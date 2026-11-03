@@ -574,7 +574,6 @@ impl CircuitBreakerMiddleware {
 
     pub(in crate::middleware::control) fn classify_call(
         &self,
-        _event: &ChainEvent,
         outputs: &[ChainEvent],
         ctx: &MiddlewareContext,
     ) -> (FailureClassification, Option<ErrorKind>, Option<String>) {
@@ -650,7 +649,7 @@ impl CircuitBreakerMiddleware {
     ) -> FailureClassification {
         let error_event = effect_error_event(event, error);
         let default = self
-            .classify_call(event, std::slice::from_ref(&error_event), ctx)
+            .classify_call(std::slice::from_ref(&error_event), ctx)
             .0;
         let Some(classifier) = &self.failure_classification_classifier else {
             return default;
@@ -1548,7 +1547,7 @@ mod tests {
         let input = event();
 
         assert_eq!(
-            breaker.classify_call(&input, &[], &ctx).0,
+            breaker.classify_call(&[], &ctx).0,
             FailureClassification::Success
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);

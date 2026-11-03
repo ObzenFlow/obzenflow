@@ -257,7 +257,7 @@ mod tests {
     static TEST_ALLOCATOR: CountingTestAllocator = CountingTestAllocator;
 
     fn record_test_allocation() {
-        let _ = THREAD_ALLOCATION_COUNT.try_with(|counter| {
+        THREAD_ALLOCATION_COUNT.with(|counter| {
             if let Some(count) = counter.get() {
                 counter.set(Some(count + 1));
             }

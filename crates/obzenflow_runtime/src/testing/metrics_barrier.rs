@@ -765,7 +765,7 @@ mod tests {
         let (watchdog_tx, mut watchdog_rx) = tokio::sync::oneshot::channel::<()>();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = watchdog_tx.send(());
+            drop(watchdog_tx);
         });
 
         tokio::select! {

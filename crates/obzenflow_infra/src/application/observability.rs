@@ -82,9 +82,12 @@ impl PreparedObservability {
         }
 
         // An embedding application may already own ordinary tracing.
-        let _ = tracing_subscriber::registry()
+        if let Err(error) = tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer().with_filter(filter))
-            .try_init();
+            .try_init()
+        {
+            tracing::debug!(%error, "keeping the application's tracing subscriber");
+        }
         Ok(Self {
             #[cfg(feature = "tokio-console")]
             console: None,

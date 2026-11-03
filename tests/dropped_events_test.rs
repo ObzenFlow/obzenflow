@@ -136,10 +136,13 @@ async fn test_dropped_events_detection() -> Result<()> {
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
         .with_metrics_exporter(metrics_model.clone());
     // Enable debug logging
-    let _ = tracing_subscriber::fmt()
+    if let Err(error) = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_test_writer()
-        .try_init();
+        .try_init()
+    {
+        eprintln!("keeping the existing tracing subscriber: {error}");
+    }
 
     println!("\n=== Dropped Events Detection Test ===\n");
 

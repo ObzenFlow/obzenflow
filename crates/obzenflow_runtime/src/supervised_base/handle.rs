@@ -360,7 +360,7 @@ where
     }
 
     async fn wait_for_stage_exit(&self) -> LifecycleExit {
-        let _ = self.completion.clone().await;
+        self.completion.clone().await;
         self.lifecycle.settled(self.publications.capture())
     }
 
@@ -557,7 +557,7 @@ mod tests {
             let dropped = dropped.clone();
             SupervisorTaskBuilder::<()>::new("abort-join-test").spawn_for_test(move || async move {
                 let _flag = DropFlag(dropped);
-                let _ = started_tx.send(());
+                started_tx.send(()).unwrap();
                 std::future::pending::<()>().await;
                 #[allow(unreachable_code)]
                 Ok::<(), Box<dyn Error + Send + Sync>>(())
@@ -665,13 +665,13 @@ mod completion_tests {
             let (release_second, second_gate) = tokio::sync::oneshot::channel();
             let first = publications
                 .enqueue(async move {
-                    let _ = first_gate.await;
+                    first_gate.await.unwrap();
                     Ok(())
                 })
                 .unwrap();
             let second = publications
                 .enqueue(async move {
-                    let _ = second_gate.await;
+                    second_gate.await.unwrap();
                     if fails {
                         Err(Box::new(PublicationFailure) as publication::BoxError)
                     } else {
@@ -685,12 +685,14 @@ mod completion_tests {
             struct OnDrop(Option<tokio::sync::oneshot::Sender<()>>);
             impl Drop for OnDrop {
                 fn drop(&mut self) {
-                    let _ = self.0.take().unwrap().send(());
+                    if self.0.take().unwrap().send(()).is_err() {
+                        eprintln!("the test stopped waiting for this task to drop");
+                    }
                 }
             }
             let task = tokio::spawn(async move {
                 let _drop = OnDrop(Some(destroyed));
-                let _ = entered.send(());
+                entered.send(()).unwrap();
                 std::future::pending().await
             });
             let handle = HandleBuilder::new()
@@ -754,7 +756,7 @@ mod completion_tests {
             let (sender, _receiver, watcher) = ChannelBuilder::<(), bool>::new().build(false);
             let (release, gate) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(async move {
-                let _ = gate.await;
+                gate.await.unwrap();
                 match exit {
                     Exit::Failure => Err(std::io::Error::other("supervisor failure").into()),
                     Exit::Panic => panic!("supervisor panic"),

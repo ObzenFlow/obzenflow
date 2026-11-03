@@ -117,15 +117,8 @@ pub(super) async fn dispatch_enriching<
                         heartbeat.state.record_data_read(source_id, event_id);
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
-                    common::observe_join_input(
-                        ctx,
-                        scope,
-                        &event,
-                        delivery_snapshot.as_ref(),
-                        None,
-                        Some(&envelope),
-                    )
-                    .await?;
+                    common::observe_join_input(ctx, scope, delivery_snapshot.as_ref(), None)
+                        .await?;
 
                     let merged_parent = envelope.clone();
 
@@ -174,11 +167,9 @@ pub(super) async fn dispatch_enriching<
                             common::observe_join_outputs(
                                 ctx,
                                 scope,
-                                Some(&event),
                                 delivery_snapshot.as_ref(),
                                 None,
                                 events.as_mut_slice(),
-                                Some(&merged_parent),
                             )
                             .await?;
                             if let Some(kind) = framework_eof {
@@ -230,11 +221,9 @@ pub(super) async fn dispatch_enriching<
                             common::observe_join_outputs(
                                 ctx,
                                 scope,
-                                Some(&event),
                                 delivery_snapshot.as_ref(),
                                 None,
                                 std::slice::from_mut(&mut error_event),
-                                Some(&merged_parent),
                             )
                             .await?;
 

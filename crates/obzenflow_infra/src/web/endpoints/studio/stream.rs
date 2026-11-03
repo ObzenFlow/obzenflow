@@ -83,7 +83,9 @@ impl<T: JournalEvent + 'static> ReadBatch<T> {
                     let reader = match journal.reader_from(0).await {
                         Ok(reader) => reader,
                         Err(error) => {
-                            let _ = results.send(Err(ReaderError::Open(error))).await;
+                            if results.send(Err(ReaderError::Open(error))).await.is_err() {
+                                tracing::debug!("Studio stream left before its reader opened");
+                            }
                             return None;
                         }
                     };
@@ -95,7 +97,9 @@ impl<T: JournalEvent + 'static> ReadBatch<T> {
                             at_end: false,
                         })
                         .map_err(ReaderError::Read);
-                    let _ = results.send(opened).await;
+                    if results.send(opened).await.is_err() {
+                        tracing::debug!("Studio stream left before its reader opened");
+                    }
                     return Some(reader);
                 }
             };

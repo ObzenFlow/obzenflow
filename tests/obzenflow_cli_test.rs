@@ -2052,7 +2052,11 @@ mod hosted {
                 let Ok(metadata) = file.metadata() else {
                     continue;
                 };
-                let _ = file.seek(SeekFrom::Start(metadata.len().saturating_sub(8192)));
+                if let Err(error) = file.seek(SeekFrom::Start(metadata.len().saturating_sub(8192)))
+                {
+                    eprintln!("{name}: could not seek to its tail: {error}");
+                    continue;
+                }
                 let mut tail = Vec::new();
                 if file.take(8192).read_to_end(&mut tail).is_ok() {
                     eprintln!(
@@ -2065,7 +2069,8 @@ mod hosted {
             }
             // A hard runner timeout also leaves this target-directory fixture
             // available to the owner's artifact upload, without a journal scan.
-            let _ = self.directory.take().unwrap().keep();
+            let retained = self.directory.take().unwrap().keep();
+            eprintln!("retained {}", retained.display());
         }
     }
 
@@ -2416,7 +2421,7 @@ mod hosted {
             _ => unreachable!(),
         }
         dir.phase("host-settlement");
-        let _ = wait(&mut application).await;
+        wait(&mut application).await;
         let mut tail = open_disk_run(&path).await.unwrap().into_tail();
         while matches!(tail.read_next().await.unwrap(), TailRead::Record(_)) {}
         if mode == "sigkill" {

@@ -226,7 +226,9 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
         "the port performs no hidden retry"
     );
     live_task.abort();
-    let _ = live_task.await;
+    if let Err(error) = live_task.await {
+        assert!(error.is_cancelled(), "{error}");
+    }
 
     let in_doubt_archive = latest_run_dir(&journal_base);
     wait_for_writers_released(&in_doubt_archive).await;

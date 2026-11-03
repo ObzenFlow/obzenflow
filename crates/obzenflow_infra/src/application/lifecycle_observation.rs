@@ -219,7 +219,9 @@ impl Feed {
                 updates.send_replace(reader.projection.clone());
                 if at_end {
                     if let Some(barrier) = barrier.take() {
-                        let _ = barrier.send(reader.projection.clone());
+                        if barrier.send(reader.projection.clone()).is_err() {
+                            tracing::debug!("lifecycle barrier waiter left before settlement");
+                        }
                     }
                     tokio::select! {
                         request = requests.recv() => match request {

@@ -130,7 +130,6 @@ pub(super) fn materialize_effect_attachment(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
     control: &Arc<ControlMiddlewareAggregator>,
-    _authored_site: usize,
     safety: EffectSafety,
 ) -> Result<EffectPolicyAttachment, String> {
     materialize_owned_effect_attachment(factory, config, control, safety, ProtectedUnitOwner::Stage)

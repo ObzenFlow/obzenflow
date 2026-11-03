@@ -153,7 +153,7 @@ impl LifecycleResults {
             accounting,
             causal_context: publication::capture(),
         };
-        let _ = CURRENT.try_with(|owner| {
+        let observed = CURRENT.try_with(|owner| {
             owner.tx.send_modify(|results| {
                 results.snapshot = snapshot.clone();
                 match phase {
@@ -205,6 +205,9 @@ impl LifecycleResults {
                 }
             })
         });
+        if observed.is_err() {
+            tracing::debug!("stage lifecycle phase observed outside its owner");
+        }
     }
 
     pub(crate) fn settled(&self, causal_context: CausalFrontier) -> LifecycleExit {

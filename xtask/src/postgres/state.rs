@@ -157,7 +157,9 @@ pub(super) fn write(path: &Path, state: &SessionState) -> Result<()> {
         Ok(())
     })();
     if write_result.is_err() && temporary.exists() {
-        let _ = fs::remove_file(&temporary);
+        if let Err(error) = fs::remove_file(&temporary) {
+            eprintln!("could not remove {}: {error}", temporary.display());
+        }
     }
     write_result
 }

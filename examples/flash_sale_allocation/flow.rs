@@ -10,7 +10,7 @@ use super::domain::{
     AllocationInput, CancelIgnored, HoldId, OrderCancelled, OrderId, OrderPlaced,
     ReservationConfirmed, ReservationFailed, Sku, SoldOut, StockReleased, StockReserved,
 };
-use super::warehouse::{warehouse_system, StockReservation, WarehouseConfig, WarehouseStats};
+use super::warehouse::{warehouse_system, StockReservation, WarehouseConfig};
 use obzenflow::effects::SystemError;
 use obzenflow::flow::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
@@ -19,7 +19,6 @@ use obzenflow::stages::sinks::TracingSink;
 use obzenflow::stages::sources;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 pub const DEMO_JOURNAL_ROOT: &str = "target/flash-sale-allocation-logs";
@@ -96,43 +95,16 @@ pub fn phone_reservations() -> Vec<StockReserved> {
 }
 
 pub fn build_flow() -> FlowDefinition {
-    settings_flow(
-        scripted_inputs(),
-        Arc::new(WarehouseStats::default()),
-        PathBuf::from(DEMO_JOURNAL_ROOT),
-    )
+    settings_flow(scripted_inputs(), PathBuf::from(DEMO_JOURNAL_ROOT))
 }
 
-pub fn settings_flow(
-    inputs: Vec<AllocationInput>,
-    warehouse_stats: Arc<WarehouseStats>,
-    journal_root: PathBuf,
-) -> FlowDefinition {
+pub fn settings_flow(inputs: Vec<AllocationInput>, journal_root: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: FlashSaleSettings| {
         let reservation_pace = settings.warehouse.reservation_pace();
         Ok(allocation_flow(
             inputs,
             settings.warehouse.into_config(),
             reservation_pace,
-            warehouse_stats,
-            journal_root,
-        )?)
-    })
-}
-
-#[cfg(test)]
-pub fn assemble_flow(
-    inputs: Vec<AllocationInput>,
-    warehouse_config: WarehouseConfig,
-    warehouse_stats: Arc<WarehouseStats>,
-    journal_root: PathBuf,
-) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        Ok(allocation_flow(
-            inputs,
-            warehouse_config,
-            Duration::ZERO,
-            warehouse_stats,
             journal_root,
         )?)
     })
@@ -142,10 +114,9 @@ fn allocation_flow(
     inputs: Vec<AllocationInput>,
     warehouse_config: WarehouseConfig,
     reservation_pace: Duration,
-    warehouse_stats: Arc<WarehouseStats>,
     journal_root: PathBuf,
 ) -> Result<FlowDefinition, SystemError> {
-    let warehouse = warehouse_system(&warehouse_config, warehouse_stats)?;
+    let warehouse = warehouse_system(&warehouse_config)?;
 
     let reserve_breaker = circuit_breaker()
         .count_window(1)

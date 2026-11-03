@@ -1482,7 +1482,9 @@ mod tests {
             .expect("resolver must begin");
         first.abort();
         release_tx.send(()).expect("release begun resolver");
-        let _ = first.await;
+        if let Err(error) = first.await {
+            assert!(error.is_cancelled(), "{error}");
+        }
 
         let view = registry
             .scoped_view(named.registration, &named.slots)

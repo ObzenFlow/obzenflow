@@ -242,7 +242,7 @@ pub(super) async fn dispatch_accumulating<
                                         .check_contracts(&mut ctx.contract_state[..])
                                         .await
                                         .into_result()?;
-                                    let _ = subscription.take_last_eof_outcome();
+                                    subscription.take_last_eof_outcome();
                                 }
                             }
                             StatefulSupervisor::<H>::forward_control_event(ctx, &envelope).await?;
@@ -666,7 +666,6 @@ pub(super) async fn dispatch_emitting<
     H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut StatefulSupervisor<H>,
-    _state: &StatefulState<H>,
     ctx: &mut StatefulResources<H>,
 ) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let flow_id = ctx.flow_id.to_string();

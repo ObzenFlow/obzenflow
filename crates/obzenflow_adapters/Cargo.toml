@@ -60,3 +60,6 @@ required-features = ["postgres", "test-support"]
 name = "postgres_sink_driver_test"
 path = "tests/postgres_sink_driver_test.rs"
 required-features = ["postgres", "test-support"]
+
+[lints]
+workspace = true

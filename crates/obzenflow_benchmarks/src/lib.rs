@@ -80,7 +80,12 @@ fn bump_nofile_limit() {
 
             // If hard limit is lower than desired, raising won't help enough;
             // still attempt to raise to the hard limit and continue either way.
-            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &updated);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &updated) != 0 {
+                eprintln!(
+                    "could not raise RLIMIT_NOFILE: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
         }
     }
 }
@@ -113,11 +118,14 @@ pub fn init_tracing() {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
 
-        let _ = tracing_subscriber::fmt()
+        if let Err(error) = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(true)
             .with_level(true)
-            .try_init();
+            .try_init()
+        {
+            eprintln!("keeping the existing tracing subscriber: {error}");
+        }
     });
 }
 

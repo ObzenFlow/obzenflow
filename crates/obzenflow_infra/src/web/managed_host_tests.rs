@@ -237,8 +237,12 @@ async fn close_deadline_aborts_and_joins_pending_unary_and_sse_on_a_live_runtime
     assert_eq!(unary.dropped.load(Ordering::SeqCst), 1);
     assert_eq!(sse.dropped.load(Ordering::SeqCst), 1);
     tokio::time::resume();
-    let _ = unary_socket.read_to_end(&mut Vec::new()).await;
-    let _ = sse_socket.read_to_end(&mut Vec::new()).await;
+    if let Err(error) = unary_socket.read_to_end(&mut Vec::new()).await {
+        eprintln!("the unary socket closed with {error}");
+    }
+    if let Err(error) = sse_socket.read_to_end(&mut Vec::new()).await {
+        eprintln!("the SSE socket closed with {error}");
+    }
     let rebound = TcpListener::bind(address).await.unwrap();
     assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
     drop(rebound);
@@ -355,7 +359,9 @@ async fn http2_stream_tasks_belong_to_the_host_scope() {
     assert!(tasks.is_empty());
     drop(response);
     connection.abort();
-    let _ = connection.await;
+    if let Err(error) = connection.await {
+        assert!(error.is_cancelled(), "{error}");
+    }
 }
 
 #[tokio::test]

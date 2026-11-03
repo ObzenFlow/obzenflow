@@ -1281,7 +1281,7 @@ pub async fn run_writer_conformance<F: SinkWriterConformanceFixture>(
                     let calls_before = fixture.external_calls().map_err(|error| {
                         failure("failure", "lifecycle-buffer", error.to_string())
                     })?;
-                    let _ = driver.write(input).await.map_err(|error| {
+                    driver.write(input).await.map_err(|error| {
                         failure("failure", "lifecycle-buffer", driver_detail(error))
                     })?;
                     let calls_after = fixture.external_calls().map_err(|error| {

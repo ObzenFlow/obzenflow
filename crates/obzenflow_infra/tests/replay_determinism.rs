@@ -90,7 +90,6 @@ impl SimpleStateful for CountingHandler {
 }
 
 async fn run_stateful_fold_once(
-    _upstream_stage: StageId,
     upstream_journal: Arc<MemoryJournal<ChainEvent>>,
 ) -> Vec<serde_json::Value> {
     let writer_id = WriterId::from(StageId::new());
@@ -169,8 +168,8 @@ async fn stateful_replay_produces_identical_aggregates() {
         .await
         .expect("append eof");
 
-    let aggregates_run1 = run_stateful_fold_once(upstream_stage, upstream_journal.clone()).await;
-    let aggregates_run2 = run_stateful_fold_once(upstream_stage, upstream_journal.clone()).await;
+    let aggregates_run1 = run_stateful_fold_once(upstream_journal.clone()).await;
+    let aggregates_run2 = run_stateful_fold_once(upstream_journal.clone()).await;
 
     assert_eq!(
         aggregates_run1, aggregates_run2,
@@ -291,7 +290,7 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
     ];
     for row in &ref_rows {
         let event = row.clone().to_event(writer);
-        let _ = handler
+        handler
             .process_reference(
                 &mut state,
                 event,

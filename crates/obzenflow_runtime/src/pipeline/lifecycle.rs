@@ -21,7 +21,7 @@ pub enum FlowStopMode {
 
 /// Exact public projection of the pipeline's pending and achieved phases.
 /// Handles may coalesce observations; acknowledgements retain achieved results.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, StateVariant)]
 pub enum PipelineState {
     Created,
     Registering,
@@ -49,31 +49,6 @@ pub enum PipelineState {
         reason: String,
         failure_cause: Option<obzenflow_core::event::types::ViolationCause>,
     },
-}
-impl StateVariant for PipelineState {
-    fn variant_name(&self) -> &str {
-        match self {
-            Self::Created => "Created",
-            Self::Registering => "Registering",
-            Self::InitializingStages => "InitializingStages",
-            Self::StartingConsumers => "StartingConsumers",
-            Self::PublishingReady => "PublishingReady",
-            Self::ReadyForRun => "ReadyForRun",
-            Self::PublishingStart => "PublishingStart",
-            Self::StartingSources => "StartingSources",
-            Self::PublishingRunning => "PublishingRunning",
-            Self::Running => "Running",
-            Self::Draining => "Draining",
-            Self::CancellingChildren => "CancellingChildren",
-            Self::PublishingTerminal => "PublishingTerminal",
-            Self::FinalizingMetrics => "FinalizingMetrics",
-            Self::PublishingFinalMarker => "PublishingFinalMarker",
-            Self::Drained => "Drained",
-            Self::FailingChildren { .. } => "FailingChildren",
-            Self::Cancelled { .. } => "Cancelled",
-            Self::Failed { .. } => "Failed",
-        }
-    }
 }
 impl PipelineState {
     pub fn is_terminal(&self) -> bool {

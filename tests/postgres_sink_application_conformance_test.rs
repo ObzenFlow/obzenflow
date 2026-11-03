@@ -1407,12 +1407,13 @@ impl PostgresApplicationFixture {
     }
 
     async fn cleanup(&self) {
-        let _ = sqlx::query(&format!(
+        sqlx::query(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE",
             self.verifier.schema
         ))
         .execute(&self.verifier.pool)
-        .await;
+        .await
+        .expect("drop the test schema");
     }
 }
 
@@ -1538,7 +1539,7 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
 async fn postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_same_word_and_final_row(
 ) {
     let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
-    let _ = trace_capture();
+    trace_capture();
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
         .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
     let database = OrderingDatabase::connect(&url, "source").await;
@@ -1674,7 +1675,7 @@ async fn postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_sa
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_order_sensitive_derived_fan_in_reports_named_quiet_input() {
     let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
-    let _ = trace_capture();
+    trace_capture();
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
         .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
     let database = OrderingDatabase::connect(&url, "derived").await;
@@ -1943,7 +1944,7 @@ async fn postgres_eof_flush_failure_archive_redelivery_retries_unresolved_input_
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_order_sensitive_cycle_fan_in_is_rejected_before_open() {
     let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
-    let _ = trace_capture();
+    trace_capture();
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
         .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
     let run_id = std::env::var("OBZENFLOW_POSTGRES_TEST_RUN_ID")
@@ -1964,7 +1965,9 @@ async fn postgres_order_sensitive_cycle_fan_in_is_rejected_before_open() {
     let failure = match result {
         Err(failure) => failure,
         Ok(handle) => {
-            let _ = handle.stop().await;
+            if let Err(error) = handle.stop().await {
+                eprintln!("teardown stop failed: {error:?}");
+            }
             panic!("cycle-fed order-sensitive PostgreSQL sink must fail construction");
         }
     };

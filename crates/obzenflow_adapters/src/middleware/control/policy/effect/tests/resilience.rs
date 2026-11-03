@@ -289,7 +289,6 @@ fn materialized_resilience_with_snapshot(
         factory.as_ref(),
         &config,
         &control,
-        0,
         EffectSafety::Idempotent,
     )
     .expect("resilience aggregate should materialize for an idempotent effect");
@@ -619,7 +618,7 @@ async fn file_configuration_can_switch_rate_based_breaker_to_consecutive() {
     let boundary = boundary_with_chain(vec![attachment]);
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let _ = boundary
+    boundary
         .around_repeatable_effect(
             &identity_at(103),
             &data_event(),

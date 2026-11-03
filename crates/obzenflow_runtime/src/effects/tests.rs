@@ -6346,7 +6346,8 @@ async fn capture_refuses_a_changed_label_whatever_the_handler_does() {
         parent_envelope(WriterId::from(stage_id)),
         None,
     ));
-    let _: u64 = live.capture("side_value", 7).await.expect("capture");
+    let captured: u64 = live.capture("side_value", 7).await.expect("capture");
+    assert_eq!(captured, 7);
     let records = effect_records(&journal);
     let history = Arc::new(
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
@@ -7833,7 +7834,9 @@ impl EffectBoundary for TwoPreparedCallsBoundary {
         _event: &ChainEvent,
         mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
-        let _ = operation.prepare().execute().await;
+        if let Err(error) = operation.prepare().execute().await {
+            eprintln!("the first prepared call failed: {error}");
+        }
         EffectBoundaryReport {
             outcome: EffectBoundaryOutcome::Executed(operation.prepare().execute().await),
             control_events: Vec::new(),
@@ -7946,7 +7949,7 @@ impl EffectBoundary for ExecuteThenRefuseBoundary {
         event: &ChainEvent,
         mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
-        let _ = operation.execute().await;
+        assert!(operation.execute().await.is_err(), "the effect fails");
         AbortingBoundary
             .around_repeatable_effect(identity, event, operation)
             .await

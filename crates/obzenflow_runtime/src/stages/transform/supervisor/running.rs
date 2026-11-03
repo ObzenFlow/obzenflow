@@ -341,7 +341,7 @@ async fn dispatch_running_inner<
                                             .check_contracts(&mut ctx.contract_state[..])
                                             .await
                                             .into_result()?;
-                                        let _ = subscription.take_last_eof_outcome();
+                                        subscription.take_last_eof_outcome();
                                     }
                                 }
                             }
@@ -374,7 +374,7 @@ async fn dispatch_running_inner<
                                         .await
                                         .into_result()?;
                                     if !is_cycle_entry_point {
-                                        let _ = subscription.take_last_eof_outcome();
+                                        subscription.take_last_eof_outcome();
                                     }
                                 }
                             }

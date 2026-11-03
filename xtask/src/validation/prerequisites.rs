@@ -530,9 +530,13 @@ impl Drop for OwnedChildGuard {
     fn drop(&mut self) {
         // try_wait reaps a completed child; never signal a potentially reused PID.
         if matches!(self.0.try_wait(), Ok(None)) {
-            let _ = self.0.kill();
+            if let Err(error) = self.0.kill() {
+                eprintln!("could not kill the prerequisite child: {error}");
+            }
         }
-        let _ = self.0.wait();
+        if let Err(error) = self.0.wait() {
+            eprintln!("could not reap the prerequisite child: {error}");
+        }
     }
 }
 

@@ -1714,19 +1714,6 @@ where
         // Create flow handle using builder pattern
         use crate::prelude::PipelineBuilder;
 
-        // FLOWIP-114b: stage_typing_map, join_metadata_map,
-        // subgraph_membership_map, subgraphs, and middleware_stacks have
-        // already been folded into the canonical `topology` above as
-        // `StageInfo`/`Topology` annotations, so PipelineBuilder no longer
-        // needs to thread them through.
-        let _ = (
-            &stage_typing_map,
-            &join_metadata_map,
-            &subgraph_membership_map,
-            &subgraphs,
-            &middleware_stacks,
-        );
-
         let builder = PipelineBuilder::new(
                 topology.clone(),
                 stage_resources_set.system_journal.clone(),

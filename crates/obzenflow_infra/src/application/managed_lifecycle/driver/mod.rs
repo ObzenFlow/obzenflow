@@ -720,7 +720,9 @@ async fn host_failure(host: &mut Option<ManagedWebHost>) -> ApplicationError {
 
 async fn terminal_observation(flow: &Option<Arc<FlowHandle>>, observation: &Option<Feed>) {
     let flow = flow.as_ref().expect("active host has a flow");
-    let _ = wait_journal(flow, observation.as_ref()).await;
+    if let Err(failure) = wait_journal(flow, observation.as_ref()).await {
+        tracing::debug!(%failure, "terminal observation ended with a failure");
+    }
 }
 
 async fn observation_failure(observation: &Option<Feed>) -> ObservationError {

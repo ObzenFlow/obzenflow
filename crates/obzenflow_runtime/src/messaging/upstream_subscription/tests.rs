@@ -879,7 +879,10 @@ async fn every_required_finalization_append_must_commit_before_one_final_report(
         .transport_only();
         let mut progress = [ReaderProgress::new(upstream)];
         drive_subscription_to_eof(&mut subscription, &mut progress).await;
-        let _ = subscription.check_contracts(&mut progress).await;
+        assert!(matches!(
+            subscription.check_contracts(&mut progress).await,
+            ContractStatus::Violated { .. }
+        ));
         // The successful path has eight required evidence appends and one final.
         assert!(
             attempts.load(Ordering::SeqCst) > failed_append,
@@ -895,9 +898,15 @@ async fn every_required_finalization_append_must_commit_before_one_final_report(
                 record.payload,
                 ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
             )));
-        let _ = subscription.check_contracts(&mut progress).await;
+        assert!(matches!(
+            subscription.check_contracts(&mut progress).await,
+            ContractStatus::Violated { .. }
+        ));
         assert!(progress[0].final_emitted, "retry {failed_append}");
-        let _ = subscription.check_contracts(&mut progress).await;
+        assert!(matches!(
+            subscription.check_contracts(&mut progress).await,
+            ContractStatus::Healthy
+        ));
         let records = journal.read_causally_ordered().await.unwrap();
         let finals: Vec<_> = records
             .iter()
@@ -1408,7 +1417,10 @@ async fn stall_cooloff_suppresses_repeat_stalled_emission() {
 
     // Progress emission clears stalled_since (time_elapsed >= progress_max_interval).
     tokio::time::advance(std::time::Duration::from_millis(400)).await;
-    let _ = subscription.check_contracts(&mut reader_progress).await;
+    assert!(matches!(
+        subscription.check_contracts(&mut reader_progress).await,
+        ContractStatus::ProgressEmitted
+    ));
 
     // Still stalled, but within cooloff window, so do not emit ReaderStalled again.
     tokio::time::advance(std::time::Duration::from_millis(50)).await;
@@ -3460,7 +3472,7 @@ async fn canonical_merge_alternates_by_ordinal_then_stage_key_and_never_waits_on
     // Sealed inputs never wait: eight consecutive deliveries, no NoEvents.
     let mut delivered_from = Vec::new();
     for _ in 0..8 {
-        let _ = expect_delivery(&mut subscription).await;
+        expect_delivery(&mut subscription).await;
         delivered_from.push(subscription.last_delivered_upstream_stage().unwrap());
     }
     assert_eq!(
@@ -3518,7 +3530,7 @@ async fn canonical_merge_authored_eof_orders_by_tiebreak_and_exhausts_reader() {
 
     let mut delivered_from = Vec::new();
     for _ in 0..6 {
-        let _ = expect_delivery(&mut subscription).await;
+        expect_delivery(&mut subscription).await;
         delivered_from.push(subscription.last_delivered_upstream_stage().unwrap());
     }
     // a1, b1, eofA (ordinal tie at 2, stage key), then B streams unblocked.
@@ -4023,7 +4035,7 @@ async fn canonical_merge_rejects_tail_start_readers() {
 
     // A tail-start reader has a non-zero position and baseline; selecting the
     // canonical merge on it must fail fast (FLOWIP-095d ordinal stability).
-    let _ = UpstreamSubscription::new_at_tail("tail_owner", &upstreams, &[1])
+    UpstreamSubscription::new_at_tail("tail_owner", &upstreams, &[1])
         .await
         .unwrap()
         .with_reader_selection(ReaderSelectionPolicy::CanonicalMerge);

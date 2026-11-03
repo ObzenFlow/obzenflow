@@ -126,11 +126,15 @@ impl OwnedChild {
             libc::kill(-(self.process.id() as i32), signal);
         }
         #[cfg(not(unix))]
-        let _ = self.process.kill();
+        if let Err(error) = self.process.kill() {
+            eprintln!("could not kill the child process: {error}");
+        }
     }
 
     fn reap(&mut self) {
-        let _ = self.process.wait();
+        if let Err(error) = self.process.wait() {
+            eprintln!("could not reap the child process: {error}");
+        }
         self.reaped = true;
     }
 }
@@ -417,7 +421,10 @@ fn show_tail(path: &Path) {
         return;
     };
     let length = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let _ = file.seek(SeekFrom::Start(length.saturating_sub(16 * 1024)));
+    if let Err(error) = file.seek(SeekFrom::Start(length.saturating_sub(16 * 1024))) {
+        eprintln!("{}: could not seek to its tail: {error}", path.display());
+        return;
+    }
     let mut bytes = Vec::new();
     if file.take(16 * 1024).read_to_end(&mut bytes).is_ok() && !bytes.is_empty() {
         eprintln!("{}:\n{}", path.display(), String::from_utf8_lossy(&bytes));

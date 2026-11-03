@@ -12,7 +12,9 @@ struct Cancelled(Option<oneshot::Sender<()>>);
 impl Drop for Cancelled {
     fn drop(&mut self) {
         if let Some(sender) = self.0.take() {
-            let _ = sender.send(());
+            if sender.send(()).is_err() {
+                eprintln!("the test stopped waiting for this task to drop");
+            }
         }
     }
 }
@@ -61,7 +63,7 @@ async fn join_budget_keeps_blocking_task_owned_and_cancels_the_entire_group() {
     let blocking = ApplicationTask(tokio::task::spawn_blocking(move || {
         let _released = Cancelled(Some(released_tx));
         started_tx.send(()).unwrap();
-        let _ = release_rx.recv();
+        release_rx.recv().unwrap();
     }));
     started_rx.await.unwrap();
     let (other, other_cancelled) = pending_task().await;

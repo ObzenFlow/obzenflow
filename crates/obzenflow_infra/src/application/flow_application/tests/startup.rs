@@ -46,7 +46,16 @@ enabled = false
         .with_config_file(config_path)
         .with_cli_args(["http-ingress-builder-test", "--server-port", "0"])
         .with_flow_handle_hook(move |flow| {
-            let _ = flow_tx.lock().unwrap().take().unwrap().send(flow.clone());
+            assert!(
+                flow_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(flow.clone())
+                    .is_ok(),
+                "the test awaits the flow handle"
+            );
             tokio::spawn(async {})
         });
     let config = |path: &str| IngestionConfig {
@@ -465,10 +474,13 @@ enabled = false
             }
 
             if let Some(tx) = hook_running.lock().expect("running lock poisoned").take() {
-                let _ = tx.send(());
+                tx.send(()).unwrap();
             }
             if let Some(tx) = hook_shutdown.lock().expect("shutdown lock poisoned").take() {
-                let _ = tx.send(ShutdownSignal::Sigint);
+                assert!(
+                    tx.send(ShutdownSignal::Sigint).is_ok(),
+                    "the driver awaits the injected signal"
+                );
             }
         })
     };
@@ -726,11 +738,14 @@ shutdown_timeout_secs = 2
                 }
             }
             if let Some(tx) = hook_running.lock().expect("running lock poisoned").take() {
-                let _ = tx.send(());
+                tx.send(()).unwrap();
             }
             hook_stub.registered.notified().await;
             if let Some(tx) = hook_shutdown.lock().expect("shutdown lock poisoned").take() {
-                let _ = tx.send(ShutdownSignal::Sigint);
+                assert!(
+                    tx.send(ShutdownSignal::Sigint).is_ok(),
+                    "the driver awaits the injected signal"
+                );
             }
         })
     };

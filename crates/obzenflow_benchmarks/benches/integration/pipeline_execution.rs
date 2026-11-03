@@ -85,12 +85,6 @@ impl TypedFiniteSourceHandler for TimestampedSource {
 #[derive(Clone, Copy, Debug)]
 struct PassthroughStage {}
 
-impl PassthroughStage {
-    fn new(_name: &str) -> Self {
-        Self {}
-    }
-}
-
 impl TypedTransformHandler for PassthroughStage {
     type Input = BenchEvent;
     type Output = BenchEvent;
@@ -159,7 +153,7 @@ async fn build_pipeline(
     }
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let passthrough = PassthroughStage::new("all stages");
+        let passthrough = PassthroughStage {};
         let definition = match stage_count {
             1 => flow! {
                 journals: disk_journals(journals_base_path.clone()),

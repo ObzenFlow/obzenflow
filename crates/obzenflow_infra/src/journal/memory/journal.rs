@@ -345,9 +345,15 @@ impl<T: JournalEvent> MemoryJournalState<T> {
         }
         // A failed optional update leaves the physical records committed. The
         // next lookup resumes from the last completely indexed prefix.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = self.rebuild_observations(new_records);
-        }));
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.rebuild_observations(new_records)
+        })) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "memory journal observation index fell behind");
+            }
+            Err(_) => tracing::warn!("memory journal observation index panicked"),
+        }
     }
 
     fn rebuild_observations(&mut self, budget: usize) -> Result<(), JournalError> {

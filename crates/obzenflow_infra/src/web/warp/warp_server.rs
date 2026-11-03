@@ -1418,7 +1418,7 @@ mod tests {
         ] {
             validate_cors_origin(origin, 0).unwrap();
             // Preserve Warp's existing accepted origins and normalisation.
-            let _ = warp::cors().allow_origins([origin]).build();
+            warp::cors().allow_origins([origin]).build();
         }
         for origin in [
             "not-an-origin",

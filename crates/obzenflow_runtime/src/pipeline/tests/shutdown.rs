@@ -97,7 +97,7 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
         context.resources.exits.get_mut().unwrap().push(
             std::future::poll_fn(move |_| {
                 if let Some(entered) = entered.take() {
-                    let _ = entered.send(());
+                    entered.send(()).unwrap();
                     assert!(
                         !matches!(
                             held.recv_timeout(Duration::from_secs(2)),

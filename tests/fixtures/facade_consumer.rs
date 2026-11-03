@@ -305,42 +305,42 @@ fn renamed_facade_macros_and_constructors_compile() {
     });
 
     // Placeholder-first authoring works through both prelude and qualified paths.
-    let _ = source!(Fact => placeholder!());
-    let _ = of::flow::async_source!(Fact => placeholder!());
-    let _ = infinite_source!(Fact => placeholder!());
-    let _ = of::flow::async_infinite_source!(Fact => placeholder!());
-    let _ = effectful_transform!(Fact -> Fact => Pure);
-    let _ = of::flow::effectful_stateful!(Fact -> Fact => Pure);
-    let _ = of::flow::transform!(Fact -> Fact => placeholder!());
-    let _ = of::flow::stateful!(Fact -> Fact => placeholder!());
-    let _ = of::flow::sink!(Fact => placeholder!());
+    source!(Fact => placeholder!());
+    of::flow::async_source!(Fact => placeholder!());
+    infinite_source!(Fact => placeholder!());
+    of::flow::async_infinite_source!(Fact => placeholder!());
+    effectful_transform!(Fact -> Fact => Pure);
+    of::flow::effectful_stateful!(Fact -> Fact => Pure);
+    of::flow::transform!(Fact -> Fact => placeholder!());
+    of::flow::stateful!(Fact -> Fact => placeholder!());
+    of::flow::sink!(Fact => placeholder!());
     let joined = joins::inner(
         |fact: &Fact| fact.0,
         |fact: &Fact| fact.0,
         |_reference: Fact, fact: Fact| fact,
     );
-    let _ = of::flow::join!(catalog input: Fact, Fact -> Fact => joined);
-    let _ = merge!(Fact => merges::then_live);
-    let _ = of::flow::merge!(Fact => merges::then_live);
-    let _ = merge!(first input: Fact => merges::concat);
-    let _ = of::flow::merge!(first input: Fact => merges::concat);
+    of::flow::join!(catalog input: Fact, Fact -> Fact => joined);
+    merge!(Fact => merges::then_live);
+    of::flow::merge!(Fact => merges::then_live);
+    merge!(first input: Fact => merges::concat);
+    of::flow::merge!(first input: Fact => merges::concat);
     let then_live = joins::inner_then_live(
         |fact: &Fact| fact.0,
         |fact: &Fact| fact.0,
         |_reference: Fact, fact: Fact| fact,
     );
-    let _ = join!(catalog input: Fact, Fact -> Fact => then_live);
-    let _ = joins::left_then_live(
+    join!(catalog input: Fact, Fact -> Fact => then_live);
+    joins::left_then_live(
         |fact: &Fact| fact.0,
         |fact: &Fact| fact.0,
         |_reference: Option<Fact>, fact: Fact| fact,
     );
-    let _ = joins::strict_then_live(
+    joins::strict_then_live(
         |fact: &Fact| fact.0,
         |fact: &Fact| fact.0,
         |_reference: Fact, fact: Fact| fact,
     );
-    let _ = joins::JoinReferenceMode::FiniteThenLive;
+    const _: joins::JoinReferenceMode = joins::JoinReferenceMode::FiniteThenLive;
     let priced = joins::left_as_of(
         |fact: &Fact| fact.0,
         |fact: &Fact| fact.0,
@@ -348,17 +348,17 @@ fn renamed_facade_macros_and_constructors_compile() {
         |fact: &Fact| fact.0,
         |_version: joins::AsOf<Fact>, fact: Fact| fact,
     );
-    let _ = join!(catalog input: Fact, Fact -> Fact => priced);
+    join!(catalog input: Fact, Fact -> Fact => priced);
     let point_in_time = joins::AsOfJoin::new(PointInTime);
-    let _ = of::flow::join!(catalog input: Fact, Fact -> Fact => point_in_time);
-    let _ = source!(Fact => Pure);
-    let _ = async_source!(Fact => Pure);
-    let _ = infinite_source!(Fact => Pure);
-    let _ = async_infinite_source!(Fact => Pure);
-    let _ = transform!(Fact -> Fact => Pure);
-    let _ = stateful!(Fact -> Fact => Pure);
-    let _ = join!(catalog input: Fact, Fact -> Fact => Pure);
-    let _ = sink!(Fact => Pure);
+    of::flow::join!(catalog input: Fact, Fact -> Fact => point_in_time);
+    source!(Fact => Pure);
+    async_source!(Fact => Pure);
+    infinite_source!(Fact => Pure);
+    async_infinite_source!(Fact => Pure);
+    transform!(Fact -> Fact => Pure);
+    stateful!(Fact -> Fact => Pure);
+    join!(catalog input: Fact, Fact -> Fact => Pure);
+    sink!(Fact => Pure);
 
     let _selected = FlowDefinition::materialize(|_config| {
         let input = sources::ValuesSource::new([Fact(1)]);

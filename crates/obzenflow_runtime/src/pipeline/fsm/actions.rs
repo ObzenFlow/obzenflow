@@ -346,11 +346,17 @@ impl PipelineAction {
                                 None => false,
                             };
                             if committed {
-                                let _ = metrics
+                                if let Err(error) = metrics
                                     .send_event(
                                         crate::metrics::MetricsAggregatorEvent::StartDraining,
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    tracing::debug!(
+                                        ?error,
+                                        "metrics aggregator left before draining started"
+                                    );
+                                }
                             }
                             metrics.wait_for_stage_exit().await
                         }

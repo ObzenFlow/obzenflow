@@ -52,8 +52,9 @@ mod decoder;
 mod domain;
 mod flow;
 mod mock_server;
+mod runner;
 mod util;
 
 fn main() -> anyhow::Result<()> {
-    flow::run_demo_blocking()
+    runner::run_demo_blocking()
 }

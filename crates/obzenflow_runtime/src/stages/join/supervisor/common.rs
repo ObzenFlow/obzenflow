@@ -82,10 +82,8 @@ pub(super) async fn read_control<H: UnifiedJoinHandler>(
                     None,
                     subscription.last_delivered_generation(),
                 ),
-                &envelope.authored(),
                 None,
                 Some(&signal_snapshot),
-                Some(&envelope),
             )
             .await?;
         }
@@ -209,16 +207,7 @@ pub(super) async fn dead_letter_reference<H: UnifiedJoinHandler>(
         scope,
     );
     ctx.instrumentation.record_error(error.kind());
-    observe_join_outputs(
-        ctx,
-        scope,
-        Some(&input),
-        delivery,
-        None,
-        std::slice::from_ref(&record),
-        Some(envelope),
-    )
-    .await?;
+    observe_join_outputs(ctx, scope, delivery, None, std::slice::from_ref(&record)).await?;
     publication::append(
         &ctx.error_journal,
         record,
@@ -283,10 +272,8 @@ pub(super) async fn flush_pending_outputs<
 pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
     ctx: &JoinResources<H>,
     scope: obzenflow_core::MiddlewareExecutionScope,
-    _input: &ChainEvent,
     delivery: Option<&JoinDeliverySnapshot>,
     signal: Option<&JoinSignalSnapshot>,
-    _parent: Option<&DeliveredRecord<ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());
@@ -312,11 +299,9 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
 pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
     ctx: &JoinResources<H>,
     scope: obzenflow_core::MiddlewareExecutionScope,
-    _input: Option<&ChainEvent>,
     delivery: Option<&JoinDeliverySnapshot>,
     signal: Option<&JoinSignalSnapshot>,
     outputs: &[ChainEvent],
-    _parent: Option<&DeliveredRecord<ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());

@@ -590,7 +590,7 @@ async fn abort_during_initialization_cancels_the_waiter_before_request_send() {
         gate.release();
         stopping.await.expect("stop task after emergency release");
         setup_watchdog.join().expect("setup watchdog");
-        let _ = observer_shutdown.send(());
+        observer_shutdown.send(()).unwrap();
         observer.await.expect("HTTP observer task");
         panic!("Abort must cancel the setup waiter without waiting for physical setup");
     }

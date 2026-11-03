@@ -433,12 +433,14 @@ fn cleanup(flags: &[String]) -> Result<()> {
         "removing disposable PostgreSQL test project '{}' and its data volume",
         identity.project
     );
-    let _ = compose.capture_logs(
+    if let Err(error) = compose.capture_logs(
         &root,
         &identity.directory,
         &session,
         &identity.directory.join(config::LOG_FILE),
-    );
+    ) {
+        eprintln!("could not capture the PostgreSQL logs: {error}");
+    }
     compose.stop(&root, &identity.directory, &session, true)?;
     if compose.volume_exists(&expected_volume)? {
         return Err(error(format!(

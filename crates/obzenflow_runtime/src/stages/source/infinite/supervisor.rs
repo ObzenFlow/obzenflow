@@ -697,11 +697,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                         .replay_driver
                         .as_mut()
                         .expect("replay_driver is initialized")
-                        .next_replayed_event(
-                            WriterId::from(self.stage_id),
-                            &ctx.stage_name,
-                            flow_context,
-                        )
+                        .next_replayed_event(flow_context)
                         .await;
                     let tick_duration = tick_started_at.elapsed();
 
@@ -925,7 +921,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                 source_poll_observation
                                     .observe(
                                         events.as_mut_slice(),
-                                        poll.poll_duration,
                                         SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
@@ -956,7 +951,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                 source_poll_observation
                                     .observe(
                                         events.as_slice(),
-                                        poll.poll_duration,
                                         SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
@@ -981,10 +975,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                     && report.control_events.is_empty()
                                 {
                                     source_poll_observation
-                                        .observe_empty(
-                                            poll.poll_duration,
-                                            SourcePollObserverOutcome::Eof,
-                                        )
+                                        .observe_empty(SourcePollObserverOutcome::Eof)
                                         .await;
                                     Ok(EventLoopDirective::Transition(
                                         InfiniteSourceEvent::BeginDrain,
@@ -995,7 +986,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                     source_poll_observation
                                         .observe(
                                             control_events.as_mut_slice(),
-                                            poll.poll_duration,
                                             SourcePollObserverOutcome::Eof,
                                         )
                                         .await;
@@ -1028,7 +1018,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                 source_poll_observation
                                     .observe(
                                         events.as_mut_slice(),
-                                        poll.poll_duration,
                                         SourcePollObserverOutcome::Error { kind },
                                     )
                                     .await;

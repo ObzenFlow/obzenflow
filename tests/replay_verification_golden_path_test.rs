@@ -232,8 +232,7 @@ impl EffectfulTransformHandler for AuthorizePayment {
             .await;
 
         match outcome {
-            Ok(grant) if order.amount > 500 => {
-                let _ = grant;
+            Ok(_grant) if order.amount > 500 => {
                 fx.emit(OrderCancelled {
                     order_id: order.order_id,
                     origin: "declined".to_string(),

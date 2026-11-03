@@ -573,17 +573,15 @@ where
         false
     }
 
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
-        let _ = state;
+    fn emit(&self, _state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         Ok(Vec::new())
     }
 
     fn emit_with_context(
         &self,
-        state: &mut Self::State,
+        _state: &mut Self::State,
         _output_context: Option<StatefulOutputContext<'_>>,
     ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
-        let _ = state;
         Ok(Vec::new())
     }
 
@@ -596,10 +594,9 @@ where
 
     async fn drain_with_context(
         &self,
-        state: &Self::State,
+        _state: &Self::State,
         _output_context: Option<StatefulOutputContext<'_>>,
     ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
-        let _ = state;
         Ok(Vec::new())
     }
 

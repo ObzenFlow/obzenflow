@@ -378,7 +378,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                     .check_contracts_diagnostics_only(&mut ctx.contract_state[..])
                     .await
                     .into_result()?;
-                let _ = subscription.take_last_eof_outcome();
+                subscription.take_last_eof_outcome();
 
                 let upstream_readers = subscription.upstream_count();
                 match last_eof_outcome {
@@ -415,7 +415,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
             }
 
             // Forward other control/control-like events to the sink journal.
-            let _ = forward_control_event_helper(
+            forward_control_event_helper(
                 envelope,
                 ctx.stage_id,
                 &ctx.stage_name,
@@ -432,7 +432,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                 .check_contracts_diagnostics_only(&mut ctx.contract_state[..])
                 .await
                 .into_result()?;
-            let _ = subscription.take_last_eof_outcome();
+            subscription.take_last_eof_outcome();
 
             if let Some(outcome) = last_eof_outcome {
                 tracing::debug!(

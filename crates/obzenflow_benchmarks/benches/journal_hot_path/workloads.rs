@@ -123,7 +123,7 @@ impl Fixture {
         packet
     }
     fn journal(&self, name: &str) -> Arc<dyn Journal<ChainEvent>> {
-        self.journal_at(self.seed._directory.path().join(name))
+        self.journal_at(self.seed.directory.path().join(name))
     }
     fn journal_at(&self, path: std::path::PathBuf) -> Arc<dyn Journal<ChainEvent>> {
         Arc::new(
@@ -309,7 +309,7 @@ pub fn bench(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
                 } else {
                     // Both are warmed-process cases. Reopening is not a cold-cache claim.
                     if operation == "reopened_scan" {
-                        let _ = &*reopened;
+                        LazyCell::force(&reopened);
                         timed(|| rt.block_on(async {
                             tokio::time::timeout(fixtures::DEADLINE, async {
                                 let journal = read_fixture.journal("reopened.log");
@@ -785,7 +785,7 @@ fn cache_workloads(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) 
             sample.completed("appended_and_read_records", 192);
             drop(rows);
             drop(reader);
-            sample.observations = serde_json::json!({"archive_bytes":std::fs::metadata(fixture.seed._directory.path().join("mixed.log")).unwrap().len(),"retained_heap_delta_after_dropping_read_results":obzenflow_benchmarks::support::allocations::live_requested_bytes() as i128 - heap_before as i128});
+            sample.observations = serde_json::json!({"archive_bytes":std::fs::metadata(fixture.seed.directory.path().join("mixed.log")).unwrap().len(),"retained_heap_delta_after_dropping_read_results":obzenflow_benchmarks::support::allocations::live_requested_bytes() as i128 - heap_before as i128});
             sample
         }));
     let fixture = LazyCell::new(|| rt.block_on(Fixture::new(33, true, false, 256)));

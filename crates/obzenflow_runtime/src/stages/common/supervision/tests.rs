@@ -763,11 +763,11 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for N
 fn make_writer_with_window(window: NonZeroU64) -> (StageId, BackpressureWriter) {
     let mut builder = TopologyBuilder::new();
     let s_top = builder.add_stage(Some("s".to_string()));
-    let _d_top = builder.add_stage(Some("d".to_string()));
+    let d_top = builder.add_stage(Some("d".to_string()));
     let topology = builder.build_unchecked().expect("topology");
 
     let s = StageId::from_topology_id(s_top);
-    let d = StageId::from_topology_id(_d_top);
+    let d = StageId::from_topology_id(d_top);
 
     let plan = BackpressurePlan::disabled().with_stage_enforced(s, window, Duration::from_secs(30));
     let registry = BackpressureRegistry::new(&topology, &plan);

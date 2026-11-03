@@ -177,8 +177,8 @@ async fn handle_connection(
     };
 
     let response = http_response(status, &body);
-    let _ = socket.write_all(response.as_bytes()).await;
-    let _ = socket.shutdown().await;
+    socket.write_all(response.as_bytes()).await?;
+    socket.shutdown().await?;
     Ok(())
 }
 

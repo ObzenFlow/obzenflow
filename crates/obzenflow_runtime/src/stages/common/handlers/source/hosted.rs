@@ -327,18 +327,21 @@ impl HostedAdmission {
                 if original.identity.map(|(_, staged_digest)| staged_digest) == Some(digest) {
                     original.receipts.joined.push(submission.receipt);
                 } else {
-                    let _ = submission.receipt.send(IngressReceipt::Conflict);
+                    deliver_receipt(submission.receipt, IngressReceipt::Conflict);
                 }
                 continue;
             }
             match self.live_identity(key, accepted_at_ns, window_ns) {
                 Some(entry) if entry.digest == digest => {
-                    let _ = submission.receipt.send(IngressReceipt::Duplicate {
-                        event_id: entry.event_id,
-                    });
+                    deliver_receipt(
+                        submission.receipt,
+                        IngressReceipt::Duplicate {
+                            event_id: entry.event_id,
+                        },
+                    );
                 }
                 Some(_) => {
-                    let _ = submission.receipt.send(IngressReceipt::Conflict);
+                    deliver_receipt(submission.receipt, IngressReceipt::Conflict);
                 }
                 None => {
                     staged_keys.insert(key, staged.len());
@@ -368,13 +371,19 @@ impl HostedAdmission {
     pub(super) fn settle(&mut self, committed: &[EventId]) {
         for event_id in committed {
             if let Some(receipts) = self.pending.remove(event_id) {
-                let _ = receipts.original.send(IngressReceipt::Committed {
-                    event_id: *event_id,
-                });
-                for joined in receipts.joined {
-                    let _ = joined.send(IngressReceipt::Duplicate {
+                deliver_receipt(
+                    receipts.original,
+                    IngressReceipt::Committed {
                         event_id: *event_id,
-                    });
+                    },
+                );
+                for joined in receipts.joined {
+                    deliver_receipt(
+                        joined,
+                        IngressReceipt::Duplicate {
+                            event_id: *event_id,
+                        },
+                    );
                 }
             }
         }
@@ -477,6 +486,12 @@ fn unix_now_ns() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(duration_ns)
         .unwrap_or_default()
+}
+
+fn deliver_receipt(sender: IngressReceiptSender, receipt: IngressReceipt) {
+    if sender.send(receipt).is_err() {
+        tracing::debug!("ingress client left before its receipt");
+    }
 }
 
 #[cfg(test)]

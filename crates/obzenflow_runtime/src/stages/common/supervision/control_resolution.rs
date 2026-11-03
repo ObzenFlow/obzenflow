@@ -90,8 +90,7 @@ pub(crate) async fn resolve_control_event_awaiting_pauses(
                     duration = ?duration,
                     "Delaying control event"
                 );
-                let _ =
-                    suspend_until(&WakeOn::At(std::time::Instant::now() + duration), None).await;
+                suspend_until(&WakeOn::At(std::time::Instant::now() + duration), None).await;
             }
         }
     }
@@ -113,7 +112,7 @@ pub(crate) async fn await_signal_gate(
             duration = ?duration,
             "Delaying control event"
         );
-        let _ = suspend_until(&WakeOn::At(std::time::Instant::now() + duration), None).await;
+        suspend_until(&WakeOn::At(std::time::Instant::now() + duration), None).await;
     }
 }
 

@@ -224,7 +224,7 @@ fn exported_chain_events(jsonl: &str) -> impl Iterator<Item = ChainEvent> + '_ {
 #[test]
 #[should_panic(expected = "is neither a ChainEvent nor a SystemEvent")]
 fn exported_record_decoder_fails_loud_on_an_unknown_row() {
-    let _ = exported_jsonl::chain_events(r#"{"event":{"unknown":"shape"}}"#);
+    exported_jsonl::chain_events(r#"{"event":{"unknown":"shape"}}"#);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

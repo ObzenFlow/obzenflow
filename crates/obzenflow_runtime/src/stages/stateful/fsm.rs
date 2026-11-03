@@ -44,7 +44,7 @@ use crate::stages::resources_builder::BoundSubscriptionFactory;
 // ============================================================================
 
 /// FSM states for stateful stages
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, StateVariant)]
 pub enum StatefulState<H> {
     /// Initial state - stateful stage has been created but not initialized
     Created,
@@ -171,34 +171,6 @@ impl<H: Send + Sync> PartialEq for StatefulState<H> {
     }
 }
 
-impl<H: Send + Sync + 'static> StateVariant for StatefulState<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            StatefulState::Created => "Created",
-            Self::Initializing => "Initializing",
-            Self::Starting => "Starting",
-            Self::Finalizing => "Finalizing",
-            Self::ValidatingTerminal => "ValidatingTerminal",
-            Self::ForwardingTerminal => "ForwardingTerminal",
-            Self::ProducingFinalOutput => "ProducingFinalOutput",
-            Self::DrainingFinalOutput => "DrainingFinalOutput",
-
-            Self::Failing(..) => "Failing",
-            Self::Cancelling(..) => "Cancelling",
-            Self::Cancelled(..) => "Cancelled",
-
-            StatefulState::Initialized => "Initialized",
-            StatefulState::Accumulating => "Accumulating",
-            StatefulState::Emitting => "Emitting",
-            Self::EmittingDuringDrain => "EmittingDuringDrain",
-            StatefulState::Draining => "Draining",
-            StatefulState::Drained => "Drained",
-            StatefulState::Failed(_) => "Failed",
-            StatefulState::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
-    }
-}
-
 impl<H> StatefulState<H> {
     pub(crate) fn failure(cause: String) -> Self {
         use crate::stages::common::stage_handle::{
@@ -234,6 +206,7 @@ impl<H> StatefulState<H> {
 // ============================================================================
 
 /// Events that can trigger stateful state transitions
+#[derive(EventVariant)]
 pub enum StatefulEvent<H> {
     /// Initialize the stateful stage
     Initialize,
@@ -363,34 +336,6 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             | Self::DrainComplete => None,
             Self::_Phantom(_) => unreachable!("PhantomData variant"),
         })
-    }
-}
-
-impl<H: Send + Sync + 'static> EventVariant for StatefulEvent<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            StatefulEvent::Initialize => "Initialize",
-            Self::InitializationCompleted => "InitializationCompleted",
-            Self::DrainInputsCompleted => "DrainInputsCompleted",
-            Self::TerminalValidated => "TerminalValidated",
-            Self::TerminalForwarded => "TerminalForwarded",
-            Self::FinalOutputsPrepared => "FinalOutputsPrepared",
-            Self::FinalOutputPending => "FinalOutputPending",
-
-            Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalizationCompleted => "FinalizationCompleted",
-            Self::TerminationSettled => "TerminationSettled",
-
-            StatefulEvent::Ready => "Ready",
-            StatefulEvent::ReceivedData => "ReceivedData",
-            StatefulEvent::ShouldEmit => "ShouldEmit",
-            StatefulEvent::EmitComplete => "EmitComplete",
-            StatefulEvent::ReceivedEOF => "ReceivedEOF",
-            StatefulEvent::BeginDrain => "BeginDrain",
-            StatefulEvent::DrainComplete => "DrainComplete",
-            StatefulEvent::Error(_) => "Error",
-            StatefulEvent::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
     }
 }
 

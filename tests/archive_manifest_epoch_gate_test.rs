@@ -261,15 +261,18 @@ async fn empty_observer_labels_fail_before_any_materialisation_or_connector_io()
             .await
             .map(|_| ())
             .expect_err("empty labels must fail preflight");
-        assert!(matches!(&failure.error,
-            obzenflow_dsl::FlowBuildError::MiddlewarePlan(plan) if matches!(
-                plan.as_ref(),
-                obzenflow_dsl::dsl::MiddlewarePlanError::InvalidBinding {
-                    source: obzenflow_adapters::middleware::MiddlewareAttachmentValidationError::EmptyLabel,
-                    ..
-                }
-            )
-        ), "{failure}");
+        assert!(
+            matches!(&failure.error,
+                obzenflow_dsl::FlowBuildError::MiddlewarePlan(plan) if matches!(
+                    plan.as_ref(),
+                    obzenflow_dsl::dsl::MiddlewarePlanError::InvalidBinding {
+                        source: obzenflow_adapters::middleware::MiddlewareAttachmentValidationError::EmptyLabel,
+                        ..
+                    }
+                )
+            ),
+            "{failure}"
+        );
         assert_eq!(materialisations.load(Ordering::SeqCst), 0);
         assert_eq!(opens.load(Ordering::SeqCst), 0);
         assert!(failure.run.is_none());

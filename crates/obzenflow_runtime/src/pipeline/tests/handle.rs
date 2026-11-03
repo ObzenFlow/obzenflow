@@ -140,9 +140,7 @@ fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
                             event_id: Some(obzenflow_core::EventId::new()),
                         })
                         .unwrap();
-                    state_watcher_for_task
-                        .update(final_state)
-                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+                    state_watcher_for_task.update(final_state);
                     Ok(())
                 }
                 Some(event) => Err(format!("unexpected event: {event:?}").into()),

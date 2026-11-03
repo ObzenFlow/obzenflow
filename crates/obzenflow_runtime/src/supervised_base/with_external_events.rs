@@ -375,7 +375,7 @@ where
     fn after_transition(&mut self, state: &Self::State, context: &Self::Context) {
         self.inner.after_transition(state, context);
         if self.last_state.as_ref() != Some(state) {
-            let _ = self.state_watcher.update(state.clone());
+            self.state_watcher.update(state.clone());
             self.last_state = Some(state.clone());
         }
     }
@@ -407,7 +407,7 @@ where
         // Update state for external observers only when it changes (FLOWIP-086i).
         if self.last_state.as_ref() != Some(state) {
             let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
+            self.state_watcher.update(new_state.clone());
             self.last_state = Some(new_state);
         }
 
@@ -536,7 +536,7 @@ where
         // Update state for external observers only when it changes (FLOWIP-086i).
         if self.last_state.as_ref() != Some(state) {
             let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
+            self.state_watcher.update(new_state.clone());
             self.last_state = Some(new_state);
         }
 
@@ -584,7 +584,7 @@ where
 
         if self.last_state.as_ref() != Some(state) {
             let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
+            self.state_watcher.update(new_state.clone());
             self.last_state = Some(new_state);
         }
     }

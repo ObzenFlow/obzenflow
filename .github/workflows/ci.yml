@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
           components: rustfmt
       - name: Verify lockfile
         run: cargo fetch --locked
@@ -110,7 +110,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
           components: clippy
       - name: Verify lockfile
         run: cargo fetch --locked
@@ -150,7 +150,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2
@@ -180,7 +180,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2
@@ -217,7 +217,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2
@@ -247,7 +247,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2
@@ -269,7 +269,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
       - name: Verify lockfile
         run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2

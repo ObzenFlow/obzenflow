@@ -232,24 +232,23 @@ impl HandlerSupervised for TestHandlerSupervisor {
 
 #[test]
 fn supervision_traits_remain_obzenflow_fsm_backed() {
-    fn handler_contract<S: HandlerSupervised>(
-        supervisor: &S,
-        initial_state: S::State,
-    ) -> StateMachine<S::State, S::Event, S::Context, S::Action> {
-        <S as Supervisor>::build_state_machine(supervisor, initial_state)
+    type Machine<S> = StateMachine<
+        <S as Supervisor>::State,
+        <S as Supervisor>::Event,
+        <S as Supervisor>::Context,
+        <S as Supervisor>::Action,
+    >;
+
+    fn handler_contract<S: HandlerSupervised>() -> fn(&S, S::State) -> Machine<S> {
+        <S as Supervisor>::build_state_machine
     }
 
-    fn self_contract<S: SelfSupervised>(
-        supervisor: &S,
-        initial_state: S::State,
-    ) -> StateMachine<S::State, S::Event, S::Context, S::Action> {
-        <S as Supervisor>::build_state_machine(supervisor, initial_state)
+    fn self_contract<S: SelfSupervised>() -> fn(&S, S::State) -> Machine<S> {
+        <S as Supervisor>::build_state_machine
     }
 
-    // FLOWIP-137a B1: merely instantiating these function items proves that
-    // both supervision traits still imply the FSM-backed base contract.
-    let _handler_contract = handler_contract::<TestHandlerSupervisor>;
-    let _self_contract = self_contract::<TestSelfSupervisor>;
+    handler_contract::<TestHandlerSupervisor>();
+    self_contract::<TestSelfSupervisor>();
 }
 
 #[tokio::test]
@@ -523,16 +522,33 @@ impl HandlerSupervised for ExternalEventTestHandlerSupervisor {
 
 #[tokio::test]
 async fn with_external_events_disconnected_maps_to_error_event() {
-    // Keep all variants "live" so refactors do not accidentally narrow the policy surface.
-    let _ = ExternalEventTestState::Drained;
-    let _ = ExternalEventTestState::Failed("x".to_string());
-    let _ = ExternalEventTestAction::Noop;
+    for terminal in [
+        ExternalEventTestState::Drained,
+        ExternalEventTestState::Failed("x".to_string()),
+    ] {
+        assert!(matches!(
+            <ExternalEventTestSelfSupervisor as ExternalEventPolicy>::external_event_mode(
+                &terminal
+            ),
+            ExternalEventMode::CloseAndRecord
+        ));
+        assert!(
+            <ExternalEventTestSelfSupervisor as ExternalEventPolicy>::on_external_event_channel_closed(
+                &terminal
+            )
+            .is_none()
+        );
+    }
+    ExternalEventTestAction::Noop
+        .execute(&mut ExternalEventTestContext)
+        .await
+        .unwrap();
 
     // SelfSupervised wrapper
-    let (_sender, receiver, watcher) =
+    let (sender, receiver, watcher) =
         ChannelBuilder::<ExternalEventTestEvent, ExternalEventTestState>::new()
             .build(ExternalEventTestState::Created);
-    drop(_sender);
+    drop(sender);
 
     let dispatch_calls = Arc::new(AtomicUsize::new(0));
     let inner = ExternalEventTestSelfSupervisor {
@@ -562,10 +578,10 @@ async fn with_external_events_disconnected_maps_to_error_event() {
     assert_eq!(dispatch_calls.load(Ordering::Relaxed), 0);
 
     // HandlerSupervised wrapper
-    let (_sender, receiver, watcher) =
+    let (sender, receiver, watcher) =
         ChannelBuilder::<ExternalEventTestEvent, ExternalEventTestState>::new()
             .build(ExternalEventTestState::Created);
-    drop(_sender);
+    drop(sender);
 
     let dispatch_calls = Arc::new(AtomicUsize::new(0));
     let inner = ExternalEventTestHandlerSupervisor {

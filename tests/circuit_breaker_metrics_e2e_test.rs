@@ -145,10 +145,13 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
         .with_metrics_exporter(metrics_model.clone());
     // Initialize tracing
-    let _ = tracing_subscriber::fmt()
+    if let Err(error) = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_test_writer()
-        .try_init();
+        .try_init()
+    {
+        eprintln!("keeping the existing tracing subscriber: {error}");
+    }
 
     println!("\n=== Circuit Breaker Metrics E2E Test ===\n");
 

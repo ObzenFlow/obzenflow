@@ -520,7 +520,7 @@ fn quarantine_failure(
     }
     match result {
         Ok(Err(error)) => {
-            let _ = catch_unwind(AssertUnwindSafe(move || {
+            contain_diagnostic_panic(move || {
                 tracing::warn!(
                     observer = label,
                     stage,
@@ -529,7 +529,7 @@ fn quarantine_failure(
                     error = %error,
                     "observer failed and was quarantined for the remainder of the stage run"
                 );
-            }));
+            });
         }
         Err(_) => warn_quarantined(label, stage, surface, phase),
         Ok(Ok(())) => unreachable!("successful observer results return before quarantine"),
@@ -556,7 +556,7 @@ fn emit_quarantine_warning(
     phase: &'static str,
     effect_type: Option<&str>,
 ) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    contain_diagnostic_panic(|| {
         if let Some(effect_type) = effect_type {
             tracing::warn!(
                 observer = label,
@@ -575,7 +575,14 @@ fn emit_quarantine_warning(
                 "observer panicked and was quarantined for the remainder of the stage run"
             );
         }
-    }));
+    });
+}
+
+// Dropping a panic payload can panic again, so containment keeps it.
+fn contain_diagnostic_panic(emit: impl FnOnce()) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(emit)) {
+        std::mem::forget(payload);
+    }
 }
 
 struct HandlerObserverChain(Vec<ObserverChild<dyn HandlerObserver>>);

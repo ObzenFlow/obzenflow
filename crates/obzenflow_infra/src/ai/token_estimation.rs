@@ -81,15 +81,20 @@ pub fn resolve_estimator_for_model(model: &str) -> ResolvedTokenEstimator {
 ///
 /// This is the lower-level escape hatch for callers that explicitly want
 /// unique ownership of the estimator trait object.
+#[cfg(feature = "ai-tiktoken")]
 pub fn boxed_estimator_for_model(model: &str) -> Box<dyn TokenEstimator> {
-    #[cfg(feature = "ai-tiktoken")]
-    if let Ok(t) = super::tiktoken::TiktokenEstimator::for_model(model) {
-        return Box::new(t);
+    match super::tiktoken::TiktokenEstimator::for_model(model) {
+        Ok(tiktoken) => Box::new(tiktoken),
+        Err(_) => Box::new(HeuristicTokenEstimator::default()),
     }
+}
 
-    #[cfg(not(feature = "ai-tiktoken"))]
-    let _ = model;
-
+/// Best-available boxed estimator for a model.
+///
+/// This is the lower-level escape hatch for callers that explicitly want
+/// unique ownership of the estimator trait object.
+#[cfg(not(feature = "ai-tiktoken"))]
+pub fn boxed_estimator_for_model(_model: &str) -> Box<dyn TokenEstimator> {
     Box::new(HeuristicTokenEstimator::default())
 }
 

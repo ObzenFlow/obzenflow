@@ -80,6 +80,6 @@ async fn debug_flight_delays_issue() {
     assert_eq!(events.len(), 9); // 1 + 8
 
     // Cleanup
-    std::fs::remove_dir_all(&journal_dir).ok();
+    std::fs::remove_dir_all(&journal_dir).unwrap();
     println!("✅ Debug test completed successfully!");
 }

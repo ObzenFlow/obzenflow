@@ -49,7 +49,9 @@ impl Signals {
         }
         #[cfg(not(unix))]
         {
-            let _ = tokio::signal::ctrl_c().await;
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                tracing::warn!(%error, "Ctrl-C listener failed");
+            }
             ShutdownSignal::Sigint
         }
     }

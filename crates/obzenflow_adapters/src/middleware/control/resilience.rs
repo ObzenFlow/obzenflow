@@ -1834,7 +1834,7 @@ fn classify_physical_result(
 ) -> Option<FailureClassification> {
     match (physical_outcome, result) {
         (PhysicalCallOutcome::Succeeded, Ok(outputs)) => {
-            Some(breaker.classify_call(event, outputs, ctx).0)
+            Some(breaker.classify_call(outputs, ctx).0)
         }
         // Dependency success followed by decomposition/materialisation failure
         // is healthy for the breaker and is never retried.
@@ -1849,9 +1849,7 @@ fn classify_physical_result(
             Some(breaker.classify_effect_error(event, error, ctx))
         }
         (PhysicalCallOutcome::Failed, Err(_)) => None,
-        (PhysicalCallOutcome::Failed, Ok(outputs)) => {
-            Some(breaker.classify_call(event, outputs, ctx).0)
-        }
+        (PhysicalCallOutcome::Failed, Ok(outputs)) => Some(breaker.classify_call(outputs, ctx).0),
     }
 }
 

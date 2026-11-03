@@ -121,7 +121,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
         _ctx: &MetricsAggregatorContext,
     ) {
         if self.last_state.as_ref() != Some(state) {
-            let _ = self.state_watcher.update(state.clone());
+            self.state_watcher.update(state.clone());
             self.last_state = Some(state.clone());
         }
     }
@@ -385,7 +385,7 @@ mod tests {
         let system_journal: Arc<dyn Journal<SystemEvent>> =
             Arc::new(FailAppendJournal::new(system_id));
 
-        let (_event_sender, _event_receiver, state_watcher) =
+        let (_event_sender, event_receiver, state_watcher) =
             ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
                 .with_event_buffer(1)
                 .build(MetricsAggregatorState::Initializing);
@@ -394,7 +394,7 @@ mod tests {
             name: obzenflow_core::event::vocabulary::supervisor::METRICS_NAME.to_string(),
             system_journal: system_journal.clone(),
             system_id,
-            control: _event_receiver.into(),
+            control: event_receiver.into(),
             readers: None,
             final_refresh: None,
             state_watcher: state_watcher.clone(),
@@ -422,7 +422,9 @@ mod tests {
         }
         .into();
 
-        let _ = SelfSupervisedExt::run(supervisor, MetricsAggregatorState::Created, ctx).await;
+        SelfSupervisedExt::run(supervisor, MetricsAggregatorState::Created, ctx)
+            .await
+            .expect("a dispatch failure settles in the Failed state");
 
         assert!(
             matches!(

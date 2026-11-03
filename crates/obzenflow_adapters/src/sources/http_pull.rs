@@ -638,7 +638,7 @@ where
                 }
 
                 let mut pending = pending.clone();
-                let _ = pending.pop_front();
+                pending.pop_front();
 
                 let next_cursor = if pending.is_empty() {
                     None

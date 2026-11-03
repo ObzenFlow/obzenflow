@@ -278,10 +278,7 @@ impl PublicationScope {
                     .then_some(rejected.cancelled_task)
                     .flatten();
             }
-            match error.source() {
-                Some(source) => error = source,
-                None => return None,
-            }
+            error = error.source()?;
         }
     }
 
@@ -511,7 +508,7 @@ impl PublicationScope {
                 let mut frontier = snapshot;
                 if let Some(previous) = previous {
                     if let Err(error) = frontier.merge(&previous.await) {
-                        let _ = scope.retain_error(Box::new(error));
+                        scope.retain_error(Box::new(error));
                         scope
                             .state
                             .lock()
@@ -565,8 +562,15 @@ impl PublicationScope {
                     state.failure.get_or_insert(error.clone());
                     scope.failure_changed.notify_waiters();
                 }
-                let _ = receipt_tx.send(result);
-                let _ = done_tx.send(frontier.lock().unwrap_or_else(|e| e.into_inner()).clone());
+                if receipt_tx.send(result).is_err() {
+                    tracing::trace!("publication receipt waiter left before settlement");
+                }
+                if done_tx
+                    .send(frontier.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                    .is_err()
+                {
+                    tracing::trace!("next publication left before this one settled");
+                }
                 settlement
             });
             let abort = task.abort_handle();
@@ -738,7 +742,7 @@ pub(crate) fn admit_command(frontier: &CausalFrontier) -> bool {
         Ok(()) => true,
         Err(error) => {
             if let Some(scope) = PublicationScope::current() {
-                let _ = scope.retain_error(Box::new(error));
+                scope.retain_error(Box::new(error));
                 scope
                     .state
                     .lock()

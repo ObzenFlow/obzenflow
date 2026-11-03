@@ -61,7 +61,7 @@ jobs:
         run: git checkout --force --detach "$MEASURED_SHA"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
       - name: Restore the validator build
         id: builds
         uses: actions/cache/restore@v4
@@ -155,7 +155,7 @@ jobs:
           path: target/test-runs/${{ env.RUN_ID }}/performance
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
       - name: Restore intact performance builds
         id: builds
         uses: actions/cache/restore@v4

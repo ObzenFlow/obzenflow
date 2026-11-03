@@ -393,7 +393,7 @@ mod direct_fact_continuation_tests {
 // ============================================================================
 
 /// FSM states for transform stages
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, StateVariant)]
 pub enum TransformState<H> {
     /// Initial state - transform has been created but not initialized
     Created,
@@ -495,28 +495,6 @@ impl<H: Send + Sync> PartialEq for TransformState<H> {
     }
 }
 
-impl<H: Send + Sync + 'static> StateVariant for TransformState<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            TransformState::Created => "Created",
-            Self::Initializing => "Initializing",
-            Self::Starting => "Starting",
-            Self::Finalizing => "Finalizing",
-            Self::Failing(..) => "Failing",
-            Self::Cancelling(..) => "Cancelling",
-            Self::Cancelled(..) => "Cancelled",
-
-            TransformState::Initialized => "Initialized",
-            TransformState::Running => "Running",
-            TransformState::Draining => "Draining",
-            TransformState::ClosingCycle => "ClosingCycle",
-            TransformState::Drained => "Drained",
-            TransformState::Failed(_) => "Failed",
-            TransformState::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
-    }
-}
-
 impl<H> TransformState<H> {
     pub(crate) fn failure(cause: String) -> Self {
         use crate::stages::common::stage_handle::{
@@ -552,6 +530,7 @@ impl<H> TransformState<H> {
 // ============================================================================
 
 /// Events that can trigger transform state transitions
+#[derive(EventVariant)]
 pub enum TransformEvent<H> {
     /// Initialize the transform
     Initialize,
@@ -652,27 +631,6 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             | Self::CycleClosed => None,
             Self::_Phantom(_) => unreachable!("PhantomData variant"),
         })
-    }
-}
-
-impl<H: Send + Sync + 'static> EventVariant for TransformEvent<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            TransformEvent::Initialize => "Initialize",
-            Self::InitializationCompleted => "InitializationCompleted",
-            Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalizationCompleted => "FinalizationCompleted",
-            Self::TerminationSettled => "TerminationSettled",
-
-            TransformEvent::Ready => "Ready",
-            TransformEvent::ReceivedEOF => "ReceivedEOF",
-            TransformEvent::BeginDrain => "BeginDrain",
-            TransformEvent::DrainComplete => "DrainComplete",
-            TransformEvent::CycleDrained => "CycleDrained",
-            TransformEvent::CycleClosed => "CycleClosed",
-            TransformEvent::Error(_) => "Error",
-            TransformEvent::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
     }
 }
 

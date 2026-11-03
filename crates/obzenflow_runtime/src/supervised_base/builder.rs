@@ -412,10 +412,8 @@ pub struct StateWatcher<S> {
 
 impl<S: Clone> StateWatcher<S> {
     /// Update the state (for supervisor use)
-    pub fn update(&self, state: S) -> Result<(), HandleError> {
-        self.tx
-            .send(state)
-            .map_err(|_| HandleError::SupervisorNotRunning)
+    pub fn update(&self, state: S) {
+        self.tx.send_replace(state);
     }
 
     /// Get a receiver for watching state (for handle use)

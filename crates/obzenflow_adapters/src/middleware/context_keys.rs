@@ -61,11 +61,15 @@ impl CircuitBreakerProbeSlotGuard {
             return;
         }
         self.released = true;
-        let _ = self
+        if self
             .probe_in_flight
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 current.checked_sub(1)
-            });
+            })
+            .is_err()
+        {
+            tracing::warn!("circuit breaker probe released with none in flight");
+        }
     }
 }
 

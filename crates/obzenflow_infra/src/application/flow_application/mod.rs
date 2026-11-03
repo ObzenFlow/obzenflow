@@ -605,7 +605,9 @@ impl FlowApplication {
             params.test_console_bound_address.take(),
             diagnostics.address(),
         ) {
-            let _ = sender.send(address);
+            sender
+                .send(address)
+                .expect("the test awaits the Console address");
         }
         let result = Self::launch_inner(flow, &mut params, prepared.config).await;
         diagnostics.finish(result).await
@@ -973,7 +975,9 @@ impl FlowApplication {
             #[cfg(feature = "warp-server")]
             if config.server.enabled {
                 let runtime_instance_id = RuntimeInstanceId::new();
-                let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::watch::channel(false);
+                let server_shutdown_tx = tokio::sync::watch::Sender::new(false);
+                #[cfg(feature = "studio-registration")]
+                let server_shutdown_rx = server_shutdown_tx.subscribe();
                 let cors_mode = match config.server.cors_mode {
                     CorsModeArg::AllowAnyOrigin => HostCorsMode::AllowAnyOrigin,
                     CorsModeArg::AllowList => {
@@ -1023,7 +1027,9 @@ impl FlowApplication {
                 // reserving and dropping an unrelated ephemeral port first.
                 #[cfg(test)]
                 if let Some(address) = test_bound_address {
-                    let _ = address.send(host.address());
+                    address
+                        .send(host.address())
+                        .expect("the test awaits the bound address");
                 }
                 #[cfg(any(test, feature = "studio-registration"))]
                 let mut host = host;
@@ -1035,8 +1041,6 @@ impl FlowApplication {
 
                 #[cfg(not(feature = "studio-registration"))]
                 let initial_failure = None;
-                #[cfg(not(feature = "studio-registration"))]
-                let _ = server_shutdown_rx;
                 #[cfg(feature = "studio-registration")]
                 let mut initial_failure = None;
                 #[cfg(feature = "studio-registration")]
@@ -1370,8 +1374,8 @@ impl FlowApplication {
     /// Internal: Start the web server with all endpoints
     #[cfg(feature = "warp-server")]
     async fn start_server(
-        _flow_handle: &Arc<FlowHandle>,
-        _server_config: HostConfig,
+        flow_handle: &Arc<FlowHandle>,
+        server_config: HostConfig,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
         #[cfg(feature = "prometheus")] metrics_endpoint: Option<
@@ -1382,7 +1386,7 @@ impl FlowApplication {
         use crate::web::web_server::{bind_managed_host, ManagedHostInput};
 
         // Every flow has a topology - it's required to run
-        let topology = _flow_handle.topology().ok_or_else(|| {
+        let topology = flow_handle.topology().ok_or_else(|| {
             ApplicationError::ServerStartFailed(
                 "Flow missing topology - this should never happen".to_string(),
             )
@@ -1393,7 +1397,7 @@ impl FlowApplication {
         // FLOWIP-114b: stage typing, join metadata, middleware, and
         // subgraph annotations live on the canonical `Topology` directly,
         // so only the contract side map needs to be threaded through.
-        let contract_attachments = _flow_handle.contract_attachments();
+        let contract_attachments = flow_handle.contract_attachments();
 
         let handle = bind_managed_host(
             ManagedHostInput {
@@ -1402,14 +1406,14 @@ impl FlowApplication {
                 contract_attachments,
                 #[cfg(feature = "prometheus")]
                 metrics_endpoint,
-                flow_handle: _flow_handle.clone(),
+                flow_handle: flow_handle.clone(),
                 extra_endpoints,
                 surface_metrics,
                 runtime_config: lifecycle.runtime_config,
                 runtime_instance_id: lifecycle.instance_id,
                 shutdown: lifecycle.shutdown,
             },
-            _server_config,
+            server_config,
         )
         .await
         .map_err(|e| ApplicationError::ServerStartFailed(e.to_string()))?;

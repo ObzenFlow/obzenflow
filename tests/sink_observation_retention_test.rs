@@ -253,13 +253,13 @@ impl SinkPolicy for TestPolicy {
         }
     }
 
-    fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, _ctx: &mut SinkPolicyCtx) {
+    fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, ctx: &mut SinkPolicyCtx) {
         let observation = self.observations.fetch_add(1, Ordering::SeqCst) + 1;
         if matches!(self.mode, PolicyMode::PanicOnObservation(target) if observation == target) {
             panic!("raw observation panic sentinel must be redacted");
         }
         if matches!(self.mode, PolicyMode::EmitEvidence) {
-            _ctx.try_push_evidence(
+            ctx.try_push_evidence(
                 obzenflow_runtime::stages::sink::journal_sink::SinkPolicyEvidence::circuit_breaker(
                     CircuitBreakerFact::Closed {
                         unit: "output".into(),

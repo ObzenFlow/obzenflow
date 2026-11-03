@@ -449,7 +449,6 @@ pub trait PostgresBind: Clone + Send + Sync + 'static {
 pub struct PostgresSink<B> {
     connection: PostgresConnection,
     destination: PostgresTable,
-    _insert_body: String,
     statement: String,
     binder: B,
     batch_size: usize,
@@ -604,7 +603,6 @@ where
         Ok(PostgresSink {
             connection,
             destination,
-            _insert_body: insert_body,
             statement,
             binder: self.binder,
             batch_size: self.batch_size,
@@ -2272,10 +2270,6 @@ mod tests {
         assert_eq!(
             sink.statement,
             "INSERT INTO \"Public\".\"Items\" (value) VALUES ('a;b') ON CONFLICT DO NOTHING"
-        );
-        assert_eq!(
-            sink._insert_body,
-            "(value) VALUES ('a;b') ON CONFLICT DO NOTHING"
         );
         assert_eq!(
             sink.describe().destination_name(),

@@ -108,12 +108,6 @@ impl InlineSink for TimestampedSink {
 #[derive(Clone, Debug)]
 struct PassthroughStage {}
 
-impl PassthroughStage {
-    fn new(_name: &str) -> Self {
-        Self {}
-    }
-}
-
 impl TypedTransformHandler for PassthroughStage {
     type Input = BenchEvent;
     type Output = BenchEvent;
@@ -157,15 +151,15 @@ async fn build_pipeline(
                 }
             },
             10 => {
-                let s1_handler = PassthroughStage::new("stage1");
-                let s2_handler = PassthroughStage::new("stage2");
-                let s3_handler = PassthroughStage::new("stage3");
-                let s4_handler = PassthroughStage::new("stage4");
-                let s5_handler = PassthroughStage::new("stage5");
-                let s6_handler = PassthroughStage::new("stage6");
-                let s7_handler = PassthroughStage::new("stage7");
-                let s8_handler = PassthroughStage::new("stage8");
-                let s9_handler = PassthroughStage::new("stage9");
+                let s1_handler = PassthroughStage {};
+                let s2_handler = PassthroughStage {};
+                let s3_handler = PassthroughStage {};
+                let s4_handler = PassthroughStage {};
+                let s5_handler = PassthroughStage {};
+                let s6_handler = PassthroughStage {};
+                let s7_handler = PassthroughStage {};
+                let s8_handler = PassthroughStage {};
+                let s9_handler = PassthroughStage {};
 
                 flow! {
                 journals: disk_journals(journals_base_path.clone()),
@@ -199,25 +193,25 @@ async fn build_pipeline(
                 }
             }
             20 => {
-                let s1_handler = PassthroughStage::new("stage1");
-                let s2_handler = PassthroughStage::new("stage2");
-                let s3_handler = PassthroughStage::new("stage3");
-                let s4_handler = PassthroughStage::new("stage4");
-                let s5_handler = PassthroughStage::new("stage5");
-                let s6_handler = PassthroughStage::new("stage6");
-                let s7_handler = PassthroughStage::new("stage7");
-                let s8_handler = PassthroughStage::new("stage8");
-                let s9_handler = PassthroughStage::new("stage9");
-                let s10_handler = PassthroughStage::new("stage10");
-                let s11_handler = PassthroughStage::new("stage11");
-                let s12_handler = PassthroughStage::new("stage12");
-                let s13_handler = PassthroughStage::new("stage13");
-                let s14_handler = PassthroughStage::new("stage14");
-                let s15_handler = PassthroughStage::new("stage15");
-                let s16_handler = PassthroughStage::new("stage16");
-                let s17_handler = PassthroughStage::new("stage17");
-                let s18_handler = PassthroughStage::new("stage18");
-                let s19_handler = PassthroughStage::new("stage19");
+                let s1_handler = PassthroughStage {};
+                let s2_handler = PassthroughStage {};
+                let s3_handler = PassthroughStage {};
+                let s4_handler = PassthroughStage {};
+                let s5_handler = PassthroughStage {};
+                let s6_handler = PassthroughStage {};
+                let s7_handler = PassthroughStage {};
+                let s8_handler = PassthroughStage {};
+                let s9_handler = PassthroughStage {};
+                let s10_handler = PassthroughStage {};
+                let s11_handler = PassthroughStage {};
+                let s12_handler = PassthroughStage {};
+                let s13_handler = PassthroughStage {};
+                let s14_handler = PassthroughStage {};
+                let s15_handler = PassthroughStage {};
+                let s16_handler = PassthroughStage {};
+                let s17_handler = PassthroughStage {};
+                let s18_handler = PassthroughStage {};
+                let s19_handler = PassthroughStage {};
 
                 flow! {
                 journals: disk_journals(journals_base_path.clone()),
@@ -272,15 +266,15 @@ async fn build_pipeline(
             }
             100 => {
                 // For 100 stages, simplify to 10 stages for maintainability
-                let s1_handler = PassthroughStage::new("stage1");
-                let s2_handler = PassthroughStage::new("stage2");
-                let s3_handler = PassthroughStage::new("stage3");
-                let s4_handler = PassthroughStage::new("stage4");
-                let s5_handler = PassthroughStage::new("stage5");
-                let s6_handler = PassthroughStage::new("stage6");
-                let s7_handler = PassthroughStage::new("stage7");
-                let s8_handler = PassthroughStage::new("stage8");
-                let s9_handler = PassthroughStage::new("stage9");
+                let s1_handler = PassthroughStage {};
+                let s2_handler = PassthroughStage {};
+                let s3_handler = PassthroughStage {};
+                let s4_handler = PassthroughStage {};
+                let s5_handler = PassthroughStage {};
+                let s6_handler = PassthroughStage {};
+                let s7_handler = PassthroughStage {};
+                let s8_handler = PassthroughStage {};
+                let s9_handler = PassthroughStage {};
 
                 flow! {
                     journals: disk_journals(journals_base_path.clone()),

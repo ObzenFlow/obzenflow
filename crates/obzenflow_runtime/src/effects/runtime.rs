@@ -1340,7 +1340,8 @@ impl EffectsCore {
                     );
                     Ok(output)
                 }
-                Err((err, observation)) => {
+                Err(failure) => {
+                    let (err, observation) = *failure;
                     self.append_failed_record(
                         cursor,
                         descriptor_hash,
@@ -1515,16 +1516,16 @@ impl EffectsCore {
     async fn execute_into_success<E>(
         effect: E,
         effect_ctx: &mut EffectContext,
-    ) -> Result<(E::Outcome, PreparedEffectSuccess), (EffectError, EffectObservation)>
+    ) -> Result<(E::Outcome, PreparedEffectSuccess), Box<(EffectError, EffectObservation)>>
     where
         E: Effect,
     {
         let output = effect
             .execute(effect_ctx)
             .await
-            .map_err(|error| (error, EffectObservation::returned_failure()))?;
+            .map_err(|error| Box::new((error, EffectObservation::returned_failure())))?;
         let success = E::OutcomeSemantics::prepare_success(&output)
-            .map_err(|error| (error, EffectObservation::OutcomePreparationFailed {}))?;
+            .map_err(|error| Box::new((error, EffectObservation::OutcomePreparationFailed {})))?;
         Ok((output, success))
     }
 

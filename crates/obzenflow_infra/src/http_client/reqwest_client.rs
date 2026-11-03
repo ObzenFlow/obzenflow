@@ -217,7 +217,7 @@ where
     let ready = futures::future::ready(result).boxed().shared();
     // Populate `Shared`'s cached output so pre-seeded clients report ready without
     // mutating a fresh one-time cell through a fallible `set` path.
-    let _ = ready.clone().now_or_never();
+    ready.clone().now_or_never();
     ready
 }
 

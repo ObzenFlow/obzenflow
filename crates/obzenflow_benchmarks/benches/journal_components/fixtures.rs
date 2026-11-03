@@ -25,7 +25,7 @@ pub struct History {
     pub paths: Vec<PathBuf>,
     pub records: Vec<Vec<ChainJournalRecord>>,
     // Retain files until readers and definition-cache lookups have settled.
-    pub _directory: tempfile::TempDir,
+    pub directory: tempfile::TempDir,
 }
 
 impl History {
@@ -45,10 +45,10 @@ impl History {
             journals: Vec::new(),
             paths: Vec::new(),
             records: Vec::new(),
-            _directory: directory,
+            directory,
         };
         for stage in stages {
-            let path = fixture._directory.path().join(format!("{stage}.log"));
+            let path = fixture.directory.path().join(format!("{stage}.log"));
             let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(
                 DiskJournal::with_owner_in_run(path.clone(), JournalOwner::stage(*stage), run)
                     .unwrap(),

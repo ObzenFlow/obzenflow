@@ -756,12 +756,7 @@ impl<'a> SourcePollObservation<'a> {
         self.observers.has_source_poll() && !self.scope.is_deterministic_replay()
     }
 
-    pub(crate) async fn observe(
-        &self,
-        outputs: &[ChainEvent],
-        _poll_duration: Duration,
-        outcome: SourcePollObserverOutcome,
-    ) {
+    pub(crate) async fn observe(&self, outputs: &[ChainEvent], outcome: SourcePollObserverOutcome) {
         if !self.is_enabled() {
             return;
         }
@@ -770,12 +765,8 @@ impl<'a> SourcePollObservation<'a> {
         run_source_poll_observers(self.observers, self.scope, &observer_ctx, outputs);
     }
 
-    pub(crate) async fn observe_empty(
-        &self,
-        poll_duration: Duration,
-        outcome: SourcePollObserverOutcome,
-    ) {
-        self.observe(&[], poll_duration, outcome).await;
+    pub(crate) async fn observe_empty(&self, outcome: SourcePollObserverOutcome) {
+        self.observe(&[], outcome).await;
     }
 }
 
@@ -791,13 +782,9 @@ pub(crate) async fn observe_source_boundary_rejection(
         policy: policy.map(str::to_string),
     };
     if control_events.is_empty() {
-        observation
-            .observe_empty(Duration::from_nanos(0), outcome)
-            .await;
+        observation.observe_empty(outcome).await;
     } else {
-        observation
-            .observe(control_events, Duration::from_nanos(0), outcome)
-            .await;
+        observation.observe(control_events, outcome).await;
     }
 }
 
@@ -997,17 +984,11 @@ where
                         Some(bound),
                     ) => wait_started.elapsed(),
                 };
-                // The chunk elapsed (the external-event arm returns early
-                // above, so this only runs on a real wait): record the wait
-                // and feed the blocked pulse through the same append/mirror
-                // path the sync drain uses, so async-source pulses are not
-                // silently dropped.
+                // The external-event arm returns early above, so this only
+                // runs on a real wait.
                 backpressure_writer.record_wait(waited);
                 crate::stages::common::supervision::backpressure_drain::emit_blocked_pulse(
-                    stage_id,
-                    stage_flow_context,
                     waited,
-                    data_journal,
                     instrumentation,
                     backpressure_writer,
                     backpressure_pulse,

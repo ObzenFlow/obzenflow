@@ -1586,7 +1586,7 @@ mod tests {
         );
 
         // Cleanup
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1642,7 +1642,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reopened.read_all_unordered().await.unwrap().len(), 3);
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1692,7 +1692,7 @@ mod tests {
             drop(reopened);
         }
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1755,7 +1755,7 @@ mod tests {
         );
 
         // Cleanup
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1806,7 +1806,7 @@ mod tests {
         assert_eq!(writer_ids.len(), 5);
 
         // Cleanup
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1867,7 +1867,7 @@ mod tests {
         let expected: Vec<u64> = (1..=task_count as u64).collect();
         assert_eq!(writer_seqs, expected);
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1937,7 +1937,7 @@ mod tests {
             "writer clock must continue after reopen, not reset"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1978,7 +1978,7 @@ mod tests {
             "mid-file corruption must fail loud"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2031,7 +2031,7 @@ mod tests {
         writer.await.unwrap();
         assert_eq!(seen, N);
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2105,7 +2105,7 @@ mod tests {
             assert_eq!(reader.position(), 1);
         }
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2147,7 +2147,7 @@ mod tests {
             "a truncated indexed record must fail loud, not return None"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2236,7 +2236,7 @@ mod tests {
             "from_position past a mid-file corrupt record must fail loud"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2280,7 +2280,7 @@ mod tests {
             "a torn tail must not be counted as a committed position"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[derive(Clone, Copy)]
@@ -2481,6 +2481,6 @@ mod tests {
             "a poisoned journal must reject further appends"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 }

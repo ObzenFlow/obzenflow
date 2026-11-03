@@ -194,7 +194,7 @@ async fn execute_affine_chain_once(
 #[async_trait]
 impl EffectBoundary for PerEffectPolicyBoundary {
     fn install_observation_recorder(&self, recorder: Arc<dyn ObservationRecorder>) {
-        let _ = self.recorder.set(recorder);
+        self.recorder.get_or_init(|| recorder);
     }
 
     async fn around_repeatable_effect(

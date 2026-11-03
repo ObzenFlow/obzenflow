@@ -109,7 +109,7 @@ async fn replay_origins_advance_only_with_the_corresponding_admitted_record() {
     let mut driver = ReplayDriver::new(reader, PathBuf::from("archive.log"), template());
     for original in [first, second] {
         let replayed = driver
-            .next_replayed_event(writer, "source", flow_context())
+            .next_replayed_event(flow_context())
             .await
             .unwrap()
             .unwrap();
@@ -165,7 +165,6 @@ async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
 
     let mut driver = ReplayDriver::new(reader, journal_path.clone(), replay_context.clone());
 
-    let new_writer = WriterId::from(StageId::new());
     let flow_context = FlowContext {
         flow_name: "new_flow".to_string(),
         flow_id: "flow_new".to_string(),
@@ -175,7 +174,7 @@ async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
     };
 
     let replayed = driver
-        .next_replayed_event(new_writer, "new_source", flow_context.clone())
+        .next_replayed_event(flow_context.clone())
         .await
         .unwrap()
         .expect("should replay data after skipping eof");
@@ -243,7 +242,7 @@ async fn replay_driver_treats_reader_none_as_clean_end() {
     let mut driver = ReplayDriver::new(reader, PathBuf::from("/tmp/archive.log"), template());
 
     let result = driver
-        .next_replayed_event(WriterId::from(StageId::new()), "new_source", flow_context())
+        .next_replayed_event(flow_context())
         .await
         .expect("None from the reader is a clean end, not an error");
 
@@ -253,7 +252,7 @@ async fn replay_driver_treats_reader_none_as_clean_end() {
 async fn drain_driver(driver: &mut ReplayDriver) {
     // Pull until exhaustion so every skipped row is observed.
     while driver
-        .next_replayed_event(WriterId::from(StageId::new()), "new_source", flow_context())
+        .next_replayed_event(flow_context())
         .await
         .expect("clean archive")
         .is_some()
@@ -331,7 +330,7 @@ async fn replay_driver_maps_reader_error_to_corrupted_archive() {
     let mut driver = ReplayDriver::new(reader, PathBuf::from("/tmp/archive.log"), template());
 
     let err = driver
-        .next_replayed_event(WriterId::from(StageId::new()), "new_source", flow_context())
+        .next_replayed_event(flow_context())
         .await
         .err()
         .unwrap();
@@ -484,7 +483,7 @@ fn member(events: &[ChainEvent], flow: &str) -> ReplayMember {
 async fn spliced(driver: &mut ReplayDriver) -> Vec<(obzenflow_core::EventId, String)> {
     let mut replayed = Vec::new();
     while let Some(next) = driver
-        .next_replayed_event(WriterId::from(StageId::new()), "new_source", flow_context())
+        .next_replayed_event(flow_context())
         .await
         .expect("an agreeing lineage")
     {
@@ -592,11 +591,11 @@ async fn a_lineage_that_disagrees_by_recorded_identity_refuses() {
     let ancestor = member(&[shared, row(writer, Some(2))], "parent");
     let mut driver = ReplayDriver::merged(head, vec![ancestor]);
     driver
-        .next_replayed_event(WriterId::from(StageId::new()), "new_source", flow_context())
+        .next_replayed_event(flow_context())
         .await
         .expect("the shared record agrees");
     let disagreement = driver
-        .next_replayed_event(WriterId::from(StageId::new()), "new_source", flow_context())
+        .next_replayed_event(flow_context())
         .await
         .err()
         .expect("different records at one position refuse");

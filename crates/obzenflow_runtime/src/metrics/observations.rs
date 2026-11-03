@@ -189,7 +189,9 @@ impl LatestObservationMap {
     /// Recorded attachments never activate an execution generation.
     pub(crate) fn offer_recorded(&self, packet: &ObservabilityContext) {
         if self.could_update(packet, true).unwrap_or(false) {
-            let _ = self.select_inner(packet.clone(), true, false);
+            if let Err(offer) = self.select_inner(packet.clone(), true, false) {
+                tracing::trace!(?offer, "recorded observation was not selected");
+            }
         }
     }
 
@@ -369,7 +371,7 @@ impl ObservationOwner {
         let sequence = self
             .sequence
             .as_ref()?
-            .fetch_update(
+            .try_update(
                 Ordering::Relaxed,
                 Ordering::Relaxed,
                 |current_capture_seq| current_capture_seq.checked_add(1),

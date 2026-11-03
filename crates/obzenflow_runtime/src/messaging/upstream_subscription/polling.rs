@@ -486,7 +486,7 @@ where
         let original_chain_event = (&original_authored as &dyn Any).downcast_ref::<ChainEvent>();
 
         let normalized_contract_event =
-            self.normalized_eof_for_contracts(reader_index, stage_id, original_chain_event, is_eof);
+            self.normalized_eof_for_contracts(stage_id, original_chain_event, is_eof);
         let contract_chain_event = normalized_contract_event.as_ref().or(original_chain_event);
 
         self.bump_selected_data_counters(reader_index, stage_id, original_chain_event);
@@ -574,7 +574,6 @@ where
     /// writer count rather than the upstream's raw count.
     fn normalized_eof_for_contracts(
         &self,
-        _reader_index: usize,
         stage_id: StageId,
         original: Option<&ChainEvent>,
         is_eof: bool,

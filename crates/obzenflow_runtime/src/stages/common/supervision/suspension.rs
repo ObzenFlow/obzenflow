@@ -98,6 +98,6 @@ mod tests {
     #[should_panic(expected = "Notify pause must carry a stall cap")]
     async fn credit_wake_without_cap_panics() {
         let wake = WakeOn::Notify(CreditWaker::new());
-        let _ = suspend_until(&wake, None).await;
+        suspend_until(&wake, None).await;
     }
 }

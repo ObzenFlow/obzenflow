@@ -216,12 +216,11 @@ impl EffectfulStatefulHandler for Allocator {
 
 #[cfg(test)]
 mod tests {
-    use super::super::warehouse::{warehouse_system, WarehouseConfig, WarehouseStats};
+    use super::super::warehouse::{warehouse_system, WarehouseConfig};
     use super::*;
     use obzenflow::effects::{
         EffectFailureCause, EffectFailureCode, EffectFailureSource, RetryDisposition,
     };
-    use std::sync::Arc;
 
     fn order(value: &str) -> OrderId {
         OrderId::from(value)
@@ -283,11 +282,8 @@ mod tests {
 
     #[test]
     fn failed_reservation_is_a_noop_for_capacity_and_holds() {
-        let warehouse = warehouse_system(
-            &WarehouseConfig::default(),
-            Arc::new(WarehouseStats::default()),
-        )
-        .expect("the demo warehouse is a valid system");
+        let warehouse = warehouse_system(&WarehouseConfig::default())
+            .expect("the demo warehouse is a valid system");
         let mut allocator = Allocator::new(warehouse, 1);
         let mut state = AllocationState::default();
         allocator

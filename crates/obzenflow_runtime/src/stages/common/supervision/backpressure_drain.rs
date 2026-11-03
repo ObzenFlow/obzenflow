@@ -122,14 +122,11 @@ pub(crate) async fn drain_one_pending(
         DrainAttempt::Committed { was_data } => Ok(DrainOutcome::Committed { was_data }),
         DrainAttempt::BackedOff { bound, waker } => {
             let wait_started = tokio::time::Instant::now();
-            let _ = suspend_until(&WakeOn::Notify(waker), Some(bound)).await;
+            suspend_until(&WakeOn::Notify(waker), Some(bound)).await;
             let measured = wait_started.elapsed();
             backpressure_writer.record_wait(measured);
             emit_blocked_pulse(
-                stage_id,
-                flow_context,
                 measured,
-                data_journal,
                 instrumentation,
                 backpressure_writer,
                 backpressure_pulse,
@@ -217,19 +214,10 @@ pub(crate) async fn acquire_direct_fact_lease(
                 .credit_waker()
                 .ok_or_else(|| "generated direct-fact admission has no credit waker".to_string())?;
             let wait_started = tokio::time::Instant::now();
-            let _ = suspend_until(&WakeOn::Notify(waker), Some(wait_bound)).await;
+            suspend_until(&WakeOn::Notify(waker), Some(wait_bound)).await;
             let measured = wait_started.elapsed();
             writer.record_wait(measured);
-            emit_blocked_pulse(
-                stage_id,
-                flow_context,
-                measured,
-                data_journal,
-                instrumentation,
-                writer,
-                backpressure_pulse,
-            )
-            .await;
+            emit_blocked_pulse(measured, instrumentation, writer, backpressure_pulse).await;
             Ok(None)
         }
     }
@@ -317,15 +305,8 @@ pub(crate) async fn drain_one_pending_resolve(
 
             // Debug-only: emit activity pulses even when bypass is enabled, so
             // operators can see what *would* have blocked (FLOWIP-086k).
-            emit_bypass_pulse_if_needed(
-                stage_id,
-                flow_context,
-                data_journal,
-                instrumentation,
-                backpressure_writer,
-                backpressure_pulse,
-            )
-            .await;
+            emit_bypass_pulse_if_needed(instrumentation, backpressure_writer, backpressure_pulse)
+                .await;
 
             let Some(reservation) = backpressure_writer.reserve(1) else {
                 pending_outputs.push_front(pending);
@@ -412,9 +393,6 @@ pub(crate) async fn drain_one_pending_resolve(
 
 /// Emit a bypass-mode activity pulse when credit would have been zero.
 async fn emit_bypass_pulse_if_needed(
-    _stage_id: StageId,
-    _flow_context: &FlowContext,
-    _data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -519,14 +497,9 @@ async fn emit_poison_eof(
 /// Feed the blocked-state pulse after one chunk of the credit wait, with the
 /// measured blocked time (a wake can cut the bound short). The coalescer
 /// still emits at most one pulse per second. Shared by the sync drain and the
-/// async-source wait so both paths append identically. Backpressure is not
-/// middleware (FLOWIP-115e), so the pulse rides the data journal only, never
-/// the middleware system-journal mirror.
+/// async-source wait so both paths report identically.
 pub(crate) async fn emit_blocked_pulse(
-    _stage_id: StageId,
-    _flow_context: &FlowContext,
     measured: std::time::Duration,
-    _data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,

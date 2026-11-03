@@ -395,7 +395,7 @@ pub fn note_merge_wait(
 
 impl HeartbeatHandle {
     pub fn cancel(&self) {
-        let _ = self.cancel.send(true);
+        self.cancel.send_replace(true);
         self.task.abort();
     }
 }
@@ -601,7 +601,9 @@ mod tests {
                 snapshots.with_read(|_| {
                     holding_tx.send(()).unwrap();
                     // A non-waiting writer returns here; a waiting one times out.
-                    let _ = written_rx.recv_timeout(Duration::from_millis(200));
+                    if let Err(error) = written_rx.recv_timeout(Duration::from_millis(200)) {
+                        eprintln!("the writer waited for this reader: {error}");
+                    }
                 });
             })
         };
@@ -620,7 +622,9 @@ mod tests {
                         edges: Vec::new(),
                     },
                 );
-                let _ = written_tx.send(());
+                if written_tx.send(()).is_err() {
+                    eprintln!("the reader stopped waiting before this write");
+                }
             })
         };
         reader.join().unwrap();

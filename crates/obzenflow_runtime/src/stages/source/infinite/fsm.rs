@@ -40,7 +40,7 @@ use crate::stages::source::supervision::SourceExit;
 // ============================================================================
 
 /// FSM states for infinite source stages
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, StateVariant)]
 pub enum InfiniteSourceState<H> {
     /// Initial state - source has been created but not initialized
     Created,
@@ -146,29 +146,6 @@ impl<H: Send + Sync> PartialEq for InfiniteSourceState<H> {
     }
 }
 
-impl<H: Send + Sync + 'static> StateVariant for InfiniteSourceState<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            InfiniteSourceState::Created => "Created",
-            Self::Initializing => "Initializing",
-            Self::Starting => "Starting",
-            Self::Finalizing => "Finalizing",
-            Self::AcquiringInput => "AcquiringInput",
-            Self::Failing(..) => "Failing",
-            Self::Cancelling(..) => "Cancelling",
-            Self::Cancelled(..) => "Cancelled",
-
-            InfiniteSourceState::Initialized => "Initialized",
-            InfiniteSourceState::WaitingForGun => "WaitingForGun",
-            InfiniteSourceState::Running => "Running",
-            InfiniteSourceState::Draining => "Draining",
-            InfiniteSourceState::Drained => "Drained",
-            InfiniteSourceState::Failed(_) => "Failed",
-            InfiniteSourceState::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
-    }
-}
-
 impl<H> InfiniteSourceState<H> {
     pub(crate) fn defer_external_event(state: &Self, event: &InfiniteSourceEvent<H>) -> bool {
         match state {
@@ -228,6 +205,7 @@ impl<H> InfiniteSourceState<H> {
 // ============================================================================
 
 /// Events that can trigger infinite source state transitions
+#[derive(EventVariant)]
 pub enum InfiniteSourceEvent<H> {
     /// Initialize the source - allocate resources, create writer ID
     Initialize,
@@ -323,27 +301,6 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             }
             Self::_Phantom(_) => unreachable!("PhantomData variant"),
         })
-    }
-}
-
-impl<H: Send + Sync + 'static> EventVariant for InfiniteSourceEvent<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            InfiniteSourceEvent::Initialize => "Initialize",
-            Self::InitializationCompleted => "InitializationCompleted",
-            Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalizationCompleted => "FinalizationCompleted",
-            Self::TerminationSettled => "TerminationSettled",
-            Self::InputAcquired => "InputAcquired",
-            Self::ResumeLiveInput => "ResumeLiveInput",
-
-            InfiniteSourceEvent::Ready => "Ready",
-            InfiniteSourceEvent::Start => "Start",
-            InfiniteSourceEvent::BeginDrain => "BeginDrain",
-            InfiniteSourceEvent::Completed => "Completed",
-            InfiniteSourceEvent::Error(_) => "Error",
-            InfiniteSourceEvent::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
     }
 }
 

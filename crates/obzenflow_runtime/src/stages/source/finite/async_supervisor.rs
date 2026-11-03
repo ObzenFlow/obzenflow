@@ -386,7 +386,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
             self.exit = Some(exit);
         }
         if self.last_state.as_ref() != Some(state) {
-            let _ = self.state_watcher.update(state.clone());
+            self.state_watcher.update(state.clone());
             self.last_state = Some(state.clone());
         }
     }
@@ -556,7 +556,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
         let ctx = ctx.resources_mut()?;
         if self.last_state.as_ref() != Some(state) {
             let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
+            self.state_watcher.update(new_state.clone());
             self.last_state = Some(new_state);
         }
 
@@ -763,11 +763,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                         .replay_driver
                         .as_mut()
                         .expect("replay_driver is initialized")
-                        .next_replayed_event(
-                            WriterId::from(self.stage_id),
-                            &ctx.stage_name,
-                            flow_context,
-                        )
+                        .next_replayed_event(flow_context)
                         .await;
                     let tick_duration = tick_started_at.elapsed();
 
@@ -978,7 +974,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                 source_poll_observation
                                     .observe(
                                         events.as_mut_slice(),
-                                        poll.poll_duration,
                                         SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
@@ -1004,7 +999,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                 source_poll_observation
                                     .observe(
                                         events.as_slice(),
-                                        poll.poll_duration,
                                         SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
@@ -1029,10 +1023,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                     && report.control_events.is_empty()
                                 {
                                     source_poll_observation
-                                        .observe_empty(
-                                            poll.poll_duration,
-                                            SourcePollObserverOutcome::Eof,
-                                        )
+                                        .observe_empty(SourcePollObserverOutcome::Eof)
                                         .await;
                                     Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
                                 } else {
@@ -1041,7 +1032,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                     source_poll_observation
                                         .observe(
                                             control_events.as_mut_slice(),
-                                            poll.poll_duration,
                                             SourcePollObserverOutcome::Eof,
                                         )
                                         .await;
@@ -1074,7 +1064,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                 source_poll_observation
                                     .observe(
                                         events.as_mut_slice(),
-                                        poll.poll_duration,
                                         SourcePollObserverOutcome::Error { kind },
                                     )
                                     .await;

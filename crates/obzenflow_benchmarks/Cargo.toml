@@ -91,3 +91,6 @@ name = "validation_boundaries"
 path = "benches/validation_boundaries.rs"
 harness = false
 required-features = ["validation-benchmarks"]
+
+[lints]
+workspace = true

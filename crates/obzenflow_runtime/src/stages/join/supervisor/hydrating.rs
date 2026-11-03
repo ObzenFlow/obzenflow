@@ -113,15 +113,8 @@ pub(super) async fn dispatch_hydrating<
                         heartbeat.state.record_data_read(upstream, event_id);
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
-                    common::observe_join_input(
-                        ctx,
-                        scope,
-                        &event,
-                        delivery_snapshot.as_ref(),
-                        None,
-                        Some(&envelope),
-                    )
-                    .await?;
+                    common::observe_join_input(ctx, scope, delivery_snapshot.as_ref(), None)
+                        .await?;
 
                     ctx.instrumentation
                         .in_flight_count
@@ -168,11 +161,9 @@ pub(super) async fn dispatch_hydrating<
                             common::observe_join_outputs(
                                 ctx,
                                 scope,
-                                Some(&event),
                                 delivery_snapshot.as_ref(),
                                 None,
                                 events_produced.as_mut_slice(),
-                                Some(&envelope),
                             )
                             .await?;
 

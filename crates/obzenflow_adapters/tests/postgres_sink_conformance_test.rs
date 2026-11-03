@@ -93,9 +93,10 @@ impl PostgresFixture {
     }
 
     async fn cleanup(&self) {
-        let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema))
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema))
             .execute(&self.pool)
-            .await;
+            .await
+            .expect("drop the test schema");
     }
 }
 
