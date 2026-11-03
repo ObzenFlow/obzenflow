@@ -309,9 +309,6 @@ impl PipelineBuilder {
         // ErrorSink will be automatically created by the flow DSL
         // similar to how MetricsAggregator is created
 
-        // Create unique stage ID for the pipeline supervisor
-        let _stage_id = StageId::new();
-
         // Prepare stage supervisors map
         let mut stage_map = HashMap::new();
         for stage in self.stages {

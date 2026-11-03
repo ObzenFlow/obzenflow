@@ -1660,7 +1660,7 @@ mod tests {
             .expect("local configuration is valid");
         assert!(!path.exists(), "build must not touch the destination");
 
-        let _writer = connector
+        connector
             .open(SinkWriterInitContext::new(
                 StageId::new(),
                 "csv".to_string(),

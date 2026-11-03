@@ -339,8 +339,8 @@ mod tests {
     }
 
     #[test]
-    fn sink_operation_error_stays_within_the_large_error_threshold() {
+    fn sink_operation_error_stays_under_the_large_error_threshold() {
         let size = size_of::<SinkOperationError>();
-        assert!(size <= 128, "SinkOperationError is {size} bytes");
+        assert!(size < 128, "SinkOperationError is {size} bytes");
     }
 }

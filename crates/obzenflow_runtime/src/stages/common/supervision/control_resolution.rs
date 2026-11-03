@@ -21,6 +21,7 @@ use crate::stages::common::control_strategies::{
 };
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::supervision::suspension::suspend_until;
+use std::time::{Duration, Instant};
 
 /// Final action the supervisor should execute for a resolved control event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +46,7 @@ pub(crate) enum ControlResolution {
     /// A final action is ready for the supervisor to execute.
     Ready(ControlAction),
     /// Wait for the duration, then re-resolve the same signal.
-    Pause(std::time::Duration),
+    Pause(Duration),
 }
 
 pub(crate) struct ControlResolutionInputs<'a> {
@@ -101,7 +102,7 @@ pub(crate) async fn resolve_control_event_awaiting_pauses(
                     duration = ?duration,
                     "Delaying control event"
                 );
-                suspend_until(&WakeOn::At(std::time::Instant::now() + duration), None).await;
+                suspend_until(&WakeOn::At(Instant::now() + duration), None).await;
             }
         }
     }
@@ -123,7 +124,7 @@ pub(crate) async fn await_signal_gate(
             duration = ?duration,
             "Delaying control event"
         );
-        suspend_until(&WakeOn::At(std::time::Instant::now() + duration), None).await;
+        suspend_until(&WakeOn::At(Instant::now() + duration), None).await;
     }
 }
 

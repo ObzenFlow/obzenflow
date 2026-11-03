@@ -9,7 +9,7 @@ use super::control_resolution::{
 };
 use super::flow_context_factory::make_flow_context;
 use crate::backpressure::{
-    BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter,
+    BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter, StallEpisode,
 };
 use crate::feed_plan::{FactVisibility, PayloadTypeDescriptor, StageOutputContract};
 use crate::id_conversions::StageIdExt;
@@ -20,6 +20,7 @@ use crate::pipeline::MaxIterations;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{ProcessingContext, SignalDecision, SignalGate};
 use crate::stages::common::cycle_guard::CycleGuard;
+use crate::supervised_base::publication;
 use async_trait::async_trait;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::payloads::execution_payload::{
@@ -36,7 +37,7 @@ use obzenflow_core::{FlowId, JournalRecord, MiddlewareExecutionScope, SccId, Sta
 use obzenflow_topology::{TopologyBuilder, TypeHintInfo};
 use serde_json::json;
 use std::collections::VecDeque;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use ulid::Ulid;
@@ -783,17 +784,15 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for N
 fn make_writer_with_window(window: NonZeroU64) -> (StageId, BackpressureWriter) {
     let mut builder = TopologyBuilder::new();
     let s_top = builder.add_stage(Some("s".to_string()));
-    let d_top = builder.add_stage(Some("d".to_string()));
+    builder.add_stage(Some("d".to_string()));
     let topology = builder.build_unchecked().expect("topology");
 
     let s = StageId::from_topology_id(s_top);
-    let d = StageId::from_topology_id(d_top);
 
     let plan = BackpressurePlan::disabled().with_stage_enforced(s, window, Duration::from_secs(30));
     let registry = BackpressureRegistry::new(&topology, &plan);
 
     let writer = registry.writer(s);
-    let _reader = registry.reader(s, d);
 
     (s, writer)
 }
@@ -811,7 +810,7 @@ async fn missing_or_saturated_observations_do_not_gate_fact_commit_or_terminal_a
     let event = ChainEventFactory::data_event(
         stage.into(),
         "business.null",
-        std::num::NonZeroU32::MIN,
+        NonZeroU32::MIN,
         serde_json::Value::Null,
     );
     let journal: Arc<dyn Journal<ChainEvent>> =
@@ -911,7 +910,7 @@ async fn the_data_journal_refuses_an_error_marked_row_under_any_commit_options()
     let rejected = ChainEventFactory::data_event(
         stage.into(),
         "probe.order",
-        std::num::NonZeroU32::MIN,
+        NonZeroU32::MIN,
         json!({"customer": null, "id": 2}),
     )
     .mark_as_error("order 2 has no customer", ErrorKind::Validation);
@@ -1023,21 +1022,19 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
         Arc::new(NoopJournal::new(JournalOwner::stage(t)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
-    pending_outputs.push_back(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
-            event: ChainEventFactory::data_event(
-                WriterId::from(t),
-                "x",
-                std::num::NonZeroU32::MIN,
-                json!({"n": 1}),
-            ),
-            scope: MiddlewareExecutionScope::LiveHandler,
-        },
-    );
+    pending_outputs.push_back(PendingOutput {
+        causal: publication::capture(),
+        event: ChainEventFactory::data_event(
+            WriterId::from(t),
+            "x",
+            NonZeroU32::MIN,
+            json!({"n": 1}),
+        ),
+        scope: MiddlewareExecutionScope::LiveHandler,
+    });
 
     let started = tokio::time::Instant::now();
     let mut iterations = 0u32;
@@ -1166,7 +1163,7 @@ async fn atomic_group_accounts_every_member_in_its_owned_history() {
                         event: ChainEventFactory::data_event(
                             stage.into(),
                             "x",
-                            std::num::NonZeroU32::MIN,
+                            NonZeroU32::MIN,
                             json!({"n":n}),
                         ),
                         options: CommitOptions {
@@ -1281,12 +1278,12 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                         obzenflow_core::event::context::StageType::Transform,
                     );
                     drain_one_pending(DrainRequest {
-                        pending: super::backpressure_drain::PendingOutput {
-                            causal: crate::supervised_base::publication::capture(),
+                        pending: PendingOutput {
+                            causal: publication::capture(),
                             event: ChainEventFactory::data_event(
                                 WriterId::from(stage_id),
                                 "x",
-                                std::num::NonZeroU32::MIN,
+                                NonZeroU32::MIN,
                                 json!({"n":1}),
                             ),
                             scope: MiddlewareExecutionScope::LiveHandler,
@@ -1299,7 +1296,7 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                         instrumentation: &stage_instrumentation,
                         backpressure_writer: &stage_writer,
                         backpressure_pulse: &mut BackpressureActivityPulse::new(),
-                        backpressure_stall: &mut crate::backpressure::StallEpisode::default(),
+                        backpressure_stall: &mut StallEpisode::default(),
                         output_contract: Some(&output_contract_for_event_type("x")),
                         pending_outputs: &mut VecDeque::new(),
                     })
@@ -1390,20 +1387,20 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
 
     let event = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         "x",
-        std::num::NonZeroU32::MIN,
+        NonZeroU32::MIN,
         json!({"n": 1}),
     );
 
     let outcome = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1451,20 +1448,20 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("semantic.test");
 
     let event = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         "semantic.test",
-        std::num::NonZeroU32::MIN,
+        NonZeroU32::MIN,
         json!({"n": 1}),
     );
 
     let outcome = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1509,20 +1506,20 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("declared");
 
     let event = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         "undeclared",
-        std::num::NonZeroU32::MIN,
+        NonZeroU32::MIN,
         json!({"n": 1}),
     );
 
     let err = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1574,14 +1571,14 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
 
     let event = ChainEventFactory::drain_event(WriterId::from(stage_id));
 
     let outcome = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1632,7 +1629,7 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
         let fact = ChainEventFactory::data_event(
             WriterId::from(stage_id),
             "test.joined",
-            std::num::NonZeroU32::MIN,
+            NonZeroU32::MIN,
             json!({"n": n}),
         );
         last_fact_id = Some(fact.id);
@@ -1644,11 +1641,11 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
         obzenflow_core::event::payloads::flow_control_payload::EofKind::Poison,
     );
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let outcome = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1719,7 +1716,7 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
     let fact = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         "test.joined",
-        std::num::NonZeroU32::MIN,
+        NonZeroU32::MIN,
         json!({"n": 1}),
     );
     instrumentation.record_output_event(&fact);
@@ -1739,11 +1736,11 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
     }
 
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let error = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1788,8 +1785,8 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
     }
 
     let error = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1839,20 +1836,20 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
 
     let event = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         "x",
-        std::num::NonZeroU32::MIN,
+        NonZeroU32::MIN,
         json!({"n": 1}),
     );
     let id = event.id;
 
     let outcome = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1924,17 +1921,17 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
     let data_journal: Arc<dyn Journal<ChainEvent>> = checking.clone();
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
 
     let outcome = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event: ChainEventFactory::data_event(
                 WriterId::from(s),
                 "x",
-                std::num::NonZeroU32::MIN,
+                NonZeroU32::MIN,
                 json!({"n": 1}),
             ),
             scope,
@@ -1999,12 +1996,12 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
     // The gate is scope-driven, not credit-driven: a second reconstruction
     // output at still-zero live credit also commits without blocking.
     let outcome2 = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event: ChainEventFactory::data_event(
                 WriterId::from(s),
                 "x",
-                std::num::NonZeroU32::MIN,
+                NonZeroU32::MIN,
                 json!({"n": 2}),
             ),
             scope,
@@ -2075,7 +2072,7 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
         Arc::new(NoopJournal::new(JournalOwner::stage(s)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = crate::backpressure::StallEpisode::default();
+    let mut stall = StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
 
@@ -2083,12 +2080,12 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     // that never acks, building a backlog of 3 against a window of 2.
     for n in 0..3 {
         let outcome = drain_one_pending(DrainRequest {
-            pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                causal: crate::supervised_base::publication::capture(),
+            pending: PendingOutput {
+                causal: publication::capture(),
                 event: ChainEventFactory::data_event(
                     WriterId::from(s),
                     "x",
-                    std::num::NonZeroU32::MIN,
+                    NonZeroU32::MIN,
                     json!({ "n": n }),
                 ),
                 scope: MiddlewareExecutionScope::ResumeHandler,
@@ -2123,12 +2120,12 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     // Handoff: the first live output gates on the true backlog (3 in flight
     // against a window of 2), returns BackedOff, and anchors the stall clock.
     let outcome = drain_one_pending(DrainRequest {
-        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+        pending: PendingOutput {
+            causal: publication::capture(),
             event: ChainEventFactory::data_event(
                 WriterId::from(s),
                 "x",
-                std::num::NonZeroU32::MIN,
+                NonZeroU32::MIN,
                 json!({ "n": 99 }),
             ),
             scope: MiddlewareExecutionScope::LiveHandler,
@@ -2166,7 +2163,7 @@ struct RecordedBacklogHandoff {
     data_journal: Arc<dyn Journal<ChainEvent>>,
     instrumentation: Arc<StageInstrumentation>,
     pulse: BackpressureActivityPulse,
-    stall: crate::backpressure::StallEpisode,
+    stall: StallEpisode,
     pending_outputs: VecDeque<PendingOutput>,
     output_contract: StageOutputContract,
 }
@@ -2199,7 +2196,7 @@ impl RecordedBacklogHandoff {
             data_journal: Arc::new(NoopJournal::new(JournalOwner::stage(stage))),
             instrumentation: Arc::new(StageInstrumentation::new()),
             pulse: BackpressureActivityPulse::new(),
-            stall: crate::backpressure::StallEpisode::default(),
+            stall: StallEpisode::default(),
             pending_outputs: VecDeque::new(),
             output_contract: output_contract_for_event_type("x"),
         };
@@ -2217,11 +2214,11 @@ impl RecordedBacklogHandoff {
 
     fn output(stage: StageId, n: u64, scope: MiddlewareExecutionScope) -> PendingOutput {
         PendingOutput {
-            causal: crate::supervised_base::publication::capture(),
+            causal: publication::capture(),
             event: ChainEventFactory::data_event(
                 WriterId::from(stage),
                 "x",
-                std::num::NonZeroU32::MIN,
+                NonZeroU32::MIN,
                 json!({ "n": n }),
             ),
             scope,

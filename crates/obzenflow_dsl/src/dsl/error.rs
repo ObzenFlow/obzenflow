@@ -5,6 +5,7 @@
 use thiserror::Error;
 
 use obzenflow_adapters::middleware::MiddlewareFactoryError;
+use obzenflow_runtime::runtime_config::{ApplicationSettingsError, ConfigResolveError};
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
@@ -194,12 +195,12 @@ pub enum FlowBuildError {
     /// candidate conflict). The message carries the full `config error at
     /// <path>` diagnostic including the scopes that may supply the knob.
     #[error("{0}")]
-    ConfigResolution(#[source] Box<obzenflow_runtime::runtime_config::ConfigResolveError>),
+    ConfigResolution(#[source] Box<ConfigResolveError>),
 
     /// The `[app]` table did not fit the settings type, was extracted twice, or
     /// is non-empty in a build that extracts none; the message names keys, never values.
     #[error("{0}")]
-    ApplicationSettings(#[source] obzenflow_runtime::runtime_config::ApplicationSettingsError),
+    ApplicationSettings(#[source] ApplicationSettingsError),
 
     /// `journal.root` is set, but the flow's journal provider keeps no run
     /// location under it.
@@ -454,8 +455,8 @@ mod tests {
     use super::FlowBuildError;
 
     #[test]
-    fn flow_build_error_stays_within_the_large_error_threshold() {
+    fn flow_build_error_stays_under_the_large_error_threshold() {
         let size = size_of::<FlowBuildError>();
-        assert!(size <= 128, "FlowBuildError is {size} bytes");
+        assert!(size < 128, "FlowBuildError is {size} bytes");
     }
 }

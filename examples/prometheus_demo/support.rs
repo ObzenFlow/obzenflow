@@ -16,6 +16,7 @@ use obzenflow::stages::stateful::emit;
 use obzenflow::stages::transforms::TryMapTyped;
 use obzenflow::stages::{stateful, transforms};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub(crate) const SOURCE_OUTAGE_INTERVAL: usize = 20_000;
@@ -152,10 +153,7 @@ impl TypedPayload for EventCountState {
 }
 
 /// The example's flow, also exercised by its journal integration test.
-pub(crate) fn flow_definition(
-    total_events: usize,
-    journal_root: std::path::PathBuf,
-) -> FlowDefinition {
+pub(crate) fn flow_definition(total_events: usize, journal_root: PathBuf) -> FlowDefinition {
     flow_definition_with_outage_interval(total_events, journal_root, SOURCE_OUTAGE_INTERVAL)
 }
 
@@ -163,7 +161,7 @@ pub(crate) fn flow_definition(
 /// The breaker duration, middleware, and business path stay intact.
 pub(crate) fn flow_definition_with_outage_interval(
     total_events: usize,
-    journal_root: std::path::PathBuf,
+    journal_root: PathBuf,
     outage_interval: usize,
 ) -> FlowDefinition {
     flow_definition_with_options(total_events, journal_root, outage_interval, true)
@@ -171,7 +169,7 @@ pub(crate) fn flow_definition_with_outage_interval(
 
 pub(crate) fn flow_definition_with_options(
     total_events: usize,
-    journal_root: std::path::PathBuf,
+    journal_root: PathBuf,
     outage_interval: usize,
     source_rate_limit: bool,
 ) -> FlowDefinition {

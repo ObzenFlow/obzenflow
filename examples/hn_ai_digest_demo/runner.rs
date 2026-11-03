@@ -14,6 +14,7 @@ use obzenflow::application::{Banner, FlowApplication, Presentation, RunPresentat
 use obzenflow::flow::{FlowBuildError, FlowDefinition};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::runtime::Builder;
 
 pub(crate) fn settings_flow_definition(reads_mock: Arc<AtomicBool>) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: HnSettings| {
@@ -34,9 +35,7 @@ pub async fn run_example(presentation: Presentation, reads_mock: Arc<AtomicBool>
 }
 
 pub fn run_demo_blocking() -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let runtime = Builder::new_multi_thread().enable_all().build()?;
 
     let reads_mock = Arc::new(AtomicBool::new(false));
     runtime.block_on(run_example(

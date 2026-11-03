@@ -45,6 +45,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "warp-server")]
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 type FlowHandleHook =
@@ -121,7 +123,7 @@ struct HostLifecycle {
     throughput: Option<Arc<dyn obzenflow_core::metrics::ThroughputSource>>,
     runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
     instance_id: RuntimeInstanceId,
-    shutdown: tokio::sync::watch::Sender<bool>,
+    shutdown: watch::Sender<bool>,
 }
 
 #[cfg(all(test, feature = "warp-server"))]
@@ -978,7 +980,7 @@ impl FlowApplication {
             #[cfg(feature = "warp-server")]
             if config.server.enabled {
                 let runtime_instance_id = RuntimeInstanceId::new();
-                let server_shutdown_tx = tokio::sync::watch::Sender::new(false);
+                let server_shutdown_tx = watch::Sender::new(false);
                 #[cfg(feature = "studio-registration")]
                 let server_shutdown_rx = server_shutdown_tx.subscribe();
                 let cors_mode = match config.server.cors_mode {

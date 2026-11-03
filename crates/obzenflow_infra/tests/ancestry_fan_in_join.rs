@@ -118,7 +118,7 @@ impl TypedJoinHandler for DrainOnlyJoin {
         _state: &Self::State,
         references: &mut JoinReferenceView<'_, String, RefRow>,
     ) -> Vec<DrainOnlyOutput> {
-        let _selected = references.select(&"k1".to_string());
+        references.select(&"k1".to_string());
         vec![DrainOnlyOutput {
             note: "drain".to_string(),
         }]

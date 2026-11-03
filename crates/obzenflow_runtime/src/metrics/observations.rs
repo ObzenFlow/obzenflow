@@ -425,6 +425,7 @@ mod tests {
     use obzenflow_core::event::observability::{MeasurementWindow, TimingMeasurements};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{ReaderGeneration, StageId};
+    use std::sync::mpsc;
     use std::time::Duration;
 
     fn packet(
@@ -665,8 +666,8 @@ mod tests {
             execution.clone(),
         );
         tokio::task::yield_now().await;
-        let (held_tx, held_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
         let holder = std::thread::spawn({
             let observations = Arc::clone(observations);
             move || {

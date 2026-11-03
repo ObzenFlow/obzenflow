@@ -11,6 +11,8 @@ use obzenflow_runtime::bootstrap::{BootstrapConfig, ReplayVerb};
 use obzenflow_runtime::runtime_config::AppTable;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+#[cfg(feature = "tokio-console")]
+use std::env::VarError;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 #[cfg(feature = "tokio-console")]
@@ -69,7 +71,6 @@ pub struct FlowConfig {
     pub tokio_console: Option<bool>,
 
     /// Tokio Console listener address (default: 127.0.0.1:6669).
-    #[cfg(feature = "tokio-console")]
     #[arg(long)]
     pub tokio_console_bind: Option<String>,
 
@@ -504,8 +505,8 @@ fn resolve_console_bind(
         Some(bind) => Some(bind),
         None => match std::env::var("TOKIO_CONSOLE_BIND") {
             Ok(bind) => Some(bind),
-            Err(std::env::VarError::NotPresent) => default_bind,
-            Err(std::env::VarError::NotUnicode(_)) => {
+            Err(VarError::NotPresent) => default_bind,
+            Err(VarError::NotUnicode(_)) => {
                 return Err(ConfigError::at(
                     "diagnostics.tokio_console.bind",
                     "TOKIO_CONSOLE_BIND must be a Unicode socket address",
@@ -1901,6 +1902,14 @@ mod tests {
             }
         }
         assert!(FlowConfig::try_parse_from(["test", "--tokio-console=maybe"]).is_err());
+    }
+
+    #[test]
+    fn console_bind_flag_is_accepted_in_every_build() {
+        let _lock = env_lock();
+        let resolved =
+            resolve_studio_file("", &["--tokio-console-bind", "127.0.0.1:6672"]).unwrap();
+        assert!(!resolved.tokio_console.enabled);
     }
 
     #[cfg(feature = "tokio-console")]

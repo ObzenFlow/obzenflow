@@ -84,7 +84,7 @@ impl<E: crate::supervised_base::with_external_events::ExternalControlEvent + Sen
     }
 }
 
-use crate::backpressure::BackpressureWriter;
+use crate::backpressure::{BackpressureWriter, StallEpisode};
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
@@ -849,7 +849,7 @@ pub(crate) struct SourceDrain<'a> {
     pub instrumentation: &'a Arc<StageInstrumentation>,
     pub backpressure_writer: &'a BackpressureWriter,
     pub backpressure_pulse: &'a mut BackpressureActivityPulse,
-    pub backpressure_stall: &'a mut crate::backpressure::StallEpisode,
+    pub backpressure_stall: &'a mut StallEpisode,
     pub output_contract: Option<&'a StageOutputContract>,
 }
 
@@ -1455,11 +1455,10 @@ mod tests {
         // Arrange: a writer with credit=0 so drain_one_pending_resolve returns BackedOff.
         let mut builder = TopologyBuilder::new();
         let s_top = builder.add_stage(Some("s".to_string()));
-        let d_top = builder.add_stage(Some("d".to_string()));
+        builder.add_stage(Some("d".to_string()));
         let topology = builder.build_unchecked().expect("topology");
 
         let s = StageId::from_topology_id(s_top);
-        let _d = StageId::from_topology_id(d_top);
 
         let plan = BackpressurePlan::disabled().with_stage_enforced(
             s,
@@ -1498,7 +1497,7 @@ mod tests {
         );
 
         let mut backpressure_pulse = BackpressureActivityPulse::new();
-        let mut backpressure_stall = crate::backpressure::StallEpisode::default();
+        let mut backpressure_stall = StallEpisode::default();
 
         let (sender, mut receiver, _watcher) = ChannelBuilder::<TestEvent, ()>::new()
             .with_event_buffer(1)
@@ -1584,7 +1583,7 @@ mod tests {
         };
 
         let mut backpressure_pulse = BackpressureActivityPulse::new();
-        let mut backpressure_stall = crate::backpressure::StallEpisode::default();
+        let mut backpressure_stall = StallEpisode::default();
 
         // Keep the sender alive and never send: recv() pends, so the biased
         // select always resolves through the credit wait, which auto-advances

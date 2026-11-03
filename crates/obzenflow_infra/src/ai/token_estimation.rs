@@ -9,6 +9,9 @@ use obzenflow_core::ai::{
 use std::sync::Arc;
 
 #[cfg(feature = "ai-tiktoken")]
+use super::tiktoken::TiktokenEstimator;
+
+#[cfg(feature = "ai-tiktoken")]
 const TOKENIZER_BACKEND_TIKTOKEN: &str = "tiktoken";
 
 /// Best-available shared estimator for a model.
@@ -34,7 +37,7 @@ pub fn estimator_for_model(model: &str) -> Arc<dyn TokenEstimator> {
 /// selected instead.
 pub fn resolve_estimator_for_model(model: &str) -> ResolvedTokenEstimator {
     #[cfg(feature = "ai-tiktoken")]
-    match super::tiktoken::TiktokenEstimator::for_model(model) {
+    match TiktokenEstimator::for_model(model) {
         Ok(estimator) => ResolvedTokenEstimator::new(
             Arc::new(estimator),
             TokenEstimatorResolutionInfo::tokenizer(model, TOKENIZER_BACKEND_TIKTOKEN),
@@ -83,7 +86,7 @@ pub fn resolve_estimator_for_model(model: &str) -> ResolvedTokenEstimator {
 /// unique ownership of the estimator trait object.
 #[cfg(feature = "ai-tiktoken")]
 pub fn boxed_estimator_for_model(model: &str) -> Box<dyn TokenEstimator> {
-    match super::tiktoken::TiktokenEstimator::for_model(model) {
+    match TiktokenEstimator::for_model(model) {
         Ok(tiktoken) => Box::new(tiktoken),
         Err(_) => Box::new(HeuristicTokenEstimator::default()),
     }

@@ -14,7 +14,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::journal::factory::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
 use obzenflow_core::{FlowId, TypedPayload};
-use obzenflow_dsl::{flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::{
     disk_journals, memory_journals, DiskJournalFactory, MemoryJournalFactory,
 };
@@ -108,7 +108,7 @@ async fn pre_substrate_failure_carries_no_run_state() {
     );
     assert!(matches!(
         failure.error,
-        obzenflow_dsl::dsl::FlowBuildError::EdgeTypingMismatch(_)
+        FlowBuildError::EdgeTypingMismatch(_)
     ));
 }
 
@@ -194,7 +194,7 @@ fn assert_materialization_failure(
     assert!(
         matches!(
             &failure.error,
-            obzenflow_dsl::dsl::FlowBuildError::StageCreationFailed { stage_name, .. }
+            FlowBuildError::StageCreationFailed { stage_name, .. }
                 if stage_name == "src"
         ),
         "the failure must occur during stage creation: {failure:?}"

@@ -96,7 +96,7 @@ pub(super) fn test_stage_config_for_factories_with_snapshot(
 pub(super) fn test_effective_config_for_factories_with_snapshot(
     factories: &[&dyn MiddlewareFactory],
     snapshot: &ResolvedRuntimeConfig,
-) -> Result<FlowEffectiveConfig, Box<ConfigResolveError>> {
+) -> Result<FlowEffectiveConfig, ConfigResolveError> {
     let stage = StageKey::from("retrying_breaker_test");
     let effect_type = EffectType::from("effect.retry");
     let mut dsl = DslCandidates::default();
@@ -123,7 +123,6 @@ pub(super) fn test_effective_config_for_factories_with_snapshot(
             dsl,
         },
     )
-    .map_err(Box::new)
 }
 
 pub(super) fn materialize_effect_attachment(

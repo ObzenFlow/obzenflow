@@ -10,6 +10,7 @@ use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEv
 use obzenflow_core::event::payloads::effect_payload::{
     CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
 };
+use obzenflow_core::MiddlewareExecutionScope;
 
 /// Slot a guarded execution future fills with the real typed outcome, so
 /// `perform` records from its own state rather than boundary-returned events.
@@ -801,7 +802,7 @@ impl EffectsCore {
             self.ctx.flow_id,
             self.ctx.stage_id,
             &self.ctx.stage_key,
-            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            MiddlewareExecutionScope::LiveEffectBoundary,
             effect_type,
             outcome,
         );
@@ -1011,7 +1012,7 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
         crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
@@ -1605,8 +1606,7 @@ impl EffectsCore {
                         heartbeat_state: heartbeat_state.as_ref(),
                         output_contract: None,
                         backpressure_writer: Some(&backpressure_writer),
-                        observer_scope:
-                            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+                        observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
                     };
                     crate::supervised_base::publication::with_snapshot(
                         causal,
@@ -1786,7 +1786,7 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: None,
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
         if let Err(error) = crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
@@ -1922,7 +1922,7 @@ impl EffectsCore {
                 &cursor,
                 attempt,
                 preterminal,
-                obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+                MiddlewareExecutionScope::LiveEffectBoundary,
                 RowLineage::Live,
             )
             .await?;
@@ -2943,7 +2943,7 @@ impl EffectsCore {
                     heartbeat_state: self.ctx.heartbeat_state.as_ref(),
                     output_contract: Some(&self.ctx.output_contract),
                     backpressure_writer: Some(&self.ctx.backpressure_writer),
-                    observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+                    observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
                 },
                 &self.ctx.parent,
                 events,
@@ -3037,7 +3037,7 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
         if let Err(error) = crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
@@ -3146,7 +3146,7 @@ impl EffectsCore {
                     cursor,
                     started.attempt,
                     control_events.to_vec(),
-                    obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+                    MiddlewareExecutionScope::StrictReplayHandler,
                     RowLineage::Reproduced(Some(history)),
                 )
                 .await?;

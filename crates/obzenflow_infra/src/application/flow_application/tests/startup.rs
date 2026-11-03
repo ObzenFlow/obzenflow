@@ -159,7 +159,7 @@ enabled = false
     let mut app = FlowApplication::builder()
         .with_config_file(config_path)
         .with_cli_args(["missing-ingress-test"]);
-    let _unplaced_source = app.http_ingress(
+    app.http_ingress(
         IdleIngress,
         IngestionConfig {
             ingress_key: Some("unplaced-ingress".into()),

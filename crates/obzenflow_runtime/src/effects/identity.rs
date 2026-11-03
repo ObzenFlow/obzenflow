@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use obzenflow_core::config::LineagePolicy;
 
 pub(super) fn descriptor_for_effect<E>(
     effect: &E,
@@ -193,7 +194,7 @@ pub fn deterministic_typed_output_event<Out>(
     parent: &ChainEvent,
     output: Out,
     position: OutputPosition<'_>,
-    lineage: obzenflow_core::config::LineagePolicy,
+    lineage: LineagePolicy,
 ) -> Result<ChainEvent, EffectError>
 where
     Out: TypedPayload,

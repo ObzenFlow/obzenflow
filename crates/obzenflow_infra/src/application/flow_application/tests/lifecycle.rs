@@ -1024,7 +1024,7 @@ enabled = false
         {
             eprintln!("the SSE socket closed with {error}");
         }
-        let _rebound = tokio::net::TcpListener::bind(address).await.unwrap();
+        tokio::net::TcpListener::bind(address).await.unwrap();
         assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
     }
 }
@@ -1158,7 +1158,7 @@ enabled = false
                     terminal.as_slice(),
                     [SystemFact::PipelineLifecycle(PipelineFact::Failed { .. })]
                 ));
-                let _rebound = TcpListener::bind(bound_rx.await.unwrap()).unwrap();
+                TcpListener::bind(bound_rx.await.unwrap()).unwrap();
             }
         }
     }

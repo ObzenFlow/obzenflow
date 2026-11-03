@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::messaging::DeliveredRecord;
+use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::ChainPayload;
 
@@ -44,7 +45,7 @@ struct EffectCommitHandleInner<T, S> {
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
     output_ordinal: Option<EffectOutputOrdinal>,
-    lineage: obzenflow_core::config::LineagePolicy,
+    lineage: LineagePolicy,
     defer_persistence: bool,
     state: Mutex<EffectCommitState<T>>,
     _marker: PhantomData<fn() -> (T, S)>,
@@ -63,7 +64,7 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) descriptor_hash: EffectDescriptorHash,
     pub(super) descriptor: EffectDescriptor,
     pub(super) output_ordinal: Option<EffectOutputOrdinal>,
-    pub(super) lineage: obzenflow_core::config::LineagePolicy,
+    pub(super) lineage: LineagePolicy,
     pub(super) defer_persistence: bool,
 }
 
@@ -429,7 +430,7 @@ pub(super) fn build_effect_attempt_started_event(
     parent: &DeliveredRecord<ChainPayload>,
     started: EffectAttemptStarted,
     descriptor: EffectDescriptor,
-    lineage: obzenflow_core::config::LineagePolicy,
+    lineage: LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {
     let mut event = ChainEventFactory::derived_execution_event(
         writer_id,
@@ -467,7 +468,7 @@ pub(super) fn build_effect_recovery_abandoned_event(
     parent: &DeliveredRecord<ChainPayload>,
     abandoned: EffectRecoveryAbandoned,
     descriptor: EffectDescriptor,
-    lineage: obzenflow_core::config::LineagePolicy,
+    lineage: LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {
     let mut event = ChainEventFactory::derived_execution_event(
         writer_id,
@@ -502,7 +503,7 @@ pub(super) fn build_effect_recovery_abandoned_event(
 pub(super) struct EffectFactAuthoring<'a> {
     pub(super) writer_id: WriterId,
     pub(super) parent: &'a DeliveredRecord<ChainPayload>,
-    pub(super) lineage: obzenflow_core::config::LineagePolicy,
+    pub(super) lineage: LineagePolicy,
     pub(super) cursor: EffectCursor,
     pub(super) descriptor_hash: EffectDescriptorHash,
     pub(super) descriptor: EffectDescriptor,
@@ -654,7 +655,7 @@ pub(super) fn build_effect_record_event(
     writer_id: WriterId,
     parent: &DeliveredRecord<ChainPayload>,
     record: EffectRecord,
-    lineage: obzenflow_core::config::LineagePolicy,
+    lineage: LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {
     record
         .validate()

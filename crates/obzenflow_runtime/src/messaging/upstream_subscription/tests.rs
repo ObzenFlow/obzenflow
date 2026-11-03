@@ -517,7 +517,8 @@ async fn progress_append_failure_does_not_advance_progress_state() {
     reader_progress[0].reader_seq = SeqNo(1);
     reader_progress[0].last_progress_seq = SeqNo(0);
 
-    let _status = subscription.check_contracts(&mut reader_progress).await;
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(matches!(status, ContractStatus::Healthy), "{status:?}");
 
     assert_eq!(reader_progress[0].last_progress_seq, SeqNo(0));
     assert!(reader_progress[0].last_progress_instant.is_none());
@@ -560,7 +561,11 @@ async fn final_append_failure_keeps_final_emitted_false() {
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
 
-    let _status = subscription.check_contracts(&mut reader_progress).await;
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(
+        matches!(status, ContractStatus::ProgressEmitted),
+        "{status:?}"
+    );
 
     assert!(!reader_progress[0].final_emitted);
     assert!(!reader_progress[0].contract_violated);
@@ -650,9 +655,10 @@ async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
     reader_progress[0].reader_seq = SeqNo(1);
     reader_progress[0].receipted_seq = SeqNo(1);
 
-    let _status = subscription
+    let status = subscription
         .check_contracts_diagnostics_only(&mut reader_progress)
         .await;
+    assert!(matches!(status, ContractStatus::Healthy), "{status:?}");
 
     assert!(!reader_progress[0].final_emitted);
     assert!(!reader_progress[0].contract_violated);
@@ -783,7 +789,11 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
     reader_progress[0].advertised_writer_seq = Some(SeqNo(0));
     reader_progress[0].reader_seq = SeqNo(0);
 
-    let _status = subscription.check_contracts(&mut reader_progress).await;
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(
+        matches!(status, ContractStatus::ProgressEmitted),
+        "{status:?}"
+    );
 
     assert!(!reader_progress[0].final_emitted);
     assert!(!reader_progress[0].contract_violated);
@@ -974,7 +984,8 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
     reader_progress[0].last_event_id = Some(EventId::new());
     reader_progress[0].reader_seq = SeqNo(0);
 
-    let _status = subscription.check_contracts(&mut reader_progress).await;
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(matches!(status, ContractStatus::Healthy), "{status:?}");
 
     let events = evidence_journal.read_causally_ordered().await.unwrap();
     assert!(
@@ -988,7 +999,11 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
 
     // Once data is observed, progress contract heartbeats should be emitted.
     reader_progress[0].reader_seq = SeqNo(1);
-    let _status = subscription.check_contracts(&mut reader_progress).await;
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(
+        matches!(status, ContractStatus::ProgressEmitted),
+        "{status:?}"
+    );
 
     let events = evidence_journal.read_causally_ordered().await.unwrap();
     assert!(

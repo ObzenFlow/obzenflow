@@ -99,7 +99,7 @@ fn console_setup_reports_bind_and_subscriber_errors() {
     assert!(error
         .to_string()
         .contains("could not install its tracing subscriber"));
-    let _rebound = std::net::TcpListener::bind(address).unwrap();
+    std::net::TcpListener::bind(address).unwrap();
 }
 
 #[cfg(all(feature = "tokio-console", tokio_unstable))]
@@ -215,7 +215,7 @@ async fn console_owner_joins_both_tasks_and_closes_idle_clients() {
         assert_eq!(result.is_err(), early_failure);
         assert!(aborts.iter().all(tokio::task::AbortHandle::is_finished));
         assert_eq!(connections.len(), 0, "all accepted transport IO released");
-        let _rebound = std::net::TcpListener::bind(address).unwrap();
+        std::net::TcpListener::bind(address).unwrap();
         assert_client_closed(client).await;
     }
 }
@@ -270,7 +270,7 @@ async fn console_owner_drop_terminates_tasks_and_idle_clients() {
     })
     .await
     .expect("dropped owner terminated tasks and IO while caller runtime remained alive");
-    let _rebound = std::net::TcpListener::bind(address).unwrap();
+    std::net::TcpListener::bind(address).unwrap();
     assert_client_closed(client).await;
 }
 
@@ -314,7 +314,7 @@ async fn console_owner_closes_a_watch_stream_with_no_receive_window() {
     .unwrap();
     assert!(aborts.iter().all(tokio::task::AbortHandle::is_finished));
     assert_eq!(connections.len(), 0);
-    let _rebound = std::net::TcpListener::bind(address).unwrap();
+    std::net::TcpListener::bind(address).unwrap();
     drop(stream);
     drop(client);
 }

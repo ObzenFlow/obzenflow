@@ -10,13 +10,19 @@
 use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::topology::LoweredFlow;
 use obzenflow_core::journal::factory::FlowJournalFactory;
+#[cfg(feature = "test-support")]
+use obzenflow_core::journal::Journal;
 use obzenflow_core::journal::JournalConfig;
 use obzenflow_core::journal::JournalError;
 use obzenflow_core::FlowId;
+#[cfg(feature = "test-support")]
+use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_runtime::effects::{EffectPortRegistry, EffectRegistrationCollectionError};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "test-support")]
+use std::sync::Arc;
 
 type ConfiguredSinkResolution = (HashMap<String, Box<dyn StageDescriptor>>, HashSet<String>);
 
@@ -113,12 +119,7 @@ fn validate_hosted_ingress_bindings<'a>(
 pub struct FlowBuildOutput {
     handle: FlowHandle,
     #[cfg(feature = "test-support")]
-    stage_data_journals: Vec<(
-        obzenflow_core::StageId,
-        std::sync::Arc<
-            dyn obzenflow_core::journal::Journal<obzenflow_core::event::chain_event::ChainEvent>,
-        >,
-    )>,
+    stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 }
 
 impl FlowBuildOutput {
@@ -163,6 +164,8 @@ where
         artifacts: lowering_artifacts,
         join_catalogs,
     } = lowered;
+    use crate::dsl::attachment_plan;
+    use crate::dsl::error::{EdgeTypingMismatch, EdgeTypingMismatchKind};
     use crate::dsl::FlowBuildError;
     use crate::prelude::*;
     use obzenflow_topology::{DirectedEdge, StageInfo as TopologyStageInfo};
@@ -392,18 +395,18 @@ where
                             })
                     });
             let suggested_fix = match first.kind {
-                crate::dsl::error::EdgeTypingMismatchKind::SingleEdge => {
+                EdgeTypingMismatchKind::SingleEdge => {
                     "Align the upstream and downstream types, or insert an alignment transform. \
                      See FLOWIP-114c \"How to handle heterogeneous fan-in\"."
                         .to_string()
                 }
-                crate::dsl::error::EdgeTypingMismatchKind::HeterogeneousFanIn { .. } => {
+                EdgeTypingMismatchKind::HeterogeneousFanIn { .. } => {
                     "Insert per-branch alignment transforms so the fan-in is homogeneous on a \
                      common envelope type, or use a join for two-input typed fan-in. See \
                      FLOWIP-114c \"How to handle heterogeneous fan-in\"."
                         .to_string()
                 }
-                crate::dsl::error::EdgeTypingMismatchKind::DeclaredFeedPayloadMissing => {
+                EdgeTypingMismatchKind::DeclaredFeedPayloadMissing => {
                     "Add the payload type to the member's output contract, or remove it from \
                      the composite's internal feed declaration (FLOWIP-128a D3)."
                         .to_string()
@@ -413,8 +416,8 @@ where
                 Some(prefix) => format!("{prefix}{suggested_fix}"),
                 None => suggested_fix,
             };
-            return Err(crate::dsl::error::FlowBuildError::EdgeTypingMismatch(
-                Box::new(crate::dsl::error::EdgeTypingMismatch {
+            return Err(FlowBuildError::EdgeTypingMismatch(
+                Box::new(EdgeTypingMismatch {
                     upstream_stage: first.upstream_stage,
                     downstream_stage: first.downstream_stage,
                     role: first.input_role,
@@ -1635,7 +1638,7 @@ where
                     resources.upstream_stages.insert(0, ref_stage_id);
                 }
 
-                middleware_stacks.insert(*id, crate::dsl::attachment_plan::topology(descriptor.as_ref(), &config).map_err(FlowBuildError::from)?);
+                middleware_stacks.insert(*id, attachment_plan::topology(descriptor.as_ref(), &config).map_err(FlowBuildError::from)?);
 
                 // Cycle protection is configured via StageConfig for transforms.
                 let handle = descriptor

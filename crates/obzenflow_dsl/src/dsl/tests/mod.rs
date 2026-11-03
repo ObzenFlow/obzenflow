@@ -15,14 +15,16 @@ pub mod then_live_build_rules_test;
 pub mod typed_decoration_matrix_test;
 pub mod typed_stage_contracts_test;
 
-type LoweredEdges = (
-    std::collections::HashMap<String, Box<dyn super::stage_descriptor::StageDescriptor>>,
-    super::composites::LoweringArtifacts,
-);
+use super::composites::LoweringArtifacts;
+use super::composition::FlowMember;
+use super::stage_descriptor::StageDescriptor;
+use std::collections::HashMap;
+
+type LoweredEdges = (HashMap<String, Box<dyn StageDescriptor>>, LoweringArtifacts);
 
 /// Existing non-join graph fixtures still assert physical edge rewrites.
 fn lower_edges(
-    members: std::collections::HashMap<String, super::composition::FlowMember>,
+    members: HashMap<String, FlowMember>,
     connections: &mut Vec<(String, String, obzenflow_topology::EdgeKind)>,
 ) -> Result<LoweredEdges, super::FlowBuildError> {
     let authored = connections

@@ -15,11 +15,10 @@ fn backpressure_bypass_env_var_preserves_generic_progress_but_rejects_generated_
 
     let mut builder = TopologyBuilder::new();
     let s_top = builder.add_stage(Some("s".to_string()));
-    let d_top = builder.add_stage(Some("d".to_string()));
+    builder.add_stage(Some("d".to_string()));
     let topology = builder.build_unchecked().expect("topology");
 
     let s = obzenflow_core::StageId::from_topology_id(s_top);
-    let d = obzenflow_core::StageId::from_topology_id(d_top);
 
     let plan = BackpressurePlan::disabled().with_stage_enforced(
         s,
@@ -29,7 +28,6 @@ fn backpressure_bypass_env_var_preserves_generic_progress_but_rejects_generated_
     let registry = BackpressureRegistry::new(&topology, &plan);
 
     let writer = registry.writer(s);
-    let _reader = registry.reader(s, d);
 
     let generated_error = writer
         .validate_generated_direct_bound(NonZeroU64::new(3).expect("generated bound"))

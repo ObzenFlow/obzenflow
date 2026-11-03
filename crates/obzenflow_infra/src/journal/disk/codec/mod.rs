@@ -320,13 +320,12 @@ impl Decoder {
         }
         Ok((
             match envelope.summary.group {
-                Some(group_id) => {
+                Some(_) => {
                     let mut records = records.into_iter();
                     let Some(first) = records.next() else {
                         return Err(invalid("atomic group carries no member"));
                     };
                     LogFrame::AtomicGroup {
-                        group_id,
                         first,
                         rest: records.collect(),
                     }

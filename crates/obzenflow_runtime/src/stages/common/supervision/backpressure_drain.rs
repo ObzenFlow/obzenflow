@@ -21,6 +21,7 @@ use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::backpressure::{
@@ -100,7 +101,7 @@ pub(crate) struct DrainRequest<'a> {
     pub backpressure_pulse: &'a mut BackpressureActivityPulse,
     pub backpressure_stall: &'a mut StallEpisode,
     pub output_contract: Option<&'a StageOutputContract>,
-    pub pending_outputs: &'a mut std::collections::VecDeque<PendingOutput>,
+    pub pending_outputs: &'a mut VecDeque<PendingOutput>,
 }
 
 pub(crate) async fn drain_one_pending(

@@ -319,10 +319,6 @@ pub(super) async fn dispatch_accumulating<
                         stage_input_position,
                         delivered_generation,
                     );
-                    let _observer_parent = ctx
-                        .last_consumed_envelope
-                        .as_ref()
-                        .map(|envelope| envelope.authored());
                     let observer_ctx = StatefulObserverContext::new(
                         ctx.flow_id,
                         &flow_context,

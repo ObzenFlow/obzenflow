@@ -763,7 +763,7 @@ mod tests {
     use obzenflow_core::event::observability::families::ObservationFamily;
     use obzenflow_core::event::observability::{CaptureSeq, ExecutionProgress, RuntimeSnapshot};
     use obzenflow_core::{ChainEvent, Journal, JournalOwner, StageId};
-    use std::sync::{atomic::AtomicBool, Condvar};
+    use std::sync::{atomic::AtomicBool, mpsc, Condvar};
     use std::time::Duration;
 
     #[derive(Default)]
@@ -1037,10 +1037,10 @@ mod tests {
             let observed = event(stage, 1);
             let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
             let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
-            let (held_tx, held_rx) = std::sync::mpsc::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
             let holder = std::thread::spawn({
-                let shared = std::sync::Arc::clone(&reader.shared);
+                let shared = Arc::clone(&reader.shared);
                 move || {
                     let guard = shared.state.lock().unwrap();
                     held_tx.send(()).unwrap();

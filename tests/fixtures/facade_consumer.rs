@@ -50,9 +50,9 @@ fn renamed_facade_ingress_builders_compile() {
             ..IngestionConfig::default()
         },
     );
-    let _sender = inbox.handle();
+    inbox.handle();
     let direct_source = app.ingress(inbox);
-    let _flow = FlowDefinition::materialize(move |_| {
+    FlowDefinition::materialize(move |_| {
         let output = sinks::ConsoleSink::<Fact, _>::new(sinks::DebugFormatter);
         Ok(flow! {
             name: "facade_ingress",
@@ -281,7 +281,7 @@ fn renamed_facade_derives_preserve_flat_facts() {
 
 #[test]
 fn renamed_facade_macros_and_constructors_compile() {
-    let _flow = FlowDefinition::materialize(|_config| {
+    FlowDefinition::materialize(|_config| {
         let input = sources::ValuesSource::new([Fact(1)]);
         let mapped = transforms::map(|fact: Fact| fact);
         let folded = stateful::reduce(Fact(0), |sum: &mut Fact, fact: &Fact| sum.0 += fact.0)
@@ -360,7 +360,7 @@ fn renamed_facade_macros_and_constructors_compile() {
     join!(catalog input: Fact, Fact -> Fact => Pure);
     sink!(Fact => Pure);
 
-    let _selected = FlowDefinition::materialize(|_config| {
+    FlowDefinition::materialize(|_config| {
         let input = sources::ValuesSource::new([Fact(1)]);
         let first = Pure;
         let second = sinks::ConsoleSink::<Fact, _>::new(sinks::DebugFormatter);

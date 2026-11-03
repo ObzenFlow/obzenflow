@@ -54,19 +54,19 @@ pub enum ConfigResolveError {
     /// or a source (CLI/env) was scoped in the first pass.
     ScopeNotAdmitted {
         key_path: String,
-        address: ConfigAddress,
+        address: Box<ConfigAddress>,
         reason: String,
     },
     /// Two candidates with the same (knob, address, source) and different values.
     Conflict {
         key_path: String,
-        address: ConfigAddress,
+        address: Box<ConfigAddress>,
         source: ConfigSource,
     },
     /// A candidate value failed its knob's type or range check.
     InvalidValue {
         key_path: String,
-        address: ConfigAddress,
+        address: Box<ConfigAddress>,
         message: String,
     },
     /// A key path with no registry entry reached the resolver.
@@ -262,5 +262,11 @@ mod tests {
         let message = err.to_string();
         assert!(!message.contains("did you mean"), "{message}");
         assert!(message.contains("Known stages: a"), "{message}");
+    }
+
+    #[test]
+    fn config_resolve_error_stays_under_the_large_error_threshold() {
+        let size = size_of::<ConfigResolveError>();
+        assert!(size < 128, "ConfigResolveError is {size} bytes");
     }
 }

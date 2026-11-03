@@ -160,7 +160,7 @@ fn console_uses_prepared_config_and_closes_after_build_failure() {
             let address = bound_rx
                 .await
                 .expect("diagnostics acquired before flow build");
-            let _rebound = TcpListener::bind(address).expect("failed build releases Console");
+            TcpListener::bind(address).expect("failed build releases Console");
         });
 }
 
@@ -346,7 +346,7 @@ fn blocking_console_disk_flow_preserves_filtering_and_completed_journal() {
     let (address, run_path) = proved_rx
         .try_recv()
         .expect("Console protocol proof completed before source EOF");
-    let _rebound = TcpListener::bind(address).expect("blocking host releases Console listener");
+    TcpListener::bind(address).expect("blocking host releases Console listener");
     // The product runtime has now completed and been dropped. A separate
     // reader runtime cannot affect its subscriber/runtime construction order.
     tokio::runtime::Builder::new_current_thread()
@@ -684,7 +684,7 @@ fn telemetry_proof(cancel: bool) {
             })
             .await
             .expect("application shutdown closes the active Console stream");
-            let _rebound = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     match TcpListener::bind(address) {
                         Ok(listener) => break listener,

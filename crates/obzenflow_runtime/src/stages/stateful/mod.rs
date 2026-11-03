@@ -188,20 +188,20 @@ mod helper_tests {
 
     #[test]
     fn owner_helpers_construct_every_supported_accumulator() {
-        let _reduce = reduce(State(0), |state: &mut State, _input: &Input| state.0 += 1);
-        let _conflate = conflate(|input: &Input| input.key);
-        let _grouped = group_by(
+        reduce(State(0), |state: &mut State, _input: &Input| state.0 += 1);
+        conflate(|input: &Input| input.key);
+        group_by(
             |input: &Input| input.key,
             |count: &mut u64, _input: &Input| *count += 1,
             |_key: &u32, count: &u64| Output(*count),
         );
-        let _top = top_n(
+        top_n(
             3,
             |input: &Input| input.key,
             |input: &Input| input.score,
             |snapshot: TopNSnapshot<u32, Input>| Output(snapshot.top_n.len() as u64),
         );
-        let _top_by = top_n_by(
+        top_n_by(
             3,
             |input: &Input| input.key,
             |input: &Input| input.score,

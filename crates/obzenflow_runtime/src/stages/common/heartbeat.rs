@@ -573,15 +573,9 @@ mod tests {
     use crate::metrics::instrumentation::StageInstrumentation;
     use async_trait::async_trait;
     use obzenflow_core::event::context::StageType;
-    use obzenflow_core::event::journal_event::JournalEvent;
-    use obzenflow_core::event::journal_record::JournalRecord;
-    use obzenflow_core::event::SystemEvent;
-    use obzenflow_core::id::{JournalId, SystemId};
     use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
-    use obzenflow_core::journal::journal_error::JournalError;
-    use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::reader::JournalReader;
-    use obzenflow_core::journal::{ArchiveStatus, Journal, StatusDerivation};
+    use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
     use obzenflow_core::{ChainEvent, ReaderGeneration};
     use std::path::{Path, PathBuf};
 
@@ -741,111 +735,6 @@ mod tests {
         }
     }
 
-    struct TestJournal<T: JournalEvent> {
-        id: JournalId,
-        owner: Option<JournalOwner>,
-        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
-    }
-
-    impl<T: JournalEvent> TestJournal<T> {
-        fn new(owner: JournalOwner) -> Self {
-            Self {
-                id: JournalId::new(),
-                owner: Some(owner),
-                events: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-    }
-
-    struct TestJournalReader<T: JournalEvent> {
-        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
-        pos: usize,
-    }
-
-    #[async_trait]
-    impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for TestJournal<T> {
-        fn storage_id(&self) -> &JournalId {
-            &self.id
-        }
-
-        fn storage_owner(&self) -> Option<&JournalOwner> {
-            self.owner.as_ref()
-        }
-
-        async fn storage_append(
-            &self,
-            event: T,
-            mut options: obzenflow_core::journal::AppendOptions<T>,
-        ) -> Result<JournalRecord<T::Payload>, JournalError> {
-            let event = options.capture.prepare(0, event);
-            let mut guard = self.events.lock().unwrap();
-            let env = crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
-            guard.push(env.clone());
-            Ok(env)
-        }
-
-        async fn storage_read_all_unordered(
-            &self,
-        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-            let guard = self.events.lock().expect("journal events lock");
-            Ok(guard.clone())
-        }
-
-        async fn storage_read_event(
-            &self,
-            _event_id: &EventId,
-        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
-            Ok(None)
-        }
-
-        async fn storage_reader_from(
-            &self,
-            position: u64,
-        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            Ok(Box::new(TestJournalReader {
-                events: self.events.clone(),
-                pos: position as usize,
-            }))
-        }
-
-        async fn storage_read_last_n(
-            &self,
-            count: usize,
-        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-            let guard = self.events.lock().expect("journal events lock");
-            let len = guard.len();
-            let start = len.saturating_sub(count);
-            Ok(guard[start..].iter().rev().cloned().collect())
-        }
-    }
-
-    #[async_trait]
-    impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
-        for TestJournalReader<T>
-    {
-        async fn storage_next(
-            &mut self,
-        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
-            let guard = self.events.lock().expect("journal events lock");
-            if self.pos >= guard.len() {
-                Ok(None)
-            } else {
-                let env = guard.get(self.pos).cloned();
-                self.pos += 1;
-                Ok(env)
-            }
-        }
-
-        fn storage_position(&self) -> u64 {
-            self.pos as u64
-        }
-
-        fn storage_is_at_end(&self) -> bool {
-            let guard = self.events.lock().expect("journal events lock");
-            self.pos >= guard.len()
-        }
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn processing_edge_stays_healthy_while_inflight_below_warn_threshold() {
         tokio::time::pause();
@@ -855,8 +744,6 @@ mod tests {
 
         let state = HeartbeatState::new(vec![upstream]);
         let liveness_snapshots: LivenessSnapshots = new_liveness_snapshots();
-        let _system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(TestJournal::new(JournalOwner::system(SystemId::new())));
 
         let config = HeartbeatConfig {
             interval: Duration::from_secs(1),
@@ -920,8 +807,6 @@ mod tests {
 
         let state = HeartbeatState::new(vec![upstream]);
         let liveness_snapshots: LivenessSnapshots = new_liveness_snapshots();
-        let _system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(TestJournal::new(JournalOwner::system(SystemId::new())));
 
         let config = HeartbeatConfig {
             interval: Duration::from_secs(1),
@@ -973,8 +858,6 @@ mod tests {
 
         let state = HeartbeatState::new(vec![upstream]);
         let liveness_snapshots: LivenessSnapshots = new_liveness_snapshots();
-        let _system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(TestJournal::new(JournalOwner::system(SystemId::new())));
 
         // StubArchive's max recorded generation is 0, so the run enters
         // generation 1 and every stage starts DormantUntilLive.

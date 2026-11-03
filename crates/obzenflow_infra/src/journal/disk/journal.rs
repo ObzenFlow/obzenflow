@@ -979,19 +979,10 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
                     tolerate_torn_tail: false,
                 },
             ) {
-                Disposition::Yield(frame) => {
-                    let journal_group_id = frame.group_id().map(str::to_string);
-                    let records = frame.into_records();
-                    let _group_size = journal_group_id.as_ref().map(|_| {
-                        u32::try_from(records.len())
-                            .expect("a materialised journal frame fits in addressable memory")
-                    });
-                    Ok(records
-                        .into_iter()
-                        .enumerate()
-                        .find(|(_, record)| record.id().as_ulid() == ulid)
-                        .map(|(_index, record)| record))
-                }
+                Disposition::Yield(frame) => Ok(frame
+                    .into_records()
+                    .into_iter()
+                    .find(|record| record.id().as_ulid() == ulid)),
                 Disposition::EndOfCommittedRecords | Disposition::Skip => Ok(None),
                 Disposition::Corrupt(problem) => Err(JournalError::Implementation {
                     message: format!(
@@ -1105,13 +1096,7 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
                 },
             ) {
                 Disposition::Yield(frame) => {
-                    let journal_group_id = frame.group_id().map(str::to_string);
-                    let records = frame.into_records();
-                    let _group_size = journal_group_id.as_ref().map(|_| {
-                        u32::try_from(records.len())
-                            .expect("a materialised journal frame fits in addressable memory")
-                    });
-                    for (_index, record) in records.into_iter().enumerate().rev() {
+                    for record in frame.into_records().into_iter().rev() {
                         if results.len() >= count {
                             break;
                         }

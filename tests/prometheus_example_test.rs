@@ -1517,7 +1517,9 @@ enabled = {prometheus}
             "Prometheus proof phase: application returned after {:?}; {count} inputs, mode={mode:?}",
             proof_started.elapsed()
         );
-        let _rebound = address.map(|address| std::net::TcpListener::bind(address).unwrap());
+        if let Some(address) = address {
+            std::net::TcpListener::bind(address).unwrap();
+        }
         if collecting {
             assert_final_example_metrics(&model, count);
         } else {

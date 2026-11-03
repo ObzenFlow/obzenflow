@@ -28,6 +28,7 @@ use anyhow::Result;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow::flow::FlowDefinition;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use support::{flow_definition, flow_definition_with_options, SOURCE_OUTAGE_INTERVAL};
 
 const CONFIG_FILE: &str = concat!(
@@ -92,7 +93,7 @@ fn main() -> Result<()> {
 
 fn demo_flow() -> FlowDefinition {
     FlowDefinition::materialize_with(|_runtime_config, settings: PrometheusDemoSettings| {
-        let journal_root = std::path::PathBuf::from(JOURNAL_ROOT);
+        let journal_root = PathBuf::from(JOURNAL_ROOT);
         Ok(if settings.source_rate_limit {
             flow_definition(settings.event_count, journal_root)
         } else {

@@ -268,7 +268,7 @@ async fn dropping_host_aborts_response_work_and_releases_the_listener() {
         tokio::task::yield_now().await;
     }
     assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
-    let _rebound = TcpListener::bind(address).await.unwrap();
+    TcpListener::bind(address).await.unwrap();
 }
 
 #[tokio::test]
@@ -455,5 +455,5 @@ async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flus
     );
     assert!(tasks.is_empty());
     assert_eq!(journal.read_all_unordered().await.unwrap().len(), 1);
-    let _rebound = TcpListener::bind(address).await.unwrap();
+    TcpListener::bind(address).await.unwrap();
 }

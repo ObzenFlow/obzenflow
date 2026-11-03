@@ -428,7 +428,7 @@ fn exact_configuration_cannot_create_omitted_retry_or_limiter_components() {
             test_effective_config_for_factories_with_snapshot(&[factory.as_ref()], &snapshot)
                 .expect_err("an exact subject cannot attach a structurally omitted component");
         assert!(matches!(
-            *error,
+            error,
             obzenflow_runtime::runtime_config::ConfigResolveError::UnattachedEffectSubject {
                 key_path: rejected,
                 ..

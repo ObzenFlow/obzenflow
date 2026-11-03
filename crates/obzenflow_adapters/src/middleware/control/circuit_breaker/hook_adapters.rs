@@ -14,8 +14,8 @@ use crate::middleware::context_keys::{
 };
 use crate::middleware::MiddlewareContext;
 use crate::middleware::{
-    SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx,
-    SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    PolicyAdmission, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy,
+    SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::execution_payload::{
@@ -256,7 +256,7 @@ impl CircuitBreakerMiddleware {
         &self,
         ctx: &mut MiddlewareContext,
         fence: EffectAdmissionFence,
-    ) -> crate::middleware::PolicyAdmission {
+    ) -> PolicyAdmission {
         let decision = {
             let _probe_gate = self
                 .probe_gate
@@ -339,7 +339,7 @@ impl CircuitBreakerMiddleware {
                     ctx.insert::<CircuitBreakerProbeGeneration>(generation);
                     ctx.insert::<CircuitBreakerProbeSlot>(guard);
                 }
-                crate::middleware::PolicyAdmission::Admit
+                PolicyAdmission::Admit
             }
             EffectAdmissionDecision::Reject {
                 transition_event,
@@ -348,7 +348,7 @@ impl CircuitBreakerMiddleware {
                 if let Some(event) = transition_event {
                     ctx.write_control_event(event);
                 }
-                crate::middleware::PolicyAdmission::Reject(self.effect_rejection_cause(ctx, reason))
+                PolicyAdmission::Reject(self.effect_rejection_cause(ctx, reason))
             }
         }
     }
