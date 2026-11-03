@@ -33,7 +33,7 @@ fn authored_eof_stage_id(envelopes: &[JournalRecord<ChainPayload>]) -> Option<St
 
 /// Project a stage's journal as a transport-row signature: `data:{event_type}`
 /// for data rows and `eof:{upstream key}` for EOF rows attributed through each
-/// upstream's authored EOF (FLOWIP-095d). EOFs whose author is not one of the
+/// upstream's authored EOF. EOFs whose author is not one of the
 /// named upstreams (the stage's own authored EOF) are labelled `eof:local`.
 ///
 /// Rows are read in physical append order, the order a downstream

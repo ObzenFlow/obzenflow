@@ -7,10 +7,10 @@ use obzenflow_runtime::testing::DeliveredOrderProjection;
 use std::path::Path;
 
 /// Assert `extended_run`'s delivered order at a fan-in stage begins with
-/// `prefix_run`'s order (FLOWIP-120n prefix stability).
+/// `prefix_run`'s order.
 ///
 /// The canonical merge recomputes the recorded prefix order during catch-up,
-/// and FLOWIP-120n's all-sources admission barrier is what keeps the
+/// and the all-sources admission barrier is what keeps the
 /// recomputed order prefix-stable once live tails appear. A pure replay is the
 /// degenerate case where the extension is empty.
 pub async fn assert_prefix_stable(

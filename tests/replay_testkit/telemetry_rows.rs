@@ -6,8 +6,8 @@ use super::ordered_stage_journal::read_stage_envelopes;
 use obzenflow_core::event::ChainPayload;
 use std::path::Path;
 
-/// Count reader-telemetry flow-control rows in a stage's journal
-/// (FLOWIP-095d). Witness tests use this to prove a run actually crossed the
+/// Count reader-telemetry flow-control rows in a stage's journal. Witness tests
+/// use this to prove a run actually crossed the
 /// contract tick and emitted telemetry mid-stream, so a determinism assertion
 /// downstream of the telemetry filter is exercising the condition it pins.
 pub async fn count_reader_telemetry_rows(run_dir: &Path, stage_key: &str) -> usize {

@@ -22,10 +22,6 @@ use std::time::Duration;
 pub(crate) const SOURCE_OUTAGE_INTERVAL: usize = 20_000;
 const SOURCE_BREAKER_COOLDOWN: Duration = Duration::from_secs(5);
 
-// ============================================================================
-// FLOWIP-082a: Strongly-Typed Domain Events
-// ============================================================================
-
 /// Data request event from the source
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DataRequest {
@@ -106,10 +102,6 @@ impl TypedPayload for ProcessedEvent {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-// ============================================================================
-// FLOWIP-114b: Typed transform helper for the error-prone stage
-// ============================================================================
-
 /// Transform that can fail on certain events.
 ///
 /// Returns `TryMapTyped<DataRequest, ProcessedEvent, String, _>`, which both
@@ -137,11 +129,7 @@ fn error_prone_transform() -> TryMapTyped<
     })
 }
 
-// ============================================================================
-// FLOWIP-080j: ReduceTyped for Type-Safe Event Counting
-// ============================================================================
-
-/// State for business-level event counting (FLOWIP-080j)
+/// State for business-level event counting
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct EventCountState {
     event_count: usize,
