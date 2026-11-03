@@ -371,13 +371,14 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             }
             self.position += 1;
             return Ok((
-                Disposition::Yield(match group_id {
+                Disposition::Yield(Box::new(match group_id {
                     Some(group_id) => super::log_record::LogFrame::AtomicGroup {
                         group_id,
-                        records: vec![record],
+                        first: record,
+                        rest: Vec::new(),
                     },
                     None => super::log_record::LogFrame::Record(record),
-                }),
+                })),
                 self.read_offset,
             ));
         }
@@ -469,13 +470,14 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                     }
                     self.position += 1;
                     Ok((
-                        Disposition::Yield(match group_id {
+                        Disposition::Yield(Box::new(match group_id {
                             Some(group_id) => super::log_record::LogFrame::AtomicGroup {
                                 group_id,
-                                records: vec![record],
+                                first: record,
+                                rest: Vec::new(),
                             },
                             None => super::log_record::LogFrame::Record(record),
-                        }),
+                        })),
                         frame_start,
                     ))
                 }

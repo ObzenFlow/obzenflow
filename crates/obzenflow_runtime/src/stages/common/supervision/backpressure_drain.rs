@@ -88,22 +88,25 @@ pub(crate) struct PendingOutput {
     pub(crate) scope: obzenflow_core::MiddlewareExecutionScope,
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct DrainRequest<'a> {
+    pub pending: PendingOutput,
+    pub flow_context: &'a FlowContext,
+    pub stage_id: StageId,
+    pub heartbeat_state: Option<&'a Arc<HeartbeatState>>,
+    pub data_journal: &'a Arc<dyn Journal<ChainEvent>>,
+    pub pending_parent: Option<&'a DeliveredRecord<ChainPayload>>,
+    pub instrumentation: &'a Arc<StageInstrumentation>,
+    pub backpressure_writer: &'a BackpressureWriter,
+    pub backpressure_pulse: &'a mut BackpressureActivityPulse,
+    pub backpressure_stall: &'a mut StallEpisode,
+    pub output_contract: Option<&'a StageOutputContract>,
+    pub pending_outputs: &'a mut std::collections::VecDeque<PendingOutput>,
+}
+
 pub(crate) async fn drain_one_pending(
-    pending: PendingOutput,
-    flow_context: &FlowContext,
-    stage_id: StageId,
-    heartbeat_state: Option<Arc<HeartbeatState>>,
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    pending_parent: Option<&DeliveredRecord<ChainPayload>>,
-    instrumentation: &Arc<StageInstrumentation>,
-    backpressure_writer: &BackpressureWriter,
-    backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_stall: &mut StallEpisode,
-    output_contract: Option<&StageOutputContract>,
-    pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
+    request: DrainRequest<'_>,
 ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
-    match drain_one_pending_resolve(
+    let DrainRequest {
         pending,
         flow_context,
         stage_id,
@@ -116,7 +119,21 @@ pub(crate) async fn drain_one_pending(
         backpressure_stall,
         output_contract,
         pending_outputs,
-    )
+    } = request;
+    match drain_one_pending_resolve(DrainRequest {
+        pending,
+        flow_context,
+        stage_id,
+        heartbeat_state,
+        data_journal,
+        pending_parent,
+        instrumentation,
+        backpressure_writer,
+        backpressure_pulse: &mut *backpressure_pulse,
+        backpressure_stall: &mut *backpressure_stall,
+        output_contract,
+        pending_outputs: &mut *pending_outputs,
+    })
     .await?
     {
         DrainAttempt::Committed { was_data } => Ok(DrainOutcome::Committed { was_data }),
@@ -230,21 +247,23 @@ pub(crate) async fn acquire_direct_fact_lease(
 /// blocks the write, it returns `DrainAttempt::BackedOff { bound, waker }`
 /// and the caller owns the chunked wait (for example inside a
 /// `tokio::select!` that stays responsive to external events).
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_one_pending_resolve(
-    pending: PendingOutput,
-    flow_context: &FlowContext,
-    stage_id: StageId,
-    heartbeat_state: Option<Arc<HeartbeatState>>,
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    pending_parent: Option<&DeliveredRecord<ChainPayload>>,
-    instrumentation: &Arc<StageInstrumentation>,
-    backpressure_writer: &BackpressureWriter,
-    backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_stall: &mut StallEpisode,
-    output_contract: Option<&StageOutputContract>,
-    pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
+    request: DrainRequest<'_>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {
+    let DrainRequest {
+        pending,
+        flow_context,
+        stage_id,
+        heartbeat_state,
+        data_journal,
+        pending_parent,
+        instrumentation,
+        backpressure_writer,
+        backpressure_pulse,
+        backpressure_stall,
+        output_contract,
+        pending_outputs,
+    } = request;
     let frontier = pending.causal.clone();
     crate::supervised_base::publication::with_snapshot(frontier, async move {
         let is_data = pending.event.consumes_data_credit();
@@ -267,7 +286,7 @@ pub(crate) async fn drain_one_pending_resolve(
             flow_context: Some(flow_context),
 
             instrumentation: Some(instrumentation),
-            heartbeat_state: heartbeat_state.as_ref(),
+            heartbeat_state,
             output_contract,
             backpressure_writer: None,
             observer_scope: pending.scope,

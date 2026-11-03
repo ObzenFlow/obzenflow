@@ -16,8 +16,21 @@
 //! only the head of a history resumes, and resuming a replay resumes the run
 //! it reproduces.
 
-#[path = "../../../tests/replay_testkit/mod.rs"]
-mod replay_testkit;
+#[path = "../../../tests/replay_testkit"]
+mod replay_testkit {
+    mod bootstrap;
+    mod delivered_order;
+    mod journal;
+    mod manifest;
+    mod ordered_stage_journal;
+    mod prefix_stable;
+    mod reattaching_source;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{
+        bootstrap::*, prefix_stable::*, reattaching_source::*, run_dir::*, stage_journal::*,
+    };
+}
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;

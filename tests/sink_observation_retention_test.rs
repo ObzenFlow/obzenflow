@@ -4,7 +4,11 @@
 
 //! FLOWIP-122a retained-outcome and admission-only boundary proofs.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    mod ordered_journal;
+    pub use self::ordered_journal::*;
+}
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{

@@ -11,7 +11,20 @@
 //! delivered-order projections from the event-sourced journals; raw journal
 //! bytes legitimately differ across runs until FLOWIP-120o.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod delivered_order;
+    mod journal;
+    mod manifest;
+    mod ordered_stage_journal;
+    mod run_dir;
+    mod same_delivered_order;
+    mod stage_journal;
+    mod telemetry_rows;
+    pub use self::{
+        delivered_order::*, ordered_stage_journal::*, run_dir::*, same_delivered_order::*,
+        telemetry_rows::*,
+    };
+}
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;

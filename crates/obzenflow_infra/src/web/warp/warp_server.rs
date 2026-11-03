@@ -476,35 +476,20 @@ async fn dispatch_request(
         path_params.insert(k.to_string(), v.to_string());
     }
 
-    let matched_route = dispatch.template.to_string();
-    match body {
-        Some(body) => {
-            handle_request_with_body(
-                routed,
-                host_policy,
-                method,
-                headers,
-                query_params,
-                body,
-                raw_path,
-                matched_route,
-                path_params,
-            )
-            .await
-        }
-        None => {
-            handle_request_no_body(
-                routed,
-                host_policy,
-                method,
-                headers,
-                query_params,
-                raw_path,
-                matched_route,
-                path_params,
-            )
-            .await
-        }
+    let has_body = body.is_some();
+    let request = Request {
+        method,
+        path: raw_path,
+        matched_route: dispatch.template.to_string(),
+        path_params,
+        headers: headers_to_owned_map(&headers),
+        query_params,
+        body: body.map(|body| body.to_vec()).unwrap_or_default(),
+    };
+    if has_body {
+        handle_request_with_body(routed, host_policy, request).await
+    } else {
+        handle_request_no_body(routed, host_policy, request).await
     }
 }
 
@@ -861,12 +846,11 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         return None;
     }
 
-    let bytes: Option<Vec<u8>> = value
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, _) = value.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
-        .collect();
-    bytes
+        .collect()
 }
 
 fn reply_from_response(response: Response) -> Result<Box<dyn Reply>, Rejection> {
@@ -922,16 +906,10 @@ fn finalize_unary(
 }
 
 /// Helper function to handle requests without body (GET, HEAD, DELETE, OPTIONS)
-#[allow(clippy::too_many_arguments)]
 async fn handle_request_no_body(
     routed: RoutedEndpoint,
     host_policy: HostPolicy,
-    method: HttpMethod,
-    headers: warp::http::HeaderMap,
-    query_params: HashMap<String, String>,
-    path: String,
-    matched_route: String,
-    path_params: HashMap<String, String>,
+    request: Request,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let RoutedEndpoint {
         endpoint,
@@ -939,6 +917,7 @@ async fn handle_request_no_body(
         auth,
         surface_metrics,
     } = routed;
+    let method = request.method;
     // Check if endpoint supports this method
     let supported_methods = endpoint.methods();
     if !supported_methods.is_empty() && !supported_methods.contains(&method) {
@@ -947,20 +926,17 @@ async fn handle_request_no_body(
 
     let start = std::time::Instant::now();
 
-    // Convert headers
-    let req_headers = headers_to_owned_map(&headers);
-
     let effective_timeout =
         resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
     let log_ctx = if managed.is_some() {
-        Some((path.clone(), matched_route.clone()))
+        Some((request.path.clone(), request.matched_route.clone()))
     } else {
         None
     };
 
     if managed.is_some() {
         if let Some(auth) = auth.as_ref() {
-            if let Err(response) = enforce_auth_policy(auth, &req_headers, &[]) {
+            if let Err(response) = enforce_auth_policy(auth, &request.headers, &[]) {
                 if let Some(metrics) = &surface_metrics {
                     metrics.observe(
                         method,
@@ -973,21 +949,14 @@ async fn handle_request_no_body(
                 return reply_from_response(response);
             }
         }
-    } else if let Err(response) =
-        maybe_enforce_control_plane_auth(&host_policy, matched_route.as_str(), &req_headers, &[])
-    {
+    } else if let Err(response) = maybe_enforce_control_plane_auth(
+        &host_policy,
+        request.matched_route.as_str(),
+        &request.headers,
+        &[],
+    ) {
         return reply_from_response(response);
     }
-
-    let request = Request {
-        method,
-        path,
-        matched_route,
-        path_params,
-        headers: req_headers,
-        query_params,
-        body: Vec::new(),
-    };
 
     // Handle request
     let handler_result = if let Some(timeout) = effective_timeout {
@@ -1067,17 +1036,10 @@ async fn handle_request_no_body(
 }
 
 /// Helper function to handle requests with body (POST, PUT, PATCH)
-#[allow(clippy::too_many_arguments)]
 async fn handle_request_with_body(
     routed: RoutedEndpoint,
     host_policy: HostPolicy,
-    method: HttpMethod,
-    headers: warp::http::HeaderMap,
-    query_params: HashMap<String, String>,
-    body: bytes::Bytes,
-    path: String,
-    matched_route: String,
-    path_params: HashMap<String, String>,
+    request: Request,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let RoutedEndpoint {
         endpoint,
@@ -1085,6 +1047,7 @@ async fn handle_request_with_body(
         auth,
         surface_metrics,
     } = routed;
+    let method = request.method;
     // Check if endpoint supports this method
     let supported_methods = endpoint.methods();
     if !supported_methods.is_empty() && !supported_methods.contains(&method) {
@@ -1092,15 +1055,12 @@ async fn handle_request_with_body(
     }
 
     let start = std::time::Instant::now();
-    let request_bytes = body.len() as u64;
-
-    // Convert headers
-    let req_headers = headers_to_owned_map(&headers);
+    let request_bytes = request.body.len() as u64;
 
     let effective_timeout =
         resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
     let log_ctx = if managed.is_some() {
-        Some((path.clone(), matched_route.clone()))
+        Some((request.path.clone(), request.matched_route.clone()))
     } else {
         None
     };
@@ -1123,7 +1083,7 @@ async fn handle_request_with_body(
         }
 
         if let Some(expected) = managed.route_policy.request_content_type.as_deref() {
-            if !content_type_matches(header_value(&req_headers, "content-type"), expected) {
+            if !content_type_matches(header_value(&request.headers, "content-type"), expected) {
                 let response = Response::new(415).with_text("Unsupported Media Type");
                 if let Some(metrics) = &surface_metrics {
                     metrics.observe(
@@ -1139,7 +1099,9 @@ async fn handle_request_with_body(
         }
 
         if let Some(auth) = auth.as_ref() {
-            if let Err(response) = enforce_auth_policy(auth, &req_headers, body.as_ref()) {
+            if let Err(response) =
+                enforce_auth_policy(auth, &request.headers, request.body.as_slice())
+            {
                 if let Some(metrics) = &surface_metrics {
                     metrics.observe(
                         method,
@@ -1154,22 +1116,12 @@ async fn handle_request_with_body(
         }
     } else if let Err(response) = maybe_enforce_control_plane_auth(
         &host_policy,
-        matched_route.as_str(),
-        &req_headers,
-        body.as_ref(),
+        request.matched_route.as_str(),
+        &request.headers,
+        request.body.as_slice(),
     ) {
         return reply_from_response(response);
     }
-
-    let request = Request {
-        method,
-        path,
-        matched_route,
-        path_params,
-        headers: req_headers,
-        query_params,
-        body: body.to_vec(),
-    };
 
     // Handle request
     let handler_result = if let Some(timeout) = effective_timeout {
@@ -1296,7 +1248,7 @@ fn validate_cors_origin(raw: &str, index: usize) -> Result<(), ManagedWebHostErr
         message: format!("server.cors.allow_origins[{index}]: invalid origin"),
         source: None,
     };
-    let (scheme, authority) = raw.split_once("://").ok_or_else(&invalid)?;
+    let (scheme, authority) = raw.split_once("://").ok_or_else(invalid)?;
     let origin = headers::Origin::try_from_parts(scheme, authority, None).map_err(|_| invalid())?;
     origin
         .to_string()

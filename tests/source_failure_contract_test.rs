@@ -6,7 +6,14 @@
 //! terminal report and an opening failure each commit one diagnostic, fail the
 //! stage and pipeline with a causal link to it, and write no EOF.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    mod journal;
+    mod manifest;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{discard::*, journal::*, manifest::*, run_dir::*, stage_journal::*};
+}
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::{

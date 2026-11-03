@@ -10,8 +10,10 @@
 
 #[path = "test_support/postgres_payments/mod.rs"]
 mod payments;
-#[path = "support/postgres.rs"]
-mod postgres_support;
+mod postgres_support {
+    mod pool;
+    pub use self::pool::*;
+}
 
 use postgres_support::{pool, required_env};
 use serde_json::Value;

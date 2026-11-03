@@ -4,6 +4,7 @@
 
 use super::*;
 
+#[cfg(feature = "tokio-console")]
 fn console(bind: &str) -> ResolvedConsoleConfig {
     ResolvedConsoleConfig {
         enabled: true,
@@ -38,8 +39,11 @@ fn ordinary_tracing_accepts_an_existing_subscriber() {
         return;
     }
     tracing_subscriber::registry().try_init().unwrap();
-    let mut config = console("127.0.0.1:6669");
-    config.enabled = false;
+    let config = ResolvedConsoleConfig {
+        enabled: false,
+        #[cfg(feature = "tokio-console")]
+        bind: "127.0.0.1:6669".parse().unwrap(),
+    };
     let diagnostics = PreparedObservability::install(&config, EnvFilter::new("info"))
         .unwrap()
         .start()
@@ -53,8 +57,9 @@ fn ordinary_tracing_accepts_an_existing_subscriber() {
 #[cfg(not(feature = "tokio-console"))]
 #[test]
 fn console_request_without_feature_fails() {
+    let config = ResolvedConsoleConfig { enabled: true };
     assert!(matches!(
-        PreparedObservability::install(&console("127.0.0.1:6669"), EnvFilter::new("info")),
+        PreparedObservability::install(&config, EnvFilter::new("info")),
         Err(ApplicationError::FeatureNotEnabled(feature)) if feature == "tokio-console"
     ));
 }

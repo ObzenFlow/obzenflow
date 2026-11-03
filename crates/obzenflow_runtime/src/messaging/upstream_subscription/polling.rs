@@ -27,8 +27,6 @@ use tokio::time::Instant;
 /// Both reader-selection policies consume journals through exactly this step,
 /// so a read-side rule (baseline clearing, transport filtering, EOF/drain
 /// classification) can never drift between them.
-// Transfer the inline journal head without allocating for every delivery.
-#[allow(clippy::large_enum_variant)]
 enum ReadStep<T: JournalEvent> {
     /// A deliverable transport head, classified at read time.
     Head { head: HeldHead<T>, is_data: bool },
@@ -144,7 +142,7 @@ where
         };
         Ok(ReadStep::Head {
             head: HeldHead {
-                envelope,
+                envelope: Box::new(envelope),
                 is_authored_eof,
                 is_drain,
                 catch_up,
@@ -418,7 +416,7 @@ where
             let slot = &self.readers[reader_index];
             (slot.stage_id, slot.stage_key.clone())
         };
-        if let Some(record) = (&envelope as &dyn Any).downcast_ref::<JournalRecord<ChainPayload>>()
+        if let Some(record) = (&*envelope as &dyn Any).downcast_ref::<JournalRecord<ChainPayload>>()
         {
             if matches!(
                 record.envelope.provenance.event.processing.status,

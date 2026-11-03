@@ -1027,7 +1027,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[allow(clippy::await_holding_lock)] // The held optional mutex is the injected failure.
     async fn held_optional_index_mutex_does_not_block_committed_appends() {
         for grouped in [false, true] {
             let directory = tempfile::tempdir().unwrap();
@@ -1038,7 +1037,18 @@ mod tests {
             let observed = event(stage, 1);
             let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
             let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
-            let guard = reader.shared.state.lock().unwrap();
+            let (held_tx, held_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let holder = std::thread::spawn({
+                let shared = std::sync::Arc::clone(&reader.shared);
+                move || {
+                    let guard = shared.state.lock().unwrap();
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    guard.offset
+                }
+            });
+            held_rx.recv().unwrap();
             // This optional mutex must not delay commit. Cancellation belongs
             // in journal::tests::cancelled_append_retains_index_clock_and_writer_serialisation,
             // where the required publication lock keeps the receipt pending.
@@ -1068,10 +1078,6 @@ mod tests {
             ))
             .await
             .unwrap();
-            assert_eq!(
-                guard.offset, 0,
-                "all append-side index updates were skipped"
-            );
             let records = completes(journal.read_all_unordered()).await.unwrap();
             assert_eq!(records.len(), if grouped { 5 } else { 4 });
             // Fixed-prefix readers must work while optional indexing is held
@@ -1092,7 +1098,12 @@ mod tests {
                 !checkpoint_path(&path).exists(),
                 "destruction must not persist an index"
             );
-            drop(guard);
+            release_tx.send(()).unwrap();
+            assert_eq!(
+                holder.join().unwrap(),
+                0,
+                "all append-side index updates were skipped"
+            );
             let ObservationLookup::Ready {
                 committed_len,
                 observation,

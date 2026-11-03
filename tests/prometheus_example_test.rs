@@ -19,13 +19,16 @@ use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
 
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
-#[allow(dead_code)]
-#[path = "../examples/prometheus_demo/main.rs"]
+#[path = "../examples/prometheus_demo/support.rs"]
 mod prometheus_demo;
 
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
-#[path = "test_support/exported_jsonl.rs"]
-mod exported_jsonl;
+mod exported_jsonl {
+    mod chain;
+    mod commitment;
+    mod without_observations;
+    pub use self::{chain::*, commitment::*, without_observations::*};
+}
 
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
 #[path = "test_support/prometheus_measurement.rs"]

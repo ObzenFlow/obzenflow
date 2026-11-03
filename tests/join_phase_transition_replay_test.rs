@@ -16,7 +16,20 @@
 //!   merge (`dispatch_live_canonical`), so its delivered order, EOF-relative
 //!   positions, and the effect cursors below all reproduce under replay.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod delivered_order;
+    mod journal;
+    mod manifest;
+    mod ordered_stage_journal;
+    mod run_dir;
+    mod same_delivered_order;
+    mod stage_journal;
+    mod transport_signature;
+    pub use self::{
+        delivered_order::*, ordered_stage_journal::*, run_dir::*, same_delivered_order::*,
+        transport_signature::*,
+    };
+}
 
 use async_trait::async_trait;
 use obzenflow::stages::joins;

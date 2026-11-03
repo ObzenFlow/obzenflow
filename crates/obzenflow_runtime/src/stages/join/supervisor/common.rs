@@ -7,7 +7,9 @@ use crate::messaging::DeliveredRecord;
 use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::UnifiedJoinHandler;
-use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::backpressure_drain::{
+    drain_one_pending, DrainOutcome, DrainRequest,
+};
 use crate::stages::common::supervision::control_resolution::await_signal_gate;
 use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -234,20 +236,20 @@ pub(super) async fn flush_pending_outputs<
     );
 
     while let Some(pending) = ctx.pending_outputs.pop_front() {
-        match drain_one_pending(
+        match drain_one_pending(DrainRequest {
             pending,
-            &flow_context,
-            ctx.stage_id,
-            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-            &ctx.data_journal,
-            ctx.pending_parent.as_ref(),
-            &ctx.instrumentation,
-            &ctx.backpressure_writer,
-            &mut ctx.backpressure_pulse,
-            &mut ctx.backpressure_stall,
-            Some(&ctx.output_contract),
-            &mut ctx.pending_outputs,
-        )
+            flow_context: &flow_context,
+            stage_id: ctx.stage_id,
+            heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+            data_journal: &ctx.data_journal,
+            pending_parent: ctx.pending_parent.as_ref(),
+            instrumentation: &ctx.instrumentation,
+            backpressure_writer: &ctx.backpressure_writer,
+            backpressure_pulse: &mut ctx.backpressure_pulse,
+            backpressure_stall: &mut ctx.backpressure_stall,
+            output_contract: Some(&ctx.output_contract),
+            pending_outputs: &mut ctx.pending_outputs,
+        })
         .await?
         {
             DrainOutcome::Committed { was_data } => {

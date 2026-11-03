@@ -936,15 +936,12 @@ fn scan_source_journals(
         let mut decoder = Decoder::new(&path);
         let mut admission =
             super::identity::CommitmentAdmission::open(&path).map_err(causal_admission_error)?;
-        loop {
-            let Some((consumed, termination)) =
-                read_frame_sync(&mut reader, &mut buf).map_err(|e| ReplayError::Io {
-                    message: format!("Failed to read source journal at {}", path.display()),
-                    source: e,
-                })?
-            else {
-                break;
-            };
+        while let Some((consumed, termination)) =
+            read_frame_sync(&mut reader, &mut buf).map_err(|e| ReplayError::Io {
+                message: format!("Failed to read source journal at {}", path.display()),
+                source: e,
+            })?
+        {
             line_no += 1;
             let record_offset = offset;
             offset += consumed as u64;

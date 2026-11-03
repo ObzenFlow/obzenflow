@@ -18,7 +18,7 @@ use crate::stages::common::handlers::{
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event_awaiting_pauses, ControlAction,
+    resolve_control_event_awaiting_pauses, ControlAction, ControlResolutionInputs,
 };
 use crate::stages::common::supervision::error_routing::processing_failure_record;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -361,12 +361,14 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
         envelope,
         ctx.control_strategy.as_ref(),
         &mut ctx.processing_context,
-        /* cycle_config */ None,
-        /* cycle_guard */ None,
-        last_eof_outcome.as_ref(),
-        upstream_stage,
-        contract_reader_count,
-        /* drain_is_terminal */ false,
+        ControlResolutionInputs {
+            cycle_config: None,
+            cycle_guard: None,
+            eof_outcome: last_eof_outcome.as_ref(),
+            upstream_stage,
+            contract_reader_count,
+            drain_is_terminal: false,
+        },
         &ctx.stage_name,
     )
     .await;

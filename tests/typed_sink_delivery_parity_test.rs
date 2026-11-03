@@ -4,7 +4,10 @@
 
 //! FLOWIP-134h journal oracle for immediate and deferred typed sink settlement.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    pub use self::journal::*;
+}
 
 use async_trait::async_trait;
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};

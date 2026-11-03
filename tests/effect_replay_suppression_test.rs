@@ -2,9 +2,17 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "test_support/exported_jsonl.rs"]
-mod exported_jsonl;
-mod replay_testkit;
+mod exported_jsonl {
+    mod chain;
+    pub use self::chain::*;
+}
+mod replay_testkit {
+    mod journal;
+    mod manifest;
+    mod ordered_journal;
+    mod stage_journal;
+    pub use self::{ordered_journal::*, stage_journal::*};
+}
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry, MiddlewareFactory};

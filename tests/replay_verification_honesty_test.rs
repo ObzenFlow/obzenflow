@@ -12,7 +12,10 @@
 //! stage is named `not_order_certified`, per-type row counts are an advisory,
 //! and the run exits 2.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    pub use self::discard::*;
+}
 
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};

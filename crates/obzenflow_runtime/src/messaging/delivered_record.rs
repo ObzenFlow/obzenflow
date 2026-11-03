@@ -14,14 +14,20 @@ use std::ops::Deref;
 /// evidence. Journal operations always use `record()` as their causal parent.
 #[derive(Clone, Debug)]
 pub struct DeliveredRecord<P: JournalPayload> {
-    record: JournalRecord<P>,
-    // Ordinary deliveries retain only the original inline record. Allocate a
+    record: Box<JournalRecord<P>>,
+    // Ordinary deliveries retain only the original record. Allocate a
     // separate view only for inputs that need runtime enrichment.
     dispatch: Option<Box<P::Event>>,
 }
 
 impl<P: JournalPayload> From<JournalRecord<P>> for DeliveredRecord<P> {
     fn from(record: JournalRecord<P>) -> Self {
+        Self::from(Box::new(record))
+    }
+}
+
+impl<P: JournalPayload> From<Box<JournalRecord<P>>> for DeliveredRecord<P> {
+    fn from(record: Box<JournalRecord<P>>) -> Self {
         Self {
             record,
             dispatch: None,

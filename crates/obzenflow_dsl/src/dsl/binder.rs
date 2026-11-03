@@ -30,7 +30,6 @@ use std::sync::Arc;
 
 /// Preflight uses the same typed surface and protected unit as materialization.
 /// It runs over every stage before any factory or connector can open.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_factory_configuration(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
@@ -182,7 +181,6 @@ fn with_binding_request<T>(
     Ok(visit(request))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn attachment_key(
     declaration: &MiddlewareDeclaration,
     config: &StageConfig,

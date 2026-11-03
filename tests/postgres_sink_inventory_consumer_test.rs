@@ -7,8 +7,11 @@
 //! This intentionally lives under `tests/`, not `examples/`: its destination
 //! setup and read-back assertions are test concerns rather than user guidance.
 
-#[path = "support/postgres.rs"]
-mod postgres_support;
+mod postgres_support {
+    mod connection;
+    mod pool;
+    pub use self::{connection::*, pool::*};
+}
 
 use obzenflow::application::FlowApplication;
 use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};

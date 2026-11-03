@@ -1313,12 +1313,12 @@ enum TransactionFailure {
     Acquire(SinkOperationError),
     Execute {
         subject: TransactionInputSubject,
-        operation: SinkOperationError,
-        rollback: Option<SinkOperationError>,
+        operation: Box<SinkOperationError>,
+        rollback: Option<Box<SinkOperationError>>,
     },
     PreCommit {
-        operation: SinkOperationError,
-        rollback: Option<SinkOperationError>,
+        operation: Box<SinkOperationError>,
+        rollback: Option<Box<SinkOperationError>>,
     },
     Commit(SinkOperationError),
     PostCommit(SinkOperationError),
@@ -1340,15 +1340,17 @@ impl TransactionFailure {
                 rollback,
             } => Self::Execute {
                 subject,
-                operation: destination_operation_error(destination, operation),
-                rollback: rollback.map(|error| destination_operation_error(destination, error)),
+                operation: Box::new(destination_operation_error(destination, *operation)),
+                rollback: rollback
+                    .map(|error| Box::new(destination_operation_error(destination, *error))),
             },
             Self::PreCommit {
                 operation,
                 rollback,
             } => Self::PreCommit {
-                operation: destination_operation_error(destination, operation),
-                rollback: rollback.map(|error| destination_operation_error(destination, error)),
+                operation: Box::new(destination_operation_error(destination, *operation)),
+                rollback: rollback
+                    .map(|error| Box::new(destination_operation_error(destination, *error))),
             },
             Self::Commit(error) => Self::Commit(destination_operation_error(destination, error)),
             Self::PostCommit(error) => {
@@ -1503,8 +1505,8 @@ where
                 .err();
             return Err(TransactionFailure::Execute {
                 subject,
-                operation,
-                rollback,
+                operation: Box::new(operation),
+                rollback: rollback.map(Box::new),
             });
         }
         probe.record_execute();
@@ -1533,8 +1535,8 @@ where
             .err();
         return Err(TransactionFailure::Execute {
             subject,
-            operation,
-            rollback,
+            operation: Box::new(operation),
+            rollback: rollback.map(Box::new),
         });
     }
 
@@ -1560,8 +1562,8 @@ where
             .await
             .err();
         return Err(TransactionFailure::PreCommit {
-            operation,
-            rollback,
+            operation: Box::new(operation),
+            rollback: rollback.map(Box::new),
         });
     }
 
@@ -1626,7 +1628,7 @@ fn map_write_failure<T>(
             Some(row) => SinkWriteFailure::poisoned_by_deferred(
                 &row.pending,
                 SinkWritePhase::Execute,
-                operation,
+                *operation,
             ),
             None => SinkWriteFailure::poisoned(
                 SinkWritePhase::Execute,
@@ -1639,7 +1641,7 @@ fn map_write_failure<T>(
             subject: TransactionInputSubject::Current,
             operation,
             rollback: None,
-        } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Execute, operation),
+        } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Execute, *operation),
         TransactionFailure::Execute {
             subject: TransactionInputSubject::Deferred(index),
             rollback: Some(rollback),
@@ -1648,7 +1650,7 @@ fn map_write_failure<T>(
             Some(row) => SinkWriteFailure::poisoned_by_deferred(
                 &row.pending,
                 SinkWritePhase::Commit,
-                rollback,
+                *rollback,
             ),
             None => SinkWriteFailure::poisoned(
                 SinkWritePhase::Commit,
@@ -1661,15 +1663,15 @@ fn map_write_failure<T>(
             subject: TransactionInputSubject::Current,
             rollback: Some(rollback),
             ..
-        } => SinkWriteFailure::poisoned(SinkWritePhase::Commit, rollback),
+        } => SinkWriteFailure::poisoned(SinkWritePhase::Commit, *rollback),
         TransactionFailure::PreCommit {
             operation,
             rollback: None,
-        } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Commit, operation),
+        } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Commit, *operation),
         TransactionFailure::PreCommit {
             rollback: Some(rollback),
             ..
-        } => SinkWriteFailure::poisoned(SinkWritePhase::Commit, rollback),
+        } => SinkWriteFailure::poisoned(SinkWritePhase::Commit, *rollback),
         TransactionFailure::Commit(error) => {
             SinkWriteFailure::poisoned(SinkWritePhase::Commit, error)
         }
@@ -1701,7 +1703,7 @@ fn map_lifecycle_failure<T>(
             subject: TransactionInputSubject::Current,
             operation,
             rollback: None,
-        } => operation,
+        } => *operation,
         TransactionFailure::Execute {
             subject: TransactionInputSubject::Deferred(index),
             rollback: Some(rollback),
@@ -1716,15 +1718,15 @@ fn map_lifecycle_failure<T>(
             subject: TransactionInputSubject::Current,
             rollback: Some(rollback),
             ..
-        } => rollback,
+        } => *rollback,
         TransactionFailure::PreCommit {
             operation,
             rollback: None,
-        } => operation,
+        } => *operation,
         TransactionFailure::PreCommit {
             rollback: Some(rollback),
             ..
-        } => rollback,
+        } => *rollback,
     }
 }
 

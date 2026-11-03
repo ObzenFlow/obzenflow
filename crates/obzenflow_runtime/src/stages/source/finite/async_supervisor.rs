@@ -21,7 +21,7 @@ use crate::stages::source::supervision::{
     drain_pending_outputs_async, emit_batch_to_pending_outputs, observe_source_boundary_rejection,
     poll_error_backoff, poll_error_summary, record_source_release, record_source_stage_fatal,
     source_error_kind, source_poll_error_record, stage_boundary_control_events,
-    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceExit,
+    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceDrain, SourceExit,
     SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
@@ -677,17 +677,19 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                 let observer_scope = ctx.runtime_execution.stage_scope(self.stage_id);
 
                 if let Some(directive) = drain_pending_outputs_async(
-                    &mut ctx.pending_outputs,
-                    &stage_flow_context,
-                    self.stage_id,
-                    None,
-                    &ctx.data_journal,
-                    &ctx.error_journal,
-                    &ctx.instrumentation,
-                    &ctx.backpressure_writer,
-                    &mut ctx.backpressure_pulse,
-                    &mut ctx.backpressure_stall,
-                    Some(&ctx.output_contract),
+                    SourceDrain {
+                        pending_outputs: &mut ctx.pending_outputs,
+                        stage_flow_context: &stage_flow_context,
+                        stage_id: self.stage_id,
+                        heartbeat_state: None,
+                        data_journal: &ctx.data_journal,
+                        error_journal: &ctx.error_journal,
+                        instrumentation: &ctx.instrumentation,
+                        backpressure_writer: &ctx.backpressure_writer,
+                        backpressure_pulse: &mut ctx.backpressure_pulse,
+                        backpressure_stall: &mut ctx.backpressure_stall,
+                        output_contract: Some(&ctx.output_contract),
+                    },
                     &mut Vec::new(),
                     self.external_events
                         .recv(|event| !FiniteSourceState::defer_external_event(state, event)),

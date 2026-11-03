@@ -599,7 +599,7 @@ where
                     __config_owner.insert(member.as_str(), spec.binding.as_str());
                 }
             }
-            for (_name, descriptor) in descriptors.iter() {
+            for descriptor in descriptors.values() {
                 let config_stage = __config_owner
                     .get(descriptor.name())
                     .copied()

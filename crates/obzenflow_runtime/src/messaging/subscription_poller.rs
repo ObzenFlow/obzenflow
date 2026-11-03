@@ -14,8 +14,6 @@ use std::fmt::Debug;
 
 /// Result of polling a subscription for events
 #[derive(Debug)]
-// Keep the delivered record inline, preserving the existing allocation-free poll handoff.
-#[allow(clippy::large_enum_variant)]
 pub enum PollResult<T: JournalEvent> {
     /// An event is available
     Event(DeliveredRecord<T::Payload>),

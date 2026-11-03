@@ -9,7 +9,13 @@
 //! end-to-end oracle deliberately does not manufacture envelope provenance from
 //! ordinary middleware.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    mod failures;
+    mod journal;
+    mod manifest;
+    pub use self::{discard::*, failures::*, journal::*};
+}
 
 use obzenflow_core::config::{ConfigScope, ConfigSource};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;

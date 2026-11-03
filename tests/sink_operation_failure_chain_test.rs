@@ -4,7 +4,11 @@
 
 //! FLOWIP-122a durable sink-operation failure-chain proofs.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    mod ordered_journal;
+    pub use self::ordered_journal::*;
+}
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};

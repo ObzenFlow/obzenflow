@@ -7,7 +7,15 @@
 //! archive recorded before rejections left data journals can, fails on the
 //! refusal and never folds the record into its state.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod failures;
+    mod journal;
+    mod manifest;
+    mod run_dir;
+    mod stage_journal;
+    mod stage_writer;
+    pub use self::{failures::*, run_dir::*, stage_journal::*, stage_writer::*};
+}
 
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::ChainEvent;

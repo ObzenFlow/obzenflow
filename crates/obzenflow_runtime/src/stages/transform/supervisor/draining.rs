@@ -9,7 +9,9 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::backpressure_drain::{
+    drain_one_pending, DrainOutcome, DrainRequest,
+};
 use crate::stages::common::supervision::error_routing::{
     error_row_in_scope, processing_failed, route_to_error_journal,
 };
@@ -72,20 +74,20 @@ async fn dispatch_draining_inner<
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     if sup.subscription.is_some() {
         while let Some(pending) = ctx.pending_outputs.pop_front() {
-            match drain_one_pending(
+            match drain_one_pending(DrainRequest {
                 pending,
                 flow_context,
-                sup.stage_id,
-                ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-                &ctx.data_journal,
-                ctx.pending_parent.as_ref(),
-                &ctx.instrumentation,
-                &ctx.backpressure_writer,
-                &mut ctx.backpressure_pulse,
-                &mut ctx.backpressure_stall,
-                Some(&ctx.output_contract),
-                &mut ctx.pending_outputs,
-            )
+                stage_id: sup.stage_id,
+                heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+                data_journal: &ctx.data_journal,
+                pending_parent: ctx.pending_parent.as_ref(),
+                instrumentation: &ctx.instrumentation,
+                backpressure_writer: &ctx.backpressure_writer,
+                backpressure_pulse: &mut ctx.backpressure_pulse,
+                backpressure_stall: &mut ctx.backpressure_stall,
+                output_contract: Some(&ctx.output_contract),
+                pending_outputs: &mut ctx.pending_outputs,
+            })
             .await?
             {
                 DrainOutcome::Committed { was_data } => {
@@ -397,20 +399,20 @@ async fn dispatch_draining_inner<
             }
 
             while let Some(event) = stage_outputs.pop_front() {
-                match drain_one_pending(
-                    event,
+                match drain_one_pending(DrainRequest {
+                    pending: event,
                     flow_context,
-                    sup.stage_id,
-                    ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-                    &ctx.data_journal,
-                    Some(&envelope),
-                    &ctx.instrumentation,
-                    &ctx.backpressure_writer,
-                    &mut ctx.backpressure_pulse,
-                    &mut ctx.backpressure_stall,
-                    Some(&ctx.output_contract),
-                    &mut stage_outputs,
-                )
+                    stage_id: sup.stage_id,
+                    heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+                    data_journal: &ctx.data_journal,
+                    pending_parent: Some(&envelope),
+                    instrumentation: &ctx.instrumentation,
+                    backpressure_writer: &ctx.backpressure_writer,
+                    backpressure_pulse: &mut ctx.backpressure_pulse,
+                    backpressure_stall: &mut ctx.backpressure_stall,
+                    output_contract: Some(&ctx.output_contract),
+                    pending_outputs: &mut stage_outputs,
+                })
                 .await?
                 {
                     DrainOutcome::Committed { was_data } => {

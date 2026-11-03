@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::backpressure_drain::{drain_one_pending, DrainOutcome, PendingOutput};
+use super::backpressure_drain::{drain_one_pending, DrainOutcome, DrainRequest, PendingOutput};
 use super::control_resolution::{
     await_signal_gate, resolve_control_event, resolve_forward_control_event, ControlAction,
-    ControlResolution,
+    ControlResolution, ControlResolutionInputs,
 };
 use super::flow_context_factory::make_flow_context;
 use crate::backpressure::{
@@ -138,12 +138,14 @@ fn resolve_control_event_entry_point_suppresses_non_terminal_forwarded_eof() {
         &envelope,
         &strategy,
         &mut crate::stages::common::control_strategies::ProcessingContext::new(),
-        Some(&cfg),
-        Some(&mut guard),
-        None,
-        Some(upstream),
-        1,
-        true,
+        ControlResolutionInputs {
+            cycle_config: Some(&cfg),
+            cycle_guard: Some(&mut guard),
+            eof_outcome: None,
+            upstream_stage: Some(upstream),
+            contract_reader_count: 1,
+            drain_is_terminal: true,
+        },
     );
 
     assert_eq!(
@@ -177,12 +179,14 @@ fn resolve_control_event_entry_point_buffers_external_terminal_eof() {
         &envelope,
         &strategy,
         &mut crate::stages::common::control_strategies::ProcessingContext::new(),
-        Some(&cfg),
-        Some(&mut guard),
-        None,
-        Some(upstream),
-        1,
-        true,
+        ControlResolutionInputs {
+            cycle_config: Some(&cfg),
+            cycle_guard: Some(&mut guard),
+            eof_outcome: None,
+            upstream_stage: Some(upstream),
+            contract_reader_count: 1,
+            drain_is_terminal: true,
+        },
     );
 
     assert_eq!(
@@ -217,12 +221,14 @@ fn resolve_control_event_entry_point_suppresses_internal_terminal_eof() {
         &envelope,
         &strategy,
         &mut crate::stages::common::control_strategies::ProcessingContext::new(),
-        Some(&cfg),
-        Some(&mut guard),
-        None,
-        Some(internal),
-        1,
-        true,
+        ControlResolutionInputs {
+            cycle_config: Some(&cfg),
+            cycle_guard: Some(&mut guard),
+            eof_outcome: None,
+            upstream_stage: Some(internal),
+            contract_reader_count: 1,
+            drain_is_terminal: true,
+        },
     );
 
     assert_eq!(
@@ -260,12 +266,14 @@ fn resolve_control_event_drain_respects_stage_policy() {
         &envelope,
         &strategy,
         &mut crate::stages::common::control_strategies::ProcessingContext::new(),
-        None,
-        Some(&mut guard),
-        None,
-        Some(stage),
-        1,
-        true,
+        ControlResolutionInputs {
+            cycle_config: None,
+            cycle_guard: Some(&mut guard),
+            eof_outcome: None,
+            upstream_stage: Some(stage),
+            contract_reader_count: 1,
+            drain_is_terminal: true,
+        },
     );
     assert_eq!(
         terminal,
@@ -277,12 +285,14 @@ fn resolve_control_event_drain_respects_stage_policy() {
         &envelope,
         &strategy,
         &mut crate::stages::common::control_strategies::ProcessingContext::new(),
-        None,
-        Some(&mut guard),
-        None,
-        Some(stage),
-        1,
-        false,
+        ControlResolutionInputs {
+            cycle_config: None,
+            cycle_guard: Some(&mut guard),
+            eof_outcome: None,
+            upstream_stage: Some(stage),
+            contract_reader_count: 1,
+            drain_is_terminal: false,
+        },
     );
     assert_eq!(
         non_terminal,
@@ -320,12 +330,14 @@ fn resolve_forward_control_event_notes_cycle_eof_before_resolving() {
     let resolution = resolve_forward_control_event(
         signal,
         &envelope,
-        None,
-        Some(&mut guard),
-        Some(&eof_outcome),
-        Some(upstream),
-        1,
-        true,
+        ControlResolutionInputs {
+            cycle_config: None,
+            cycle_guard: Some(&mut guard),
+            eof_outcome: Some(&eof_outcome),
+            upstream_stage: Some(upstream),
+            contract_reader_count: 1,
+            drain_is_terminal: true,
+        },
     );
 
     assert_eq!(resolution, ControlAction::ForwardAndDrain);
@@ -354,12 +366,14 @@ fn resolve_forward_control_event_does_not_note_non_terminal_forwarded_eof() {
     let resolution = resolve_forward_control_event(
         signal,
         &envelope,
-        None,
-        Some(&mut guard),
-        None,
-        Some(upstream),
-        1,
-        true,
+        ControlResolutionInputs {
+            cycle_config: None,
+            cycle_guard: Some(&mut guard),
+            eof_outcome: None,
+            upstream_stage: Some(upstream),
+            contract_reader_count: 1,
+            drain_is_terminal: true,
+        },
     );
 
     assert_eq!(resolution, ControlAction::Forward);
@@ -433,12 +447,14 @@ fn resolve_control_event_delay_does_not_note_cycle_guard() {
         &envelope,
         &strategy,
         &mut crate::stages::common::control_strategies::ProcessingContext::new(),
-        None,
-        Some(&mut guard),
-        None,
-        Some(upstream),
-        1,
-        true,
+        ControlResolutionInputs {
+            cycle_config: None,
+            cycle_guard: Some(&mut guard),
+            eof_outcome: None,
+            upstream_stage: Some(upstream),
+            contract_reader_count: 1,
+            drain_is_terminal: true,
+        },
     );
 
     assert_eq!(
@@ -475,12 +491,14 @@ fn resolve_control_event_delay_then_reconsult_notes_cycle_guard_on_second_pass()
         &envelope,
         &strategy,
         &mut processing_ctx,
-        None,
-        Some(&mut guard),
-        None,
-        Some(upstream),
-        1,
-        true,
+        ControlResolutionInputs {
+            cycle_config: None,
+            cycle_guard: Some(&mut guard),
+            eof_outcome: None,
+            upstream_stage: Some(upstream),
+            contract_reader_count: 1,
+            drain_is_terminal: true,
+        },
     );
     assert_eq!(
         first_pass,
@@ -496,12 +514,14 @@ fn resolve_control_event_delay_then_reconsult_notes_cycle_guard_on_second_pass()
         &envelope,
         &strategy,
         &mut processing_ctx,
-        None,
-        Some(&mut guard),
-        None,
-        Some(upstream),
-        1,
-        true,
+        ControlResolutionInputs {
+            cycle_config: None,
+            cycle_guard: Some(&mut guard),
+            eof_outcome: None,
+            upstream_stage: Some(upstream),
+            contract_reader_count: 1,
+            drain_is_terminal: true,
+        },
     );
     assert_eq!(
         second_pass,
@@ -1032,20 +1052,20 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
             healthy_reader.ack_consumed(1);
         }
         let pending = pending_outputs.pop_front().expect("requeued pending");
-        match drain_one_pending(
+        match drain_one_pending(DrainRequest {
             pending,
-            &flow_context,
-            t,
-            None,
-            &data_journal,
-            None,
-            &instrumentation,
-            &writer,
-            &mut pulse,
-            &mut stall,
-            Some(&output_contract),
-            &mut pending_outputs,
-        )
+            flow_context: &flow_context,
+            stage_id: t,
+            heartbeat_state: None,
+            data_journal: &data_journal,
+            pending_parent: None,
+            instrumentation: &instrumentation,
+            backpressure_writer: &writer,
+            backpressure_pulse: &mut pulse,
+            backpressure_stall: &mut stall,
+            output_contract: Some(&output_contract),
+            pending_outputs: &mut pending_outputs,
+        })
         .await
         {
             Ok(DrainOutcome::BackedOff) => continue,
@@ -1260,8 +1280,8 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                         stage_id,
                         obzenflow_core::event::context::StageType::Transform,
                     );
-                    drain_one_pending(
-                        super::backpressure_drain::PendingOutput {
+                    drain_one_pending(DrainRequest {
+                        pending: super::backpressure_drain::PendingOutput {
                             causal: crate::supervised_base::publication::capture(),
                             event: ChainEventFactory::data_event(
                                 WriterId::from(stage_id),
@@ -1271,18 +1291,18 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                             ),
                             scope: MiddlewareExecutionScope::LiveHandler,
                         },
-                        &flow_context,
+                        flow_context: &flow_context,
                         stage_id,
-                        None,
-                        &data_journal,
-                        None,
-                        &stage_instrumentation,
-                        &stage_writer,
-                        &mut BackpressureActivityPulse::new(),
-                        &mut crate::backpressure::StallEpisode::default(),
-                        Some(&output_contract_for_event_type("x")),
-                        &mut VecDeque::new(),
-                    )
+                        heartbeat_state: None,
+                        data_journal: &data_journal,
+                        pending_parent: None,
+                        instrumentation: &stage_instrumentation,
+                        backpressure_writer: &stage_writer,
+                        backpressure_pulse: &mut BackpressureActivityPulse::new(),
+                        backpressure_stall: &mut crate::backpressure::StallEpisode::default(),
+                        output_contract: Some(&output_contract_for_event_type("x")),
+                        pending_outputs: &mut VecDeque::new(),
+                    })
                     .await
                 })
                 .await
@@ -1381,24 +1401,24 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         json!({"n": 1}),
     );
 
-    let outcome = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let outcome = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
-        &flow_context,
+        flow_context: &flow_context,
         stage_id,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        Some(&output_contract),
-        &mut pending_outputs,
-    )
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: Some(&output_contract),
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect("drain_one_pending");
 
@@ -1442,24 +1462,24 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         json!({"n": 1}),
     );
 
-    let outcome = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let outcome = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
-        &flow_context,
+        flow_context: &flow_context,
         stage_id,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        Some(&output_contract),
-        &mut pending_outputs,
-    )
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: Some(&output_contract),
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect("semantic event should satisfy versioned contract");
 
@@ -1500,24 +1520,24 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
         json!({"n": 1}),
     );
 
-    let err = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let err = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
-        &flow_context,
+        flow_context: &flow_context,
         stage_id,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        Some(&output_contract),
-        &mut pending_outputs,
-    )
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: Some(&output_contract),
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect_err("undeclared output must fail closed");
 
@@ -1559,24 +1579,24 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
 
     let event = ChainEventFactory::drain_event(WriterId::from(stage_id));
 
-    let outcome = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let outcome = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
-        &flow_context,
+        flow_context: &flow_context,
         stage_id,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        None,
-        &mut pending_outputs,
-    )
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: None,
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect("drain_one_pending");
 
@@ -1626,24 +1646,24 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
-    let outcome = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let outcome = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
-        &flow_context,
+        flow_context: &flow_context,
         stage_id,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        None,
-        &mut pending_outputs,
-    )
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: None,
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect("local terminal should seal");
     assert_eq!(outcome, DrainOutcome::Committed { was_data: false });
@@ -1721,24 +1741,24 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
-    let error = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let error = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
-        &flow_context,
+        flow_context: &flow_context,
         stage_id,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        None,
-        &mut pending_outputs,
-    )
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: None,
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect_err("conflicting terminal evidence must fail closed");
     assert!(
@@ -1767,24 +1787,24 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         *writer_id = Some(WriterId::from(foreign_stage));
     }
 
-    let error = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let error = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
-        &flow_context,
+        flow_context: &flow_context,
         stage_id,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        None,
-        &mut pending_outputs,
-    )
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: None,
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect_err("conflicting terminal writer must fail closed");
     assert!(
@@ -1830,24 +1850,24 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
     );
     let id = event.id;
 
-    let outcome = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let outcome = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
-        &flow_context,
+        flow_context: &flow_context,
         stage_id,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        None,
-        &mut pending_outputs,
-    )
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: None,
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect("drain_one_pending");
 
@@ -1908,8 +1928,8 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
 
-    let outcome = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let outcome = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(
                 WriterId::from(s),
@@ -1919,18 +1939,18 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
             ),
             scope,
         },
-        &flow_context,
-        s,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        Some(&output_contract),
-        &mut pending_outputs,
-    )
+        flow_context: &flow_context,
+        stage_id: s,
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: Some(&output_contract),
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect("reconstruction drain commits");
 
@@ -1978,8 +1998,8 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
 
     // The gate is scope-driven, not credit-driven: a second reconstruction
     // output at still-zero live credit also commits without blocking.
-    let outcome2 = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let outcome2 = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(
                 WriterId::from(s),
@@ -1989,18 +2009,18 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
             ),
             scope,
         },
-        &flow_context,
-        s,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        Some(&output_contract),
-        &mut pending_outputs,
-    )
+        flow_context: &flow_context,
+        stage_id: s,
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: Some(&output_contract),
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect("second reconstruction drain commits");
     assert_eq!(outcome2, DrainOutcome::Committed { was_data: true });
@@ -2062,8 +2082,8 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     // Catch-up: three recorded outputs commit in track mode with a downstream
     // that never acks, building a backlog of 3 against a window of 2.
     for n in 0..3 {
-        let outcome = drain_one_pending(
-            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+        let outcome = drain_one_pending(DrainRequest {
+            pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
                 causal: crate::supervised_base::publication::capture(),
                 event: ChainEventFactory::data_event(
                     WriterId::from(s),
@@ -2073,18 +2093,18 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
                 ),
                 scope: MiddlewareExecutionScope::ResumeHandler,
             },
-            &flow_context,
-            s,
-            None,
-            &data_journal,
-            None,
-            &instrumentation,
-            &writer,
-            &mut pulse,
-            &mut stall,
-            Some(&output_contract),
-            &mut pending_outputs,
-        )
+            flow_context: &flow_context,
+            stage_id: s,
+            heartbeat_state: None,
+            data_journal: &data_journal,
+            pending_parent: None,
+            instrumentation: &instrumentation,
+            backpressure_writer: &writer,
+            backpressure_pulse: &mut pulse,
+            backpressure_stall: &mut stall,
+            output_contract: Some(&output_contract),
+            pending_outputs: &mut pending_outputs,
+        })
         .await
         .expect("catch-up drain commits");
         assert_eq!(outcome, DrainOutcome::Committed { was_data: true });
@@ -2102,8 +2122,8 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
 
     // Handoff: the first live output gates on the true backlog (3 in flight
     // against a window of 2), returns BackedOff, and anchors the stall clock.
-    let outcome = drain_one_pending(
-        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+    let outcome = drain_one_pending(DrainRequest {
+        pending: crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(
                 WriterId::from(s),
@@ -2113,18 +2133,18 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
             ),
             scope: MiddlewareExecutionScope::LiveHandler,
         },
-        &flow_context,
-        s,
-        None,
-        &data_journal,
-        None,
-        &instrumentation,
-        &writer,
-        &mut pulse,
-        &mut stall,
-        Some(&output_contract),
-        &mut pending_outputs,
-    )
+        flow_context: &flow_context,
+        stage_id: s,
+        heartbeat_state: None,
+        data_journal: &data_journal,
+        pending_parent: None,
+        instrumentation: &instrumentation,
+        backpressure_writer: &writer,
+        backpressure_pulse: &mut pulse,
+        backpressure_stall: &mut stall,
+        output_contract: Some(&output_contract),
+        pending_outputs: &mut pending_outputs,
+    })
     .await
     .expect("handoff drain");
     assert_eq!(
@@ -2210,20 +2230,20 @@ impl RecordedBacklogHandoff {
 
     async fn drain(&mut self) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
         let pending = self.pending_outputs.pop_front().expect("a queued output");
-        drain_one_pending(
+        drain_one_pending(DrainRequest {
             pending,
-            &self.flow_context,
-            self.stage,
-            None,
-            &self.data_journal,
-            None,
-            &self.instrumentation,
-            &self.writer,
-            &mut self.pulse,
-            &mut self.stall,
-            Some(&self.output_contract),
-            &mut self.pending_outputs,
-        )
+            flow_context: &self.flow_context,
+            stage_id: self.stage,
+            heartbeat_state: None,
+            data_journal: &self.data_journal,
+            pending_parent: None,
+            instrumentation: &self.instrumentation,
+            backpressure_writer: &self.writer,
+            backpressure_pulse: &mut self.pulse,
+            backpressure_stall: &mut self.stall,
+            output_contract: Some(&self.output_contract),
+            pending_outputs: &mut self.pending_outputs,
+        })
         .await
     }
 

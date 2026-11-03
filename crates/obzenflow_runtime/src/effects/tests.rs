@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::identity::OutputPosition;
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
 use crate::id_conversions::StageIdExt;
@@ -1659,10 +1660,12 @@ fn deterministic_typed_output_events_preserve_ordinals() {
         writer_id,
         &parent,
         FirstOutput { value: 1 },
-        "flow-a",
-        "stage-a",
-        StageInputPosition(4),
-        2,
+        OutputPosition {
+            recorded_flow_id: "flow-a",
+            stage_key: "stage-a",
+            input_seq: StageInputPosition(4),
+            output_ordinal: 2.into(),
+        },
         obzenflow_core::config::LineagePolicy::default(),
     )
     .expect("first output event");
@@ -1672,10 +1675,12 @@ fn deterministic_typed_output_events_preserve_ordinals() {
         SecondOutput {
             value: "two".to_string(),
         },
-        "flow-a",
-        "stage-a",
-        StageInputPosition(4),
-        3,
+        OutputPosition {
+            recorded_flow_id: "flow-a",
+            stage_key: "stage-a",
+            input_seq: StageInputPosition(4),
+            output_ordinal: 3.into(),
+        },
         obzenflow_core::config::LineagePolicy::default(),
     )
     .expect("second output event");

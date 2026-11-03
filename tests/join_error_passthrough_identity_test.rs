@@ -6,7 +6,15 @@
 //! own error journal, so the join receives only valid rows and joins them all.
 
 use obzenflow_core::event::{ChainPayload, JournalRecord};
-mod replay_testkit;
+mod replay_testkit {
+    mod failures;
+    mod journal;
+    mod manifest;
+    mod run_dir;
+    mod stage_journal;
+    mod stage_writer;
+    pub use self::{failures::*, run_dir::*, stage_journal::*, stage_writer::*};
+}
 
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};

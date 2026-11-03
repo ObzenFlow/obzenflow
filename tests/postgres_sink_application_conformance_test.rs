@@ -4,7 +4,19 @@
 
 #![cfg(all(feature = "postgres", feature = "test-support"))]
 
-mod replay_testkit;
+mod replay_testkit {
+    mod delivered_order;
+    mod journal;
+    mod manifest;
+    mod ordered_journal;
+    mod ordered_stage_journal;
+    mod run_dir;
+    mod same_delivered_order;
+    mod stage_journal;
+    pub use self::{
+        delivered_order::*, manifest::*, ordered_journal::*, run_dir::*, same_delivered_order::*,
+    };
+}
 
 use async_trait::async_trait;
 use obzenflow::stages::sinks::postgres::testing::{

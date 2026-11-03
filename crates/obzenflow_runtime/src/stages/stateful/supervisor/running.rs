@@ -10,11 +10,11 @@ use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{
-    drain_one_pending, DrainOutcome, PendingOutput,
+    drain_one_pending, DrainOutcome, DrainRequest, PendingOutput,
 };
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event_awaiting_pauses, ControlAction,
+    resolve_control_event_awaiting_pauses, ControlAction, ControlResolutionInputs,
 };
 use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -75,20 +75,20 @@ pub(super) async fn dispatch_accumulating<
     // Drain any pending outputs from a prior emission before polling upstream again
     // (bounded to one emission; FLOWIP-086k).
     while let Some(pending) = ctx.pending_outputs.pop_front() {
-        match drain_one_pending(
+        match drain_one_pending(DrainRequest {
             pending,
-            &flow_context,
-            sup.stage_id,
-            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-            &ctx.data_journal,
-            ctx.last_consumed_envelope.as_ref(),
-            &ctx.instrumentation,
-            &ctx.backpressure_writer,
-            &mut ctx.backpressure_pulse,
-            &mut ctx.backpressure_stall,
-            Some(&ctx.output_contract),
-            &mut ctx.pending_outputs,
-        )
+            flow_context: &flow_context,
+            stage_id: sup.stage_id,
+            heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+            data_journal: &ctx.data_journal,
+            pending_parent: ctx.last_consumed_envelope.as_ref(),
+            instrumentation: &ctx.instrumentation,
+            backpressure_writer: &ctx.backpressure_writer,
+            backpressure_pulse: &mut ctx.backpressure_pulse,
+            backpressure_stall: &mut ctx.backpressure_stall,
+            output_contract: Some(&ctx.output_contract),
+            pending_outputs: &mut ctx.pending_outputs,
+        })
         .await?
         {
             DrainOutcome::Committed { was_data } => {
@@ -224,12 +224,14 @@ pub(super) async fn dispatch_accumulating<
                         &envelope,
                         ctx.control_strategy.as_ref(),
                         &mut ctx.processing_context,
-                        /* cycle_config */ None,
-                        /* cycle_guard */ None,
-                        last_eof_outcome.as_ref(),
-                        upstream_stage,
-                        contract_reader_count,
-                        /* drain_is_terminal */ true,
+                        ControlResolutionInputs {
+                            cycle_config: None,
+                            cycle_guard: None,
+                            eof_outcome: last_eof_outcome.as_ref(),
+                            upstream_stage,
+                            contract_reader_count,
+                            drain_is_terminal: true,
+                        },
                         &ctx.stage_name,
                     )
                     .await;
@@ -695,20 +697,20 @@ pub(super) async fn dispatch_emitting<
         )
     {
         while let Some(pending) = ctx.pending_outputs.pop_front() {
-            match drain_one_pending(
+            match drain_one_pending(DrainRequest {
                 pending,
-                &flow_context,
-                sup.stage_id,
-                ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-                &ctx.data_journal,
-                ctx.last_consumed_envelope.as_ref(),
-                &ctx.instrumentation,
-                &ctx.backpressure_writer,
-                &mut ctx.backpressure_pulse,
-                &mut ctx.backpressure_stall,
-                Some(&ctx.output_contract),
-                &mut ctx.pending_outputs,
-            )
+                flow_context: &flow_context,
+                stage_id: sup.stage_id,
+                heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+                data_journal: &ctx.data_journal,
+                pending_parent: ctx.last_consumed_envelope.as_ref(),
+                instrumentation: &ctx.instrumentation,
+                backpressure_writer: &ctx.backpressure_writer,
+                backpressure_pulse: &mut ctx.backpressure_pulse,
+                backpressure_stall: &mut ctx.backpressure_stall,
+                output_contract: Some(&ctx.output_contract),
+                pending_outputs: &mut ctx.pending_outputs,
+            })
             .await?
             {
                 DrainOutcome::Committed { was_data } => {

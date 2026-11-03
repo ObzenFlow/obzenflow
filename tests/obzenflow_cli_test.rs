@@ -10,7 +10,13 @@
 //! uncertified verdicts are exercised in-process by the other verification
 //! suites; the contract mapping itself is unit-tested in `verdict`.)
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    mod journal;
+    mod manifest;
+    mod stage_journal;
+    pub use self::{discard::*, stage_journal::*};
+}
 
 use obzenflow::application::FlowApplication;
 use obzenflow::flow::{flow, sink, source, FlowDefinition};

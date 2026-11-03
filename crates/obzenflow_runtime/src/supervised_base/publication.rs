@@ -1243,11 +1243,7 @@ mod tests {
     async fn accounting_panic_is_a_retained_settlement_failure() {
         let scope = PublicationScope::new();
         let error = scope
-            .accept(async {
-                panic!("accounting failed");
-                #[allow(unreachable_code)]
-                Ok::<(), BoxError>(())
-            })
+            .accept::<()>(async { panic!("accounting failed") })
             .await
             .unwrap_err();
         assert!(error.to_string().contains("accounting panicked"));

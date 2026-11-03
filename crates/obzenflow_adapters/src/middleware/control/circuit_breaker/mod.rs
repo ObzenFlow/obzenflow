@@ -927,7 +927,10 @@ impl CircuitBreakerMiddleware {
             CircuitState::Open => {
                 if self.should_attempt_reset() {
                     let transition_event = {
-                        let _probe_gate = self.probe_gate.lock().ok();
+                        let _probe_gate = self
+                            .probe_gate
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let (transitioned, event) =
                             self.transition_to_inner(CircuitState::HalfOpen);
                         if transitioned {
@@ -955,7 +958,10 @@ impl CircuitBreakerMiddleware {
     /// Reserve a half-open probe slot via the shared CAS loop, or back off
     /// briefly when all slots are in use.
     fn source_reserve_probe(&self, event: Option<ChainEvent>) -> SourceAdmit {
-        let _probe_gate = self.probe_gate.lock().ok();
+        let _probe_gate = self
+            .probe_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let generation = self.probe_generation.load(Ordering::SeqCst);
         let permitted = self.half_open_policy.permitted_probes.get();
         let mut current = self.probe_in_flight.load(Ordering::SeqCst);
@@ -1012,11 +1018,14 @@ impl CircuitBreakerMiddleware {
         let pending = self
             .source_pending_probe
             .lock()
-            .ok()
-            .and_then(|mut pending| pending.take());
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
 
         if let Some(generation) = pending {
-            let _probe_gate = self.probe_gate.lock().ok();
+            let _probe_gate = self
+                .probe_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
 
             if generation == self.probe_generation.load(Ordering::SeqCst)
                 && matches!(self.current_state(), CircuitState::HalfOpen)
@@ -1067,7 +1076,10 @@ impl CircuitBreakerMiddleware {
     /// rejected by a later policy. No breaker outcome is classified.
     pub(in crate::middleware::control) fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
         if ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false) {
-            let _probe_gate = self.probe_gate.lock().ok();
+            let _probe_gate = self
+                .probe_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             drop(ctx.remove::<CircuitBreakerProbeSlot>());
         }
         self.maybe_emit_summary(ctx);

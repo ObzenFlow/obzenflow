@@ -2,7 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    mod ordered_journal;
+    pub use self::ordered_journal::*;
+}
 
 #[path = "../examples/hn_ai_digest_demo/config.rs"]
 mod config;
@@ -10,8 +14,10 @@ mod config;
 mod decoder;
 #[path = "../examples/hn_ai_digest_demo/domain.rs"]
 mod domain;
-#[path = "test_support/exported_jsonl.rs"]
-mod exported_jsonl;
+mod exported_jsonl {
+    mod omit_observations;
+    pub use self::omit_observations::*;
+}
 #[path = "support/fake_ai.rs"]
 pub mod fake_ai;
 #[path = "../examples/hn_ai_digest_demo/flow.rs"]
@@ -19,8 +25,10 @@ mod hn_demo_flow;
 #[path = "../examples/hn_ai_digest_demo/mock_server.rs"]
 mod mock_server;
 #[cfg(feature = "e2e")]
-#[path = "support/postgres.rs"]
-mod postgres_support;
+mod postgres_support {
+    mod pool;
+    pub use self::pool::*;
+}
 #[path = "../examples/hn_ai_digest_demo/util.rs"]
 mod util;
 

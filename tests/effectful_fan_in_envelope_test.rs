@@ -12,7 +12,16 @@
 //! recorded outcome and zero re-execution, with identical cursors across
 //! live, replay, and replay-of-replay.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod delivered_order;
+    mod journal;
+    mod manifest;
+    mod ordered_stage_journal;
+    mod prefix_stable;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{ordered_stage_journal::*, prefix_stable::*, run_dir::*};
+}
 
 use async_trait::async_trait;
 use obzenflow_core::{event::ChainPayload, TypedPayload};

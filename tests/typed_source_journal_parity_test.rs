@@ -4,7 +4,12 @@
 
 //! FLOWIP-134g journal oracle for all four typed source variants.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod count_deliveries;
+    mod discard;
+    mod journal;
+    pub use self::{count_deliveries::*, discard::*, journal::*};
+}
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;

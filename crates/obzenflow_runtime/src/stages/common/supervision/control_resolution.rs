@@ -48,6 +48,28 @@ pub(crate) enum ControlResolution {
     Pause(std::time::Duration),
 }
 
+pub(crate) struct ControlResolutionInputs<'a> {
+    pub(crate) cycle_config: Option<&'a CycleGuardConfig>,
+    pub(crate) cycle_guard: Option<&'a mut CycleGuard>,
+    pub(crate) eof_outcome: Option<&'a EofOutcome>,
+    pub(crate) upstream_stage: Option<StageId>,
+    pub(crate) contract_reader_count: usize,
+    pub(crate) drain_is_terminal: bool,
+}
+
+impl ControlResolutionInputs<'_> {
+    fn reborrow(&mut self) -> ControlResolutionInputs<'_> {
+        ControlResolutionInputs {
+            cycle_config: self.cycle_config,
+            cycle_guard: self.cycle_guard.as_deref_mut(),
+            eof_outcome: self.eof_outcome,
+            upstream_stage: self.upstream_stage,
+            contract_reader_count: self.contract_reader_count,
+            drain_is_terminal: self.drain_is_terminal,
+        }
+    }
+}
+
 /// Resolve a control event, awaiting every `Pause` and re-consulting the same
 /// signal hook after each wake.
 ///
@@ -55,18 +77,12 @@ pub(crate) enum ControlResolution {
 /// while they are inside this wait. That is intentional: strategies that return
 /// repeated pauses must be self-limiting through a bounded deadline, attempt
 /// count, or other state in [`ProcessingContext`].
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_control_event_awaiting_pauses(
     signal: &FlowControlPayload,
     envelope: &JournalRecord<ChainPayload>,
     strategy: &dyn SignalGate,
     processing_ctx: &mut ProcessingContext,
-    cycle_config: Option<&CycleGuardConfig>,
-    mut cycle_guard: Option<&mut CycleGuard>,
-    eof_outcome: Option<&EofOutcome>,
-    upstream_stage: Option<StageId>,
-    contract_reader_count: usize,
-    drain_is_terminal: bool,
+    mut inputs: ControlResolutionInputs<'_>,
     stage_name: &str,
 ) -> ControlAction {
     loop {
@@ -75,12 +91,7 @@ pub(crate) async fn resolve_control_event_awaiting_pauses(
             envelope,
             strategy,
             processing_ctx,
-            cycle_config,
-            cycle_guard.as_deref_mut(),
-            eof_outcome,
-            upstream_stage,
-            contract_reader_count,
-            drain_is_terminal,
+            inputs.reborrow(),
         ) {
             ControlResolution::Ready(action) => return action,
             ControlResolution::Pause(duration) => {
@@ -120,47 +131,36 @@ pub(crate) async fn await_signal_gate(
 ///
 /// This function performs the "resolve" phase (FLOWIP-051m): it computes the
 /// decision synchronously without performing any I/O.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_control_event(
     signal: &FlowControlPayload,
     envelope: &JournalRecord<ChainPayload>,
     strategy: &dyn SignalGate,
     processing_ctx: &mut ProcessingContext,
-    cycle_config: Option<&CycleGuardConfig>,
-    cycle_guard: Option<&mut CycleGuard>,
-    eof_outcome: Option<&EofOutcome>,
-    upstream_stage: Option<StageId>,
-    contract_reader_count: usize,
-    drain_is_terminal: bool,
+    inputs: ControlResolutionInputs<'_>,
 ) -> ControlResolution {
     let action = dispatch_control_signal(strategy, signal, envelope, processing_ctx);
 
     match action {
         SignalDecision::Pause(duration) => ControlResolution::Pause(duration),
-        SignalDecision::Continue => ControlResolution::Ready(resolve_forward_control_event(
-            signal,
-            envelope,
-            cycle_config,
-            cycle_guard,
-            eof_outcome,
-            upstream_stage,
-            contract_reader_count,
-            drain_is_terminal,
-        )),
+        SignalDecision::Continue => {
+            ControlResolution::Ready(resolve_forward_control_event(signal, envelope, inputs))
+        }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_forward_control_event(
     signal: &FlowControlPayload,
     envelope: &JournalRecord<ChainPayload>,
-    cycle_config: Option<&CycleGuardConfig>,
-    mut cycle_guard: Option<&mut CycleGuard>,
-    eof_outcome: Option<&EofOutcome>,
-    upstream_stage: Option<StageId>,
-    contract_reader_count: usize,
-    drain_is_terminal: bool,
+    inputs: ControlResolutionInputs<'_>,
 ) -> ControlAction {
+    let ControlResolutionInputs {
+        cycle_config,
+        mut cycle_guard,
+        eof_outcome,
+        upstream_stage,
+        contract_reader_count,
+        drain_is_terminal,
+    } = inputs;
     if envelope.is_eof() {
         // The SCC entry point buffers external EOF and suppresses all other EOF
         // signals, so it does not participate in cycle-boundary drain readiness.

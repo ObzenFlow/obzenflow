@@ -154,15 +154,17 @@ where
                     })?;
                     let public_fact_count = facts.len();
                     let events = build_domain_effect_success_facts(
-                        self.inner.writer_id,
-                        &self.inner.parent,
-                        self.inner.cursor.clone(),
-                        self.inner.descriptor_hash.clone(),
-                        self.inner.descriptor.clone(),
+                        EffectFactAuthoring {
+                            writer_id: self.inner.writer_id,
+                            parent: &self.inner.parent,
+                            lineage: self.inner.lineage,
+                            cursor: self.inner.cursor.clone(),
+                            descriptor_hash: self.inner.descriptor_hash.clone(),
+                            descriptor: self.inner.descriptor.clone(),
+                        },
                         facts,
                         output_ordinal,
                         Some(EffectFactOrigin::Effect),
-                        self.inner.lineage,
                     )?;
                     (
                         EffectOutcomeKind::DomainFacts,
@@ -497,18 +499,29 @@ pub(super) fn build_effect_recovery_abandoned_event(
     Ok(event)
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct EffectFactAuthoring<'a> {
+    pub(super) writer_id: WriterId,
+    pub(super) parent: &'a DeliveredRecord<ChainPayload>,
+    pub(super) lineage: obzenflow_core::config::LineagePolicy,
+    pub(super) cursor: EffectCursor,
+    pub(super) descriptor_hash: EffectDescriptorHash,
+    pub(super) descriptor: EffectDescriptor,
+}
+
 pub(super) fn build_domain_effect_success_facts(
-    writer_id: WriterId,
-    parent: &DeliveredRecord<ChainPayload>,
-    cursor: EffectCursor,
-    descriptor_hash: EffectDescriptorHash,
-    descriptor: EffectDescriptor,
+    authoring: EffectFactAuthoring<'_>,
     facts: Vec<TypedFact>,
     base_output_ordinal: EffectOutputOrdinal,
     origin: Option<EffectFactOrigin>,
-    lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<Vec<ChainEvent>, EffectError> {
+    let EffectFactAuthoring {
+        writer_id,
+        parent,
+        lineage,
+        cursor,
+        descriptor_hash,
+        descriptor,
+    } = authoring;
     if facts.is_empty() {
         return Err(EffectError::Execution(
             "domain effect outcome append requires at least one fact".to_string(),
@@ -575,27 +588,11 @@ pub(super) fn build_domain_effect_success_facts(
     Ok(events)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn append_domain_effect_success_facts(
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    flow_context: Option<&FlowContext>,
-    instrumentation: Option<&Arc<StageInstrumentation>>,
-    heartbeat_state: Option<&Arc<HeartbeatState>>,
-    output_contract: Option<&StageOutputContract>,
-    backpressure_writer: &BackpressureWriter,
+    committer: &OutputCommitter<'_>,
     parent: &DeliveredRecord<ChainPayload>,
     events: Vec<ChainEvent>,
 ) -> Result<Vec<ChainEvent>, EffectError> {
-    let committer = OutputCommitter {
-        data_journal,
-        flow_context,
-        instrumentation,
-        heartbeat_state,
-        output_contract,
-        backpressure_writer: Some(backpressure_writer),
-        observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
-    };
-
     for event in &events {
         committer
             .commit_prebuilt(

@@ -13,7 +13,10 @@
 //! named exclusion. Sink delivery rows are independently excluded by the
 //! projection's receipt-lane rule.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    pub use self::discard::*;
+}
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;

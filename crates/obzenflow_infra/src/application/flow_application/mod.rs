@@ -210,6 +210,7 @@ impl LogLevel {
 #[derive(Default)]
 pub struct FlowApplicationBuilder {
     console_subscriber: bool,
+    #[cfg(feature = "tokio-console")]
     console_bind: Option<String>,
     log_level: Option<LogLevel>,
     config_file: Option<PathBuf>,
@@ -251,6 +252,7 @@ impl FlowApplicationBuilder {
     /// Set the default Console bind address, below CLI, file and TOKIO_CONSOLE_BIND.
     ///
     /// Default is "127.0.0.1:6669"
+    #[cfg(feature = "tokio-console")]
     pub fn with_console_bind(mut self, bind: impl Into<String>) -> Self {
         self.console_bind = Some(bind.into());
         self
@@ -450,6 +452,7 @@ impl FlowApplicationBuilder {
         LaunchParams {
             console_defaults: ConsoleDefaults {
                 enabled: self.console_subscriber,
+                #[cfg(feature = "tokio-console")]
                 bind: self.console_bind,
             },
             log_level: self.log_level,

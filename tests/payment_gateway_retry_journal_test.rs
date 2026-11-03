@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "test_support/exported_jsonl.rs"]
-mod exported_jsonl;
+mod exported_jsonl {
+    mod chain;
+    pub use self::chain::*;
+}
 #[path = "../examples/payment_gateway_resilience/domain.rs"]
 pub mod payment_domain;
 #[path = "test_support/payment_gateway_retry_fixture.rs"]

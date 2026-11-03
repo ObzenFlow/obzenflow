@@ -383,7 +383,10 @@ impl RateLimiterCore {
     /// pulse accumulators. Returns `None` when no pulse is due or there were no
     /// delayed events in the window.
     pub(crate) fn take_due_pulse(&self, now: Instant) -> Option<RateLimitPulse> {
-        let mut stats = self.stats.lock().ok()?;
+        let mut stats = self
+            .stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let elapsed = now.duration_since(stats.pulse_window_start);
         if elapsed < ACTIVITY_PULSE_WINDOW {
             return None;
@@ -414,7 +417,10 @@ impl RateLimiterCore {
     /// hysteresis and resetting the window counters. Returns `None` when no
     /// summary is due.
     pub(crate) fn take_due_summary(&self, now: Instant) -> Option<RateLimitSummary> {
-        let mut stats = self.stats.lock().ok()?;
+        let mut stats = self
+            .stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Emit a summary every 10 seconds or every 1000 processed events.
         let window_duration = now.duration_since(stats.last_summary);

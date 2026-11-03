@@ -15,7 +15,7 @@ use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{
     acquire_direct_fact_lease, drain_one_pending, DirectFactLeaseRequest, DrainOutcome,
-    PendingOutput,
+    DrainRequest, PendingOutput,
 };
 use crate::stages::common::supervision::error_routing::{
     error_row_in_scope, processing_failed, route_to_error_journal,
@@ -356,22 +356,20 @@ async fn finish_success<
     }
 
     while let Some(output) = pending.pop_front() {
-        match drain_one_pending(
-            output,
+        match drain_one_pending(DrainRequest {
+            pending: output,
             flow_context,
-            sup.stage_id,
-            ctx.heartbeat
-                .as_ref()
-                .map(|heartbeat| heartbeat.state.clone()),
-            &ctx.data_journal,
-            Some(&continuation.envelope),
-            &ctx.instrumentation,
-            &ctx.backpressure_writer,
-            &mut ctx.backpressure_pulse,
-            &mut ctx.backpressure_stall,
-            Some(&ctx.output_contract),
-            &mut pending,
-        )
+            stage_id: sup.stage_id,
+            heartbeat_state: ctx.heartbeat.as_ref().map(|heartbeat| &heartbeat.state),
+            data_journal: &ctx.data_journal,
+            pending_parent: Some(&continuation.envelope),
+            instrumentation: &ctx.instrumentation,
+            backpressure_writer: &ctx.backpressure_writer,
+            backpressure_pulse: &mut ctx.backpressure_pulse,
+            backpressure_stall: &mut ctx.backpressure_stall,
+            output_contract: Some(&ctx.output_contract),
+            pending_outputs: &mut pending,
+        })
         .await
         {
             Ok(DrainOutcome::Committed { was_data: false }) => {}

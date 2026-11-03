@@ -16,7 +16,10 @@
 //! orders by admission sequence, reproducible under replay but
 //! arrival-dependent across independent live runs).
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    pub use self::discard::*;
+}
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;

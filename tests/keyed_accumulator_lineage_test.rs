@@ -2,7 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    mod journal;
+    mod manifest;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{discard::*, run_dir::*, stage_journal::*};
+}
 
 use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::{EventId, TypedPayload};

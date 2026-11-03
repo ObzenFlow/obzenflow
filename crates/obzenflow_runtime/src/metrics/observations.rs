@@ -637,7 +637,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::await_holding_lock)] // Deliberately force the sampler's nonblocking offer to lose contention.
     async fn heartbeat_refreshes_an_edge_after_a_dropped_transition() {
         use crate::stages::common::heartbeat::{
             spawn_heartbeat, HeartbeatConfig, HeartbeatProcessingGuard, HeartbeatState,
@@ -666,17 +665,27 @@ mod tests {
             execution.clone(),
         );
         tokio::task::yield_now().await;
-        {
-            let _held = observations.latest.view.lock().unwrap();
-            tokio::time::advance(Duration::from_secs(8)).await;
-            tokio::task::yield_now().await;
-            let snapshot = snapshots
-                .get(stage)
-                .expect("sampler ran while the handoff was locked");
-            assert_eq!(snapshot.edges[0].state, EdgeLivenessState::Idle);
-            assert_eq!(snapshot.edges[1].state, EdgeLivenessState::Healthy);
-            assert!(observations.latest.dropped.load(Ordering::Relaxed) > 0);
-        }
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let observations = Arc::clone(observations);
+            move || {
+                let _held = observations.latest.view.lock().unwrap();
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        });
+        held_rx.recv().unwrap();
+        tokio::time::advance(Duration::from_secs(8)).await;
+        tokio::task::yield_now().await;
+        let snapshot = snapshots
+            .get(stage)
+            .expect("sampler ran while the handoff was locked");
+        assert_eq!(snapshot.edges[0].state, EdgeLivenessState::Idle);
+        assert_eq!(snapshot.edges[1].state, EdgeLivenessState::Healthy);
+        assert!(observations.latest.dropped.load(Ordering::Relaxed) > 0);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
         assert!(!observations.snapshot().iter().any(|packet| {
             packet.records.iter().any(|record|
             matches!(record, ObservationRecord::EdgeLiveness { upstream, .. } if *upstream == idle)

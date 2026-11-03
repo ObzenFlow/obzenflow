@@ -4,10 +4,14 @@
 
 //! FLOWIP-134b journal oracle for scalar and dynamic synchronous transforms.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    mod journal;
+    mod ordered_journal;
+    pub use self::{discard::*, ordered_journal::*};
+}
 
-#[path = "../examples/csv_demo_support_sla/domain.rs"]
-#[allow(dead_code)]
+#[path = "../examples/csv_demo_support_sla/ticket.rs"]
 mod support_domain;
 
 use obzenflow_core::ai::{ChunkEnvelope, TokenCount};

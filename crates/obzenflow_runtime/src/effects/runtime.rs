@@ -1863,15 +1863,17 @@ impl EffectsCore {
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
         let mut committed_events = build_domain_effect_success_facts(
-            self.ctx.writer_id,
-            &self.ctx.parent,
-            cursor.clone(),
-            descriptor_hash,
-            descriptor,
+            EffectFactAuthoring {
+                writer_id: self.ctx.writer_id,
+                parent: &self.ctx.parent,
+                lineage: self.ctx.lineage,
+                cursor: cursor.clone(),
+                descriptor_hash,
+                descriptor,
+            },
             facts,
             output_ordinal,
             Some(EffectFactOrigin::Effect),
-            self.ctx.lineage,
         )?;
         for event in &mut committed_events {
             let provenance = event.effect_provenance.as_mut().ok_or_else(|| {
@@ -2915,15 +2917,17 @@ impl EffectsCore {
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
         let mut events = build_domain_effect_success_facts(
-            self.ctx.writer_id,
-            &self.ctx.parent,
-            cursor,
-            descriptor_hash,
-            descriptor,
+            EffectFactAuthoring {
+                writer_id: self.ctx.writer_id,
+                parent: &self.ctx.parent,
+                lineage: self.ctx.lineage,
+                cursor,
+                descriptor_hash,
+                descriptor,
+            },
             facts,
             output_ordinal,
             origin,
-            self.ctx.lineage,
         )?;
         for event in &mut events {
             self.stamp_idempotency_key(event);
@@ -2932,12 +2936,15 @@ impl EffectsCore {
         let committed_events = crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
             append_domain_effect_success_facts(
-                &self.ctx.data_journal,
-                self.ctx.flow_context.as_ref(),
-                self.ctx.instrumentation.as_ref(),
-                self.ctx.heartbeat_state.as_ref(),
-                Some(&self.ctx.output_contract),
-                &self.ctx.backpressure_writer,
+                &OutputCommitter {
+                    data_journal: &self.ctx.data_journal,
+                    flow_context: self.ctx.flow_context.as_ref(),
+                    instrumentation: self.ctx.instrumentation.as_ref(),
+                    heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+                    output_contract: Some(&self.ctx.output_contract),
+                    backpressure_writer: Some(&self.ctx.backpressure_writer),
+                    observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+                },
                 &self.ctx.parent,
                 events,
             ),
@@ -2969,15 +2976,17 @@ impl EffectsCore {
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
         let mut committed_events = build_domain_effect_success_facts(
-            self.ctx.writer_id,
-            &self.ctx.parent,
-            cursor.clone(),
-            descriptor_hash,
-            descriptor,
+            EffectFactAuthoring {
+                writer_id: self.ctx.writer_id,
+                parent: &self.ctx.parent,
+                lineage: self.ctx.lineage,
+                cursor: cursor.clone(),
+                descriptor_hash,
+                descriptor,
+            },
             facts,
             output_ordinal,
             origin,
-            self.ctx.lineage,
         )?;
         for event in &mut committed_events {
             self.stamp_idempotency_key(event);
@@ -3191,15 +3200,17 @@ impl EffectsCore {
                 self.ensure_routed_fanout_capacity(routed_fact_count)?;
                 let output_ordinal = self.reserve_output_ordinals(facts.len())?;
                 let mut events = build_domain_effect_success_facts(
-                    self.ctx.writer_id,
-                    &self.ctx.parent,
-                    cursor.clone(),
-                    descriptor_hash,
-                    descriptor.clone(),
+                    EffectFactAuthoring {
+                        writer_id: self.ctx.writer_id,
+                        parent: &self.ctx.parent,
+                        lineage: self.ctx.lineage,
+                        cursor: cursor.clone(),
+                        descriptor_hash,
+                        descriptor: descriptor.clone(),
+                    },
                     facts,
                     output_ordinal,
                     recorded_origin.or(Some(EffectFactOrigin::Effect)),
-                    self.ctx.lineage,
                 )?;
                 for event in &mut events {
                     event

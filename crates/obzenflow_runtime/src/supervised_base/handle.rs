@@ -559,7 +559,6 @@ mod tests {
                 let _flag = DropFlag(dropped);
                 started_tx.send(()).unwrap();
                 std::future::pending::<()>().await;
-                #[allow(unreachable_code)]
                 Ok::<(), Box<dyn Error + Send + Sync>>(())
             })
         };
