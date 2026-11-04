@@ -6,9 +6,10 @@
 
 use obzenflow::schema::TypedPayload;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct OrderId(pub String);
+pub struct OrderId(String);
 
 impl From<&str> for OrderId {
     fn from(value: &str) -> Self {
@@ -16,8 +17,20 @@ impl From<&str> for OrderId {
     }
 }
 
+impl From<String> for OrderId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Display for OrderId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Sku(pub String);
+pub struct Sku(String);
 
 impl From<&str> for Sku {
     fn from(value: &str) -> Self {
@@ -26,7 +39,13 @@ impl From<&str> for Sku {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct HoldId(pub String);
+pub struct HoldId(String);
+
+impl From<String> for HoldId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
 
 /// A fact that an order entered the limited-stock allocation process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

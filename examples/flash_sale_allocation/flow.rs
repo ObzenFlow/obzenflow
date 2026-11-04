@@ -88,9 +88,9 @@ pub fn phone_reservations() -> Vec<StockReserved> {
     let sku = Sku::from("store-allotment");
     (1..=3)
         .map(|n| StockReserved {
-            order_id: OrderId(format!("phone-{n}")),
+            order_id: OrderId::from(format!("phone-{n}")),
             sku: sku.clone(),
-            hold_id: HoldId(format!("desk:phone-{n}")),
+            hold_id: HoldId::from(format!("desk:phone-{n}")),
         })
         .collect()
 }
@@ -135,19 +135,19 @@ fn allocation_flow(
     let desk = ReservationDesk;
     let record_confirmation = TracingSink::new(|confirmed: &ReservationConfirmed| {
         tracing::info!(
-            order_id = %confirmed.order_id.0,
+            order_id = %confirmed.order_id,
             confirmation = confirmed.confirmation,
             "reservation confirmation delivered"
         );
     });
     let record_reservation = TracingSink::new(|reserved: &StockReserved| {
-        tracing::info!(order_id = %reserved.order_id.0, "stock reservation delivered");
+        tracing::info!(order_id = %reserved.order_id, "stock reservation delivered");
     });
     let record_release = TracingSink::new(|released: &StockReleased| {
-        tracing::info!(order_id = %released.order_id.0, "stock release delivered");
+        tracing::info!(order_id = %released.order_id, "stock release delivered");
     });
     let record_reservation_failure = TracingSink::new(|failed: &ReservationFailed| {
-        tracing::info!(order_id = %failed.order_id.0, "reservation failure delivered");
+        tracing::info!(order_id = %failed.order_id, "reservation failure delivered");
     });
 
     flow! {

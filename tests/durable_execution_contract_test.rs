@@ -5014,7 +5014,7 @@ mod flash_sale {
     fn confirmations(archive: &Archive) -> Vec<(String, u64)> {
         archive
             .facts::<ReservationConfirmed>("reservation_desk")
-            .map(|(_, confirmed)| (confirmed.order_id.0, confirmed.confirmation))
+            .map(|(_, confirmed)| (confirmed.order_id.to_string(), confirmed.confirmation))
             .collect()
     }
 

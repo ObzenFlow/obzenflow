@@ -291,7 +291,7 @@ mod tests {
                 AllocationOutput::Reserved(StockReserved {
                     order_id: order("order-1"),
                     sku: sku(),
-                    hold_id: HoldId("hold-1".to_string()),
+                    hold_id: HoldId::from("hold-1".to_string()),
                 }),
             )
             .unwrap();

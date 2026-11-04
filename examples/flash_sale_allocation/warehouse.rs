@@ -82,10 +82,7 @@ impl SimulatedWarehouse {
     ) -> Result<StockReserved, EffectError> {
         tokio::time::sleep(self.reserve_latency).await;
         match self.reservations {
-            Reservations::Available => Ok(request.reserved(HoldId(format!(
-                "{warehouse}:{}:{}",
-                request.sku.0, request.order_id.0
-            )))),
+            Reservations::Available => Ok(request.reserved(warehouse)),
             Reservations::Outage => Err(EffectError::unavailable(
                 "warehouse",
                 "unavailable",
@@ -142,11 +139,11 @@ pub struct StockReservation {
 }
 
 impl StockReservation {
-    pub fn reserved(&self, hold_id: HoldId) -> StockReserved {
+    pub fn reserved(&self, warehouse: &str) -> StockReserved {
         StockReserved {
             order_id: self.order_id.clone(),
             sku: self.sku.clone(),
-            hold_id,
+            hold_id: HoldId::from(format!("{warehouse}:{}", self.order_id)),
         }
     }
 }
