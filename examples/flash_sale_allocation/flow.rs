@@ -10,7 +10,9 @@ use super::domain::{
     AllocationInput, CancelIgnored, HoldId, OrderCancelled, OrderId, OrderPlaced,
     ReservationConfirmed, ReservationFailed, Sku, SoldOut, StockReleased, StockReserved,
 };
-use super::warehouse::{warehouse_port, StockReservation, WarehouseConfig, WarehouseId};
+use super::warehouse::{
+    warehouse_port, Reservations, StockReservation, WarehouseConfig, WarehouseId,
+};
 use obzenflow::flow::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, MiddlewareFactory};
@@ -33,7 +35,7 @@ pub struct FlashSaleSettings {
 struct WarehouseSettings {
     id: WarehouseId,
     reserve_latency_ms: u64,
-    reserve_unavailable: bool,
+    reservations: Reservations,
     reservation_pace_ms: u64,
 }
 
@@ -46,7 +48,7 @@ impl WarehouseSettings {
         WarehouseConfig::new(
             self.id,
             Duration::from_millis(self.reserve_latency_ms),
-            self.reserve_unavailable,
+            self.reservations,
         )
     }
 }

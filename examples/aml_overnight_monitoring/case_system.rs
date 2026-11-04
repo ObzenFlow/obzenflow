@@ -82,6 +82,12 @@ impl From<ReplyFailure> for EffectError {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum CaseReply {
+    Readable,
+    Unreadable,
+}
+
 pub struct SimulatedCaseSystem {
     calls: CallLog<CaseAnswer>,
 }
@@ -98,32 +104,32 @@ impl SimulatedCaseSystem {
         key: &IdempotencyKey,
         flow_id: FlowId,
     ) -> Result<Result<CaseAnswer, ReplyFailure>, CallLogError> {
-        self.reply(key, flow_id, false)
+        self.reply(key, flow_id, CaseReply::Readable)
     }
 
     fn reply(
         &self,
         key: &IdempotencyKey,
         flow_id: FlowId,
-        unreadable: bool,
+        reply: CaseReply,
     ) -> Result<Result<CaseAnswer, ReplyFailure>, CallLogError> {
-        self.calls.try_answer(key, flow_id, |decided| {
-            if unreadable {
-                Err(ReplyFailure::NoCaseNumber)
-            } else {
-                Ok(CaseAnswer {
-                    case_number: CaseNumber(decided + 1),
-                })
-            }
+        self.calls.try_answer(key, flow_id, |decided| match reply {
+            CaseReply::Readable => Ok(CaseAnswer {
+                case_number: CaseNumber(decided + 1),
+            }),
+            CaseReply::Unreadable => Err(ReplyFailure::NoCaseNumber),
         })
     }
 }
 
-pub struct UnreadableCaseSystem(SimulatedCaseSystem);
+pub struct UnreadableCaseSystem {
+    cases: SimulatedCaseSystem,
+}
 
 impl UnreadableCaseSystem {
     pub fn open(path: &Path) -> Result<Self, CallLogError> {
-        SimulatedCaseSystem::open(path).map(Self)
+        let cases = SimulatedCaseSystem::open(path)?;
+        Ok(Self { cases })
     }
 
     fn answer(
@@ -132,7 +138,12 @@ impl UnreadableCaseSystem {
         key: &IdempotencyKey,
         flow_id: FlowId,
     ) -> Result<Result<CaseAnswer, ReplyFailure>, CallLogError> {
-        self.0.reply(key, flow_id, request.alert_id.is_whole_day())
+        let reply = if request.alert_id.is_whole_day() {
+            CaseReply::Unreadable
+        } else {
+            CaseReply::Readable
+        };
+        self.cases.reply(key, flow_id, reply)
     }
 }
 

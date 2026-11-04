@@ -4991,7 +4991,7 @@ mod flash_sale {
             config(&scenario),
             "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 64\n\
              stall_timeout_ms = 30000\n\n[app.warehouse]\nid = \"warehouse-demo\"\n\
-             reserve_latency_ms = 0\nreserve_unavailable = false\nreservation_pace_ms = 300\n",
+             reserve_latency_ms = 0\nreservations = \"available\"\nreservation_pace_ms = 300\n",
         )
         .expect("write the configuration");
         scenario

@@ -13,7 +13,7 @@ stall_timeout_ms = 30000
 id = "warehouse-demo"
 # One slow reservation opens the reserve breaker; 0 keeps it closed.
 reserve_latency_ms = 20
-# true makes every reservation fail as unavailable.
-reserve_unavailable = false
+# `available`, or `outage` to make every reservation fail as unavailable.
+reservations = "available"
 # How long the allocator takes over each live order; 0 runs at full speed.
 reservation_pace_ms = 0

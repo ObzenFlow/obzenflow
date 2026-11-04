@@ -18,30 +18,41 @@ pub enum WarehouseId {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reservations {
+    Available,
+    Outage,
+}
+
 #[derive(Debug, Clone)]
 pub struct WarehouseConfig {
     pub warehouse_id: WarehouseId,
     pub reserve_latency: Duration,
-    pub reserve_unavailable: bool,
+    pub reservations: Reservations,
 }
 
 impl WarehouseConfig {
     pub fn new(
         warehouse_id: WarehouseId,
         reserve_latency: Duration,
-        reserve_unavailable: bool,
+        reservations: Reservations,
     ) -> Self {
         Self {
             warehouse_id,
             reserve_latency,
-            reserve_unavailable,
+            reservations,
         }
     }
 }
 
 impl Default for WarehouseConfig {
     fn default() -> Self {
-        Self::new(WarehouseId::Demo, Duration::from_millis(20), false)
+        Self::new(
+            WarehouseId::Demo,
+            Duration::from_millis(20),
+            Reservations::Available,
+        )
     }
 }
 
@@ -58,40 +69,37 @@ pub trait WarehousePort: Send + Sync {
 }
 
 #[derive(Debug)]
-struct WarehouseFloor {
+struct SimulatedWarehouse {
     reserve_latency: Duration,
-    reserve_unavailable: bool,
+    reservations: Reservations,
 }
 
-impl WarehouseFloor {
-    async fn reserve(
+impl SimulatedWarehouse {
+    async fn reserve_as(
         &self,
         warehouse: &str,
         request: &StockReservation,
     ) -> Result<StockReserved, EffectError> {
         tokio::time::sleep(self.reserve_latency).await;
-        if self.reserve_unavailable {
-            return Err(EffectError::unavailable(
+        match self.reservations {
+            Reservations::Available => Ok(request.reserved(HoldId(format!(
+                "{warehouse}:{}:{}",
+                request.sku.0, request.order_id.0
+            )))),
+            Reservations::Outage => Err(EffectError::unavailable(
                 "warehouse",
                 "unavailable",
                 "warehouse unavailable",
-            ));
+            )),
         }
-        Ok(request.reserved(HoldId(format!(
-            "{warehouse}:{}:{}",
-            request.sku.0, request.order_id.0
-        ))))
     }
 }
-
-#[derive(Debug)]
-struct SimulatedWarehouse(WarehouseFloor);
 
 #[obzenflow::system("warehouse-demo")]
 #[async_trait]
 impl WarehousePort for SimulatedWarehouse {
     async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError> {
-        self.0.reserve(Self::NAME, request).await
+        self.reserve_as(Self::NAME, request).await
     }
 
     async fn release(&self, request: &StockRelease) -> Result<StockReleased, EffectError> {
@@ -100,28 +108,30 @@ impl WarehousePort for SimulatedWarehouse {
 }
 
 #[derive(Debug)]
-struct OtherWarehouse(WarehouseFloor);
+struct OtherWarehouse {
+    warehouse: SimulatedWarehouse,
+}
 
 #[obzenflow::system("warehouse-other")]
 #[async_trait]
 impl WarehousePort for OtherWarehouse {
     async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError> {
-        self.0.reserve(Self::NAME, request).await
+        self.warehouse.reserve_as(Self::NAME, request).await
     }
 
     async fn release(&self, request: &StockRelease) -> Result<StockReleased, EffectError> {
-        Ok(request.released())
+        self.warehouse.release(request).await
     }
 }
 
 pub fn warehouse_port(config: &WarehouseConfig) -> Port<dyn WarehousePort> {
-    let floor = WarehouseFloor {
+    let warehouse = SimulatedWarehouse {
         reserve_latency: config.reserve_latency,
-        reserve_unavailable: config.reserve_unavailable,
+        reservations: config.reservations,
     };
     match config.warehouse_id {
-        WarehouseId::Demo => Port::to(SimulatedWarehouse(floor)),
-        WarehouseId::Other => Port::to(OtherWarehouse(floor)),
+        WarehouseId::Demo => Port::to(warehouse),
+        WarehouseId::Other => Port::to(OtherWarehouse { warehouse }),
     }
 }
 
