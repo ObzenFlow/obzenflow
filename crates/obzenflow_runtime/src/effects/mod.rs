@@ -49,6 +49,7 @@ mod actions;
 mod binding;
 mod boundary;
 mod call;
+mod command;
 mod commit;
 mod completion;
 mod context;
@@ -59,10 +60,10 @@ mod error;
 mod fault;
 mod history;
 mod identity;
+mod perform;
 mod ports;
 mod replay;
 mod runtime;
-mod system;
 mod typed;
 
 #[cfg(test)]
@@ -91,24 +92,28 @@ pub use call::KeyRule;
 pub use call::{
     AtLeastOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey, Transactional,
 };
+#[doc(hidden)]
+pub use command::{
+    assert_command, assert_handler_performs_no_ai_effect, assert_port_answer,
+    assert_stateful_handler_performs_no_ai_effect, effectful_stateful_effects,
+    effectful_transform_effects, AcknowledgedSafety, AnswersEffect, BuiltSystem, DeclareEffects,
+    EffectAcknowledgement, EveryPortAnswers, FieldEffects, FieldsEffects, FindPort,
+    HandlerPerformableEffects, JoinMembers, MarkPortUsed, NarrowedPort, PortAfter, PortAnswer,
+    PortAnswersAnEffect, PortEffects, PortField, PortFound, PortImpl, PortList, PortMark,
+    PortServesRequest, RowAcknowledgedEffect, ServesPort, StageEffectsError, Unused, Used,
+    WholePort,
+};
+pub use command::{Command, Port, StagePort, SystemName};
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
 pub use context::{EffectContext, EffectInvocationContext, EffectPortMetadataContext};
 pub(crate) use current_run::CurrentRunFailure;
 pub use current_run::CurrentRunHistory;
 pub use obzenflow_core::SystemBindingEvidence;
-pub use obzenflow_core_derive::{port, EffectHandler};
+pub use obzenflow_core_derive::{command, port, system};
 #[doc(hidden)]
-pub use system::{
-    assert_handler_performs_no_ai_effect, assert_port_answer,
-    assert_stateful_handler_performs_no_ai_effect, effectful_stateful_effects,
-    effectful_transform_effects, AcknowledgedSafety, AnswersEffect, DeclareEffects,
-    EffectAcknowledgement, EverySystemAnswers, FindSystem, HandlerPerformableEffects, JoinMembers,
-    MarkSystemUsed, NarrowedSystem, PortAnswer, PortEffects, PortImpl, RowAcknowledgedEffect,
-    ServesPort, StageEffectsError, SystemAfter, SystemAnswersAnEffect, SystemEffects, SystemFound,
-    SystemList, SystemMark, SystemServesRequest, SystemsEffects, Unused, Used, WholeSystem,
-};
-pub use system::{EffectHandler, StageSystem, System, SystemError};
+pub use perform::PerformedRequest;
+pub use perform::{perform, Perform, PerformRequest};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[doc(hidden)]
 pub use async_trait::async_trait as __async_trait;

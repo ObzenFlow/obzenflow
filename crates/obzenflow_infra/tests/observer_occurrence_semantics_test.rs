@@ -841,8 +841,8 @@ impl TypedFiniteSourceHandler for OneConcurrentInput {
     }
 }
 
-#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
-#[effect_handler(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[derive(Clone, Debug)]
 struct ConcurrentTransform {
     branch: &'static str,
     barrier: Arc<Barrier>,

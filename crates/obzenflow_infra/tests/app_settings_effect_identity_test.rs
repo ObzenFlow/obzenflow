@@ -44,9 +44,7 @@ use obzenflow_infra::journal::read::{
     open_disk_run, read_config_changes, read_configuration_refusals, ConfigChanges,
 };
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{
-    EffectError, EffectHandler, Effects, SinkRedeliverySafety, System,
-};
+use obzenflow_runtime::effects::{Command, EffectError, Effects, Port, SinkRedeliverySafety};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{AppTable, ResolvedRuntimeConfig};
@@ -193,7 +191,7 @@ struct ScoreRequest {
     threshold: u64,
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "scorer", effects = obzenflow_runtime::effects)]
 impl Scorer {
     #[effect(type = "app_identity.score", exactly_once)]
     fn score(&self, request: &ScoreRequest) -> Result<Score, EffectError> {
@@ -208,12 +206,12 @@ type ScoreOutput = obzenflow_core::stage_fact_set![Scored, Score, Unscored, Note
 
 const RESCORE_OFFSET: u64 = 1_000;
 
-#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
-#[effect_handler(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[derive(Clone, Debug)]
 struct ScoreTransform {
     app: App,
-    #[system]
-    scorer: System<Scorer>,
+    #[port]
+    scorer: Port<Scorer>,
 }
 
 impl ScoreTransform {
@@ -227,7 +225,7 @@ impl ScoreTransform {
     async fn score(
         &self,
         value: u64,
-        fx: &mut Effects<ScoreOutput, <Self as EffectHandler>::AllowedEffects>,
+        fx: &mut Effects<ScoreOutput, <Self as Command>::AllowedEffects>,
     ) -> Result<Score, EffectError> {
         let score = fx.call(self.request(value)).await?;
         if self.app.rescore {
@@ -344,7 +342,7 @@ async fn build(
                 quiet: settings.quiet,
                 failing: settings.failing,
             },
-            scorer: System::eager("scorer", Arc::new(Scorer { executed }))?,
+            scorer: Port::to(Scorer { executed }),
         };
         let counting_sink = CountingSink { delivered };
         Ok(flow! {

@@ -12,7 +12,7 @@ mod tests {
 
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::effects::{
-        AnswersEffect, EffectDeclaration, EffectError, EffectName, System,
+        AnswersEffect, EffectDeclaration, EffectError, EffectName, Port,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::TransformHandler;
@@ -64,7 +64,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct FixtureRequest;
 
-    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::port(system = "fixture", effects = obzenflow_runtime::effects)]
     impl FixturePort {
         #[effect(type = "test.fixture_effect", exactly_once)]
         fn fixture(&self, _: &FixtureRequest) -> Result<MidP, EffectError> {
@@ -73,8 +73,7 @@ mod tests {
     }
 
     fn fixture_declaration() -> EffectDeclaration {
-        let system =
-            System::eager("fixture", std::sync::Arc::new(FixturePort)).expect("fixture system");
+        let system = Port::to(FixturePort);
         AnswersEffect::<<FixtureRequest as EffectName>::Effect>::declaration(&system, None)
             .expect("fixture declaration")
     }

@@ -18,7 +18,7 @@ use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, Typ
 use obzenflow_dsl::{effectful_stateful, effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{
-    effectful_transform_effects, EffectDeclaration, EffectError, Effects, System,
+    effectful_transform_effects, EffectDeclaration, EffectError, Effects, Port, StageCompletion,
 };
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::DslConfigDefault;
@@ -47,7 +47,7 @@ impl TypedPayload for CompositionFact {
 
 struct CompositionService;
 
-#[obzenflow::port]
+#[obzenflow::port(system = "composition")]
 impl CompositionService {
     #[effect(type = "effect_control_composition.a", exactly_once)]
     fn a(&self, _: &RequestA) -> Result<CompositionFact, EffectError> {
@@ -65,8 +65,8 @@ impl CompositionService {
     }
 }
 
-fn composition_service() -> System<CompositionService> {
-    System::eager("composition", Arc::new(CompositionService)).expect("a valid system name")
+fn composition_service() -> Port<CompositionService> {
+    Port::to(CompositionService)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -75,10 +75,11 @@ struct RequestA;
 #[derive(Clone, Debug, Serialize)]
 struct RequestB;
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct OneEffectHandler {
-    #[system(RequestA)]
-    service: System<CompositionService>,
+    #[port(RequestA)]
+    service: Port<CompositionService>,
 }
 
 impl OneEffectHandler {
@@ -103,10 +104,11 @@ impl EffectfulTransformHandler for OneEffectHandler {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct TwoEffectHandler {
-    #[system(RequestA, RequestB)]
-    service: System<CompositionService>,
+    #[port(RequestA, RequestB)]
+    service: Port<CompositionService>,
 }
 
 impl TwoEffectHandler {
@@ -131,10 +133,11 @@ impl EffectfulTransformHandler for TwoEffectHandler {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct StatefulOneEffectHandler {
-    #[system(RequestA)]
-    service: System<CompositionService>,
+    #[port(RequestA)]
+    service: Port<CompositionService>,
 }
 
 impl StatefulOneEffectHandler {
@@ -705,10 +708,11 @@ async fn materialization_cannot_swap_the_declaration_that_passed_structural_vali
 #[derive(Clone, Debug, Serialize)]
 struct PaidRequest;
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct PaidHandler {
-    #[system(PaidRequest)]
-    service: System<CompositionService>,
+    #[port(PaidRequest)]
+    service: Port<CompositionService>,
 }
 
 impl PaidHandler {
@@ -733,10 +737,11 @@ impl EffectfulTransformHandler for PaidHandler {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct WholePortHandler {
-    #[system]
-    service: System<CompositionService>,
+    #[port]
+    service: Port<CompositionService>,
 }
 
 #[async_trait]
@@ -753,7 +758,8 @@ impl EffectfulTransformHandler for WholePortHandler {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct NoEffectHandler;
 
 #[async_trait]
@@ -824,9 +830,9 @@ async fn a_paid_effect_without_its_acknowledgement_fails_build() {
     assert!(
         rendered.contains(
             "Effectful stage 'guarded' performs at-least-once effect \
-             'effect_control_composition.paid', which its `#[system]` field `service` allows; \
+             'effect_control_composition.paid', which its `#[port]` field `service` allows; \
              acknowledge it with `.at_least_once::<PaidRequest>()` after the handler, or narrow \
-             the field with `#[system(...)]`"
+             the field with `#[port(...)]`"
         ),
         "{rendered}"
     );
@@ -844,9 +850,9 @@ async fn a_whole_port_field_allows_its_paid_effect_until_narrowed() {
     assert!(
         rendered.contains(
             "performs at-least-once effect 'effect_control_composition.paid', which its \
-             `#[system]` field `service` allows; acknowledge it with \
+             `#[port]` field `service` allows; acknowledge it with \
              `.at_least_once::<PaidRequest>()` after the handler, or narrow the field with \
-             `#[system(...)]`"
+             `#[port(...)]`"
         ),
         "{rendered}"
     );
@@ -859,8 +865,70 @@ async fn a_whole_port_field_allows_its_paid_effect_until_narrowed() {
     .expect("a field narrowed to the requests it performs needs no acknowledgement");
 }
 
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+trait ResendPort: Send + Sync {
+    #[effect(type = "effect_control_composition.resend", at_least_once)]
+    fn resend(&self, _: &ResendRequest) -> Result<CompositionFact, EffectError>;
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ResendRequest;
+
+struct Resender;
+
+#[obzenflow_runtime::effects::system("resender", effects = obzenflow_runtime::effects)]
+impl ResendPort for Resender {
+    fn resend(&self, _: &ResendRequest) -> Result<CompositionFact, EffectError> {
+        Ok(CompositionFact)
+    }
+}
+
+#[obzenflow_runtime::effects::command(through = ResendPort, effects = obzenflow_runtime::effects)]
+#[derive(Clone, Debug)]
+struct ThroughResend;
+
+#[async_trait]
+impl EffectfulTransformHandler for ThroughResend {
+    type Input = CompositionInput;
+    type Output = CompositionFact;
+
+    async fn process(
+        &self,
+        _: CompositionInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        fx.call(ResendRequest).await?;
+        Ok(fx.complete()?)
+    }
+}
+
+#[tokio::test]
+async fn through_unacknowledged_at_least_once_refused() {
+    let rendered = row_refusal(|| {
+        let resend = ThroughResend::through(Port::to(Resender));
+        effectful_transform!(CompositionInput -> CompositionFact => resend)
+    })
+    .await;
+    assert!(
+        rendered.contains(
+            "Effectful stage 'guarded' performs at-least-once effect \
+             'effect_control_composition.resend', which its port `ResendPort` allows; \
+             acknowledge it with `.at_least_once::<ResendRequest>()` after the handler, or write \
+             the port as a `#[port(ResendRequest)]` field"
+        ),
+        "{rendered}"
+    );
+
+    build(row_flow(|| {
+        let resend = ThroughResend::through(Port::to(Resender));
+        effectful_transform!(CompositionInput -> CompositionFact => resend.at_least_once::<ResendRequest>())
+    }))
+    .await
+    .expect("an acknowledged whole port builds");
+}
+
 #[test]
-fn a_stage_declares_the_effects_its_system_fields_allow() {
+fn stage_declares_port_field_effects() {
     let declared = |declarations: Vec<EffectDeclaration>| {
         declarations
             .iter()

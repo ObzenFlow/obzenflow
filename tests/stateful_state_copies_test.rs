@@ -205,7 +205,8 @@ impl Accumulator for Sum {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct Ledger {
     copies: Arc<AtomicUsize>,
 }

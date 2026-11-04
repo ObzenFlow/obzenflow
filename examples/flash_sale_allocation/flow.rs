@@ -10,8 +10,9 @@ use super::domain::{
     AllocationInput, CancelIgnored, HoldId, OrderCancelled, OrderId, OrderPlaced,
     ReservationConfirmed, ReservationFailed, Sku, SoldOut, StockReleased, StockReserved,
 };
-use super::warehouse::{warehouse_system, StockReservation, WarehouseConfig};
-use obzenflow::effects::SystemError;
+use super::warehouse::{
+    warehouse_port, Reservations, StockReservation, WarehouseConfig, WarehouseId,
+};
 use obzenflow::flow::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, MiddlewareFactory};
@@ -32,9 +33,9 @@ pub struct FlashSaleSettings {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct WarehouseSettings {
-    id: String,
+    id: WarehouseId,
     reserve_latency_ms: u64,
-    reserve_unavailable: bool,
+    reservations: Reservations,
     reservation_pace_ms: u64,
 }
 
@@ -47,7 +48,7 @@ impl WarehouseSettings {
         WarehouseConfig::new(
             self.id,
             Duration::from_millis(self.reserve_latency_ms),
-            self.reserve_unavailable,
+            self.reservations,
         )
     }
 }
@@ -87,9 +88,9 @@ pub fn phone_reservations() -> Vec<StockReserved> {
     let sku = Sku::from("store-allotment");
     (1..=3)
         .map(|n| StockReserved {
-            order_id: OrderId(format!("phone-{n}")),
+            order_id: OrderId::from(format!("phone-{n}")),
             sku: sku.clone(),
-            hold_id: HoldId(format!("desk:phone-{n}")),
+            hold_id: HoldId::from(format!("desk:phone-{n}")),
         })
         .collect()
 }
@@ -106,7 +107,7 @@ pub fn settings_flow(inputs: Vec<AllocationInput>, journal_root: PathBuf) -> Flo
             settings.warehouse.into_config(),
             reservation_pace,
             journal_root,
-        )?)
+        ))
     })
 }
 
@@ -115,8 +116,8 @@ fn allocation_flow(
     warehouse_config: WarehouseConfig,
     reservation_pace: Duration,
     journal_root: PathBuf,
-) -> Result<FlowDefinition, SystemError> {
-    let warehouse = warehouse_system(&warehouse_config)?;
+) -> FlowDefinition {
+    let warehouse = warehouse_port(&warehouse_config);
 
     let reserve_breaker = circuit_breaker()
         .count_window(1)
@@ -134,22 +135,22 @@ fn allocation_flow(
     let desk = ReservationDesk;
     let record_confirmation = TracingSink::new(|confirmed: &ReservationConfirmed| {
         tracing::info!(
-            order_id = %confirmed.order_id.0,
+            order_id = %confirmed.order_id,
             confirmation = confirmed.confirmation,
             "reservation confirmation delivered"
         );
     });
     let record_reservation = TracingSink::new(|reserved: &StockReserved| {
-        tracing::info!(order_id = %reserved.order_id.0, "stock reservation delivered");
+        tracing::info!(order_id = %reserved.order_id, "stock reservation delivered");
     });
     let record_release = TracingSink::new(|released: &StockReleased| {
-        tracing::info!(order_id = %released.order_id.0, "stock release delivered");
+        tracing::info!(order_id = %released.order_id, "stock release delivered");
     });
     let record_reservation_failure = TracingSink::new(|failed: &ReservationFailed| {
-        tracing::info!(order_id = %failed.order_id.0, "reservation failure delivered");
+        tracing::info!(order_id = %failed.order_id, "reservation failure delivered");
     });
 
-    Ok(flow! {
+    flow! {
         name: "flash_sale_allocation",
         journals: disk_journals(journal_root),
 
@@ -188,5 +189,5 @@ fn allocation_flow(
             phone_reservations |> reservation_desk;
             reservation_desk |> confirmations;
         }
-    })
+    }
 }

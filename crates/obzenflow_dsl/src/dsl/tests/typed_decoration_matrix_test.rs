@@ -12,8 +12,8 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::{ChainEvent, TypedPayload};
     use obzenflow_runtime::effects::{
-        EffectCommitHandle, EffectError, EffectHandler, EffectPortResolutionError, EffectSafety,
-        Effects, SinkRedeliverySafety, StageCompletion, System,
+        EffectCommitHandle, EffectError, EffectPortResolutionError, EffectSafety, Effects, Port,
+        SinkRedeliverySafety, StageCompletion,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -143,8 +143,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug, EffectHandler)]
-    #[effect_handler(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[derive(Clone, Debug)]
     struct FxTr;
     #[async_trait]
     impl EffectfulTransformHandler for FxTr {
@@ -163,11 +163,11 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug, EffectHandler)]
-    #[effect_handler(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[derive(Clone, Debug)]
     struct TxFxTr {
-        #[system]
-        tx: System<TxPort>,
+        #[port]
+        tx: Port<TxPort>,
     }
 
     #[async_trait]
@@ -201,8 +201,8 @@ mod tests {
         fn post_emit(&self, _: &mut Self::State) {}
     }
 
-    #[derive(Clone, Debug, EffectHandler)]
-    #[effect_handler(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[derive(Clone, Debug)]
     struct FxSt;
     #[async_trait]
     impl EffectfulStatefulHandler for FxSt {
@@ -235,7 +235,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct PolicyRequest;
 
-    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::port(system = "policy", effects = obzenflow_runtime::effects)]
     impl PolicyPort {
         #[effect(type = "test.stateful_policy_effect", exactly_once)]
         fn apply(&self, _: &PolicyRequest) -> Result<Out, EffectError> {
@@ -243,16 +243,16 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug, EffectHandler)]
-    #[effect_handler(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[derive(Clone, Debug)]
     struct FxPolicySt {
-        #[system]
-        policy: System<PolicyPort>,
+        #[port]
+        policy: Port<PolicyPort>,
     }
 
     fn policy_handler() -> FxPolicySt {
         FxPolicySt {
-            policy: System::eager("policy", std::sync::Arc::new(PolicyPort)).unwrap(),
+            policy: Port::to(PolicyPort),
         }
     }
 
@@ -331,7 +331,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct TxRequest;
 
-    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::port(system = "tx", effects = obzenflow_runtime::effects)]
     impl TxPort {
         #[effect(type = "test.tx_effect", exactly_once)]
         async fn post(
@@ -344,14 +344,10 @@ mod tests {
         }
     }
 
-    fn tx_system() -> System<TxPort> {
-        System::deferred(
-            "tx",
-            || -> Result<std::sync::Arc<TxPort>, EffectPortResolutionError> {
-                Err(EffectPortResolutionError::ClientConstructionFailed)
-            },
-        )
-        .unwrap()
+    fn tx_system() -> Port<TxPort> {
+        Port::deferred(|| -> Result<TxPort, EffectPortResolutionError> {
+            Err(EffectPortResolutionError::ClientConstructionFailed)
+        })
     }
 
     #[test]
@@ -531,7 +527,7 @@ mod tests {
     #[test]
     fn effectful_transform_transactional_effect_needs_no_acknowledgement() {
         let tx = tx_system();
-        assert_eq!(tx.name(), "tx");
+        assert_eq!(tx.system_name(), "tx");
         let handler = TxFxTr { tx };
         let descriptor = crate::effectful_transform!(In -> Out => handler);
 

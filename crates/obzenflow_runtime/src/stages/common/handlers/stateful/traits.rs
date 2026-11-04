@@ -350,9 +350,8 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// because its state no longer represents a fold of its durable history.
 ///
 /// The stage arrow is the operator-facing output contract, and `Output` mirrors
-/// it so Rust can check `decide` before the handler is erased. The handler's
-/// `#[system]` fields allow the effects the stage performs, and the row never
-/// restates them.
+/// it so Rust can check `decide` before the handler is erased. The command's
+/// ports allow the effects the stage performs, and the row never restates them.
 ///
 /// Unlike an effectful transform's zero-sized fact-set witness, stateful
 /// `Output` is inhabited because [`EffectfulStatefulHandler::apply`] receives
@@ -369,6 +368,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 ///
 /// ```ignore
 /// #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+/// #[stage_output(schema = obzenflow_core::event::schema)]
 /// enum PaymentStateFact {
 ///     Authorized(PaymentAuthorized),
 ///     Declined(PaymentDeclined),
@@ -409,10 +409,9 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// }
 /// ```
 ///
-/// Middleware stays in the stage's `with` clause. The handler derives
-/// [`EffectHandler`](crate::effects::EffectHandler) and holds each system it
-/// calls in a `#[system]` field, which allows every effect that system's port
-/// declares.
+/// Middleware stays in the stage's `with` clause. The handler is a
+/// [`Command`](crate::effects::Command), which allows every effect the ports it
+/// works through declare.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not satisfy `EffectfulStatefulHandler` for this stage",
     label = "this handler does not match the effectful stateful contract",
@@ -421,7 +420,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
             `Output` mirrors the arrow"
 )]
 #[async_trait]
-pub trait EffectfulStatefulHandler: crate::effects::EffectHandler + Send + Sync {
+pub trait EffectfulStatefulHandler: crate::effects::Command + Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: obzenflow_core::OneFactStageOutput + Send + Sync + 'static;
@@ -678,6 +677,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+    #[stage_output(schema = obzenflow_core::event::schema)]
     struct DishonestProductOutput {
         first: FirstOutput,
         second: SecondOutput,
@@ -723,8 +723,8 @@ mod tests {
         assert!(message.contains("stateful.second"));
     }
 
-    #[derive(Clone, Debug, crate::effects::EffectHandler)]
-    #[effect_handler(effects = crate::effects)]
+    #[crate::effects::command(effects = crate::effects)]
+    #[derive(Clone, Debug)]
     struct DecideOnly;
 
     #[async_trait]

@@ -15,7 +15,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -67,7 +67,7 @@ struct RequestA;
 #[derive(Clone, Debug, Serialize)]
 struct RequestB;
 
-#[obzenflow::port]
+#[obzenflow::port(system = "scope")]
 impl ScopeService {
     #[effect(type = "effect_observer_scope.a", exactly_once)]
     fn a(&self, _: &RequestA) -> Result<EffectReply, EffectError> {
@@ -102,17 +102,18 @@ impl TypedFiniteSourceHandler for OneInputSource {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct PerformsBothEffects {
-    #[system]
-    service: System<ScopeService>,
+    #[port]
+    service: Port<ScopeService>,
     repetitions: usize,
 }
 
 impl PerformsBothEffects {
     fn new(repetitions: usize) -> Self {
         Self {
-            service: System::eager("scope", Arc::new(ScopeService)).expect("a valid system name"),
+            service: Port::to(ScopeService),
             repetitions,
         }
     }

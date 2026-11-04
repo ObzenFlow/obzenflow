@@ -32,7 +32,7 @@ use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     EffectCommitHandle, EffectContext, EffectCursor, EffectError, EffectOutcomePayload,
-    EffectRecord, Effects, IdempotencyKey, Keyed, SinkRedeliverySafety, System,
+    EffectRecord, Effects, IdempotencyKey, Keyed, Port, SinkRedeliverySafety,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -180,7 +180,7 @@ struct CallCounter {
     offset: u64,
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "call-counter")]
 impl CallCounter {
     #[effect(type = "effect_replay.counting", exactly_once)]
     fn count(
@@ -229,20 +229,16 @@ impl CallCounter {
     }
 }
 
-fn call_counter(calls: Arc<AtomicUsize>) -> System<CallCounter> {
+fn call_counter(calls: Arc<AtomicUsize>) -> Port<CallCounter> {
     recording_call_counter(calls, KeyLog::default())
 }
 
-fn recording_call_counter(calls: Arc<AtomicUsize>, keys: KeyLog) -> System<CallCounter> {
-    System::eager(
-        "call-counter",
-        Arc::new(CallCounter {
-            calls,
-            keys,
-            offset: 100,
-        }),
-    )
-    .expect("a valid system name")
+fn recording_call_counter(calls: Arc<AtomicUsize>, keys: KeyLog) -> Port<CallCounter> {
+    Port::to(CallCounter {
+        calls,
+        keys,
+        offset: 100,
+    })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -289,7 +285,7 @@ impl Drop for PendingEffectGuard {
     }
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "blocking-gate")]
 impl BlockingGate {
     #[effect(type = "effect_replay.blocking", exactly_once)]
     async fn block(
@@ -329,10 +325,11 @@ impl Keyed for Blocking {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct ReplayTransform {
-    #[system(Counting)]
-    counter: System<CallCounter>,
+    #[port(Counting)]
+    counter: Port<CallCounter>,
 }
 
 #[async_trait]
@@ -364,10 +361,11 @@ impl EffectfulTransformHandler for ReplayTransform {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct BlockingTransform {
-    #[system]
-    gate: System<BlockingGate>,
+    #[port]
+    gate: Port<BlockingGate>,
 }
 
 #[async_trait]
@@ -402,10 +400,11 @@ impl EffectfulTransformHandler for BlockingTransform {
 /// Completes the physical effect and then deliberately keeps the handler alive.
 /// `perform()` returning is the synchronization point: terminal effect evidence
 /// must already be durable before cancellation can reach this second gate.
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct PostPerformBlockingTransform {
-    #[system(Counting)]
-    counter: System<CallCounter>,
+    #[port(Counting)]
+    counter: Port<CallCounter>,
     performed: Arc<Semaphore>,
     handler_release: Arc<Semaphore>,
 }
@@ -463,10 +462,11 @@ struct ReplayStatefulState {
     outputs: Vec<ReplayOutput>,
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct ReplayStateful {
-    #[system(Counting)]
-    counter: System<CallCounter>,
+    #[port(Counting)]
+    counter: Port<CallCounter>,
 }
 
 /// Stateful `Output` enum derived per FLOWIP-120m: the same sum shape an
@@ -553,10 +553,11 @@ enum PolicyStatefulFact {
     Failed(ReservationFailed),
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct PolicyStateful {
-    #[system(SlowReserve)]
-    counter: System<CallCounter>,
+    #[port(SlowReserve)]
+    counter: Port<CallCounter>,
 }
 
 fn is_circuit_breaker_rejection(error: &EffectError) -> bool {
@@ -647,10 +648,11 @@ struct DishonestReplayStatefulOutput {
 
 impl obzenflow_core::OneFactStageOutput for DishonestReplayStatefulOutput {}
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct DishonestOneFactStateful {
-    #[system(Counting)]
-    counter: System<CallCounter>,
+    #[port(Counting)]
+    counter: Port<CallCounter>,
     decide_inputs: Arc<Mutex<Vec<u64>>>,
     apply_calls: Arc<AtomicUsize>,
 }
@@ -703,10 +705,11 @@ struct ErrorAfterCommitState {
     applied: Vec<String>,
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct ErrorAfterCommitStateful {
-    #[system(Counting)]
-    counter: System<CallCounter>,
+    #[port(Counting)]
+    counter: Port<CallCounter>,
     observed_fact_counts: Arc<Mutex<Vec<usize>>>,
     applied: Arc<Mutex<Vec<String>>>,
 }
@@ -776,10 +779,11 @@ struct ApplyRejectionState {
 /// B2 proof handler. The live failure and strict replay use the same handler
 /// surface and logic version; the completed replay fixture disables only the
 /// deliberate `apply` rejection so it can provide a sealed effect history.
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct ApplyRejectingStateful {
-    #[system(Counting)]
-    counter: System<CallCounter>,
+    #[port(Counting)]
+    counter: Port<CallCounter>,
     decide_inputs: Arc<Mutex<Vec<u64>>>,
     apply_attempts: Arc<Mutex<Vec<String>>>,
     reject_apply: bool,
@@ -891,10 +895,11 @@ enum ProductStatefulFact {
 #[derive(Clone, Debug, Default)]
 struct ProductStatefulState;
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct ProductStateful {
-    #[system(Product)]
-    counter: System<CallCounter>,
+    #[port(Product)]
+    counter: Port<CallCounter>,
     applied: Arc<Mutex<Vec<String>>>,
 }
 
@@ -1100,7 +1105,7 @@ fn build_blocking_flow(
             invocations,
         };
         let effectful_handler = BlockingTransform {
-            gate: System::eager("blocking-gate", Arc::new(gate)).expect("a valid system name"),
+            gate: Port::to(gate),
         };
         let collector_handler = CollectSink { outputs };
 
@@ -1225,6 +1230,114 @@ fn build_stateful_flow(
     })
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct SiblingCounting {
+    value: u64,
+}
+
+#[obzenflow::port]
+trait SiblingPort: Send + Sync {
+    #[effect(type = "effect_replay.sibling_counting", exactly_once)]
+    fn count(&self, request: &SiblingCounting) -> Result<ReplayEffectValue, EffectError>;
+}
+
+struct EagerCounter {
+    calls: Arc<AtomicUsize>,
+}
+
+#[obzenflow::system("eager-counter")]
+impl SiblingPort for EagerCounter {
+    fn count(&self, request: &SiblingCounting) -> Result<ReplayEffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ReplayEffectValue {
+            effect_value: request.value + 100,
+        })
+    }
+}
+
+struct DeferredCounter {
+    calls: Arc<AtomicUsize>,
+}
+
+#[obzenflow::system("deferred-counter")]
+impl SiblingPort for DeferredCounter {
+    fn count(&self, request: &SiblingCounting) -> Result<ReplayEffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ReplayEffectValue {
+            effect_value: request.value + 200,
+        })
+    }
+}
+
+#[obzenflow::command(through = SiblingPort)]
+#[derive(Clone, Debug)]
+struct SiblingTransform;
+
+#[async_trait]
+impl EffectfulTransformHandler for SiblingTransform {
+    type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        let effect_value = fx
+            .call(SiblingCounting { value: input.value })
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+        fx.emit(ReplayOutput {
+            value: input.value,
+            effect_value: effect_value.effect_value,
+        })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(fx.complete()?)
+    }
+}
+
+#[obzenflow::command(through = SiblingPort)]
+#[derive(Clone, Debug)]
+struct SiblingStateful;
+
+#[async_trait]
+impl EffectfulStatefulHandler for SiblingStateful {
+    type State = ReplayStatefulState;
+    type Input = ReplayInput;
+    type Output = ReplayStatefulFact;
+
+    fn initial_state(&self) -> Self::State {
+        ReplayStatefulState::default()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        let effect = fx
+            .call(SiblingCounting { value: input.value })
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+        fx.emit(ReplayOutput {
+            value: input.value,
+            effect_value: effect.effect_value,
+        })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(fx.complete()?)
+    }
+
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
+        if let ReplayStatefulFact::Output(output) = fact {
+            state.outputs.push(output);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum SiblingStages {
     Transform,
@@ -1250,30 +1363,21 @@ impl SiblingSystems {
         }
     }
 
-    fn eager(&self) -> System<CallCounter> {
-        System::eager(
-            "eager-counter",
-            Arc::new(CallCounter {
-                calls: self.eager_calls.clone(),
-                keys: KeyLog::default(),
-                offset: 100,
-            }),
-        )
-        .expect("a valid system name")
+    fn eager(&self) -> Port<dyn SiblingPort> {
+        Port::to(EagerCounter {
+            calls: self.eager_calls.clone(),
+        })
     }
 
-    fn deferred(&self) -> System<CallCounter> {
+    fn deferred(&self) -> Port<dyn SiblingPort> {
         let calls = self.deferred_calls.clone();
         let resolutions = self.deferred_resolutions.clone();
-        System::deferred("deferred-counter", move || {
+        Port::deferred(move || {
             resolutions.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(CallCounter {
+            Ok(DeferredCounter {
                 calls: calls.clone(),
-                keys: KeyLog::default(),
-                offset: 200,
-            }))
+            })
         })
-        .expect("a valid system name")
     }
 }
 
@@ -1297,8 +1401,8 @@ fn build_sibling_systems_flow(
 
         match stages {
             SiblingStages::Transform => {
-                let eager_handler = ReplayTransform { counter: eager };
-                let deferred_handler = ReplayTransform { counter: deferred };
+                let eager_handler = SiblingTransform::through(eager);
+                let deferred_handler = SiblingTransform::through(deferred);
                 Ok(flow! {
                     name: "effect_replay_sibling_transforms",
                     journals: disk_journals(journal_base),
@@ -1322,8 +1426,8 @@ fn build_sibling_systems_flow(
                 })
             }
             SiblingStages::Stateful => {
-                let eager_handler = ReplayStateful { counter: eager };
-                let deferred_handler = ReplayStateful { counter: deferred };
+                let eager_handler = SiblingStateful::through(eager);
+                let deferred_handler = SiblingStateful::through(deferred);
                 Ok(flow! {
                     name: "effect_replay_sibling_stateful",
                     journals: disk_journals(journal_base),
@@ -3899,7 +4003,7 @@ async fn incomplete_replay_stops_at_the_end_of_its_recording() {
 
 // ============================================================================
 // End-to-end requests over a host trait port, answered by an eager or a
-// deferred system the handler holds in a `#[system]` field.
+// deferred system behind the port the command holds.
 // ============================================================================
 
 /// A host-provided port that the greeting request calls.
@@ -3913,6 +4017,7 @@ struct DoublingGreetingPort {
     calls: Arc<AtomicUsize>,
 }
 
+#[obzenflow::system("greeting")]
 impl GreetingPort for DoublingGreetingPort {
     fn greet(&self, request: &Greet) -> Result<ReplayEffectValue, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -3928,10 +4033,11 @@ struct Greet {
     value: u64,
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct PortedTransform {
-    #[system]
-    greeting: System<dyn GreetingPort>,
+    #[port]
+    greeting: Port<dyn GreetingPort>,
 }
 
 #[async_trait]
@@ -3967,7 +4073,7 @@ fn build_ported_flow(
     journal_base: PathBuf,
     source_calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
-    greeting: System<dyn GreetingPort>,
+    greeting: Port<dyn GreetingPort>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let inputs_handler = ReplaySource::counted(source_calls);
@@ -3993,22 +4099,20 @@ fn build_ported_flow(
     })
 }
 
-fn greeting_system(calls: Arc<AtomicUsize>) -> System<dyn GreetingPort> {
-    System::eager("greeting", Arc::new(DoublingGreetingPort { calls }))
-        .expect("a valid system name")
+fn greeting_system(calls: Arc<AtomicUsize>) -> Port<dyn GreetingPort> {
+    Port::to(DoublingGreetingPort { calls })
 }
 
 fn deferred_greeting_system(
     resolver_calls: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
-) -> System<dyn GreetingPort> {
-    System::deferred("greeting", move || {
+) -> Port<dyn GreetingPort> {
+    Port::deferred(move || {
         resolver_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Arc::new(DoublingGreetingPort {
+        Ok(DoublingGreetingPort {
             calls: calls.clone(),
-        }))
+        })
     })
-    .expect("a valid system name")
 }
 
 #[tokio::test]
@@ -4162,6 +4266,7 @@ struct CountingLedger {
     calls: Arc<AtomicUsize>,
 }
 
+#[obzenflow::system("ledger_tx")]
 #[async_trait]
 impl LedgerPort for CountingLedger {
     async fn post(
@@ -4178,14 +4283,15 @@ impl LedgerPort for CountingLedger {
     }
 }
 
-fn ledger_system(calls: Arc<AtomicUsize>) -> System<dyn LedgerPort> {
-    System::eager("ledger_tx", Arc::new(CountingLedger { calls })).expect("a valid system name")
+fn ledger_system(calls: Arc<AtomicUsize>) -> Port<dyn LedgerPort> {
+    Port::to(CountingLedger { calls })
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct LedgerTransform {
-    #[system]
-    ledger: System<dyn LedgerPort>,
+    #[port]
+    ledger: Port<dyn LedgerPort>,
 }
 
 #[async_trait]
@@ -4220,7 +4326,7 @@ impl EffectfulTransformHandler for LedgerTransform {
 fn build_transactional_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
-    ledger: System<dyn LedgerPort>,
+    ledger: Port<dyn LedgerPort>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let resilience = circuit_breaker().consecutive_failures(2);
@@ -4388,10 +4494,11 @@ fn is_breaker_rejection(err: &EffectError) -> bool {
         .starts_with("circuit breaker rejected effect execution")
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct FailFastTransform {
-    #[system(AlwaysFailing)]
-    counter: System<CallCounter>,
+    #[port(AlwaysFailing)]
+    counter: Port<CallCounter>,
 }
 
 #[async_trait]
@@ -4435,10 +4542,11 @@ impl EffectfulTransformHandler for FailFastTransform {
 /// Same authoring behaviour with the wider manifest used by the
 /// per-effect-policy binding test. A distinct handler type keeps the static
 /// capability set honest for each stage declaration.
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct MultiEffectFailFastTransform {
-    #[system(AlwaysFailing, Counting)]
-    counter: System<CallCounter>,
+    #[port(AlwaysFailing, Counting)]
+    counter: Port<CallCounter>,
 }
 
 #[async_trait]

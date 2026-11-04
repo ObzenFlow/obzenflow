@@ -38,7 +38,7 @@ use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -382,7 +382,7 @@ struct HookRequest {
     value: u64,
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "hook-service")]
 impl HookService {
     #[effect(type = "middleware_hook_binding.effect", exactly_once)]
     fn hook(&self, request: &HookRequest) -> Result<HookEffectValue, EffectError> {
@@ -393,17 +393,17 @@ impl HookService {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct HookTransform {
-    #[system]
-    service: System<HookService>,
+    #[port]
+    service: Port<HookService>,
 }
 
 impl HookTransform {
     fn new(calls: Arc<AtomicUsize>) -> Self {
         Self {
-            service: System::eager("hook-service", Arc::new(HookService { calls }))
-                .expect("a valid system name"),
+            service: Port::to(HookService { calls }),
         }
     }
 }

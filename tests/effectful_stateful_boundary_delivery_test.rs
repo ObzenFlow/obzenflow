@@ -18,7 +18,7 @@ use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_infinite_source, effectful_stateful, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -158,7 +158,7 @@ impl Default for EffectGate {
     }
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "effect-gate")]
 impl EffectGate {
     #[effect(type = "effectful_stateful_boundary.probe", exactly_once)]
     async fn probe(
@@ -199,16 +199,17 @@ struct BoundaryProbeRequest {
     value: u64,
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct BoundaryProbeHandler {
-    #[system]
-    gate: System<EffectGate>,
+    #[port]
+    gate: Port<EffectGate>,
 }
 
 impl BoundaryProbeHandler {
     fn new(gate: Arc<EffectGate>) -> Self {
         Self {
-            gate: System::eager("effect-gate", gate).expect("a valid system name"),
+            gate: Port::to(gate),
         }
     }
 }

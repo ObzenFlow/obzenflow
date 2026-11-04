@@ -11,7 +11,13 @@ const CORE: &str = "obzenflow_core";
 const RUNTIME: &str = "obzenflow_runtime";
 const SATELLITE: &str = "obzenflow_core_derive";
 const RETIRED_SATELLITE: &str = "obzenflow_derive";
-const PERMITTED_FACADE_PATHS: [&str; 2] = ["obzenflow::effects", "obzenflow::port"];
+const PERMITTED_FACADE_PATHS: [&str; 5] = [
+    "obzenflow::command",
+    "obzenflow::effects",
+    "obzenflow::port",
+    "obzenflow::schema",
+    "obzenflow::system",
+];
 
 #[test]
 fn core_derive_is_a_core_owned_compiler_satellite() {

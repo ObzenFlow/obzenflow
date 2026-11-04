@@ -10,7 +10,7 @@ use super::domain::{
 };
 use super::warehouse::{StockRelease, StockReservation, WarehousePort};
 use async_trait::async_trait;
-use obzenflow::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+use obzenflow::effects::{EffectError, Effects, Port, StageCompletion};
 use obzenflow::error::HandlerError;
 use obzenflow::schema::StageOutputFacts;
 use obzenflow::stages::stateful::EffectfulStatefulHandler;
@@ -47,7 +47,6 @@ impl AllocationState {
 /// It is deliberately not a `TypedPayload`: the enum is never journalled or
 /// routed. Each unary variant contains the first-class domain fact that is.
 #[derive(Clone, Debug, StageOutputFacts)]
-#[stage_output(schema = obzenflow::schema)]
 pub enum AllocationOutput {
     Reserved(StockReserved),
     Released(StockReleased),
@@ -56,19 +55,20 @@ pub enum AllocationOutput {
     CancelIgnored(CancelIgnored),
 }
 
-#[derive(Clone, Debug, EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 pub struct Allocator {
-    #[system]
-    warehouse: System<dyn WarehousePort>,
+    #[port]
+    warehouse_port: Port<dyn WarehousePort>,
     capacity_per_sku: u32,
     reservation_pace: Duration,
 }
 
 impl Allocator {
-    pub fn new(warehouse: System<dyn WarehousePort>, capacity_per_sku: u32) -> Self {
+    pub fn new(warehouse_port: Port<dyn WarehousePort>, capacity_per_sku: u32) -> Self {
         assert!(capacity_per_sku > 0, "allocation capacity must be non-zero");
         Self {
-            warehouse,
+            warehouse_port,
             capacity_per_sku,
             reservation_pace: Duration::ZERO,
         }
@@ -216,7 +216,7 @@ impl EffectfulStatefulHandler for Allocator {
 
 #[cfg(test)]
 mod tests {
-    use super::super::warehouse::{warehouse_system, WarehouseConfig};
+    use super::super::warehouse::{warehouse_port, WarehouseConfig};
     use super::*;
     use obzenflow::effects::{
         EffectFailureCause, EffectFailureCode, EffectFailureSource, RetryDisposition,
@@ -282,8 +282,7 @@ mod tests {
 
     #[test]
     fn failed_reservation_is_a_noop_for_capacity_and_holds() {
-        let warehouse = warehouse_system(&WarehouseConfig::default())
-            .expect("the demo warehouse is a valid system");
+        let warehouse = warehouse_port(&WarehouseConfig::default());
         let mut allocator = Allocator::new(warehouse, 1);
         let mut state = AllocationState::default();
         allocator
@@ -292,7 +291,7 @@ mod tests {
                 AllocationOutput::Reserved(StockReserved {
                     order_id: order("order-1"),
                     sku: sku(),
-                    hold_id: HoldId("hold-1".to_string()),
+                    hold_id: HoldId::from("hold-1".to_string()),
                 }),
             )
             .unwrap();

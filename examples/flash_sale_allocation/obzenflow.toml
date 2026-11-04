@@ -6,13 +6,14 @@ mode = "enforce"
 window = 64
 stall_timeout_ms = 30000
 
-# The warehouse id is binding evidence for every warehouse effect, so a replay
-# or resume under a different id refuses at the first recorded effect.
+# The warehouse id, `warehouse-demo` or `warehouse-other`, picks the system that
+# answers. It is binding evidence for every warehouse effect, so a replay or
+# resume under the other id refuses at the first recorded effect.
 [app.warehouse]
 id = "warehouse-demo"
 # One slow reservation opens the reserve breaker; 0 keeps it closed.
 reserve_latency_ms = 20
-# true makes every reservation fail as unavailable.
-reserve_unavailable = false
+# `available`, or `outage` to make every reservation fail as unavailable.
+reservations = "available"
 # How long the allocator takes over each live order; 0 runs at full speed.
 reservation_pace_ms = 0

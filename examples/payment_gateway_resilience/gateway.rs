@@ -23,7 +23,7 @@ use super::domain::{
 use async_trait::async_trait;
 use obzenflow::effects::simulated::{CallLog, CallLogError};
 use obzenflow::effects::{
-    EffectContext, EffectError, EffectHandler, EffectSet, Effects, IdempotencyKey, Keyed, System,
+    EffectContext, EffectError, EffectSet, Effects, IdempotencyKey, Keyed, Port,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::schema::EffectOutcomeFacts;
@@ -72,7 +72,7 @@ impl From<GatewayFailure> for EffectError {
     }
 }
 
-/// The tutorial's gateway. A real implementation would issue an HTTP request
+/// The tutorial's gateway. A real system would issue an HTTP request
 /// inside [`PaymentGatewayPort::authorize`]; here we simulate latency and a
 /// scripted outage so the behaviour is deterministic and easy to follow, and a
 /// call log answers a repeated order with the gateway's first decision.
@@ -89,6 +89,7 @@ impl ScriptedGateway {
     }
 }
 
+#[obzenflow::system("scripted-gateway")]
 #[async_trait]
 impl PaymentGatewayPort for ScriptedGateway {
     async fn authorize(
@@ -198,7 +199,6 @@ impl AuthorizeRequest {
 /// itself is transient `fx.call` machinery the handler matches
 /// exhaustively. There is no persisted gateway-decision wrapper.
 #[derive(Debug, Clone, EffectOutcomeFacts)]
-#[effect_outcome(schema = obzenflow::schema)]
 pub enum AuthorizePaymentOutcome {
     Authorized(PaymentAuthorized),
     Declined(PaymentDeclined),
@@ -217,10 +217,11 @@ impl Keyed for AuthorizeRequest {
 /// fact happened and returns the transient carrier, so the handler never
 /// re-emits them. The handler emits only the non-performance fact
 /// (`PaymentAuthorizationUnavailable`).
-#[derive(Debug, Clone, EffectHandler)]
+#[obzenflow::command]
+#[derive(Debug, Clone)]
 pub struct GatewayTransform {
-    #[system]
-    gateway: System<dyn PaymentGatewayPort>,
+    #[port]
+    payment_gateway_port: Port<dyn PaymentGatewayPort>,
     first_recovery_pause: Option<Duration>,
     recovery_pause_claimed: Arc<AtomicBool>,
 }
@@ -232,10 +233,10 @@ type GatewayOutput = obzenflow::schema::stage_fact_set![
 ];
 
 impl GatewayTransform {
-    /// A gateway transform whose authorizations `gateway` answers.
-    pub fn new(gateway: System<dyn PaymentGatewayPort>) -> Self {
+    /// A gateway transform that works through `payment_gateway_port`.
+    pub fn new(payment_gateway_port: Port<dyn PaymentGatewayPort>) -> Self {
         Self {
-            gateway,
+            payment_gateway_port,
             first_recovery_pause: None,
             recovery_pause_claimed: Arc::new(AtomicBool::new(false)),
         }

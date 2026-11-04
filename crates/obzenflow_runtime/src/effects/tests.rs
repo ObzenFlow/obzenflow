@@ -777,11 +777,11 @@ struct ConsumeOneEffectThenSettle {
     settlement: AdapterSettlement,
 }
 
-impl EffectHandler for ConsumeOneEffectThenSettle {
-    type Systems = ();
+impl Command for ConsumeOneEffectThenSettle {
+    type Ports = ();
     type AllowedEffects = Allowed<(CountingEffect, ())>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 #[derive(Clone, Debug)]
@@ -791,11 +791,11 @@ struct CatchBindingFaultThenSettle {
     settlement: AdapterSettlement,
 }
 
-impl EffectHandler for CatchBindingFaultThenSettle {
-    type Systems = ();
+impl Command for CatchBindingFaultThenSettle {
+    type Ports = ();
     type AllowedEffects = Allowed<(ZeroSlotNamedEffect, ())>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 #[async_trait]
@@ -846,11 +846,11 @@ struct FoldThenCatchBindingFault {
     settlement: AdapterSettlement,
 }
 
-impl EffectHandler for FoldThenCatchBindingFault {
-    type Systems = ();
+impl Command for FoldThenCatchBindingFault {
+    type Ports = ();
     type AllowedEffects = Allowed<(CountingEffect, (ZeroSlotNamedEffect, ()))>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 #[async_trait]
@@ -980,11 +980,11 @@ struct RepeatableBoundaryStateful {
     calls: Arc<AtomicUsize>,
 }
 
-impl EffectHandler for RepeatableBoundaryStateful {
-    type Systems = ();
+impl Command for RepeatableBoundaryStateful {
+    type Ports = ();
     type AllowedEffects = Allowed<(CountingEffect, ())>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 #[async_trait]
@@ -1024,11 +1024,11 @@ struct AffineBoundaryStateful {
     calls: Arc<AtomicUsize>,
 }
 
-impl EffectHandler for AffineBoundaryStateful {
-    type Systems = ();
+impl Command for AffineBoundaryStateful {
+    type Ports = ();
     type AllowedEffects = Allowed<(AffineCountingEffect, ())>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 #[async_trait]
@@ -1173,11 +1173,11 @@ impl CallRequests for EffectsCore {
     }
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[crate::effects::command(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct TransactionalBoundaryStateful {
-    #[system(TransactionalCounting)]
-    ledger: System<dyn TransactionalLedger>,
+    #[port(TransactionalCounting)]
+    ledger: Port<dyn TransactionalLedger>,
 }
 
 #[async_trait]
@@ -1343,18 +1343,21 @@ impl TypedPayload for SecondOutput {
 /// Product carrier for the multi-fact effect tests, derived per FLOWIP-120m:
 /// exact reconstruction, one fact per field.
 #[derive(Clone, Debug, PartialEq, Eq, obzenflow_core::EffectOutcomeFacts)]
+#[effect_outcome(schema = obzenflow_core::event::schema)]
 struct MultiFactOutcome {
     first: FirstOutput,
     second: SecondOutput,
 }
 
 #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+#[stage_output(schema = obzenflow_core::event::schema)]
 enum OrderedStatefulOutput {
     First(FirstOutput),
     Second(SecondOutput),
 }
 
 #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+#[stage_output(schema = obzenflow_core::event::schema)]
 enum PolicyTranslationOutput {
     Reserved(CountingOutput),
     Failed(SecondOutput),
@@ -1365,11 +1368,11 @@ struct PolicyTranslationStateful {
     effect_calls: Arc<AtomicUsize>,
 }
 
-impl EffectHandler for PolicyTranslationStateful {
-    type Systems = ();
+impl Command for PolicyTranslationStateful {
+    type Ports = ();
     type AllowedEffects = Allowed<(CountingEffect, ())>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 fn is_test_policy_rejection(error: &EffectError) -> bool {
@@ -1427,8 +1430,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTransla
 // implementation proves the fatal runtime backstop for a trusted manual claim.
 impl obzenflow_core::OneFactStageOutput for MultiFactOutcome {}
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[crate::effects::command(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct DishonestProductStateful {
     apply_calls: Arc<AtomicUsize>,
 }
@@ -1462,8 +1465,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for DishonestProd
     }
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[crate::effects::command(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct EmitThenErrorStateful;
 
 #[async_trait]
@@ -1501,8 +1504,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for EmitThenError
     }
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[crate::effects::command(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct SingleFactErrorStateful {
     emit: bool,
     fail_apply: bool,
@@ -1539,8 +1542,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SingleFactErr
     }
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[crate::effects::command(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct SecondFactApplyErrorStateful;
 
 #[async_trait]
@@ -1719,8 +1722,11 @@ struct TransactionalCountingPort {
     commit: bool,
 }
 
-fn transactional_ledger(port: Arc<dyn TransactionalLedger>) -> System<dyn TransactionalLedger> {
-    System::eager("tx", port).unwrap()
+fn transactional_ledger<T>(port: Arc<T>) -> Port<dyn TransactionalLedger>
+where
+    T: TransactionalLedger + SystemName + 'static,
+{
+    Port::to(port)
 }
 
 fn zero_slot_named_binding(evidence: u64) -> EffectBinding<ZeroSlotNamedEffect> {
@@ -1758,6 +1764,7 @@ fn registry_with_binding<E: NamedEffect>(binding: &EffectBinding<E>) -> EffectPo
     EffectPortRegistry::collect_from_declarations([&declaration]).unwrap()
 }
 
+#[crate::effects::system("tx", effects = crate::effects)]
 #[async_trait]
 impl TransactionalLedger for TransactionalCountingPort {
     async fn write(
@@ -1783,6 +1790,7 @@ struct DivergentTransactionalPort {
     calls: Arc<AtomicUsize>,
 }
 
+#[crate::effects::system("tx", effects = crate::effects)]
 #[async_trait]
 impl TransactionalLedger for DivergentTransactionalPort {
     async fn write(
@@ -1808,6 +1816,7 @@ struct CommittedFailureTransactionalPort {
     calls: Arc<AtomicUsize>,
 }
 
+#[crate::effects::system("tx", effects = crate::effects)]
 #[async_trait]
 impl TransactionalLedger for CommittedFailureTransactionalPort {
     async fn write(
@@ -1929,7 +1938,7 @@ fn transactional_invocation_context_with_mode(
     effect_history: Option<Arc<EffectHistory>>,
     effect_runtime_mode: EffectRuntimeMode,
     effect_ports: EffectPortRegistry,
-    ledger: &System<dyn TransactionalLedger>,
+    ledger: &Port<dyn TransactionalLedger>,
 ) -> EffectInvocationContext {
     let declaration = transactional_declaration(ledger);
     let ledger_ports = EffectPortRegistry::collect_from_declarations([&declaration]).unwrap();
@@ -1944,8 +1953,8 @@ fn transactional_invocation_context_with_mode(
     context
 }
 
-fn transactional_declaration(ledger: &System<dyn TransactionalLedger>) -> EffectDeclaration {
-    <System<dyn TransactionalLedger> as AnswersEffect<TransactionalCountingEffect>>::declaration(
+fn transactional_declaration(ledger: &Port<dyn TransactionalLedger>) -> EffectDeclaration {
+    <Port<dyn TransactionalLedger> as AnswersEffect<TransactionalCountingEffect>>::declaration(
         ledger, None,
     )
     .unwrap()
@@ -6416,11 +6425,11 @@ struct CatchRefusalThenSettle {
     settlement: AdapterSettlement,
 }
 
-impl EffectHandler for CatchRefusalThenSettle {
-    type Systems = ();
+impl Command for CatchRefusalThenSettle {
+    type Ports = ();
     type AllowedEffects = Allowed<(CountingEffect, ())>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 #[async_trait]

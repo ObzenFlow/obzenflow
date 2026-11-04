@@ -9,8 +9,9 @@ crate.
 | --- | --- |
 | `EffectOutcomeFacts` | Declares the typed facts an effect outcome can contain. |
 | `StageOutputFacts` | Declares a stage output carrier and its fact-set projections. |
-| `EffectHandler` | Declares the systems an effectful handler calls, each in a `#[system]` field. |
-| `#[obzenflow::port]` | Marks a port trait, or the `impl` block of a struct that serves as its own port, so a `System` takes its port type from the value it is built from. Each method marked `#[effect(type = "...", exactly_once)]` or `at_least_once` declares the effect its request names. |
+| `#[obzenflow::command]` | Declares the ports an effectful command works through, with `through = Port` on a unit struct or in `#[port]` fields. |
+| `#[obzenflow::system]` | Names a system on its `impl` of a port. |
+| `#[obzenflow::port]` | Marks a port trait, or the `impl` block of a struct that serves as its own port, so a `Port` takes its port type from the system it is built from. Each method marked `#[effect(type = "...", exactly_once)]` or `at_least_once` declares the effect its request names. |
 
 ## Application use
 
@@ -20,28 +21,22 @@ For application payload types `PaymentAuthorized` and `PaymentDeclined`:
 use obzenflow::schema::EffectOutcomeFacts;
 
 #[derive(Debug, Clone, EffectOutcomeFacts)]
-#[effect_outcome(schema = obzenflow::schema)]
 pub enum AuthorizePaymentOutcome {
     Authorized(PaymentAuthorized),
     Declined(PaymentDeclined),
 }
 ```
 
-`StageOutputFacts` uses `#[stage_output(schema = obzenflow::schema)]`.
-If the facade dependency is renamed to `of`, use `of::schema` in either attribute.
+`StageOutputFacts` is written the same way. If the facade dependency is renamed to `of`,
+add `#[effect_outcome(schema = of::schema)]` or `#[stage_output(schema = of::schema)]`.
 
 ## Compiler integration
 
-The fact derives generate implementations of Core's schema contracts.
-`EffectHandler` and the port attribute expand to paths under `::obzenflow::effects`;
-code that depends on the runtime crate directly names its effects module with
-`#[effect_handler(effects = <path>)]` or `#[port(effects = <path>)]`. The compiler
-crate has no dependency on the facade or other ObzenFlow workspace crates.
-
-Direct Core consumers can use its re-exported derives with the default
-`::obzenflow_core` path. A renamed Core dependency retains the
-`#[effect_outcome(crate = flow_core)]` and `#[stage_output(crate = flow_core)]`
-overrides.
+The fact derives generate implementations of Core's schema contracts through paths under
+`::obzenflow::schema`, and the command, system and port attributes expand to paths under
+`::obzenflow::effects`. Code that depends on Core or the runtime crate directly names the
+module with `schema = <path>` or `effects = <path>`. The compiler crate has no dependency
+on the facade or other ObzenFlow workspace crates.
 
 ## License
 

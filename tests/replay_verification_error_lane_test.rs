@@ -82,7 +82,8 @@ impl TypedFiniteSourceHandler for Numbers {
 }
 
 /// Odd ids fail with a deterministic semantic reason; even ids pass.
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct RejectOdd;
 
 #[async_trait]

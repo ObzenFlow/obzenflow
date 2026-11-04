@@ -41,9 +41,7 @@ use obzenflow_core::{
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    EffectCursor, EffectError, Effects, SinkRedeliverySafety, System,
-};
+use obzenflow_runtime::effects::{EffectCursor, EffectError, Effects, Port, SinkRedeliverySafety};
 use obzenflow_runtime::runtime_config::RETRY_MAX_ATTEMPTS_KEY;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -156,7 +154,7 @@ struct RetryOnce {
     value: u64,
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "flaky-service")]
 impl FlakyService {
     #[effect(type = "cb_composition.retry_once", exactly_once)]
     fn retry_once(&self, request: &RetryOnce) -> Result<CompEffectValue, EffectError> {
@@ -180,17 +178,17 @@ impl FlakyService {
 }
 
 /// Performs the retry-once effect and emits the recovered outcome.
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct RetryTransform {
-    #[system]
-    service: System<FlakyService>,
+    #[port]
+    service: Port<FlakyService>,
 }
 
 impl RetryTransform {
     fn new(calls: Arc<Mutex<BTreeMap<u64, usize>>>) -> Self {
         Self {
-            service: System::eager("flaky-service", Arc::new(FlakyService { calls }))
-                .expect("a valid system name"),
+            service: Port::to(FlakyService { calls }),
         }
     }
 }

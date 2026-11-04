@@ -13,7 +13,7 @@ use super::risk_engine::{RiskEnginePort, ScoreRequest};
 use super::vendors::{CASE_SYSTEM_SOURCE, RISK_ENGINE_SOURCE};
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
-use obzenflow::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+use obzenflow::effects::{EffectError, Effects, StageCompletion};
 use obzenflow::error::HandlerError;
 use obzenflow::stages::joins::{
     AsOfReferenceView, JoinReferenceView, TypedAsOfJoinHandler, TypedJoinHandler,
@@ -169,14 +169,12 @@ impl TypedStatefulHandler for DailyProfile {
 pub type ScoreOutput =
     obzenflow::schema::stage_fact_set![TransactionCleared, AlertRaised, ScoreUnavailable];
 
-#[derive(Clone, Debug, EffectHandler)]
-pub struct ScoreHandler {
-    #[system]
-    pub risk_engine: System<dyn RiskEnginePort>,
-}
+#[obzenflow::command(through = RiskEnginePort)]
+#[derive(Clone, Debug)]
+pub struct Scorer;
 
 #[async_trait]
-impl EffectfulTransformHandler for ScoreHandler {
+impl EffectfulTransformHandler for Scorer {
     type Input = ProfiledTransaction;
     type Output = ScoreOutput;
 
@@ -211,14 +209,12 @@ impl EffectfulTransformHandler for ScoreHandler {
 
 pub type OpenCaseOutput = obzenflow::schema::stage_fact_set![CaseOpened, CaseUnavailable];
 
-#[derive(Clone, Debug, EffectHandler)]
-pub struct OpenCaseHandler {
-    #[system]
-    pub case_system: System<dyn CaseSystemPort>,
-}
+#[obzenflow::command(through = CaseSystemPort)]
+#[derive(Clone, Debug)]
+pub struct CaseOpener;
 
 #[async_trait]
-impl EffectfulTransformHandler for OpenCaseHandler {
+impl EffectfulTransformHandler for CaseOpener {
     type Input = AlertRaised;
     type Output = OpenCaseOutput;
 

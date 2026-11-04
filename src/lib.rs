@@ -235,4 +235,4 @@ pub mod stages;
 #[cfg(feature = "test-support")]
 pub mod testing;
 
-pub use obzenflow_runtime::effects::port;
+pub use obzenflow_runtime::effects::{command, port, system};

@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::effects::{
-    AnswersEffect, AtLeastOnce, EffectName, Idempotent, Keyed, RequiresKey, System, SystemError,
+    AnswersEffect, AtLeastOnce, EffectName, Idempotent, Keyed, Port, RequiresKey,
 };
 use obzenflow_core::SystemBindingEvidence;
 
@@ -22,6 +22,7 @@ struct CountingLedger {
     calls: Arc<AtomicUsize>,
 }
 
+#[crate::effects::system("simulated-ledger", effects = crate::effects)]
 #[async_trait]
 impl LedgerPort for CountingLedger {
     async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError> {
@@ -32,6 +33,7 @@ impl LedgerPort for CountingLedger {
 
 struct RefusingLedger;
 
+#[crate::effects::system("ledger-outage", effects = crate::effects)]
 #[async_trait]
 impl LedgerPort for RefusingLedger {
     async fn write(&self, _: u64) -> Result<LedgerWritten, EffectError> {
@@ -229,8 +231,7 @@ async fn a_request_records_what_an_equivalent_hand_written_effect_records() {
     let calls = Arc::new(AtomicUsize::new(0));
     let request_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let request_stage = StageId::new();
-    let system: System<dyn LedgerPort> =
-        System::eager("simulated-ledger", counting_ledger(&calls)).expect("valid system");
+    let system: Port<dyn LedgerPort> = Port::to(counting_ledger(&calls));
     let declaration = declaration_for::<Call<LedgerWrite>, _>(&system);
     let registry = EffectPortRegistry::collect_from_declarations([&declaration])
         .expect("the system's registration collects")
@@ -327,15 +328,16 @@ fn a_request_records_the_safety_and_key_its_class_names() {
 async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_answers() {
     let resolutions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
-    let system: System<dyn LedgerPort> = System::deferred("ledger", {
+    let system: Port<dyn LedgerPort> = Port::deferred({
         let resolutions = resolutions.clone();
         let calls = calls.clone();
         move || {
             resolutions.fetch_add(1, Ordering::SeqCst);
-            Ok(counting_ledger(&calls))
+            Ok(CountingLedger {
+                calls: calls.clone(),
+            })
         }
-    })
-    .expect("valid system");
+    });
     let write = declaration_for::<Call<LedgerWrite>, _>(&system);
     let check = declaration_for::<Call<LedgerCheck>, _>(&system);
     let another_stage_write = declaration_for::<Call<LedgerWrite>, _>(&system);
@@ -375,10 +377,8 @@ async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_
 #[test]
 fn independently_built_systems_with_one_name_fail_collection() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let first: System<dyn LedgerPort> =
-        System::eager("ledger", counting_ledger(&calls)).expect("valid system");
-    let second: System<dyn LedgerPort> =
-        System::eager("ledger", counting_ledger(&calls)).expect("valid system");
+    let first: Port<dyn LedgerPort> = Port::to(counting_ledger(&calls));
+    let second: Port<dyn LedgerPort> = Port::to(counting_ledger(&calls));
     let error = match EffectPortRegistry::collect_from_declarations([
         &declaration_for::<Call<LedgerWrite>, _>(&first),
         &declaration_for::<Call<LedgerWrite>, _>(&second),
@@ -396,63 +396,17 @@ fn independently_built_systems_with_one_name_fail_collection() {
 }
 
 #[test]
-fn a_system_takes_its_port_type_from_a_concrete_or_an_erased_port() -> Result<(), SystemError> {
+fn port_type_name_inferred_from_system() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let erased_port: Arc<dyn LedgerPort> = counting_ledger(&calls);
-    let concrete = System::eager("concrete-ledger", counting_ledger(&calls))?;
-    let erased = System::eager("erased-ledger", erased_port)?;
-    let deferred = System::deferred("deferred-ledger", || Ok(Arc::new(RefusingLedger)))?;
+    let by_value = Port::to(CountingLedger {
+        calls: calls.clone(),
+    });
+    let shared = Port::to(counting_ledger(&calls));
+    let deferred = Port::deferred(|| Ok(RefusingLedger));
+    let ports: [&Port<dyn LedgerPort>; 3] = [&by_value, &shared, &deferred];
     assert_eq!(
-        [concrete.name(), erased.name(), deferred.name()],
-        ["concrete-ledger", "erased-ledger", "deferred-ledger"]
-    );
-    Ok(())
-}
-
-#[test]
-fn system_constructors_refuse_names_that_could_carry_a_location_or_credential() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    for name in [
-        "",
-        "simulated risk engine",
-        "-leading-hyphen",
-        "https://user:secret@vendor.example",
-        &"s".repeat(65),
-    ] {
-        let eager: Result<System<dyn LedgerPort>, _> = System::eager(name, counting_ledger(&calls));
-        assert_eq!(
-            eager.expect_err("an invalid name is refused"),
-            SystemError::InvalidName {
-                system: name.to_string()
-            }
-        );
-        let deferred: Result<System<dyn LedgerPort>, _> = System::deferred(
-            name,
-            || -> Result<Arc<RefusingLedger>, EffectPortResolutionError> {
-                Err(EffectPortResolutionError::CredentialUnavailable)
-            },
-        );
-        assert!(matches!(
-            deferred,
-            Err(SystemError::InvalidName { system }) if system == name
-        ));
-    }
-    for name in [
-        "simulated-risk-engine",
-        "risk_engine",
-        "ledger.v2",
-        "0ledger",
-    ] {
-        let system: System<dyn LedgerPort> =
-            System::eager(name, counting_ledger(&calls)).expect("a valid name is accepted");
-        assert_eq!(system.name(), name);
-    }
-    assert_eq!(
-        SystemError::InvalidName {
-            system: "simulated risk engine".to_string()
-        }
-        .to_string(),
-        "system names must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+        ports.map(Port::system_name),
+        ["simulated-ledger", "simulated-ledger", "ledger-outage"]
     );
 }
 
@@ -476,7 +430,7 @@ struct UnkeyedWrite {
     value: u64,
 }
 
-#[crate::effects::port(effects = crate::effects)]
+#[crate::effects::port(system = "keyed-ledger", effects = crate::effects)]
 impl KeyedLedger {
     #[effect(type = "test.keyed_write", exactly_once)]
     fn keyed(
@@ -512,8 +466,7 @@ async fn a_keyed_method_receives_the_key_every_row_of_its_call_journals() {
     let keys = Arc::new(Mutex::new(Vec::new()));
     let stage = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
-    let system = System::eager("keyed-ledger", Arc::new(KeyedLedger { keys: keys.clone() }))
-        .expect("valid system");
+    let system = Port::to(KeyedLedger { keys: keys.clone() });
     let keyed = declaration_for::<<KeyedWrite as EffectName>::Effect, _>(&system);
     let unkeyed = declaration_for::<<UnkeyedWrite as EffectName>::Effect, _>(&system);
     let declarations = vec![keyed.runtime_projection(), unkeyed.runtime_projection()];
@@ -707,8 +660,7 @@ async fn unavailable_is_a_retryable_dependency_failure_live_and_recorded() {
 
     let stage = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
-    let system: System<dyn LedgerPort> =
-        System::eager("ledger-outage", Arc::new(RefusingLedger)).expect("valid system");
+    let system: Port<dyn LedgerPort> = Port::to(RefusingLedger);
     let declaration = declaration_for::<Call<LedgerWrite>, _>(&system);
     let registry = EffectPortRegistry::collect_from_declarations([&declaration])
         .unwrap()

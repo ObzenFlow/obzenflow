@@ -82,17 +82,54 @@ impl From<ReplyFailure> for EffectError {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum CaseReply {
+    Readable,
+    Unreadable,
+}
+
 pub struct SimulatedCaseSystem {
     calls: CallLog<CaseAnswer>,
-    case_system: CaseSystem,
 }
 
 impl SimulatedCaseSystem {
-    pub fn open(path: &Path, case_system: CaseSystem) -> Result<Self, CallLogError> {
+    pub fn open(path: &Path) -> Result<Self, CallLogError> {
         Ok(Self {
             calls: CallLog::open(path)?,
-            case_system,
         })
+    }
+
+    fn answer(
+        &self,
+        key: &IdempotencyKey,
+        flow_id: FlowId,
+    ) -> Result<Result<CaseAnswer, ReplyFailure>, CallLogError> {
+        self.reply(key, flow_id, CaseReply::Readable)
+    }
+
+    fn reply(
+        &self,
+        key: &IdempotencyKey,
+        flow_id: FlowId,
+        reply: CaseReply,
+    ) -> Result<Result<CaseAnswer, ReplyFailure>, CallLogError> {
+        self.calls.try_answer(key, flow_id, |decided| match reply {
+            CaseReply::Readable => Ok(CaseAnswer {
+                case_number: CaseNumber(decided + 1),
+            }),
+            CaseReply::Unreadable => Err(ReplyFailure::NoCaseNumber),
+        })
+    }
+}
+
+pub struct UnreadableCaseSystem {
+    cases: SimulatedCaseSystem,
+}
+
+impl UnreadableCaseSystem {
+    pub fn open(path: &Path) -> Result<Self, CallLogError> {
+        let cases = SimulatedCaseSystem::open(path)?;
+        Ok(Self { cases })
     }
 
     fn answer(
@@ -101,20 +138,26 @@ impl SimulatedCaseSystem {
         key: &IdempotencyKey,
         flow_id: FlowId,
     ) -> Result<Result<CaseAnswer, ReplyFailure>, CallLogError> {
-        let unreadable =
-            self.case_system == CaseSystem::UnreadableReplies && request.alert_id.is_whole_day();
-        self.calls.try_answer(key, flow_id, |decided| {
-            if unreadable {
-                Err(ReplyFailure::NoCaseNumber)
-            } else {
-                Ok(CaseAnswer {
-                    case_number: CaseNumber(decided + 1),
-                })
-            }
-        })
+        let reply = if request.alert_id.is_whole_day() {
+            CaseReply::Unreadable
+        } else {
+            CaseReply::Readable
+        };
+        self.cases.reply(key, flow_id, reply)
     }
 }
 
+fn opened(
+    request: &CaseRequest,
+    answer: Result<Result<CaseAnswer, ReplyFailure>, CallLogError>,
+) -> Result<CaseOpened, EffectError> {
+    let answer = answer.map_err(|error| {
+        EffectError::unavailable(CASE_SYSTEM_SOURCE, "ledger_write_failed", error)
+    })??;
+    Ok(request.opened(answer.case_number))
+}
+
+#[obzenflow::system("simulated-case-system")]
 #[async_trait]
 impl CaseSystemPort for SimulatedCaseSystem {
     async fn open(
@@ -123,10 +166,20 @@ impl CaseSystemPort for SimulatedCaseSystem {
         key: &IdempotencyKey,
         ctx: &EffectContext,
     ) -> Result<CaseOpened, EffectError> {
-        let answer = self.answer(request, key, ctx.flow_id()).map_err(|error| {
-            EffectError::unavailable(CASE_SYSTEM_SOURCE, "ledger_write_failed", error)
-        })??;
-        Ok(request.opened(answer.case_number))
+        opened(request, self.answer(key, ctx.flow_id()))
+    }
+}
+
+#[obzenflow::system("case-system-unreadable-replies")]
+#[async_trait]
+impl CaseSystemPort for UnreadableCaseSystem {
+    async fn open(
+        &self,
+        request: &CaseRequest,
+        key: &IdempotencyKey,
+        ctx: &EffectContext,
+    ) -> Result<CaseOpened, EffectError> {
+        opened(request, self.answer(request, key, ctx.flow_id()))
     }
 }
 
@@ -158,7 +211,7 @@ mod tests {
     fn case_number(cases: &SimulatedCaseSystem, txn_id: u64, run: FlowId) -> CaseNumber {
         let request = request(txn_id);
         cases
-            .answer(&request, &request.idempotency_key(), run)
+            .answer(&request.idempotency_key(), run)
             .expect("the call log records the call")
             .expect("case opens")
             .case_number
@@ -168,8 +221,7 @@ mod tests {
     fn cases_are_numbered_in_call_order_and_a_repeat_keeps_its_number() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cases.jsonl");
-        let cases =
-            SimulatedCaseSystem::open(&path, CaseSystem::Simulated).expect("the call log opens");
+        let cases = SimulatedCaseSystem::open(&path).expect("the call log opens");
         let run = FlowId::new();
         assert_eq!(case_number(&cases, 5, run), CaseNumber(1));
         assert_eq!(case_number(&cases, 3, run), CaseNumber(2));
@@ -196,15 +248,13 @@ mod tests {
         let path = dir.path().join("cases.jsonl");
         let first_run = FlowId::new();
         {
-            let cases = SimulatedCaseSystem::open(&path, CaseSystem::Simulated)
-                .expect("the call log opens");
+            let cases = SimulatedCaseSystem::open(&path).expect("the call log opens");
             for txn_id in [11, 12, 13] {
                 case_number(&cases, txn_id, first_run);
             }
         }
 
-        let reopened =
-            SimulatedCaseSystem::open(&path, CaseSystem::Simulated).expect("the call log reopens");
+        let reopened = SimulatedCaseSystem::open(&path).expect("the call log reopens");
         let resumed = FlowId::new();
         assert_eq!(case_number(&reopened, 12, resumed), CaseNumber(2));
         assert_eq!(case_number(&reopened, 14, resumed), CaseNumber(4));
@@ -214,8 +264,7 @@ mod tests {
     fn unreadable_replies_fail_whole_day_alerts_and_number_only_the_cases_read() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cases.jsonl");
-        let cases = SimulatedCaseSystem::open(&path, CaseSystem::UnreadableReplies)
-            .expect("the call log opens");
+        let cases = UnreadableCaseSystem::open(&path).expect("the call log opens");
         let run = FlowId::new();
         let day = alert("day:2022/09/05:48/81F0A0001".to_owned());
         let failure = cases
@@ -226,7 +275,12 @@ mod tests {
             EffectError::from(failure.clone()),
             EffectError::Permanent(message) if message == "the case system's reply has no case number"
         ));
-        assert_eq!(case_number(&cases, 5, run), CaseNumber(1));
+        let transaction = request(5);
+        let read = cases
+            .answer(&transaction, &transaction.idempotency_key(), run)
+            .expect("the call log records the call")
+            .expect("a transaction's reply is readable");
+        assert_eq!(read.case_number, CaseNumber(1));
 
         let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
             .expect("the call log is readable")

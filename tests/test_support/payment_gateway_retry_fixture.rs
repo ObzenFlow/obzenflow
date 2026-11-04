@@ -19,7 +19,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, IdempotencyKey, Keyed, System};
+use obzenflow_runtime::effects::{EffectError, Effects, IdempotencyKey, Keyed, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use obzenflow_runtime::stages::sink::SinkWriteFailure;
@@ -180,7 +180,7 @@ struct GatewayPort {
     behaviour: GatewayBehaviour,
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "payment-gateway")]
 impl GatewayPort {
     #[effect(type = "payment.authorize", exactly_once)]
     fn authorize(
@@ -252,18 +252,18 @@ impl Keyed for ScriptedAuthorize {
 type GatewayOutput =
     obzenflow_core::stage_fact_set![PaymentAuthorized, PaymentAuthorizationUnavailable];
 
-#[derive(Debug, Clone, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Debug, Clone)]
 struct ScriptedGatewayTransform {
-    #[system]
-    gateway: System<GatewayPort>,
+    #[port]
+    gateway: Port<GatewayPort>,
     pacing: InvocationPacing,
 }
 
 impl ScriptedGatewayTransform {
     fn new(gateway: &ScriptedGateway) -> Self {
         Self {
-            gateway: System::eager("payment-gateway", Arc::new(gateway.port()))
-                .expect("a valid system name"),
+            gateway: Port::to(gateway.port()),
             pacing: gateway.pacing(),
         }
     }

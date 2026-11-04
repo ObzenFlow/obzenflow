@@ -13,7 +13,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    effectful_transform_effects, EffectDeclaration, EffectError, Effects, StageEffectsError, System,
+    effectful_transform_effects, EffectDeclaration, EffectError, Effects, Port, StageEffectsError,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -23,7 +23,6 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ContainmentInput {
@@ -61,7 +60,7 @@ struct ValueRequest {
     value: u64,
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "values")]
 impl ValueService {
     #[effect(type = "containment.value", exactly_once)]
     fn value(&self, request: &ValueRequest) -> Result<ContainmentEffectValue, EffectError> {
@@ -94,16 +93,17 @@ impl TypedFiniteSourceHandler for OneShotSource {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct PerformTransform {
-    #[system]
-    values: System<ValueService>,
+    #[port]
+    values: Port<ValueService>,
 }
 
 impl PerformTransform {
     fn new() -> Self {
         Self {
-            values: System::eager("values", Arc::new(ValueService)).expect("a valid system name"),
+            values: Port::to(ValueService),
         }
     }
 }
@@ -135,7 +135,8 @@ impl EffectfulTransformHandler for PerformTransform {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct EmitOnlyTransform;
 
 #[async_trait]
@@ -373,7 +374,7 @@ struct CollidingService;
 #[derive(Clone, Debug, Serialize)]
 struct CollidingRequest;
 
-#[obzenflow::port]
+#[obzenflow::port(system = "colliding")]
 impl CollidingService {
     #[effect(type = "containment.colliding", exactly_once)]
     fn collide(&self, _: &CollidingRequest) -> Result<CollidingOutcome, EffectError> {
@@ -383,17 +384,17 @@ impl CollidingService {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct CollidingTransform {
-    #[system]
-    colliding: System<CollidingService>,
+    #[port]
+    colliding: Port<CollidingService>,
 }
 
 impl CollidingTransform {
     fn new() -> Self {
         Self {
-            colliding: System::eager("colliding", Arc::new(CollidingService))
-                .expect("a valid system name"),
+            colliding: Port::to(CollidingService),
         }
     }
 }

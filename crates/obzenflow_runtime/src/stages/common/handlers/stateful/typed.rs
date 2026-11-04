@@ -673,6 +673,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+    #[stage_output(schema = obzenflow_core::event::schema)]
     struct DishonestProduct {
         first: Output,
         second: OtherOutput,

@@ -441,15 +441,6 @@ impl From<FlowBuildError> for String {
     }
 }
 
-impl From<obzenflow_runtime::effects::SystemError> for FlowBuildError {
-    fn from(error: obzenflow_runtime::effects::SystemError) -> Self {
-        Self::BindingConfiguration {
-            binding: error.system().to_string(),
-            detail: error.to_string(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::FlowBuildError;
