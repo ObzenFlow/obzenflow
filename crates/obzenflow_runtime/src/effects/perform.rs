@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn its_input_is_the_functions_argument_and_its_output_the_outcome_facts() {
+    fn input_output_inferred_from_request_fn() {
         let charge = perform(ChargeRequest::for_invoice).through(Port::to(Scripted));
         assert_handler(&charge);
         assert_eq!(
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closure_can_build_the_request() {
+    fn closure_builds_request() {
         let floor = 10;
         let charge = perform(move |invoice: &Invoice| ChargeRequest {
             amount: invoice.amount.max(floor),
@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn it_allows_its_one_request_and_no_other_of_the_port() {
+    fn allowed_effects_limited_to_request() {
         let charge = perform(ChargeRequest::for_invoice).through(Port::to(Scripted));
         let declarations = effectful_transform_effects(&charge, &[]).expect("one declaration");
         let effects: Vec<_> = declarations
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn its_at_least_once_request_is_acknowledged_with_no_field_to_narrow() {
+    fn at_least_once_requires_acknowledgement() {
         let resend = perform(|_: &Invoice| ResendRequest).through(Port::to(Scripted));
         let declarations = effectful_transform_effects(&resend, &[]).expect("one declaration");
         let refusal = declarations[0]
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_names_the_request_and_the_system() {
+    fn debug_format_redacts_port() {
         let charge = perform(ChargeRequest::for_invoice).through(Port::to(Scripted));
         let debug = format!("{charge:?}");
         assert!(debug.contains("ChargeRequest"), "{debug}");

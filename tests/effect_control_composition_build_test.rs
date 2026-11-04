@@ -903,7 +903,7 @@ impl EffectfulTransformHandler for ThroughResend {
 }
 
 #[tokio::test]
-async fn a_through_commands_consent_refusal_names_the_port_and_the_field_form() {
+async fn through_unacknowledged_at_least_once_refused() {
     let rendered = row_refusal(|| {
         let resend = ThroughResend::through(Port::to(Resender));
         effectful_transform!(CompositionInput -> CompositionFact => resend)
@@ -928,7 +928,7 @@ async fn a_through_commands_consent_refusal_names_the_port_and_the_field_form() 
 }
 
 #[test]
-fn a_stage_declares_the_effects_its_port_fields_allow() {
+fn stage_declares_port_field_effects() {
     let declared = |declarations: Vec<EffectDeclaration>| {
         declarations
             .iter()

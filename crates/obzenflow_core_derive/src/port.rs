@@ -803,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn a_port_trait_implements_no_erased_coercion() {
+    fn trait_omits_erased_serves_port_impl() {
         let expanded = expanded(syn::parse_quote! {
             trait CardPort: Send + Sync {}
         });
@@ -818,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn a_struct_port_names_itself_on_its_port_attribute() {
+    fn system_arg_expands_system_name_impl() {
         let expanded =
             expand(quote!(system = "audit-ledger"), quote!(impl AuditLedger {})).to_string();
         assert!(
@@ -830,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn a_struct_port_name_outside_the_grammar_is_refused() {
+    fn invalid_system_arg_refused() {
         let expanded =
             expand(quote!(system = "audit ledger"), quote!(impl AuditLedger {})).to_string();
         assert!(
@@ -840,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn a_port_trait_takes_no_system_name() {
+    fn system_arg_on_trait_refused() {
         let expanded = expand(
             quote!(system = "stripe"),
             quote!(
@@ -856,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn other_arguments_are_refused() {
+    fn unknown_args_refused() {
         let expanded = expand(quote!(uses = Card), quote!(impl AuditLedger {})).to_string();
         assert!(
             expanded.contains("`#[obzenflow::port]` takes"),

@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn through_adds_a_private_field_a_constructor_and_the_command() {
+    fn through_expands_field_constructor_command_impl() {
         let expanded = expanded(
             quote!(through = RiskEnginePort),
             quote! {
@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn through_two_ports_takes_them_in_the_order_it_lists_them() {
+    fn through_constructor_preserves_port_order() {
         let expanded = expanded(
             quote!(through = (RiskEnginePort, CaseSystemPort)),
             quote!(
@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn two_ports_with_one_last_segment_get_distinct_fields() {
+    fn field_name_collision_appends_index() {
         let expanded = expanded(
             quote!(through = (billing::CardPort, refunds::CardPort)),
             quote!(
@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn a_port_named_otherwise_still_reads_as_a_port() {
+    fn field_name_appends_port_suffix() {
         let expanded = expanded(
             quote!(through = Ledger),
             quote!(
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn through_refuses_a_struct_with_fields_of_its_own() {
+    fn through_non_unit_struct_refused() {
         for item in [
             quote!(
                 struct Scorer {
@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn through_refuses_generic_parameters_and_points_at_the_field() {
+    fn through_generic_params_refused() {
         let one = expanded(
             quote!(through = WarehousePort<StockRelease>),
             quote!(
@@ -559,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn through_refuses_one_port_twice() {
+    fn through_duplicate_port_refused() {
         let expanded = expanded(
             quote!(through = (PaymentGatewayPort, PaymentGatewayPort)),
             quote!(
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn a_field_form_reads_port_fields_and_strips_the_marks() {
+    fn field_form_expands_port_fields() {
         let expanded = expanded(
             quote!(),
             quote! {
@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listed_field_is_narrowed_and_checked_against_its_port() {
+    fn listed_requests_expand_narrowed_port() {
         let expanded = expanded(
             quote!(),
             quote! {
@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn a_command_with_no_port_allows_nothing() {
+    fn no_ports_expands_empty_port_list() {
         let expanded = expanded(
             quote!(),
             quote!(
@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tuple_field_is_read_by_position() {
+    fn tuple_field_accessed_by_index() {
         let expanded = expanded(
             quote!(),
             quote!(
@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn two_fields_of_one_port_type_are_refused() {
+    fn duplicate_port_type_fields_refused() {
         let expanded = expanded(
             quote!(),
             quote! {
@@ -680,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn field_marks_are_checked() {
+    fn malformed_port_attr_refused() {
         let cases = [
             (
                 quote!(
@@ -727,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn the_effects_path_can_be_named_beside_through() {
+    fn effects_path_override_with_through() {
         let expanded = expanded(
             quote!(through = CardPort, effects = crate::effects),
             quote!(
@@ -745,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn other_arguments_and_items_are_refused() {
+    fn invalid_args_or_item_refused() {
         let expanded_args = expanded(
             quote!(uses = CardPort),
             quote!(

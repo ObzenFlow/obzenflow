@@ -481,7 +481,7 @@ impl transforms::EffectfulTransformHandler for ThroughCard {
 }
 
 #[test]
-fn renamed_facade_commands_and_systems_compile() {
+fn renamed_facade_command_rows_compile() {
     let through = ThroughCard::through(of::effects::Port::to(Card));
     effectful_transform!(Fact -> Fact => through);
     let performed = of::effects::perform(ChargeCard::for_fact).through(of::effects::Port::to(Card));

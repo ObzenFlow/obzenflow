@@ -706,7 +706,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_names_refuse_what_could_carry_a_location_or_credential() {
+    fn is_system_name_false_for_invalid() {
         for name in [
             "",
             "simulated risk engine",
@@ -719,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn every_system_name_is_a_binding_name() {
+    fn system_names_subset_of_binding_names() {
         for name in [
             "simulated-risk-engine",
             "risk_engine",

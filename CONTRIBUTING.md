@@ -59,6 +59,12 @@ way locally. `cargo xtask test --help` lists the lanes, so you can run only the
 ones your change touches. The test helpers, such as `JournalProbe` and
 `TestClock`, are documented in `obzenflow_runtime::testing`.
 
+Test names follow `<subject>_<condition>_<result>`, six words at most. No
+articles, pronouns, possessives, auxiliaries, modals or filler adverbs. Code
+symbols and domain terms such as `at_least_once` are exempt. State one result,
+with no `and`, using technical verbs such as `refused`, `expands`, `returns` and
+`fails`.
+
 ## Pull request guidelines
 
 - Keep changes focused (one feature/fix per PR when possible).

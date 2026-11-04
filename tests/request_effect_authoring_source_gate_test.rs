@@ -139,7 +139,7 @@ fn declared_effect_sets(tokens: TokenStream, found: &mut BTreeSet<String>) {
 }
 
 #[test]
-fn example_handlers_take_their_effects_from_their_ports() {
+fn examples_declare_no_effect_sets() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     rust_files(&root.join("examples"), &mut files);

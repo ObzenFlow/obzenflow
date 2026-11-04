@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn a_system_names_itself_and_keeps_its_impl_unchanged() {
+    fn expands_system_name_impl() {
         let expanded = expanded(
             quote!("stripe"),
             quote! {
@@ -134,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn a_generic_system_keeps_its_generics_on_the_name() {
+    fn generics_propagate_to_system_name_impl() {
         let expanded = expanded(
             quote!("scripted"),
             quote!(
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn the_effects_path_can_be_named() {
+    fn effects_path_override() {
         let expanded = expanded(
             quote!("ledger", effects = crate::effects),
             quote!(impl LedgerPort for Ledger {}),
@@ -162,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn names_outside_the_grammar_are_refused_with_the_grammar() {
+    fn invalid_names_refused() {
         for name in [
             "",
             "simulated risk engine",
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn names_inside_the_grammar_are_accepted() {
+    fn valid_names_accepted() {
         for name in [
             "simulated-risk-engine",
             "risk_engine",
@@ -194,13 +194,13 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_name_teaches_the_spelling() {
+    fn missing_name_refused() {
         let expanded = expanded(quote!(), quote!(impl CardPort for Card {}));
         assert!(expanded.contains("takes the system's name"), "{expanded}");
     }
 
     #[test]
-    fn only_a_port_impl_takes_the_attribute() {
+    fn non_port_impl_refused() {
         for item in [
             quote!(impl Card {}),
             quote!(

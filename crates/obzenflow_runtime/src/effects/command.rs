@@ -161,6 +161,25 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// let engine = Port::deferred(SimulatedRiskEngine::from_env);
     /// # let port: Port<dyn RiskEnginePort> = engine;
     /// ```
+    ///
+    /// A resolver that returns an `Arc` does not compile; the port wraps the
+    /// system itself:
+    ///
+    /// ```compile_fail,E0277
+    /// # use obzenflow_runtime::effects::{EffectPortResolutionError, Port};
+    /// # use std::sync::Arc;
+    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # trait RiskEnginePort: Send + Sync {}
+    /// # struct SimulatedRiskEngine;
+    /// # #[obzenflow_runtime::effects::system("simulated-risk-engine", effects = obzenflow_runtime::effects)]
+    /// # impl RiskEnginePort for SimulatedRiskEngine {}
+    /// # fn main() {
+    /// let engine = Port::deferred(|| -> Result<Arc<SimulatedRiskEngine>, EffectPortResolutionError> {
+    ///     Ok(Arc::new(SimulatedRiskEngine))
+    /// });
+    /// # let port: Port<dyn RiskEnginePort> = engine;
+    /// # }
+    /// ```
     pub fn deferred<T, F>(resolver: F) -> Self
     where
         T: SystemName + Send + Sync + 'static,
@@ -251,7 +270,8 @@ const fn checked_system_name<T: SystemName>() -> &'static str {
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
-    label = "this system does not name itself"
+    label = "this system does not name itself",
+    note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]
 pub trait SystemName {
     const NAME: &'static str;
@@ -261,7 +281,8 @@ pub trait SystemName {
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
-    label = "this system does not name itself"
+    label = "this system does not name itself",
+    note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]
 pub trait BuiltSystem {
     type System: SystemName;

@@ -396,7 +396,7 @@ fn independently_built_systems_with_one_name_fail_collection() {
 }
 
 #[test]
-fn a_port_takes_its_type_and_its_name_from_its_system() {
+fn port_type_name_inferred_from_system() {
     let calls = Arc::new(AtomicUsize::new(0));
     let by_value = Port::to(CountingLedger {
         calls: calls.clone(),
