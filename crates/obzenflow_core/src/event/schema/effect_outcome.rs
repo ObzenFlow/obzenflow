@@ -49,6 +49,7 @@ use super::typed_fact_set::TypedFactSet;
 /// /// Closed set of successful gateway authorization outcomes. The variants
 /// /// are the facts the journal records; the derive writes the marshalling.
 /// #[derive(Debug, Clone, EffectOutcomeFacts)]
+/// #[effect_outcome(schema = obzenflow_core::event::schema)]
 /// pub enum AuthorizePaymentOutcome {
 ///     Authorized(PaymentAuthorized),
 ///     Declined(PaymentDeclined),
@@ -99,25 +100,17 @@ mod tests {
 
     /// Doc comments and derives pass through; the carrier is plain source.
     #[derive(Debug, Clone, PartialEq, Eq, EffectOutcomeFacts)]
+    #[effect_outcome(schema = crate::event::schema)]
     pub enum DecisionOutcome {
         Approved(Approved),
         Refused(Refused),
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, EffectOutcomeFacts)]
+    #[effect_outcome(schema = crate::event::schema)]
     pub struct DecisionWithAudit {
         pub decision: Approved,
         pub audit: Refused,
-    }
-
-    /// The path escape hatch (FLOWIP-120m): generated code resolves through
-    /// the named path instead of the extern-prelude `::obzenflow_core`. The
-    /// self alias makes the unprefixed name stand in for a re-export path.
-    #[derive(Debug, Clone, PartialEq, Eq, EffectOutcomeFacts)]
-    #[effect_outcome(crate = obzenflow_core)]
-    pub enum HatchOutcome {
-        Approved(Approved),
-        Refused(Refused),
     }
 
     fn unknown_fact() -> TypedFact {
@@ -235,15 +228,5 @@ mod tests {
             DecisionWithAudit::try_from_facts(&with_unknown),
             Err(TypedFactSetError::UnexpectedFact { .. })
         ));
-    }
-
-    #[test]
-    fn effect_outcome_crate_path_hatch_substitutes_generated_paths() {
-        let carrier = HatchOutcome::Approved(Approved { value: 11 });
-        let facts = carrier.clone().into_facts().expect("variant serializes");
-        assert_eq!(
-            HatchOutcome::try_from_facts(&facts).expect("variant reconstructs"),
-            carrier
-        );
     }
 }

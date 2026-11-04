@@ -199,7 +199,6 @@ impl AuthorizeRequest {
 /// itself is transient `fx.call` machinery the handler matches
 /// exhaustively. There is no persisted gateway-decision wrapper.
 #[derive(Debug, Clone, EffectOutcomeFacts)]
-#[effect_outcome(schema = obzenflow::schema)]
 pub enum AuthorizePaymentOutcome {
     Authorized(PaymentAuthorized),
     Declined(PaymentDeclined),

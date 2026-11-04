@@ -204,6 +204,7 @@ mod tests {
     /// The FLOWIP-120z sum-of-products shape: one leaf on the valid path,
     /// a product on the invalid path, and a deliberate filter arm.
     #[derive(Debug, Clone, PartialEq, Eq, StageOutputFacts)]
+    #[stage_output(schema = crate::event::schema)]
     enum ClassificationOutcome {
         Validated(Valid),
         Rejected {
@@ -216,6 +217,7 @@ mod tests {
 
     /// Per-fact sum: qualifies as `OneFactStageOutput` via the derive.
     #[derive(Debug, Clone, PartialEq, Eq, StageOutputFacts)]
+    #[stage_output(schema = crate::event::schema)]
     enum PerFactSum {
         Valid(Valid),
         Invalid(Invalid),
@@ -224,6 +226,7 @@ mod tests {
     /// Structural sharing across variants is legitimate: `Cancelled`
     /// appears in two variants and the member set deduplicates it.
     #[derive(Debug, Clone, PartialEq, Eq, StageOutputFacts)]
+    #[stage_output(schema = crate::event::schema)]
     enum SharedLeafOutcome {
         InvalidPath {
             invalid: Invalid,

@@ -46,23 +46,9 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Type};
 /// one, which is deliberate, because a carrier is transient control-flow
 /// machinery and never a persisted wrapper event.
 ///
-/// # Path resolution
-///
-/// Generated code resolves `::obzenflow_core` in the deriving crate's
-/// namespace. If the direct `obzenflow_core` dependency has been renamed in
-/// Cargo.toml, point the derive at that extern-prelude name:
-///
-/// ```ignore
-/// #[derive(Debug, Clone, EffectOutcomeFacts)]
-/// #[effect_outcome(crate = flow_core)]
-/// enum Outcome {
-///     Ok(SomeFact),
-/// }
-/// ```
-///
-/// A public schema facade can instead supply the narrow compiler support path:
-/// `#[effect_outcome(schema = public_api::schema)]`. This is independent of
-/// the dependency's package name and works with renamed dependencies.
+/// Generated code resolves `::obzenflow::schema`; an application that renames
+/// the facade, or code that depends on `obzenflow_core` directly, names its
+/// schema module with `#[effect_outcome(schema = <path>)]`.
 #[proc_macro_derive(EffectOutcomeFacts, attributes(effect_outcome))]
 pub fn derive_effect_outcome_facts(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -89,10 +75,9 @@ pub fn derive_effect_outcome_facts(input: TokenStream) -> TokenStream {
 /// `#[stage_output(empty)]` attribute. A carrier must not also implement
 /// `TypedPayload`: the blanket implementations conflict, deliberately.
 ///
-/// The `#[stage_output(crate = <path>)]` attribute mirrors
-/// `#[effect_outcome(crate = <path>)]` when the direct `obzenflow_core`
-/// dependency has been renamed.
-/// Use `#[stage_output(schema = public_api::schema)]` for a schema facade.
+/// Generated code resolves `::obzenflow::schema`; an application that renames
+/// the facade, or code that depends on `obzenflow_core` directly, names its
+/// schema module with `#[stage_output(schema = <path>)]`.
 #[proc_macro_derive(StageOutputFacts, attributes(stage_output))]
 pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -178,15 +163,10 @@ pub fn port(attr: TokenStream, item: TokenStream) -> TokenStream {
     port::expand(attr.into(), item.into()).into()
 }
 
-/// Select the schema contracts for the effect carrier, through either its
-/// Core owner or a caller-supplied public schema module.
 fn effect_outcome_schema_path(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
     attr_schema_path(input, "effect_outcome", "FLOWIP-120m")
 }
 
-/// Select the schema vocabulary without depending on an application facade.
-/// Legacy `crate = <path>` selects a Core crate; `schema = <path>` selects
-/// the narrow compiler-support module below a public schema facade.
 fn attr_schema_path(
     input: &DeriveInput,
     attr_name: &str,
@@ -205,38 +185,28 @@ fn attr_schema_path(
         }
         let path = attr
             .parse_args_with(|stream: syn::parse::ParseStream<'_>| {
-                let is_core = if stream.peek(syn::Token![crate]) {
-                    stream.parse::<syn::Token![crate]>()?;
-                    true
-                } else {
-                    let key: Ident = stream.parse()?;
-                    if key != "schema" {
-                        return Err(syn::Error::new(key.span(), "expected `crate` or `schema`"));
-                    }
-                    false
-                };
+                let key: Ident = stream.parse()?;
+                if key != "schema" {
+                    return Err(syn::Error::new(key.span(), "expected `schema`"));
+                }
                 stream.parse::<syn::Token![=]>()?;
                 let path: syn::Path = stream.parse()?;
                 if !stream.is_empty() {
                     return Err(stream.error("unexpected tokens after the path"));
                 }
-                Ok(if is_core {
-                    quote!(#path::event::schema)
-                } else {
-                    quote!(#path::__private)
-                })
+                Ok(quote!(#path::__private))
             })
             .map_err(|err| {
                 syn::Error::new(
                     err.span(),
-                    format!("expected #[{attr_name}(crate = <path>)] or #[{attr_name}(schema = <path>)]: {err}"),
+                    format!("expected #[{attr_name}(schema = <path>)]: {err}"),
                 )
             })?;
         override_path = Some(path);
     }
     Ok(match override_path {
         Some(path) => path,
-        None => quote!(::obzenflow_core::event::schema),
+        None => quote!(::obzenflow::schema::__private),
     })
 }
 
@@ -508,8 +478,11 @@ mod tests {
     fn both_derives_route_through_the_selected_schema() {
         for attribute in ["stage_output", "effect_outcome"] {
             for (routing, expected) in [
-                ("", ":: obzenflow_core :: event :: schema"),
-                ("crate = renamed_core", "renamed_core :: event :: schema"),
+                ("", ":: obzenflow :: schema :: __private"),
+                (
+                    "schema = obzenflow_core::event::schema",
+                    "obzenflow_core :: event :: schema :: __private",
+                ),
                 (
                     "schema = public_api::schema",
                     "public_api :: schema :: __private",
@@ -534,9 +507,6 @@ mod tests {
                 .unwrap()
                 .to_string();
                 assert!(expanded.contains(&format!("{expected} :: TypedFactSet")));
-                if !routing.is_empty() {
-                    assert!(!expanded.contains("obzenflow_core"));
-                }
             }
         }
     }
@@ -546,7 +516,7 @@ mod tests {
         for attribute in ["stage_output", "effect_outcome"] {
             for attributes in [
                 format!("#[{attribute}(schema = one)] #[{attribute}(schema = two)]"),
-                format!("#[{attribute}(crate = one)] #[{attribute}(schema = two)]"),
+                format!("#[{attribute}(crate = one)]"),
                 format!("#[{attribute}(schema = one, crate = two)]"),
                 format!("#[{attribute}(schema =)]"),
                 format!("#[{attribute}(unknown = one)]"),

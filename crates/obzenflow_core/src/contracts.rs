@@ -1087,10 +1087,10 @@ mod tests {
         let progress = ChainEventFactory::consumption_progress_event(
             crate::WriterId::from(upstream),
             ConsumptionProgressEventParams {
-                scope: obzenflow_core::contracts::SubscriptionScope {
+                scope: crate::contracts::SubscriptionScope {
                     upstream,
                     reader: downstream,
-                    selection: obzenflow_core::contracts::SubscriptionSelection::All,
+                    selection: crate::contracts::SubscriptionSelection::All,
                 },
                 consumed_count: Count(0),
                 receipts: None,
@@ -1144,10 +1144,10 @@ mod tests {
         let progress = ChainEventFactory::consumption_progress_event(
             crate::WriterId::from(upstream),
             ConsumptionProgressEventParams {
-                scope: obzenflow_core::contracts::SubscriptionScope {
+                scope: crate::contracts::SubscriptionScope {
                     upstream,
                     reader: downstream,
-                    selection: obzenflow_core::contracts::SubscriptionSelection::All,
+                    selection: crate::contracts::SubscriptionSelection::All,
                 },
                 consumed_count: Count(0),
                 receipts: None,
@@ -1184,10 +1184,10 @@ mod tests {
         let progress = ChainEventFactory::consumption_progress_event(
             crate::WriterId::from(upstream),
             ConsumptionProgressEventParams {
-                scope: obzenflow_core::contracts::SubscriptionScope {
+                scope: crate::contracts::SubscriptionScope {
                     upstream,
                     reader: downstream,
-                    selection: obzenflow_core::contracts::SubscriptionSelection::All,
+                    selection: crate::contracts::SubscriptionSelection::All,
                 },
                 consumed_count: Count(0),
                 receipts: None,

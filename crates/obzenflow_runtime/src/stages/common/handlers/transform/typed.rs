@@ -207,6 +207,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, StageOutputFacts)]
+    #[stage_output(schema = obzenflow_core::event::schema)]
     enum Output {
         Both { first: First, second: Second },
     }

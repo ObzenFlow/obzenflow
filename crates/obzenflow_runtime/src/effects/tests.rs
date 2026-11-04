@@ -1343,18 +1343,21 @@ impl TypedPayload for SecondOutput {
 /// Product carrier for the multi-fact effect tests, derived per FLOWIP-120m:
 /// exact reconstruction, one fact per field.
 #[derive(Clone, Debug, PartialEq, Eq, obzenflow_core::EffectOutcomeFacts)]
+#[effect_outcome(schema = obzenflow_core::event::schema)]
 struct MultiFactOutcome {
     first: FirstOutput,
     second: SecondOutput,
 }
 
 #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+#[stage_output(schema = obzenflow_core::event::schema)]
 enum OrderedStatefulOutput {
     First(FirstOutput),
     Second(SecondOutput),
 }
 
 #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+#[stage_output(schema = obzenflow_core::event::schema)]
 enum PolicyTranslationOutput {
     Reserved(CountingOutput),
     Failed(SecondOutput),

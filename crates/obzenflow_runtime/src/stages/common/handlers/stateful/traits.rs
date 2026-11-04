@@ -368,6 +368,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 ///
 /// ```ignore
 /// #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+/// #[stage_output(schema = obzenflow_core::event::schema)]
 /// enum PaymentStateFact {
 ///     Authorized(PaymentAuthorized),
 ///     Declined(PaymentDeclined),
@@ -676,6 +677,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+    #[stage_output(schema = obzenflow_core::event::schema)]
     struct DishonestProductOutput {
         first: FirstOutput,
         second: SecondOutput,

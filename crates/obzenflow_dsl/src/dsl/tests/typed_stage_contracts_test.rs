@@ -243,6 +243,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, StageOutputFacts)]
+    #[stage_output(schema = obzenflow_core::event::schema)]
     enum ExactSourceOutput {
         Input(InputEvent),
         Alternate(AlternateEvent),
@@ -314,6 +315,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, StageOutputFacts)]
+    #[stage_output(schema = obzenflow_core::event::schema)]
     enum ExactTransformOutput {
         Output(OutputEvent),
         Alternate(AlternateEvent),
@@ -423,6 +425,7 @@ mod tests {
     struct EffectfulProductStateful;
 
     #[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
+    #[effect_outcome(schema = obzenflow_core::event::schema)]
     enum EffectfulStatefulOutput {
         Output(OutputEvent),
         Alternate(AlternateEvent),
@@ -552,6 +555,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, StageOutputFacts)]
+    #[stage_output(schema = obzenflow_core::event::schema)]
     enum ExactJoinOutput {
         Joined(JoinedEvent),
         Alternate(AlternateEvent),

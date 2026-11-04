@@ -18,7 +18,6 @@ pub const RISK_ENGINE_SOURCE: &str = "risk_engine";
 pub const CASE_SYSTEM_SOURCE: &str = "case_system";
 
 #[derive(Clone, Debug, EffectOutcomeFacts)]
-#[effect_outcome(schema = obzenflow::schema)]
 pub enum ScoreOutcome {
     Cleared(TransactionCleared),
     Flagged(AlertRaised),

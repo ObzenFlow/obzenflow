@@ -223,6 +223,7 @@ where
 /// # impl TypedPayload for RateMissing { const EVENT_TYPE: &'static str = "doc.rate_missing"; }
 ///
 /// #[derive(Clone, Debug, StageOutputFacts)]
+/// #[stage_output(schema = obzenflow_core::event::schema)]
 /// enum Pricing {
 ///     Priced(Priced),
 ///     RateStale(RateStale),

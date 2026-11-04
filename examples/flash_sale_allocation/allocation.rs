@@ -47,7 +47,6 @@ impl AllocationState {
 /// It is deliberately not a `TypedPayload`: the enum is never journalled or
 /// routed. Each unary variant contains the first-class domain fact that is.
 #[derive(Clone, Debug, StageOutputFacts)]
-#[stage_output(schema = obzenflow::schema)]
 pub enum AllocationOutput {
     Reserved(StockReserved),
     Released(StockReleased),

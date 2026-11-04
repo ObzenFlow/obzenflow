@@ -61,6 +61,7 @@ impl TypedPayload for CurrencyNotQuoted {
 }
 
 #[derive(Clone, Debug, StageOutputFacts)]
+#[stage_output(schema = obzenflow_core::event::schema)]
 enum PricingOutcome {
     Priced(Priced),
     RateMissing(RateMissing),

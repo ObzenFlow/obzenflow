@@ -21,28 +21,22 @@ For application payload types `PaymentAuthorized` and `PaymentDeclined`:
 use obzenflow::schema::EffectOutcomeFacts;
 
 #[derive(Debug, Clone, EffectOutcomeFacts)]
-#[effect_outcome(schema = obzenflow::schema)]
 pub enum AuthorizePaymentOutcome {
     Authorized(PaymentAuthorized),
     Declined(PaymentDeclined),
 }
 ```
 
-`StageOutputFacts` uses `#[stage_output(schema = obzenflow::schema)]`.
-If the facade dependency is renamed to `of`, use `of::schema` in either attribute.
+`StageOutputFacts` is written the same way. If the facade dependency is renamed to `of`,
+add `#[effect_outcome(schema = of::schema)]` or `#[stage_output(schema = of::schema)]`.
 
 ## Compiler integration
 
-The fact derives generate implementations of Core's schema contracts.
-The command, system and port attributes expand to paths under `::obzenflow::effects`;
-code that depends on the runtime crate directly names its effects module with
-`effects = <path>` in any of them. The compiler crate has no dependency on the facade
-or other ObzenFlow workspace crates.
-
-Direct Core consumers can use its re-exported derives with the default
-`::obzenflow_core` path. A renamed Core dependency retains the
-`#[effect_outcome(crate = flow_core)]` and `#[stage_output(crate = flow_core)]`
-overrides.
+The fact derives generate implementations of Core's schema contracts through paths under
+`::obzenflow::schema`, and the command, system and port attributes expand to paths under
+`::obzenflow::effects`. Code that depends on Core or the runtime crate directly names the
+module with `schema = <path>` or `effects = <path>`. The compiler crate has no dependency
+on the facade or other ObzenFlow workspace crates.
 
 ## License
 

@@ -36,7 +36,6 @@ use obzenflow::stages::transforms::TypedTransformHandler;
 /// The carrier itself is never journalled. Its selected variant is lowered to
 /// one `ValidatedOrder`, or to `InvalidOrder` followed by `CancelledOrder`.
 #[derive(Debug, Clone, StageOutputFacts)]
-#[stage_output(schema = obzenflow::schema)]
 pub enum ValidationOutcome {
     Validated(ValidatedOrder),
     Invalid {

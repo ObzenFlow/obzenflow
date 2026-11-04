@@ -1145,6 +1145,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, StageOutputFacts)]
+    #[stage_output(schema = obzenflow_core::event::schema)]
     struct DishonestProduct {
         first: Row,
         second: OtherRow,
