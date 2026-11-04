@@ -30,7 +30,8 @@ cargo run -p obzenflow --example flash_sale_allocation -- \
   --config <copy.toml> --replay-from <archive>
 ```
 
-The replay fails with `descriptor_mismatch` before it calls the warehouse.
+The replay fails before it calls the warehouse, and `show` records the reason
+as `descriptor_mismatch`.
 
 ## Crash and resume
 
