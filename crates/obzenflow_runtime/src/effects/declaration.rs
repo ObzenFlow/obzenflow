@@ -174,7 +174,7 @@ pub(super) enum EffectDeclarationSyntax {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffectAllowance {
     Binding,
-    SystemField(Option<&'static str>),
+    Port(Option<PortField>),
 }
 
 impl EffectDeclaration {
@@ -269,23 +269,21 @@ impl EffectDeclaration {
     pub fn validate_safety_syntax(&self) -> Result<(), String> {
         match (self.syntax, self.safety) {
             (EffectDeclarationSyntax::Bare, EffectSafety::NonIdempotentAtLeastOnce) => {
+                let effect = self.effect_type;
+                let request = self.short_rust_type();
                 Err(match self.allowance {
-                    EffectAllowance::Binding => format!(
-                        "performs at-least-once effect '{}' without acknowledging it; add `.at_least_once::<{}>()` after the handler",
-                        self.effect_type,
-                        self.short_rust_type()
+                    EffectAllowance::Binding | EffectAllowance::Port(Some(PortField::Performed)) => format!(
+                        "performs at-least-once effect '{effect}' without acknowledging it; add `.at_least_once::<{request}>()` after the handler"
                     ),
-                    EffectAllowance::SystemField(field) => {
-                        let holder = match field {
-                            Some(field) => format!("its `#[system]` field `{field}`"),
-                            None => "a `#[system]` field".to_string(),
-                        };
-                        format!(
-                            "performs at-least-once effect '{}', which {holder} allows; acknowledge it with `.at_least_once::<{}>()` after the handler, or narrow the field with `#[system(...)]`",
-                            self.effect_type,
-                            self.short_rust_type()
-                        )
-                    }
+                    EffectAllowance::Port(Some(PortField::Through(port))) => format!(
+                        "performs at-least-once effect '{effect}', which its port `{port}` allows; acknowledge it with `.at_least_once::<{request}>()` after the handler, or write the port as a `#[port({request})]` field"
+                    ),
+                    EffectAllowance::Port(Some(PortField::Named(field))) => format!(
+                        "performs at-least-once effect '{effect}', which its `#[port]` field `{field}` allows; acknowledge it with `.at_least_once::<{request}>()` after the handler, or narrow the field with `#[port(...)]`"
+                    ),
+                    EffectAllowance::Port(None) => format!(
+                        "performs at-least-once effect '{effect}', which a `#[port]` field allows; acknowledge it with `.at_least_once::<{request}>()` after the handler, or narrow the field with `#[port(...)]`"
+                    ),
                 })
             }
             (
@@ -311,14 +309,14 @@ impl EffectDeclaration {
         self
     }
 
-    pub(super) fn allowed_by_system_field(mut self) -> Self {
-        self.allowance = EffectAllowance::SystemField(None);
+    pub(super) fn allowed_by_port_field(mut self) -> Self {
+        self.allowance = EffectAllowance::Port(None);
         self
     }
 
-    pub(super) fn held_in_field(mut self, field: Option<&'static str>) -> Self {
-        if let EffectAllowance::SystemField(named) = &mut self.allowance {
-            *named = field;
+    pub(super) fn held_in_field(mut self, field: Option<PortField>) -> Self {
+        if let EffectAllowance::Port(held) = &mut self.allowance {
+            *held = field;
         }
         self
     }

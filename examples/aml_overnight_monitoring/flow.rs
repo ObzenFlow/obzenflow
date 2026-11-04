@@ -9,9 +9,9 @@ use super::domain::{
     ProfiledTransaction, ScoreUnavailable, Transaction, TransactionCleared, TransactionRow,
 };
 use super::risk_engine::RiskEngineOutage;
-use super::stages::{AccountProfile, DailyProfile, OpenCaseHandler, PriceInUsd, ScoreHandler};
+use super::stages::{AccountProfile, CaseOpener, DailyProfile, PriceInUsd, Scorer};
 use super::vendors::{simulated_case_system, simulated_risk_engine, VendorStats};
-use obzenflow::effects::System;
+use obzenflow::effects::Port;
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{
     effectful_transform, flow, join, merge, sink, source, stateful, FlowBuildError, FlowDefinition,
@@ -229,22 +229,20 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             .map_err(resources_failed)?;
         let profile = AccountProfile;
         let price = AsOfJoin::new(PriceInUsd);
-        let score = ScoreHandler {
-            risk_engine: match app.risk_engine {
-                RiskEngine::Simulated => simulated_risk_engine(&app.risk_ledger, &stats)?,
-                RiskEngine::Outage => {
-                    System::eager("risk-engine-outage", Arc::new(RiskEngineOutage))?
-                }
-            },
-        };
+        let scorer = Scorer::through(match app.risk_engine {
+            RiskEngine::Simulated => simulated_risk_engine(&app.risk_ledger, &stats),
+            RiskEngine::Outage => Port::to(RiskEngineOutage),
+        });
         let daily_profile = DailyProfile::new(
             app.rules.fan_out_counterparties,
             app.rules.fan_in_counterparties,
         );
         let day_totals = stateful::reduce(DayTotals::default(), DayTotals::add).emit(emit::on_eof);
-        let open_case = OpenCaseHandler {
-            case_system: simulated_case_system(&app.case_ledger, app.case_system, &stats)?,
-        };
+        let case_opener = CaseOpener::through(simulated_case_system(
+            &app.case_ledger,
+            app.case_system,
+            &stats,
+        ));
         register_dir(&app.cleared_register).map_err(resources_failed)?;
         let cleared_register = CsvSink::builder(ClearedRow)
             .path(&app.cleared_register)
@@ -294,7 +292,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 );
                 score           = effectful_transform!(
                     ProfiledTransaction -> { TransactionCleared, AlertRaised, ScoreUnavailable }
-                    => score
+                    => scorer
                 );
                 cleared         = sink!(TransactionCleared => cleared_register);
                 unscored        = sink!(ScoreUnavailable => unscored_register);
@@ -303,7 +301,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 alerts          = merge!(first score: AlertRaised => merges::concat);
                 open_case       = effectful_transform!(
                     AlertRaised -> { CaseOpened, CaseUnavailable }
-                    => open_case
+                    => case_opener
                 );
                 case_register   = sink!(CaseOpened => case_register);
                 unopened_alerts = sink!(CaseUnavailable => unopened_register);

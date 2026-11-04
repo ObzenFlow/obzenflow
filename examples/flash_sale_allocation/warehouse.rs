@@ -6,20 +6,31 @@
 
 use super::domain::{HoldId, OrderId, Sku, StockReleased, StockReserved};
 use async_trait::async_trait;
-use obzenflow::effects::{EffectError, System, SystemError};
-use serde::Serialize;
-use std::sync::Arc;
+use obzenflow::effects::{EffectError, Port, SystemName};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub enum WarehouseId {
+    #[serde(rename = "warehouse-demo")]
+    Demo,
+    #[serde(rename = "warehouse-other")]
+    Other,
+}
 
 #[derive(Debug, Clone)]
 pub struct WarehouseConfig {
-    pub warehouse_id: String,
+    pub warehouse_id: WarehouseId,
     pub reserve_latency: Duration,
     pub reserve_unavailable: bool,
 }
 
 impl WarehouseConfig {
-    pub fn new(warehouse_id: String, reserve_latency: Duration, reserve_unavailable: bool) -> Self {
+    pub fn new(
+        warehouse_id: WarehouseId,
+        reserve_latency: Duration,
+        reserve_unavailable: bool,
+    ) -> Self {
         Self {
             warehouse_id,
             reserve_latency,
@@ -30,11 +41,7 @@ impl WarehouseConfig {
 
 impl Default for WarehouseConfig {
     fn default() -> Self {
-        Self::new(
-            "warehouse-demo".to_string(),
-            Duration::from_millis(20),
-            false,
-        )
+        Self::new(WarehouseId::Demo, Duration::from_millis(20), false)
     }
 }
 
@@ -51,15 +58,19 @@ pub trait WarehousePort: Send + Sync {
 }
 
 #[derive(Debug)]
-struct SimulatedWarehouse {
-    config: WarehouseConfig,
+struct WarehouseFloor {
+    reserve_latency: Duration,
+    reserve_unavailable: bool,
 }
 
-#[async_trait]
-impl WarehousePort for SimulatedWarehouse {
-    async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError> {
-        tokio::time::sleep(self.config.reserve_latency).await;
-        if self.config.reserve_unavailable {
+impl WarehouseFloor {
+    async fn reserve(
+        &self,
+        warehouse: &str,
+        request: &StockReservation,
+    ) -> Result<StockReserved, EffectError> {
+        tokio::time::sleep(self.reserve_latency).await;
+        if self.reserve_unavailable {
             return Err(EffectError::unavailable(
                 "warehouse",
                 "unavailable",
@@ -67,9 +78,20 @@ impl WarehousePort for SimulatedWarehouse {
             ));
         }
         Ok(request.reserved(HoldId(format!(
-            "{}:{}:{}",
-            self.config.warehouse_id, request.sku.0, request.order_id.0
+            "{warehouse}:{}:{}",
+            request.sku.0, request.order_id.0
         ))))
+    }
+}
+
+#[derive(Debug)]
+struct SimulatedWarehouse(WarehouseFloor);
+
+#[obzenflow::system("warehouse-demo")]
+#[async_trait]
+impl WarehousePort for SimulatedWarehouse {
+    async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError> {
+        self.0.reserve(Self::NAME, request).await
     }
 
     async fn release(&self, request: &StockRelease) -> Result<StockReleased, EffectError> {
@@ -77,15 +99,30 @@ impl WarehousePort for SimulatedWarehouse {
     }
 }
 
-pub fn warehouse_system(
-    config: &WarehouseConfig,
-) -> Result<System<dyn WarehousePort>, SystemError> {
-    System::eager(
-        &config.warehouse_id,
-        Arc::new(SimulatedWarehouse {
-            config: config.clone(),
-        }),
-    )
+#[derive(Debug)]
+struct OtherWarehouse(WarehouseFloor);
+
+#[obzenflow::system("warehouse-other")]
+#[async_trait]
+impl WarehousePort for OtherWarehouse {
+    async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError> {
+        self.0.reserve(Self::NAME, request).await
+    }
+
+    async fn release(&self, request: &StockRelease) -> Result<StockReleased, EffectError> {
+        Ok(request.released())
+    }
+}
+
+pub fn warehouse_port(config: &WarehouseConfig) -> Port<dyn WarehousePort> {
+    let floor = WarehouseFloor {
+        reserve_latency: config.reserve_latency,
+        reserve_unavailable: config.reserve_unavailable,
+    };
+    match config.warehouse_id {
+        WarehouseId::Demo => Port::to(SimulatedWarehouse(floor)),
+        WarehouseId::Other => Port::to(OtherWarehouse(floor)),
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

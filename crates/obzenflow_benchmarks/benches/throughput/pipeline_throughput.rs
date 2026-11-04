@@ -15,7 +15,7 @@ use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
 use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
-use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
@@ -252,7 +252,7 @@ struct Ledger;
 struct Settle {
     index: u64,
 }
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "ledger", effects = obzenflow_runtime::effects)]
 impl Ledger {
     #[effect(type = "bench.settle", exactly_once)]
     fn settle(&self, request: &Settle) -> Result<Settled, EffectError> {
@@ -261,11 +261,11 @@ impl Ledger {
         })
     }
 }
-#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
-#[effect_handler(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[derive(Clone, Debug)]
 struct SettleEach {
-    #[system]
-    ledger: System<Ledger>,
+    #[port]
+    ledger: Port<Ledger>,
 }
 #[async_trait]
 impl EffectfulTransformHandler for SettleEach {
@@ -312,7 +312,7 @@ async fn build_effectful(
         };
         let sink = SettledSink { settled };
         let settle_each = SettleEach {
-            ledger: System::eager("ledger", Arc::new(Ledger))?,
+            ledger: Port::to(Ledger),
         };
         Ok(flow! {
             journals: journals,

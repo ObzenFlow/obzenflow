@@ -186,6 +186,42 @@ fn the_effects_facade_documents_no_request_machinery() {
 }
 
 #[test]
+fn the_effects_facade_exports_commands_and_ports_and_not_their_old_names() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join("src/effects.rs"))
+        .expect("effects facade module should be readable");
+    let facade = syn::parse_file(&source).expect("parse the effects facade");
+    let mut names = Vec::new();
+    for item in &facade.items {
+        if let syn::Item::Use(item) = item {
+            used_names(&item.tree, &mut names);
+        }
+    }
+    for name in [
+        "command",
+        "system",
+        "port",
+        "Port",
+        "Command",
+        "SystemName",
+        "StagePort",
+        "perform",
+        "Perform",
+    ] {
+        assert!(
+            names.iter().any(|exported| exported == name),
+            "obzenflow::effects exports `{name}`"
+        );
+    }
+    for retired in ["System", "SystemError", "EffectHandler", "StageSystem"] {
+        assert!(
+            !names.iter().any(|exported| exported == retired),
+            "the retired name `{retired}` must not return to obzenflow::effects"
+        );
+    }
+}
+
+#[test]
 fn every_example_uses_only_the_application_facade() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();

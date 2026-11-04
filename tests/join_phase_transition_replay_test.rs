@@ -37,7 +37,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, SinkRedeliverySafety, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
@@ -170,7 +170,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "call-counter")]
 impl CallCounter {
     #[effect(type = "join_replay.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<JoinEffectValue, EffectError> {
@@ -181,17 +181,17 @@ impl CallCounter {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct EffectfulTail {
-    #[system]
-    counter: System<CallCounter>,
+    #[port]
+    counter: Port<CallCounter>,
 }
 
 impl EffectfulTail {
     fn new(calls: Arc<AtomicUsize>) -> Self {
         Self {
-            counter: System::eager("call-counter", Arc::new(CallCounter { calls }))
-                .expect("a valid system name"),
+            counter: Port::to(CallCounter { calls }),
         }
     }
 }

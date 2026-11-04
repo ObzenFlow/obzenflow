@@ -3,12 +3,14 @@
 // https://obzenflow.dev
 
 use crate::effects_path::EffectsPath;
+use crate::system::name_error;
 use proc_macro2::{Span, TokenStream, TokenTree};
 use quote::{quote, quote_spanned, ToTokens};
+use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
     Attribute, FnArg, GenericParam, Generics, Ident, ImplItem, Item, ItemImpl, ItemTrait, LitInt,
-    LitStr, Meta, PathArguments, ReturnType, Signature, TraitItem, Type, TypePath,
+    LitStr, Meta, Path, PathArguments, ReturnType, Signature, Token, TraitItem, Type, TypePath,
 };
 
 const MISSING_GUARANTEE: &str = "`#[effect]` needs its guarantee: `exactly_once` or `at_least_once`
@@ -38,10 +40,59 @@ const KEY_AND_HANDLE: &str =
 const RETURN_SHAPE: &str = "a port method returns a concrete `Result<Outcome, EffectError>`, \
                             without `Self`, `impl` or the method's generic parameters";
 
-pub(crate) fn expand(effects: &EffectsPath, item: Item) -> TokenStream {
+const PORT_ARGUMENTS: &str =
+    "`#[obzenflow::port]` takes `system = \"…\"` on the `impl` block of a \
+                              struct that serves as its own port, and optionally \
+                              `effects = <path>`";
+
+const SYSTEM_ON_TRAIT: &str =
+    "`system = \"…\"` names a struct that serves as its own port; a port \
+                               trait's systems name themselves with \
+                               `#[obzenflow::system(\"…\")]` on their `impl` blocks";
+
+#[derive(Default)]
+struct PortArgs {
+    effects: EffectsPath,
+    system: Option<LitStr>,
+}
+
+impl Parse for PortArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut args = Self::default();
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            if key != "effects" && key != "system" {
+                return Err(syn::Error::new(key.span(), PORT_ARGUMENTS));
+            }
+            input.parse::<Token![=]>()?;
+            if key == "effects" {
+                args.effects = EffectsPath::written(input.parse::<Path>()?);
+            } else {
+                args.system = Some(input.parse::<LitStr>()?);
+            }
+            if !input.is_empty() {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        Ok(args)
+    }
+}
+
+pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = match syn::parse2::<PortArgs>(attr) {
+        Ok(args) => args,
+        Err(error) => return refused(item, error),
+    };
+    match syn::parse2::<Item>(item.clone()) {
+        Ok(item) => expand_item(&args, item),
+        Err(error) => refused(item, error),
+    }
+}
+
+fn expand_item(args: &PortArgs, item: Item) -> TokenStream {
     match item {
-        Item::Trait(item) => expand_trait(effects, item),
-        Item::Impl(item) => expand_impl(effects, item),
+        Item::Trait(item) => expand_trait(args, item),
+        Item::Impl(item) => expand_impl(args, item),
         Item::Struct(item) => refused(
             item.to_token_stream(),
             syn::Error::new_spanned(
@@ -70,7 +121,11 @@ fn refused(item: TokenStream, error: syn::Error) -> TokenStream {
     }
 }
 
-fn expand_trait(effects: &EffectsPath, mut item: ItemTrait) -> TokenStream {
+fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
+    if let Some(system) = &args.system {
+        let error = syn::Error::new(system.span(), SYSTEM_ON_TRAIT);
+        return refused(stripped_trait(item).to_token_stream(), error);
+    }
     let methods = item
         .items
         .iter()
@@ -90,7 +145,7 @@ fn expand_trait(effects: &EffectsPath, mut item: ItemTrait) -> TokenStream {
             syn::Error::new_spanned(&item.generics, "a port trait takes no generic parameters");
         return refused(stripped_trait(item).to_token_stream(), error);
     }
-    let effects = effects.tokens();
+    let effects = args.effects.tokens();
     let port = item.ident.clone();
     let mut errors = Vec::new();
     let mut answers = Vec::new();
@@ -128,12 +183,6 @@ fn expand_trait(effects: &EffectsPath, mut item: ItemTrait) -> TokenStream {
             }
         }
 
-        impl #effects::ServesPort<dyn #port, dyn #port> for #effects::PortImpl<dyn #port> {
-            fn coerce(port: ::std::sync::Arc<dyn #port>) -> ::std::sync::Arc<dyn #port> {
-                port
-            }
-        }
-
         #(#requests)*
 
         #(#errors)*
@@ -149,12 +198,12 @@ fn stripped_trait(mut item: ItemTrait) -> ItemTrait {
     item
 }
 
-fn expand_impl(effects: &EffectsPath, item: ItemImpl) -> TokenStream {
+fn expand_impl(args: &PortArgs, item: ItemImpl) -> TokenStream {
     if item.trait_.is_some() {
         let error = syn::Error::new_spanned(
             &item.self_ty,
             "`#[obzenflow::port]` marks a port trait, or the inherent `impl` block of a struct \
-             that serves as its own port; a trait's implementation answers the effects its \
+             that serves as its own port; a system's `impl` of a port answers the effects its \
              trait declares",
         );
         return refused(stripped_impl(item).to_token_stream(), error);
@@ -163,9 +212,17 @@ fn expand_impl(effects: &EffectsPath, item: ItemImpl) -> TokenStream {
         Ok(port) => port,
         Err(error) => return refused(stripped_impl(item).to_token_stream(), error),
     };
-    let effects = effects.tokens();
+    let effects = args.effects.tokens();
     let mut errors = Vec::new();
     let mut declared = Vec::new();
+    let system = args.system.as_ref().map(|name| {
+        errors.extend(name_error(name));
+        quote! {
+            impl #effects::SystemName for #port {
+                const NAME: &'static str = #name;
+            }
+        }
+    });
     for member in &item.items {
         if let ImplItem::Fn(method) = member {
             match read_effect(&method.sig, &method.attrs) {
@@ -187,6 +244,8 @@ fn expand_impl(effects: &EffectsPath, item: ItemImpl) -> TokenStream {
                 port
             }
         }
+
+        #system
 
         #(#requests)*
 
@@ -740,7 +799,69 @@ mod tests {
     use super::*;
 
     fn expanded(item: Item) -> String {
-        expand(&EffectsPath::default_path(), item).to_string()
+        expand_item(&PortArgs::default(), item).to_string()
+    }
+
+    #[test]
+    fn a_port_trait_implements_no_erased_coercion() {
+        let expanded = expanded(syn::parse_quote! {
+            trait CardPort: Send + Sync {}
+        });
+        assert!(
+            expanded.contains("ServesPort < dyn CardPort , ObzenflowPortImpl >"),
+            "{expanded}"
+        );
+        assert!(
+            !expanded.contains("ServesPort < dyn CardPort , dyn CardPort >"),
+            "{expanded}"
+        );
+    }
+
+    #[test]
+    fn a_struct_port_names_itself_on_its_port_attribute() {
+        let expanded =
+            expand(quote!(system = "audit-ledger"), quote!(impl AuditLedger {})).to_string();
+        assert!(
+            expanded.contains(
+                "SystemName for AuditLedger { const NAME : & 'static str = \"audit-ledger\" ; }"
+            ),
+            "{expanded}"
+        );
+    }
+
+    #[test]
+    fn a_struct_port_name_outside_the_grammar_is_refused() {
+        let expanded =
+            expand(quote!(system = "audit ledger"), quote!(impl AuditLedger {})).to_string();
+        assert!(
+            expanded.contains("a system name is 1 to 64 characters"),
+            "{expanded}"
+        );
+    }
+
+    #[test]
+    fn a_port_trait_takes_no_system_name() {
+        let expanded = expand(
+            quote!(system = "stripe"),
+            quote!(
+                trait CardPort: Send + Sync {}
+            ),
+        )
+        .to_string();
+        assert!(expanded.contains("trait CardPort"), "{expanded}");
+        assert!(
+            expanded.contains("names a struct that serves as its own port"),
+            "{expanded}"
+        );
+    }
+
+    #[test]
+    fn other_arguments_are_refused() {
+        let expanded = expand(quote!(uses = Card), quote!(impl AuditLedger {})).to_string();
+        assert!(
+            expanded.contains("`#[obzenflow::port]` takes"),
+            "{expanded}"
+        );
     }
 
     #[test]
@@ -1072,7 +1193,7 @@ mod tests {
         );
         assert!(
             on_trait_impl
-                .contains("a trait's implementation answers the effects its trait declares"),
+                .contains("a system's `impl` of a port answers the effects its trait declares"),
             "{on_trait_impl}"
         );
         assert!(

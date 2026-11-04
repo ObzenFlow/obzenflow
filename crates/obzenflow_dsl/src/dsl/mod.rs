@@ -43,20 +43,19 @@
 //! `__obzenflow_*` macros are doc-hidden cross-crate lowering machinery and are
 //! unsupported for direct author calls.
 //!
-//! ## Effects come from the handler's systems
+//! ## Effects come from the command's ports
 //!
-//! An effectful handler's `#[system]` fields allow the effects its stage
-//! performs. A field allows every effect its port declares, or only the
-//! requests it lists in `#[system(...)]`, and the row never restates them. A
-//! handler with no `#[system]` field performs no effects and is written
-//! `In -> Out => handler`. An `at_least_once` effect is acknowledged after the
-//! handler with `.at_least_once::<R>()`.
+//! A command's ports allow the effects its stage performs. A port allows every
+//! effect it declares, or only the requests a `#[port(...)]` field lists, and
+//! the row never restates them. A command with no port performs no effects and
+//! is written `In -> Out => handler`. An `at_least_once` effect is acknowledged
+//! after the handler with `.at_least_once::<R>()`.
 //!
 //! ```
 //! use async_trait::async_trait;
 //! use obzenflow_core::TypedPayload;
 //! use obzenflow_dsl::effectful_transform;
-//! use obzenflow_runtime::effects::{EffectHandler, Effects, StageCompletion};
+//! use obzenflow_runtime::effects::{Effects, StageCompletion};
 //! use obzenflow_runtime::stages::common::{
 //!     handlers::EffectfulTransformHandler,
 //!     HandlerError,
@@ -75,8 +74,8 @@
 //!     const EVENT_TYPE: &'static str = "docs.effectful-transform.output";
 //! }
 //!
-//! #[derive(Clone, Debug, EffectHandler)]
-//! # #[effect_handler(effects = obzenflow_runtime::effects)]
+//! #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+//! #[derive(Clone, Debug)]
 //! struct Handler;
 //!
 //! #[async_trait]

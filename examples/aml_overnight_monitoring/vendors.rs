@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::case_system::{CaseRequest, CaseSystem, CaseSystemPort, SimulatedCaseSystem};
+use super::case_system::{
+    CaseRequest, CaseSystem, CaseSystemPort, SimulatedCaseSystem, UnreadableCaseSystem,
+};
 use super::domain::{AlertRaised, AlertSubject, TransactionCleared};
 use super::risk_engine::{RiskEnginePort, RiskVerdict, ScoreRequest, SimulatedRiskEngine};
 use obzenflow::effects::simulated::CallLogError;
-use obzenflow::effects::{EffectPortResolutionError, IdempotencyKey, Keyed, System, SystemError};
+use obzenflow::effects::{EffectPortResolutionError, IdempotencyKey, Keyed, Port};
 use obzenflow::schema::EffectOutcomeFacts;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -71,16 +73,12 @@ impl VendorStats {
     }
 }
 
-pub fn simulated_risk_engine(
-    ledger: &Path,
-    stats: &Arc<VendorStats>,
-) -> Result<System<dyn RiskEnginePort>, SystemError> {
+pub fn simulated_risk_engine(ledger: &Path, stats: &Arc<VendorStats>) -> Port<dyn RiskEnginePort> {
     let ledger = ledger.to_path_buf();
     let stats = stats.clone();
-    System::deferred("simulated-risk-engine", move || {
+    Port::deferred(move || {
         stats.engines_built.fetch_add(1, Ordering::SeqCst);
-        let engine = SimulatedRiskEngine::open(&ledger).map_err(construction_failed)?;
-        Ok(Arc::new(engine))
+        SimulatedRiskEngine::open(&ledger).map_err(construction_failed)
     })
 }
 
@@ -88,18 +86,19 @@ pub fn simulated_case_system(
     ledger: &Path,
     case_system: CaseSystem,
     stats: &Arc<VendorStats>,
-) -> Result<System<dyn CaseSystemPort>, SystemError> {
+) -> Port<dyn CaseSystemPort> {
     let ledger = ledger.to_path_buf();
     let stats = stats.clone();
-    let name = match case_system {
-        CaseSystem::Simulated => "simulated-case-system",
-        CaseSystem::UnreadableReplies => "case-system-unreadable-replies",
-    };
-    System::deferred(name, move || {
-        stats.case_systems_built.fetch_add(1, Ordering::SeqCst);
-        let cases = SimulatedCaseSystem::open(&ledger, case_system).map_err(construction_failed)?;
-        Ok(Arc::new(cases))
-    })
+    match case_system {
+        CaseSystem::Simulated => Port::deferred(move || {
+            stats.case_systems_built.fetch_add(1, Ordering::SeqCst);
+            SimulatedCaseSystem::open(&ledger).map_err(construction_failed)
+        }),
+        CaseSystem::UnreadableReplies => Port::deferred(move || {
+            stats.case_systems_built.fetch_add(1, Ordering::SeqCst);
+            UnreadableCaseSystem::open(&ledger).map_err(construction_failed)
+        }),
+    }
 }
 
 fn construction_failed(error: CallLogError) -> EffectPortResolutionError {

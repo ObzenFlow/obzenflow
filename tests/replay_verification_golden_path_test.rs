@@ -29,7 +29,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, RefusalReason, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::effects::{EffectError, Effects, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
@@ -134,7 +134,8 @@ impl TypedFiniteSourceHandler for OrderSource {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct ValidateOrder;
 
 #[async_trait]
@@ -180,7 +181,7 @@ struct AuthorizeRequest {
     amount: u64,
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "gateway")]
 impl Gateway {
     #[effect(type = "replay_verification.authorize", exactly_once)]
     fn authorize(&self, request: &AuthorizeRequest) -> Result<AuthGrant, EffectError> {
@@ -197,17 +198,17 @@ impl Gateway {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct AuthorizePayment {
-    #[system]
-    gateway: System<Gateway>,
+    #[port]
+    gateway: Port<Gateway>,
 }
 
 impl AuthorizePayment {
     fn new(calls: Arc<AtomicUsize>) -> Self {
         Self {
-            gateway: System::eager("gateway", Arc::new(Gateway { calls }))
-                .expect("a valid system name"),
+            gateway: Port::to(Gateway { calls }),
         }
     }
 }

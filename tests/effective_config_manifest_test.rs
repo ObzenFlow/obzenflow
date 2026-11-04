@@ -14,7 +14,7 @@ use obzenflow_core::journal::factory::RunSubstrateState;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
@@ -120,7 +120,7 @@ struct Authorize;
 #[derive(Clone, Debug, Serialize)]
 struct Refund;
 
-#[obzenflow::port]
+#[obzenflow::port(system = "payments")]
 impl PaymentService {
     #[effect(type = "payments.authorize", exactly_once)]
     fn authorize(&self, _: &Authorize) -> Result<PaymentEffectFact, EffectError> {
@@ -137,17 +137,17 @@ impl PaymentService {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct PaymentEffectsHandler {
-    #[system]
-    payments: System<PaymentService>,
+    #[port]
+    payments: Port<PaymentService>,
 }
 
 impl PaymentEffectsHandler {
     fn new() -> Self {
         Self {
-            payments: System::eager("payments", Arc::new(PaymentService))
-                .expect("a valid system name"),
+            payments: Port::to(PaymentService),
         }
     }
 }

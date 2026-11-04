@@ -182,7 +182,8 @@ impl SourcePolicy for DivergenceSignalInjection {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct DelayedSeedTransform {
     delay: Duration,
     armed: Arc<tokio::sync::Notify>,

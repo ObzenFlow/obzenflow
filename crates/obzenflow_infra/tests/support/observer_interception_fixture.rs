@@ -12,7 +12,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
@@ -146,7 +146,7 @@ struct AuthoriseShippingRequest {
     order_id: u64,
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "shipping-desk", effects = obzenflow_runtime::effects)]
 impl ShippingDesk {
     #[effect(type = "shipping.authorise", exactly_once)]
     fn authorise(
@@ -161,11 +161,11 @@ impl ShippingDesk {
     }
 }
 
-#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
-#[effect_handler(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[derive(Clone, Debug)]
 struct AuthoriseShipping {
-    #[system]
-    desk: System<ShippingDesk>,
+    #[port]
+    desk: Port<ShippingDesk>,
 }
 
 #[async_trait]
@@ -299,7 +299,7 @@ pub(crate) fn build_flow(
             calls: probe.effect_calls.clone(),
         };
         let authorise_shipping = AuthoriseShipping {
-            desk: System::eager("shipping-desk", Arc::new(desk))?,
+            desk: Port::to(desk),
         };
         let authorised = match treatment {
             ObserverTreatment::WithoutObservers => effectful_transform!(

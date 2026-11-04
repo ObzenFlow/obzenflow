@@ -5,8 +5,8 @@
 use super::unavailable::{integrity_failure, unavailable_or_integrity};
 use super::{AiEffect, AiRole};
 use crate::effects::{
-    AllowedEffectsAllowEffect, DeclaredEffectSet, EffectHandler, EffectOutcomeFitsOutput,
-    EffectSet, Effects, StageCompletion,
+    AllowedEffectsAllowEffect, Command, DeclaredEffectSet, EffectOutcomeFitsOutput, EffectSet,
+    Effects, StageCompletion,
 };
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
@@ -87,11 +87,11 @@ pub struct AiInferHandler<R, In> {
     _input: PhantomData<fn() -> In>,
 }
 
-impl<R: AiRole<In>, In> EffectHandler for AiInferHandler<R, In> {
-    type Systems = ();
+impl<R: AiRole<In>, In> Command for AiInferHandler<R, In> {
+    type Ports = ();
     type AllowedEffects = RoleEffect<R::Effect>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 impl<R, In> AiInferHandler<R, In> {
@@ -158,11 +158,11 @@ pub struct AiMapHandler<R, T> {
     _items: PhantomData<fn() -> T>,
 }
 
-impl<R: AiRole<Chunk<T>>, T> EffectHandler for AiMapHandler<R, T> {
-    type Systems = ();
+impl<R: AiRole<Chunk<T>>, T> Command for AiMapHandler<R, T> {
+    type Ports = ();
     type AllowedEffects = RoleEffect<R::Effect>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 impl<R, T> AiMapHandler<R, T> {
@@ -230,11 +230,11 @@ pub struct AiPartialMapHandler<R, T> {
     _items: PhantomData<fn() -> T>,
 }
 
-impl<R: AiRole<Chunk<T>>, T> EffectHandler for AiPartialMapHandler<R, T> {
-    type Systems = ();
+impl<R: AiRole<Chunk<T>>, T> Command for AiPartialMapHandler<R, T> {
+    type Ports = ();
     type AllowedEffects = RoleEffect<R::Effect>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 impl<R, T> AiPartialMapHandler<R, T> {
@@ -352,11 +352,11 @@ pub struct AiReduceHandler<S, T, P> {
     _types: PhantomData<fn() -> (T, P)>,
 }
 
-impl<S: AiRole<Partials<T, P>>, T, P> EffectHandler for AiReduceHandler<S, T, P> {
-    type Systems = ();
+impl<S: AiRole<Partials<T, P>>, T, P> Command for AiReduceHandler<S, T, P> {
+    type Ports = ();
     type AllowedEffects = RoleEffect<S::Effect>;
 
-    fn systems(&self) -> Self::Systems {}
+    fn ports(&self) -> Self::Ports {}
 }
 
 impl<S, T, P> AiReduceHandler<S, T, P> {

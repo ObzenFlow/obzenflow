@@ -6,14 +6,15 @@
 //!
 //! Provides `#[derive(EffectOutcomeFacts)]` for effect outcome carriers and
 //! `#[derive(StageOutputFacts)]` for pure stage output carriers, which
-//! `obzenflow_core` re-exports next to their traits, and
-//! `#[derive(EffectHandler)]` and `#[port]`, which the runtime's effects module
-//! re-exports next to its effect handler and port contracts.
+//! `obzenflow_core` re-exports next to their traits, and `#[command]`,
+//! `#[system]` and `#[port]`, which the runtime's effects module re-exports next
+//! to its command and port contracts.
 
-mod effect_handler;
+mod command;
 mod effects_path;
 mod port;
 mod stage_output;
+mod system;
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -100,34 +101,55 @@ pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Declare the systems an effectful handler calls. Each field marked
-/// `#[system]` holds a `System` or a typed binding, and the handler may perform
+/// Declare the ports an effectful command works through.
+///
+/// `#[command(through = PaymentGatewayPort)]` on a unit struct, or
+/// `#[command(through = (RiskEnginePort, CaseSystemPort))]` for several, adds
+/// one private field per port and generates `Self::through(port, …)`, which
+/// takes them in the same order. The command may perform every effect those
+/// ports declare. It goes above the struct's derives, which then see the field.
+///
+/// `#[command]` alone reads the struct's fields instead. Each field marked
+/// `#[port]` holds a `Port` or a typed binding, and the command may perform
 /// every effect the field's port declares. A field written
-/// `#[system(RequestA, RequestB)]` allows only the requests it lists, each of
-/// which its port must declare. A handler that calls no system derives it with
-/// no such field.
+/// `#[port(RequestA, RequestB)]` allows only the requests it lists, each of
+/// which its port must declare. A command that works through no port has no such
+/// field.
 ///
 /// Generated code resolves `::obzenflow::effects`; code that depends on the
 /// runtime crate directly names its effects module with
-/// `#[effect_handler(effects = <path>)]`.
-#[proc_macro_derive(EffectHandler, attributes(system, effect_handler))]
-pub fn derive_effect_handler(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    effect_handler::expand(&input)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+/// `#[command(effects = <path>)]`.
+#[proc_macro_attribute]
+pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
+    command::expand(attr.into(), item.into()).into()
+}
+
+/// Name a system on its `impl` of a port, as in
+/// `#[system("stripe")] impl PaymentGatewayPort for StripeProcessor`.
+///
+/// The name is recorded in every call the system answers, so a replay against a
+/// different system is refused. It is 1 to 64 characters from `[A-Za-z0-9._-]`
+/// and starts with a letter or digit. A type that implements two ports names
+/// itself once, on either `impl`. A struct that serves as its own port names
+/// itself with `#[port(system = "name")]` instead.
+///
+/// Generated code resolves `::obzenflow::effects`; code that depends on the
+/// runtime crate directly writes `#[system("name", effects = <path>)]`.
+#[proc_macro_attribute]
+pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
+    system::expand(attr.into(), item.into()).into()
 }
 
 /// Mark a port trait, or the inherent `impl` block of a struct that serves as
-/// its own port, so a `System` takes its port type from the value it is built
+/// its own port, so a `Port` takes its port type from the system it is built
 /// from. Port methods answer with `Result<Outcome, EffectError>`.
 ///
 /// Each method marked `#[effect(type = "...", exactly_once)]` or
 /// `#[effect(type = "...", at_least_once)]` declares one effect. It takes its
 /// request by reference after `&self`, and the request type then names the
-/// effect: a handler performs it with `fx.call(request)` and lists it in its
-/// `AllowedEffects`. `type` is the effect type the journal records the call
-/// under, and an optional `schema_version = N` versions the request's shape.
+/// effect: a command performs it with `fx.call(request)`. `type` is the effect
+/// type the journal records the call under, and an optional
+/// `schema_version = N` versions the request's shape.
 ///
 /// The guarantee describes the call at the other end:
 ///
@@ -146,13 +168,14 @@ pub fn derive_effect_handler(input: TokenStream) -> TokenStream {
 /// commit handle. In a struct's `impl` block, methods without `#[effect]` are
 /// ordinary methods; on a port trait, every method is a port method.
 ///
+/// A struct that serves as its own port is also its own system, and names itself
+/// here with `#[port(system = "name")]`.
+///
 /// Generated code resolves `::obzenflow::effects`; code that depends on the
 /// runtime crate directly writes `#[port(effects = <path>)]`.
 #[proc_macro_attribute]
 pub fn port(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let effects = parse_macro_input!(attr as effects_path::EffectsPath);
-    let item = parse_macro_input!(item as syn::Item);
-    port::expand(&effects, item).into()
+    port::expand(attr.into(), item.into()).into()
 }
 
 /// Select the schema contracts for the effect carrier, through either its

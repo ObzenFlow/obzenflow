@@ -192,7 +192,7 @@ use serde::Serialize;
 /// struct CallCounter;
 /// ```
 ///
-/// nor on a trait's implementation:
+/// nor on a system's `impl` of its port:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;

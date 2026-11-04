@@ -54,14 +54,13 @@ use super::fixtures;
 use super::gateway::{GatewayTransform, ScriptedGateway};
 use super::validation;
 use obzenflow::effects::simulated::CallLogError;
-use obzenflow::effects::{EffectPortResolutionError, System};
+use obzenflow::effects::{EffectPortResolutionError, Port};
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry, sink_delivery_observer};
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
@@ -108,10 +107,8 @@ pub fn assemble_flow(
 ) -> obzenflow::flow::FlowDefinition {
     obzenflow::flow::FlowDefinition::materialize(move |_runtime_config| {
         let calls = gateway_calls.clone();
-        let gateway = System::deferred("scripted-gateway", move || {
-            let gateway = ScriptedGateway::open(&calls).map_err(gateway_unavailable)?;
-            Ok(Arc::new(gateway))
-        })?;
+        let gateway =
+            Port::deferred(move || ScriptedGateway::open(&calls).map_err(gateway_unavailable));
         let gateway_transform = match first_recovery_pause {
             Some(pause) => GatewayTransform::new(gateway).with_first_recovery_pause(pause),
             None => GatewayTransform::new(gateway),

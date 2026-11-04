@@ -22,7 +22,8 @@ cargo run -p obzenflow --example flash_sale_allocation -- \
 The simulated warehouse is configured under `[app.warehouse]` in
 [`obzenflow.toml`](obzenflow.toml), and the run prints these settings at
 startup. The warehouse id is binding evidence for every warehouse effect. Copy
-the file, change `id`, and replay the same archive with the copy:
+the file, change `id` to `warehouse-other`, and replay the same archive with the
+copy:
 
 ```sh
 cargo run -p obzenflow --example flash_sale_allocation -- \

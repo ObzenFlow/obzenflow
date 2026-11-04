@@ -293,7 +293,7 @@ struct Gateway {
     release: PathBuf,
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "payment-gateway")]
 impl Gateway {
     #[effect(type = "payment.authorize", exactly_once)]
     async fn authorize(
@@ -379,10 +379,11 @@ impl Keyed for AuthorizationRequest {
     }
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct Authorize {
-    #[system]
-    gateway: effects::System<Gateway>,
+    #[port]
+    gateway: effects::Port<Gateway>,
 }
 
 type Authorization = obzenflow::schema::stage_fact_set![PaymentAuthorized, PaymentDeclined];
@@ -508,8 +509,7 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
         release: scenario.release(),
     };
     let authorize = Authorize {
-        gateway: effects::System::eager("payment-gateway", std::sync::Arc::new(gateway))
-            .expect("a valid system name"),
+        gateway: effects::Port::to(gateway),
     };
     let receipt_file = ReceiptFile {
         path: scenario.receipts(),
@@ -2816,7 +2816,7 @@ mod then_live {
         entry: Entry,
     }
 
-    #[obzenflow::port]
+    #[obzenflow::port(system = "audit-ledger")]
     impl AuditLedger {
         #[effect(type = "durable_contract.then_live.audit", exactly_once)]
         fn audit(&self, request: &AuditEntry, key: &IdempotencyKey) -> Result<Entry, EffectError> {
@@ -2832,10 +2832,11 @@ mod then_live {
         }
     }
 
-    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+    #[obzenflow::command]
+    #[derive(Clone, Debug)]
     struct Vet {
-        #[system]
-        ledger: effects::System<AuditLedger>,
+        #[port]
+        ledger: effects::Port<AuditLedger>,
     }
 
     #[async_trait]
@@ -2879,8 +2880,7 @@ mod then_live {
             path: audit_ledger(scenario),
         };
         let vet = Vet {
-            ledger: effects::System::eager("audit-ledger", std::sync::Arc::new(audit))
-                .expect("a valid system name"),
+            ledger: effects::Port::to(audit),
         };
         FlowDefinition::materialize(move |_runtime_config| {
             let post_entry = joins::inner_then_live(
@@ -4085,7 +4085,7 @@ mod two_effects {
         amount_cents: u64,
     }
 
-    #[obzenflow::port]
+    #[obzenflow::port(system = "charge-ledger")]
     impl ChargeLedger {
         #[effect(type = "durable_contract.two_effects.authorize", exactly_once)]
         fn authorize(
@@ -4141,10 +4141,11 @@ mod two_effects {
         }
     }
 
-    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+    #[obzenflow::command]
+    #[derive(Clone, Debug)]
     struct Charge {
-        #[system]
-        ledger: effects::System<ChargeLedger>,
+        #[port]
+        ledger: effects::Port<ChargeLedger>,
         hold: Option<String>,
         release: PathBuf,
         fix: bool,
@@ -4198,8 +4199,7 @@ mod two_effects {
             path: ledger(scenario),
         };
         let charge = Charge {
-            ledger: effects::System::eager("charge-ledger", std::sync::Arc::new(charge_ledger))
-                .expect("a valid system name"),
+            ledger: effects::Port::to(charge_ledger),
             hold: match hold {
                 Some(Hold::BetweenEffects(order)) => Some(order),
                 _ => None,
@@ -4357,7 +4357,8 @@ mod emit_only {
         }
     }
 
-    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+    #[obzenflow::command]
+    #[derive(Clone, Debug)]
     struct Stamp;
 
     #[async_trait]
@@ -4584,7 +4585,7 @@ mod rejected_call {
         order_id: String,
     }
 
-    #[obzenflow::port]
+    #[obzenflow::port(system = "quote-desk")]
     impl QuoteDesk {
         #[effect(type = "durable_contract.rejected_call.quote", exactly_once)]
         fn quote(
@@ -4611,10 +4612,11 @@ mod rejected_call {
         }
     }
 
-    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+    #[obzenflow::command]
+    #[derive(Clone, Debug)]
     struct Quote {
-        #[system]
-        desk: effects::System<QuoteDesk>,
+        #[port]
+        desk: effects::Port<QuoteDesk>,
     }
 
     #[async_trait]
@@ -4647,13 +4649,9 @@ mod rejected_call {
             .build()
             .expect("the order channel is configured");
         let quote = Quote {
-            desk: effects::System::eager(
-                "quote-desk",
-                std::sync::Arc::new(QuoteDesk {
-                    path: desk_log(scenario),
-                }),
-            )
-            .expect("a valid system name"),
+            desk: effects::Port::to(QuoteDesk {
+                path: desk_log(scenario),
+            }),
         };
         let journals = scenario.journals();
         FlowDefinition::materialize(move |_runtime_config| {
@@ -4992,7 +4990,7 @@ mod flash_sale {
         std::fs::write(
             config(&scenario),
             "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 64\n\
-             stall_timeout_ms = 30000\n\n[app.warehouse]\nid = \"warehouse-contract\"\n\
+             stall_timeout_ms = 30000\n\n[app.warehouse]\nid = \"warehouse-demo\"\n\
              reserve_latency_ms = 0\nreserve_unavailable = false\nreservation_pace_ms = 300\n",
         )
         .expect("write the configuration");
@@ -5124,7 +5122,7 @@ mod flash_sale {
         let recorded = std::fs::read_to_string(config(&scenario)).expect("read the configuration");
         std::fs::write(
             config(&scenario),
-            recorded.replace("warehouse-contract", "warehouse-other"),
+            recorded.replace("warehouse-demo", "warehouse-other"),
         )
         .expect("change the warehouse id");
 

@@ -171,16 +171,15 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 /// Async transform surface for replay-safe effects.
 ///
 /// The stage arrow is the canonical operator-facing contract. `Output` mirrors
-/// it and the handler's `#[system]` fields allow the effects it performs, so
+/// it and the command's ports allow the effects it performs, so
 /// Rust can reject an undeclared [`Effects::emit`] or [`Effects::perform`]
 /// inside this handler before the handler is erased for execution. They carry
 /// no runtime metadata and are never journalled.
 ///
 /// A single output fact may be named directly. For a multi-fact arrow, use
-/// [`obzenflow_core::stage_fact_set!`]. The handler derives
-/// [`EffectHandler`](crate::effects::EffectHandler) and holds each system it
-/// calls in a `#[system]` field, which allows every effect that system's port
-/// declares.
+/// [`obzenflow_core::stage_fact_set!`]. The handler is a
+/// [`Command`](crate::effects::Command), which allows every effect the ports it
+/// works through declare.
 ///
 /// ```ignore
 /// # use async_trait::async_trait;
@@ -226,7 +225,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
             `Input` must match the arrow input, and `Output` mirrors the arrow"
 )]
 #[async_trait]
-pub trait EffectfulTransformHandler: crate::effects::EffectHandler + Send + Sync {
+pub trait EffectfulTransformHandler: crate::effects::Command + Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: obzenflow_core::StageFactSet;
 

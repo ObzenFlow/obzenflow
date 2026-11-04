@@ -139,7 +139,7 @@ fn declared_effect_sets(tokens: TokenStream, found: &mut BTreeSet<String>) {
 }
 
 #[test]
-fn example_handlers_take_their_effects_from_their_system_fields() {
+fn example_handlers_take_their_effects_from_their_ports() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     rust_files(&root.join("examples"), &mut files);
@@ -162,7 +162,7 @@ fn example_handlers_take_their_effects_from_their_system_fields() {
         .collect::<Vec<_>>();
     assert!(
         violations.is_empty(),
-        "an example handler's `#[system]` fields allow its effects:\n{}",
+        "an example command's ports allow its effects:\n{}",
         violations.join("\n")
     );
 }

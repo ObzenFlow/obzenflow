@@ -27,7 +27,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefi
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::effects::{EffectError, Effects, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
@@ -91,7 +91,7 @@ struct ChargeRequest {
     order_id: u64,
 }
 
-#[obzenflow::port]
+#[obzenflow::port(system = "processor")]
 impl Processor {
     #[effect(type = "replay_verification_multi.charge", exactly_once)]
     fn charge(&self, request: &ChargeRequest) -> Result<Charged, EffectError> {
@@ -125,17 +125,17 @@ impl TypedTransformHandler for Intake {
 
 /// The effectful merge: charging sits directly at the fan-in, so the build
 /// marks the merge itself as a deterministic orderer (canonical merge).
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct ChargeOrders {
-    #[system]
-    processor: System<Processor>,
+    #[port]
+    processor: Port<Processor>,
 }
 
 impl ChargeOrders {
     fn new(calls: Arc<AtomicUsize>) -> Self {
         Self {
-            processor: System::eager("processor", Arc::new(Processor { calls }))
-                .expect("a valid system name"),
+            processor: Port::to(Processor { calls }),
         }
     }
 }

@@ -88,10 +88,10 @@ enum EffectSum {
 }
 
 type Facts = of::schema::stage_fact_set![Fact];
-type NoEffects = <Pure as of::effects::EffectHandler>::AllowedEffects;
+type NoEffects = <Pure as of::effects::Command>::AllowedEffects;
 
-#[derive(Clone, Debug, of::effects::EffectHandler)]
-#[effect_handler(effects = of::effects)]
+#[of::effects::command(effects = of::effects)]
+#[derive(Clone, Debug)]
 struct Pure;
 
 impl sources::TypedFiniteSourceHandler for Pure {
@@ -435,6 +435,57 @@ impl AiRole<Partials<Fact, Fact>> for Pure {
         outcome.replied()?;
         Ok(Fact(input.partials().iter().map(|fact| fact.0).sum()))
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ChargeCard;
+
+impl ChargeCard {
+    fn for_fact(_: &Fact) -> Self {
+        Self
+    }
+}
+
+#[of::port(effects = of::effects)]
+trait CardPort: Send + Sync {
+    #[effect(type = "facade.charge_card", exactly_once)]
+    fn charge(&self, request: &ChargeCard) -> Result<Fact, of::effects::EffectError>;
+}
+
+struct Card;
+
+#[of::system("facade-card", effects = of::effects)]
+impl CardPort for Card {
+    fn charge(&self, _: &ChargeCard) -> Result<Fact, of::effects::EffectError> {
+        Ok(Fact(1))
+    }
+}
+
+#[of::command(through = CardPort, effects = of::effects)]
+#[derive(Clone, Debug)]
+struct ThroughCard;
+
+#[async_trait]
+impl transforms::EffectfulTransformHandler for ThroughCard {
+    type Input = Fact;
+    type Output = Fact;
+
+    async fn process(
+        &self,
+        _: Fact,
+        fx: &mut Effects<Fact, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Fact>, HandlerError> {
+        fx.call(ChargeCard).await?;
+        Ok(fx.complete()?)
+    }
+}
+
+#[test]
+fn renamed_facade_commands_and_systems_compile() {
+    let through = ThroughCard::through(of::effects::Port::to(Card));
+    effectful_transform!(Fact -> Fact => through);
+    let performed = of::effects::perform(ChargeCard::for_fact).through(of::effects::Port::to(Card));
+    effectful_transform!(Fact -> Fact => performed);
 }
 
 #[test]

@@ -46,7 +46,7 @@ pub trait EffectBindingMode<E: Effect>: private::Sealed + Send + Sync + 'static 
 }
 
 /// An effect answered by a named binding that carries typed evidence, which
-/// the stage's handler holds in a `#[system]` field.
+/// the stage's command holds in a `#[port]` field.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Named<B: EffectBindingEvidence>(PhantomData<fn() -> B>);
 
@@ -69,6 +69,10 @@ impl LogicalEffectBindingName {
             return Err(BindingIdentifierError::InvalidLogicalBindingName);
         }
         Ok(Self(value))
+    }
+
+    pub(super) fn of_system(name: &'static str) -> Self {
+        Self(name.to_owned())
     }
 
     pub fn as_str(&self) -> &str {
@@ -152,15 +156,20 @@ fn is_binding_name(value: &str) -> bool {
         )
 }
 
-pub(super) fn is_system_name(value: &str) -> bool {
+pub(super) const fn is_system_name(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > 64 {
+    if bytes.is_empty() || bytes.len() > 64 || !bytes[0].is_ascii_alphanumeric() {
         return false;
     }
-    bytes[0].is_ascii_alphanumeric()
-        && bytes[1..]
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    let mut index = 1;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !byte.is_ascii_alphanumeric() && !matches!(byte, b'.' | b'_' | b'-') {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 const fn is_public_identifier_const(value: &str) -> bool {
@@ -376,7 +385,7 @@ pub(super) struct BoundEffectPortSlot {
 }
 
 /// The binding for one effect, either a named binding a stage's handler holds
-/// in a `#[system]` field or a configured binding an `ai!` stage resolves.
+/// in a `#[port]` field or a configured binding an `ai!` stage resolves.
 #[derive(Clone)]
 pub struct EffectBinding<E: BoundEffect> {
     logical_name: LogicalEffectBindingName,
@@ -695,6 +704,33 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_names_refuse_what_could_carry_a_location_or_credential() {
+        for name in [
+            "",
+            "simulated risk engine",
+            "-leading-hyphen",
+            "https://user:secret@vendor.example",
+            &"s".repeat(65),
+        ] {
+            assert!(!is_system_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_system_name_is_a_binding_name() {
+        for name in [
+            "simulated-risk-engine",
+            "risk_engine",
+            "ledger.v2",
+            "0ledger",
+            &"s".repeat(64),
+        ] {
+            assert!(is_system_name(name), "{name}");
+            assert!(LogicalEffectBindingName::new(name).is_ok(), "{name}");
+        }
+    }
 
     #[test]
     fn public_identifier_grammar_is_closed_and_bounded() {

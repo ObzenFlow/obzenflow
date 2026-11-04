@@ -339,7 +339,8 @@ async fn a_stateful_stage_refuses_an_error_marked_input() {
     );
 }
 
-#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+#[obzenflow::command]
+#[derive(Clone, Debug)]
 struct Tally;
 
 #[async_trait]

@@ -39,7 +39,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{EffectError, Effects, SinkRedeliverySafety, System};
+use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -165,7 +165,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "call-counter", effects = obzenflow_runtime::effects)]
 impl CallCounter {
     #[effect(type = "resume_fan_in.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<EffectValue, EffectError> {
@@ -176,11 +176,11 @@ impl CallCounter {
     }
 }
 
-#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
-#[effect_handler(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[derive(Clone, Debug)]
 struct EffectfulTail {
-    #[system]
-    counter: System<CallCounter>,
+    #[port]
+    counter: Port<CallCounter>,
 }
 
 #[async_trait]
@@ -256,7 +256,7 @@ fn build_flow(
         let source_b_handler = ReattachingSource(ChannelTicker::new("b", b_first, b_count));
         let merge_handler = MergeTransform::new();
         let effectful_handler = EffectfulTail {
-            counter: System::eager("call-counter", Arc::new(CallCounter { calls }))?,
+            counter: Port::to(CallCounter { calls }),
         };
         let collect_handler = CountingSink { delivered };
 

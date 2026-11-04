@@ -15,8 +15,8 @@ use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{FlowId, JournalId, JournalOwner, TypedPayload};
 use obzenflow_runtime::backpressure::BackpressureWriter;
 use obzenflow_runtime::effects::{
-    AnswersEffect, CurrentRunHistory, EffectCommitHandle, EffectHandler, EffectInvocationContext,
-    EffectName, EffectPortRegistry, Effects, System,
+    AnswersEffect, CurrentRunHistory, EffectCommitHandle, EffectInvocationContext, EffectName,
+    EffectPortRegistry, Effects, Port,
 };
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::feed_plan::StageOutputContract;
@@ -212,6 +212,7 @@ enum TransactionProbeMode {
     MissingCommit,
 }
 
+#[obzenflow_runtime::effects::system("tx", effects = obzenflow_runtime::effects)]
 #[async_trait]
 impl TransactionProbeLedger for TransactionProbePort {
     async fn write(
@@ -242,7 +243,7 @@ async fn effect_context(
     calls: Arc<AtomicUsize>,
     trace: Arc<Mutex<Vec<String>>>,
     mode: TransactionProbeMode,
-) -> (EffectInvocationContext, System<dyn TransactionProbeLedger>) {
+) -> (EffectInvocationContext, Port<dyn TransactionProbeLedger>) {
     let writer_id = WriterId::from(stage_id);
     let upstream = AppendOnlyJournal::new(JournalOwner::stage(stage_id), false);
     let parent = upstream
@@ -257,8 +258,7 @@ async fn effect_context(
         )
         .await
         .unwrap();
-    let ledger =
-        System::eager("tx", Arc::new(TransactionProbePort { calls, trace, mode })).unwrap();
+    let ledger = Port::to(TransactionProbePort { calls, trace, mode });
     let authored_declaration =
         AnswersEffect::<<TransactionProbeRequest as EffectName>::Effect>::declaration(
             &ledger, None,
@@ -300,12 +300,12 @@ async fn effect_context(
     (context, ledger)
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[derive(Clone, Debug)]
 struct TransactionProbeHandler {
     terminal_error: Arc<Mutex<Option<EffectError>>>,
-    #[system]
-    ledger: System<dyn TransactionProbeLedger>,
+    #[port]
+    ledger: Port<dyn TransactionProbeLedger>,
 }
 
 #[async_trait]

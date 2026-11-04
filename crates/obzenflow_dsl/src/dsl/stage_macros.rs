@@ -1545,8 +1545,8 @@ macro_rules! __obzenflow_assert_effectful_stateful_contract {
     }};
 }
 
-/// Lower an effectful row. The handler's effect set declares the stage's
-/// effects, and the systems named after the handler answer its named effects.
+/// Lower an effectful row. The command's effect set declares the stage's
+/// effects, and its ports answer them.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_row {
@@ -1639,6 +1639,7 @@ macro_rules! __obzenflow_effectful_metadata {
 macro_rules! __obzenflow_effectful_lower {
     (transform, input = exact($in:ty), output = $out:ty, members = [$($member:ty),+], contract = $contract:tt, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*], acks = [$($acks:tt)*]) => {{
         let __handler = $handler;
+        $crate::__private::assert_command(&__handler);
         $crate::__private::assert_handler_performs_no_ai_effect(&__handler);
         $crate::__obzenflow_assert_effectful_transform_contract!(__handler, $in, [$($member),+]);
         let __effects =
@@ -1658,6 +1659,7 @@ macro_rules! __obzenflow_effectful_lower {
     }};
     (stateful, input = exact($in:ty), output = $out:ty, members = [$($member:ty),+], contract = $contract:tt, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*], acks = [$($acks:tt)*]) => {{
         let __handler = $handler;
+        $crate::__private::assert_command(&__handler);
         $crate::__private::assert_stateful_handler_performs_no_ai_effect(&__handler);
         $crate::__obzenflow_assert_effectful_stateful_contract!(__handler, $in, [$($member),+]);
         let __effects =
@@ -2934,10 +2936,10 @@ macro_rules! __obzenflow_stage_row {
         compile_error!("ai!: `via` was removed; each stage's model comes from [ai.*] configuration")
     };
     (@sig $kind:ident $target:ident [$($sig:tt)*] uses $($rest:tt)*) => {
-        compile_error!("`uses` was removed; a stage performs the effects its handler's `#[system]` fields allow, as in `#[system(AuthorizeRequest)] gateway: System<dyn GatewayPort>`")
+        compile_error!("`uses` was removed; a stage performs the effects its command's ports allow, as in `#[obzenflow::command(through = PaymentGatewayPort)]`")
     };
     (@sig $kind:ident $target:ident [$($sig:tt)*] via $($rest:tt)*) => {
-        compile_error!("`via` was removed; the handler holds the system it calls in a `#[system]` field, as in `#[system] risk_engine: System<dyn RiskEnginePort>`")
+        compile_error!("`via` was removed; the command holds the port it works through, and the flow builder connects a system with `perform(ChargeRequest::for_invoice).through(Port::deferred(StripeProcessor::from_env))`")
     };
     (@sig $kind:ident $target:ident [$($sig:tt)*] with {} $($rest:tt)*) => {
         compile_error!("middleware groups must be non-empty; omit `with` when no middleware is attached")
@@ -2994,7 +2996,7 @@ macro_rules! __obzenflow_stage_row {
     };
 
     (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . system $($rest:tt)*) => {
-        compile_error!("`.system(…)` was removed; the handler holds the system it calls in a `#[system]` field, and `fx.call(request)` performs the request through it")
+        compile_error!("`.system(…)` was removed; the command holds the port it works through in a `#[port]` field, and `fx.call(request)` performs the request through it")
     };
     (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt [$($acks:tt)*] $delivery:tt . at_least_once :: < $effect:ty > () $($rest:tt)*) => {
         $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw $handler [$($acks)* $crate::__private::EffectAcknowledgement::at_least_once::<$effect>(stringify!($effect)),] $delivery $($rest)*)
@@ -3084,7 +3086,7 @@ macro_rules! effectful_stateful {
 /// ```
 /// # use async_trait::async_trait;
 /// # use obzenflow_adapters::middleware::{rate_limit, MiddlewareFactory};
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -3101,11 +3103,11 @@ macro_rules! effectful_stateful {
 /// #     #[effect(type = "group.second", exactly_once)]
 /// #     fn second(&self, request: &SecondRequest) -> Result<Fact, EffectError>;
 /// # }
-/// # #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[derive(Clone, Debug)]
 /// # struct Handler {
-/// #     #[system]
-/// #     group: System<dyn GroupPort>,
+/// #     #[port]
+/// #     group: Port<dyn GroupPort>,
 /// # }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Handler {
@@ -3126,7 +3128,7 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_adapters::middleware::rate_limit;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -3139,11 +3141,11 @@ macro_rules! effectful_stateful {
 /// #     #[effect(type = "group.first", exactly_once)]
 /// #     fn first(&self, request: &FirstRequest) -> Result<Fact, EffectError>;
 /// # }
-/// # #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[derive(Clone, Debug)]
 /// # struct Handler {
-/// #     #[system]
-/// #     group: System<dyn GroupPort>,
+/// #     #[port]
+/// #     group: Port<dyn GroupPort>,
 /// # }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Handler {
@@ -3158,18 +3160,16 @@ macro_rules! effectful_stateful {
 /// # }
 /// ```
 ///
-/// A handler that performs a request holds the system that answers it in a
-/// `#[system]` field, so the row names only the handler and `fx.call` takes
-/// only the request.
+/// A command declares the port it works through, so the row names only the
+/// command and `fx.call` takes only the request.
 ///
 /// ```
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System, SystemError};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
-/// # use std::sync::Arc;
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Order;
 /// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "row_doc.order"; }
@@ -3182,15 +3182,13 @@ macro_rules! effectful_stateful {
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # struct Card;
+/// # #[obzenflow_runtime::effects::system("card", effects = obzenflow_runtime::effects)]
 /// # impl CardPort for Card { fn charge(&self, _: &ChargeCardRequest) -> Result<Charged, EffectError> { Ok(Charged) } }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
-/// struct Checkout {
-///     #[system]
-///     card: System<dyn CardPort>,
-/// }
+/// #[obzenflow_runtime::effects::command(through = CardPort, effects = obzenflow_runtime::effects)]
+/// #[derive(Clone, Debug)]
+/// struct Checkout;
 ///
 /// #[async_trait]
 /// impl EffectfulTransformHandler for Checkout {
@@ -3207,21 +3205,72 @@ macro_rules! effectful_stateful {
 ///     }
 /// }
 ///
-/// # fn main() -> Result<(), SystemError> {
-/// let card = System::eager("card", Arc::new(Card))?;
-/// let checkout = Checkout { card };
+/// # fn main() {
+/// let checkout = Checkout::through(Port::to(Card));
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout);
-/// # Ok(())
 /// # }
 /// ```
 ///
-/// A field left unmarked holds no system for the stage and allows no effect,
+/// A stage that performs one request per input needs no type of its own. Its
+/// output is the request's outcome facts.
+///
+/// ```
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Order;
+/// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "row_doc.order"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
+/// # #[derive(Clone, Debug, Serialize)]
+/// # struct ChargeCardRequest;
+/// # impl ChargeCardRequest { fn for_order(_: &Order) -> Self { Self } }
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait CardPort: Send + Sync {
+/// #     #[effect(type = "row_doc.charge_card", exactly_once)]
+/// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
+/// # }
+/// # struct Card;
+/// # #[obzenflow_runtime::effects::system("card", effects = obzenflow_runtime::effects)]
+/// # impl CardPort for Card { fn charge(&self, _: &ChargeCardRequest) -> Result<Charged, EffectError> { Ok(Charged) } }
+/// let charge = perform(ChargeCardRequest::for_order).through(Port::to(Card));
+/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => charge);
+/// ```
+///
+/// A `perform` without its port is not a command, so a row that names one does
+/// not compile:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::effects::{perform, EffectError};
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Order;
+/// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "row_doc.order"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
+/// # #[derive(Clone, Debug, Serialize)]
+/// # struct ChargeCardRequest;
+/// # impl ChargeCardRequest { fn for_order(_: &Order) -> Self { Self } }
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait CardPort: Send + Sync {
+/// #     #[effect(type = "row_doc.charge_card", exactly_once)]
+/// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
+/// # }
+/// let charge = perform(ChargeCardRequest::for_order);
+/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => charge);
+/// ```
+///
+/// A field left unmarked holds no port for the stage and allows no effect,
 /// so a call only that field could answer does not compile:
 ///
 /// ```compile_fail,E0277
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3238,10 +3287,10 @@ macro_rules! effectful_stateful {
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[derive(Clone, Debug)]
 /// struct Checkout {
-///     card: System<dyn CardPort>,
+///     card: Port<dyn CardPort>,
 /// }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
@@ -3252,18 +3301,18 @@ macro_rules! effectful_stateful {
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
-/// # fn build(card: System<dyn CardPort>) {
+/// # fn build(card: Port<dyn CardPort>) {
 /// let checkout = Checkout { card };
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout);
 /// # }
 /// ```
 ///
-/// Neither does a `#[system]` field whose port declares no effect:
+/// Neither does a `#[port]` field whose port declares no effect:
 ///
 /// ```compile_fail,E0277
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3282,13 +3331,13 @@ macro_rules! effectful_stateful {
 /// # trait LedgerPort: Send + Sync {}
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[derive(Clone, Debug)]
 /// struct Checkout {
-///     #[system]
-///     card: System<dyn CardPort>,
-///     #[system]
-///     ledger: System<dyn LedgerPort>,
+///     #[port]
+///     card: Port<dyn CardPort>,
+///     #[port]
+///     ledger: Port<dyn LedgerPort>,
 /// }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
@@ -3299,18 +3348,18 @@ macro_rules! effectful_stateful {
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
-/// # fn build(card: System<dyn CardPort>, ledger: System<dyn LedgerPort>) {
+/// # fn build(card: Port<dyn CardPort>, ledger: Port<dyn LedgerPort>) {
 /// let checkout = Checkout { card, ledger };
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout);
 /// # }
 /// ```
 ///
-/// Nor do two `#[system]` fields for one port type:
+/// Nor do two `#[port]` fields for one port type:
 ///
-/// ```compile_fail,E0283
+/// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3327,13 +3376,13 @@ macro_rules! effectful_stateful {
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[derive(Clone, Debug)]
 /// struct Checkout {
-///     #[system]
-///     card: System<dyn CardPort>,
-///     #[system]
-///     spare_card: System<dyn CardPort>,
+///     #[port]
+///     card: Port<dyn CardPort>,
+///     #[port]
+///     spare_card: Port<dyn CardPort>,
 /// }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
@@ -3344,7 +3393,7 @@ macro_rules! effectful_stateful {
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
-/// # fn build(card: System<dyn CardPort>, spare_card: System<dyn CardPort>) {
+/// # fn build(card: Port<dyn CardPort>, spare_card: Port<dyn CardPort>) {
 /// let checkout = Checkout { card, spare_card };
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout);
 /// # }
@@ -3357,7 +3406,7 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3374,11 +3423,11 @@ macro_rules! effectful_stateful {
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[derive(Clone, Debug)]
 /// # struct Checkout {
-/// #     #[system]
-/// #     card: System<dyn CardPort>,
+/// #     #[port]
+/// #     card: Port<dyn CardPort>,
 /// # }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
@@ -3397,7 +3446,7 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3414,11 +3463,11 @@ macro_rules! effectful_stateful {
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[derive(Clone, Debug)]
 /// # struct Checkout {
-/// #     #[system]
-/// #     card: System<dyn CardPort>,
+/// #     #[port]
+/// #     card: Port<dyn CardPort>,
 /// # }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
@@ -3429,7 +3478,7 @@ macro_rules! effectful_stateful {
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
-/// # fn build(checkout: Checkout, card: System<dyn CardPort>) {
+/// # fn build(checkout: Checkout, card: Port<dyn CardPort>) {
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged via card => checkout);
 /// # }
 /// ```
@@ -3437,7 +3486,7 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3454,11 +3503,11 @@ macro_rules! effectful_stateful {
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[derive(Clone, Debug)]
 /// # struct Checkout {
-/// #     #[system]
-/// #     card: System<dyn CardPort>,
+/// #     #[port]
+/// #     card: Port<dyn CardPort>,
 /// # }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
@@ -3469,7 +3518,7 @@ macro_rules! effectful_stateful {
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
-/// # fn build(checkout: Checkout, card: System<dyn CardPort>) {
+/// # fn build(checkout: Checkout, card: Port<dyn CardPort>) {
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout.system(card));
 /// # }
 /// ```
@@ -3480,7 +3529,7 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectCommitHandle, EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectCommitHandle, EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3497,11 +3546,11 @@ macro_rules! effectful_stateful {
 /// #     #[effect(type = "row_doc.post", exactly_once)]
 /// #     fn post(&self, request: &LedgerPosting, tx: EffectCommitHandle<Posted>) -> Result<Posted, EffectError>;
 /// # }
-/// # #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[derive(Clone, Debug)]
 /// # struct Post {
-/// #     #[system]
-/// #     ledger: System<dyn LedgerPort>,
+/// #     #[port]
+/// #     ledger: Port<dyn LedgerPort>,
 /// # }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Post {
@@ -3521,7 +3570,7 @@ macro_rules! effectful_stateful {
 /// # use async_trait::async_trait;
 /// # use obzenflow_adapters::middleware::retry;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3538,11 +3587,11 @@ macro_rules! effectful_stateful {
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[derive(Clone, Debug)]
 /// # struct Checkout {
-/// #     #[system]
-/// #     card: System<dyn CardPort>,
+/// #     #[port]
+/// #     card: Port<dyn CardPort>,
 /// # }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
@@ -3561,7 +3610,7 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3578,14 +3627,14 @@ macro_rules! effectful_stateful {
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[derive(Clone, Debug, EffectHandler)]
-/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[derive(Clone, Debug)]
 /// # struct Checkout {
-/// #     #[system]
-/// #     card: System<dyn CardPort>,
+/// #     #[port]
+/// #     card: Port<dyn CardPort>,
 /// # }
 /// # impl Checkout {
-/// #     fn new(card: System<dyn CardPort>) -> Self { Self { card } }
+/// #     fn new(card: Port<dyn CardPort>) -> Self { Self { card } }
 /// # }
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
@@ -3596,7 +3645,7 @@ macro_rules! effectful_stateful {
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
-/// # fn build(card: System<dyn CardPort>) {
+/// # fn build(card: Port<dyn CardPort>) {
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => Checkout::new(card));
 /// # }
 /// ```

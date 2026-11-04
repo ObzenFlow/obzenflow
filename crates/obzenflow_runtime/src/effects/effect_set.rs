@@ -5,11 +5,11 @@
 //! Effect capability sets.
 //!
 //! An effect set is the exhaustive, compiler-visible set of effects one
-//! handler may perform. `#[derive(EffectHandler)]` builds it from the
-//! handler's `#[system]` fields: each field allows every effect its port
-//! declares, or the requests its `#[system(...)]` lists. [`EffectName`] maps
-//! each member to its effect; the stable runtime and archive identity remains
-//! `EFFECT_TYPE`. Sets are zero-sized declarations, never persisted.
+//! command may perform. `#[obzenflow::command]` builds it from the ports the
+//! command holds: each port allows every effect it declares, or the requests
+//! its `#[port(...)]` field lists. [`EffectName`] maps each member to its
+//! effect; the stable runtime and archive identity remains `EFFECT_TYPE`. Sets
+//! are zero-sized declarations, never persisted.
 
 use super::call::{Call, CallRequest};
 use super::declaration::Effect;
@@ -40,13 +40,13 @@ impl<R: CallRequest> EffectName for Call<R> {
 
 /// Capability authority for one handler's permitted effect identities.
 ///
-/// A handler with no `#[system]` field allows no effect. The hidden `Members`
+/// A command with no port allows no effect. The hidden `Members`
 /// projection is what `Effects::perform` bounds and the DSL manifest equality
 /// assertions consume.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not an effect capability set",
-    note = "a handler's effects come from its `#[system]` fields; derive `EffectHandler` and \
-            mark each field that holds a system `#[system]`"
+    note = "a command's effects come from its ports; add `#[obzenflow::command(through = …)]` \
+            above it, or `#[obzenflow::command]` with a `#[port]` field for each port"
 )]
 pub trait EffectSet: Send + Sync + 'static {
     /// Hidden type-level member projection; proof machinery, not public
@@ -64,8 +64,8 @@ pub trait EffectSet: Send + Sync + 'static {
     const MEMBERS_DISTINCT: () = ();
 }
 
-/// The zero-sized set of the members `L` lists, which `#[derive(EffectHandler)]`
-/// and the framework's own handlers name. Never constructed and never
+/// The zero-sized set of the members `L` lists, which `#[obzenflow::command]`
+/// and the framework's own commands name. Never constructed and never
 /// persisted; it exists only as a type-level declaration.
 #[doc(hidden)]
 pub struct DeclaredEffectSet<L>(PhantomData<fn() -> L>);
