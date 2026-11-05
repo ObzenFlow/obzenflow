@@ -4,9 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU32;
+use std::ops::Range;
 /// The sealed runtime coordinate for ObzenFlow's concrete chat capability.
 ///
 /// User-facing AI syntax selects a typed effect binding lexically. It does not
@@ -466,6 +467,58 @@ pub struct ChatResponse {
     pub raw: Option<Value>,
 }
 
+impl ChatResponse {
+    /// Removes each `[^n]` citation whose number lies outside `numbers`, and
+    /// returns the numbers removed. A footnote the text defines and a marker in
+    /// code stay. `raw` keeps the provider's document.
+    pub fn remove_citations_outside(&mut self, numbers: &Range<u64>) -> BTreeSet<u64> {
+        let mut removed = BTreeSet::new();
+        if !self.text.contains("[^") {
+            return removed;
+        }
+        let defined: BTreeSet<u64> = self
+            .text
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let (length, number) = citation_marker(line)?;
+                line[length..].starts_with(':').then_some(number)
+            })
+            .collect();
+        let mut kept = String::with_capacity(self.text.len());
+        let mut fenced = false;
+        for line in self.text.split_inclusive('\n') {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+            }
+            let mut copied = 0;
+            for (start, _) in line.match_indices("[^") {
+                let Some((length, number)) = citation_marker(&line[start..]) else {
+                    continue;
+                };
+                let in_code = fenced || line[..start].matches('`').count() % 2 == 1;
+                if in_code || numbers.contains(&number) || defined.contains(&number) {
+                    continue;
+                }
+                kept.push_str(line[copied..start].trim_end_matches(' '));
+                removed.insert(number);
+                copied = start + length;
+            }
+            kept.push_str(&line[copied..]);
+        }
+        self.text = kept;
+        removed
+    }
+}
+
+fn citation_marker(text: &str) -> Option<(usize, u64)> {
+    let (digits, _) = text.strip_prefix("[^")?.split_once(']')?;
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((digits.len() + 3, digits.parse().ok()?))
+}
+
 /// Durable framework-owned outcome of the replay-safe chat-completion effect.
 ///
 /// This is deliberately not a `TypedPayload`: persistence makes the value
@@ -493,6 +546,8 @@ impl ChatCompletionReply {
         }
     }
 
+    /// The reply's text. In a map or reduce call, a `[^n]` citation outside the
+    /// input's numbers is already gone; `response.raw` keeps the provider's text.
     pub fn text(&self) -> &str {
         &self.response.text
     }
@@ -691,6 +746,39 @@ impl EmbeddingGenerationReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn removed_from(text: &str, numbers: Range<u64>) -> (String, Vec<u64>) {
+        let mut response = ChatResponse {
+            text: text.to_string(),
+            tool_calls: Vec::new(),
+            usage: None,
+            raw: None,
+        };
+        let removed = response.remove_citations_outside(&numbers);
+        (response.text, removed.into_iter().collect())
+    }
+
+    #[test]
+    fn citation_outside_numbers_removed() {
+        let (text, removed) = removed_from(
+            "- Databases [^12], Storage [^112]: launched.\n- Rust [^120]: new. [^1]",
+            11..21,
+        );
+        assert_eq!(text, "- Databases [^12], Storage: launched.\n- Rust: new.");
+        assert_eq!(removed, vec![1, 112, 120]);
+    }
+
+    #[test]
+    fn defined_footnote_outside_numbers_unchanged() {
+        let reply = "Claim [^1].\n\n[^1]: Source.";
+        assert_eq!(removed_from(reply, 11..21), (reply.to_string(), Vec::new()));
+    }
+
+    #[test]
+    fn code_marker_outside_numbers_unchanged() {
+        let reply = "Use `s/[^1]/x/`.\n```\nlet re = \"[^2]\";\n```\nDone [^15].";
+        assert_eq!(removed_from(reply, 11..21), (reply.to_string(), Vec::new()));
+    }
 
     #[test]
     fn ai_provider_normalizes_to_lowercase() {

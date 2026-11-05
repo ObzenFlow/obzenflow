@@ -21,6 +21,7 @@ use obzenflow_runtime::effects::{
     EffectPortSlot, EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety,
     LogicalEffectBindingName, RecordedReply, ResolvedEffectPort,
 };
+use std::ops::Range;
 use std::sync::Arc;
 
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
@@ -231,6 +232,7 @@ impl AiEffect for EmbeddingGeneration {
     fn effect(
         label: &'static str,
         request: &EmbeddingRequestSpec,
+        _: Option<Range<u64>>,
         binding: EffectBindingUse<Self>,
     ) -> Result<Self, AiRequestError> {
         let bound = request.bind_target(binding.evidence().target());

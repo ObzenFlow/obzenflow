@@ -4,6 +4,7 @@
 
 use super::error_mapping::map_rig_error;
 use super::preflight::{preflight_ollama, preflight_openai_models};
+use super::transport::ChatTransport;
 use crate::ai::endpoint_identity::{
     bound_chat_target, default_ollama_base_url, default_openai_base_url,
 };
@@ -12,14 +13,15 @@ use obzenflow_core::ai::{
     AiClientError, AiProvider, ChatClient, ChatMessage, ChatParams, ChatRequest, ChatResponse,
     ChatResponseFormat, ChatTarget, ToolCall, ToolDefinition, Usage, UsageSource,
 };
-use rig_rs::client::{CompletionClient, Nothing};
-use rig_rs::completion::CompletionModel;
 use rig_rs::completion::{
     CompletionRequest, CompletionResponse, ToolDefinition as RigToolDefinition,
 };
-use rig_rs::message::{AssistantContent, Message, Text, UserContent};
-use rig_rs::providers::{ollama, openai};
-use rig_rs::OneOrMany;
+use rig_rs::message::{AssistantContent, Message, ToolCall as RigToolCall, ToolName};
+use rig_rs::providers::ollama::{self, OllamaConfig};
+use rig_rs::providers::openai::responses_api::wire::Responses;
+use rig_rs::providers::openai::OpenAIConfig;
+use rig_rs::schemars::Schema;
+use rig_rs::Model;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use url::Url;
@@ -29,8 +31,8 @@ const TOOL_ROLE_UNSUPPORTED_MESSAGE: &str =
 
 #[derive(Clone)]
 enum RigChatBackend {
-    Ollama { client: Arc<ollama::Client> },
-    OpenAi { client: Arc<openai::Client> },
+    Ollama { model: Arc<Model<ollama::Chat>> },
+    OpenAi { model: Arc<Model<Responses>> },
 }
 
 /// Rig-backed implementation of `ChatClient`.
@@ -47,28 +49,16 @@ impl RigChatClient {
     /// Create an Ollama-backed client.
     pub fn ollama(model: impl Into<String>, base_url: Option<Url>) -> Result<Self, AiClientError> {
         let model = model.into();
-        let endpoint = base_url.clone().unwrap_or_else(default_ollama_base_url);
-        let client = match base_url {
-            None => ollama::Client::new(Nothing).map_err(|err| AiClientError::InvalidRequest {
-                message: err.to_string(),
-            })?,
-            Some(url) => ollama::Client::builder()
-                .api_key(Nothing)
-                // rig-core's Provider::build_uri appends a trailing `/` to `base_url`.
-                // `url::Url::as_str()` includes `/` for the root path, which would otherwise
-                // produce `//api/...` and can trigger redirects/method changes on some servers.
-                .base_url(url.as_str().trim_end_matches('/'))
-                .build()
-                .map_err(|err| AiClientError::InvalidRequest {
-                    message: err.to_string(),
-                })?,
-        };
+        let endpoint = base_url.unwrap_or_else(default_ollama_base_url);
+        let client = OllamaConfig::new()
+            .with_base_url(endpoint.as_str())
+            .connect(ChatTransport::new());
 
         Ok(Self {
-            target: bound_chat_target("ollama", model, &endpoint),
             backend: RigChatBackend::Ollama {
-                client: Arc::new(client),
+                model: Arc::new(client.native_completion(model.as_str())),
             },
+            target: bound_chat_target("ollama", model, &endpoint),
         })
     }
 
@@ -97,21 +87,12 @@ impl RigChatClient {
         base_url: Url,
     ) -> Result<Self, AiClientError> {
         let model = model.into();
-        let endpoint = base_url.clone();
-        let client = openai::Client::builder()
-            .api_key(api_key.into())
-            // See note in `ollama()` about trailing slashes.
-            .base_url(base_url.as_str().trim_end_matches('/'))
-            .build()
-            .map_err(|err| AiClientError::InvalidRequest {
-                message: err.to_string(),
-            })?;
 
         Ok(Self {
-            target: bound_chat_target("openai_compatible", model, &endpoint),
             backend: RigChatBackend::OpenAi {
-                client: Arc::new(client),
+                model: Arc::new(responses_model(model.as_str(), api_key.into(), &base_url)),
             },
+            target: bound_chat_target("openai_compatible", model, &base_url),
         })
     }
 
@@ -136,16 +117,13 @@ impl RigChatClient {
         api_key: impl Into<String>,
     ) -> Result<Self, AiClientError> {
         let model = model.into();
-        let client =
-            openai::Client::new(api_key.into()).map_err(|err| AiClientError::InvalidRequest {
-                message: err.to_string(),
-            })?;
+        let endpoint = default_openai_base_url();
 
         Ok(Self {
-            target: bound_chat_target("openai", model, &default_openai_base_url()),
             backend: RigChatBackend::OpenAi {
-                client: Arc::new(client),
+                model: Arc::new(responses_model(model.as_str(), api_key.into(), &endpoint)),
             },
+            target: bound_chat_target("openai", model, &endpoint),
         })
     }
 
@@ -182,50 +160,116 @@ impl ChatClient for RigChatClient {
     async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AiClientError> {
         validate_request_target(&req, &self.target)?;
 
-        let (preamble, chat_history) = preamble_and_history(&req.messages)?;
-
-        let additional_params = build_additional_params(&req.params, req.response_format.as_ref());
-        let tools = req
-            .tools
-            .iter()
-            .map(map_tool_definition)
-            .collect::<Vec<_>>();
-
-        let completion_req = CompletionRequest {
-            preamble,
-            chat_history: OneOrMany::many(chat_history)
-                .expect("preamble_and_history validates non-empty chat history"),
-            documents: vec![],
-            model: None,
-            output_schema: None,
-            tools,
-            temperature: req.params.temperature.map(|t| t as f64),
-            max_tokens: req.params.max_tokens.map(|n| n as u64),
-            tool_choice: None,
-            additional_params,
-        };
-
-        let response = match &self.backend {
-            RigChatBackend::Ollama { client } => {
-                let model = client.completion_model(self.target.model.as_str());
-                let resp = model
-                    .completion(completion_req.clone())
-                    .await
-                    .map_err(map_rig_error)?;
-                map_chat_response(resp)
+        let format = req.response_format.as_ref();
+        let additional_params = build_additional_params(&req.params, format);
+        match &self.backend {
+            RigChatBackend::Ollama { model } => {
+                let request =
+                    completion_request(&req, ollama_additional_params(additional_params, format))?;
+                let response = model.call(request).await.map_err(map_rig_error)?;
+                map_chat_response(response, ollama_call_id)
             }
-            RigChatBackend::OpenAi { client } => {
-                let model = client.completion_model(self.target.model.as_str());
-                let resp = model
-                    .completion(completion_req)
-                    .await
-                    .map_err(map_rig_error)?;
-                map_chat_response(resp)
+            RigChatBackend::OpenAi { model } => {
+                let request = completion_request(
+                    &req,
+                    responses_additional_params(additional_params, format)?,
+                )?;
+                let response = model.call(request).await.map_err(map_rig_error)?;
+                map_chat_response(response, responses_call_id)
             }
-        };
-
-        Ok(response)
+        }
     }
+}
+
+fn responses_model(model: &str, api_key: String, base_url: &Url) -> Model<Responses> {
+    let mut responses = OpenAIConfig::new(api_key)
+        .with_base_url(base_url.as_str().trim_end_matches('/'))
+        .with_system_instructions_as_messages()
+        .connect(ChatTransport::new())
+        .responses(model);
+    responses.wire = responses.wire.with_strict_tools();
+    responses
+}
+
+fn completion_request(
+    req: &ChatRequest,
+    additional_params: Option<Value>,
+) -> Result<CompletionRequest, AiClientError> {
+    let (preamble, chat_history) = preamble_and_history(&req.messages)?;
+    let tools = req
+        .tools
+        .iter()
+        .map(map_tool_definition)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut request = CompletionRequest::from(chat_history).tools(tools);
+    if let Some(preamble) = preamble {
+        request = request.preamble(preamble);
+    }
+    request.temperature = req.params.temperature.map(|t| t as f64);
+    request.max_tokens = req.params.max_tokens.map(|n| n as u64);
+    request.options.top_p = req.params.top_p.map(|p| p as f64);
+    request.options.seed = req.params.seed;
+    request.additional_params = additional_params;
+    if let Some(ChatResponseFormat::JsonSchema { schema }) = &req.response_format {
+        let schema =
+            Schema::try_from(schema.clone()).map_err(|err| AiClientError::InvalidRequest {
+                message: format!("invalid JSON schema for the response format: {err}"),
+            })?;
+        request.output_schema = Some(schema);
+    }
+    Ok(request)
+}
+
+fn ollama_additional_params(
+    additional_params: Option<Value>,
+    format: Option<&ChatResponseFormat>,
+) -> Option<Value> {
+    let mut map = match additional_params {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    map.entry("think").or_insert(Value::Bool(false));
+    match format {
+        Some(ChatResponseFormat::JsonObject) => {
+            map.insert("format".to_string(), json!("json"));
+        }
+        Some(ChatResponseFormat::Text | ChatResponseFormat::JsonSchema { .. }) => {
+            map.remove("format");
+        }
+        None => {}
+    }
+    Some(Value::Object(map))
+}
+
+fn responses_additional_params(
+    additional_params: Option<Value>,
+    format: Option<&ChatResponseFormat>,
+) -> Result<Option<Value>, AiClientError> {
+    let mut map = match additional_params {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    for field in ["model", "input"] {
+        if map.contains_key(field) {
+            return Err(AiClientError::InvalidRequest {
+                message: format!("extras cannot replace the request's `{field}`"),
+            });
+        }
+    }
+    match format {
+        Some(ChatResponseFormat::JsonObject) => {
+            map.insert(
+                "text".to_string(),
+                json!({ "format": { "type": "json_object" } }),
+            );
+        }
+        Some(ChatResponseFormat::Text | ChatResponseFormat::JsonSchema { .. }) => {
+            map.remove("text");
+        }
+        None => {}
+    }
+    Ok((!map.is_empty()).then_some(Value::Object(map)))
 }
 
 fn validate_request_target(req: &ChatRequest, bound: &ChatTarget) -> Result<(), AiClientError> {
@@ -246,17 +290,8 @@ fn preamble_and_history(
     for message in messages {
         match message.role.as_str() {
             "system" => preamble_parts.push(message.content.clone()),
-            "user" => history.push(Message::User {
-                content: OneOrMany::one(UserContent::Text(Text {
-                    text: message.content.clone(),
-                })),
-            }),
-            "assistant" => history.push(Message::Assistant {
-                id: None,
-                content: OneOrMany::one(AssistantContent::Text(Text {
-                    text: message.content.clone(),
-                })),
-            }),
+            "user" => history.push(Message::user(message.content.clone())),
+            "assistant" => history.push(Message::assistant(message.content.clone())),
             "tool" => {
                 return Err(AiClientError::InvalidRequest {
                     message: TOOL_ROLE_UNSUPPORTED_MESSAGE.to_string(),
@@ -295,42 +330,20 @@ fn build_additional_params(
         map.insert(key.clone(), value.clone());
     }
 
-    // Typed fields win over extras.
     if params.temperature.is_some() {
         map.remove("temperature");
     }
     if params.max_tokens.is_some() {
         map.remove("max_tokens");
     }
-
-    if let Some(value) = params.top_p {
-        map.insert("top_p".to_string(), json!(value));
+    if params.top_p.is_some() {
+        map.remove("top_p");
     }
-    if let Some(value) = params.seed {
-        map.insert("seed".to_string(), json!(value));
+    if params.seed.is_some() {
+        map.remove("seed");
     }
-
-    if let Some(format) = response_format {
-        match format {
-            ChatResponseFormat::Text => {
-                map.remove("response_format");
-            }
-            ChatResponseFormat::JsonObject => {
-                map.insert(
-                    "response_format".to_string(),
-                    json!({ "type": "json_object" }),
-                );
-            }
-            ChatResponseFormat::JsonSchema { schema } => {
-                map.insert(
-                    "response_format".to_string(),
-                    json!({
-                        "type": "json_schema",
-                        "json_schema": schema,
-                    }),
-                );
-            }
-        }
+    if response_format.is_some() {
+        map.remove("response_format");
     }
 
     if map.is_empty() {
@@ -340,7 +353,10 @@ fn build_additional_params(
     }
 }
 
-fn map_tool_definition(tool: &ToolDefinition) -> RigToolDefinition {
+fn map_tool_definition(tool: &ToolDefinition) -> Result<RigToolDefinition, AiClientError> {
+    let name = ToolName::new(tool.name.as_str()).map_err(|err| AiClientError::InvalidRequest {
+        message: err.to_string(),
+    })?;
     let parameters = tool.parameters_schema.clone().unwrap_or_else(|| {
         json!({
             "type": "object",
@@ -348,54 +364,94 @@ fn map_tool_definition(tool: &ToolDefinition) -> RigToolDefinition {
         })
     });
 
-    RigToolDefinition {
-        name: tool.name.clone(),
-        description: tool.description.clone().unwrap_or_default(),
+    Ok(RigToolDefinition::new(
+        name,
+        tool.description.clone().unwrap_or_default(),
         parameters,
-    }
+    ))
 }
 
-fn map_chat_response<T>(resp: CompletionResponse<T>) -> ChatResponse
-where
-    T: serde::Serialize,
-{
+fn ollama_call_id(call: &RigToolCall) -> Result<String, AiClientError> {
+    Ok(call.function.name.as_str().to_string())
+}
+
+fn responses_call_id(call: &RigToolCall) -> Result<String, AiClientError> {
+    if call.id.is_local() {
+        return Err(AiClientError::Other {
+            message: format!(
+                "the provider's tool call `{}` has no call_id",
+                call.function.name.as_str()
+            ),
+        });
+    }
+    Ok(call.id.wire().into_owned())
+}
+
+fn map_tool_call(
+    call: RigToolCall,
+    call_id: fn(&RigToolCall) -> Result<String, AiClientError>,
+) -> Result<ToolCall, AiClientError> {
+    let id = call_id(&call)?;
+    let name = call.function.name.as_str().to_string();
+    if let Some(arguments) = call.function.invalid_arguments {
+        return Err(AiClientError::Other {
+            message: format!(
+                "the provider's tool call `{name}` has invalid arguments: {arguments}"
+            ),
+        });
+    }
+    Ok(ToolCall {
+        id: Some(id),
+        name,
+        arguments: Value::Object(call.function.arguments),
+    })
+}
+
+fn map_chat_response(
+    resp: CompletionResponse,
+    call_id: fn(&RigToolCall) -> Result<String, AiClientError>,
+) -> Result<ChatResponse, AiClientError> {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
 
-    for content in resp.choice.into_iter() {
+    for content in resp.choice {
         match content {
             AssistantContent::Text(text) => text_parts.push(text.text),
-            AssistantContent::ToolCall(call) => {
-                tool_calls.push(ToolCall {
-                    id: Some(call.id),
-                    name: call.function.name,
-                    arguments: call.function.arguments,
-                });
-            }
+            AssistantContent::ToolCall(call) => tool_calls.push(map_tool_call(call, call_id)?),
             _ => {}
         }
     }
 
-    let usage = map_usage(resp.usage);
+    if text_parts.is_empty() && tool_calls.is_empty() {
+        let reported = resp
+            .error
+            .map_or_else(String::new, |error| format!(": {error}"));
+        return Err(AiClientError::Other {
+            message: format!("the provider's reply has no text and no tool call{reported}"),
+        });
+    }
 
-    ChatResponse {
+    Ok(ChatResponse {
         text: text_parts.join(""),
         tool_calls,
-        usage,
-        raw: serde_json::to_value(resp.raw_response).ok(),
-    }
+        usage: map_usage(resp.usage),
+        raw: Some(resp.raw),
+    })
 }
 
 fn map_usage(usage: rig_rs::completion::Usage) -> Option<Usage> {
-    if usage.input_tokens == 0 && usage.output_tokens == 0 && usage.total_tokens == 0 {
+    let input_tokens = usage.input_tokens.unwrap_or(0);
+    let output_tokens = usage.output_tokens.unwrap_or(0);
+    let total_tokens = usage.total_tokens.unwrap_or(input_tokens + output_tokens);
+    if input_tokens == 0 && output_tokens == 0 && total_tokens == 0 {
         return None;
     }
 
     Some(Usage {
         source: UsageSource::Provider,
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        total_tokens: usage.total_tokens,
+        input_tokens,
+        output_tokens,
+        total_tokens,
     })
 }
 
@@ -403,6 +459,7 @@ fn map_usage(usage: rig_rs::completion::Usage) -> Option<Usage> {
 mod tests {
     use super::*;
     use obzenflow_core::ai::{ChatRole, ToolCall};
+    use rig_rs::message::{CallId, Origin, ToolFunction};
     use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -480,50 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn response_format_is_encoded_as_openai_shaped_json() {
-        let params = ChatParams::default();
-
-        let value = build_additional_params(&params, Some(&ChatResponseFormat::JsonObject))
-            .expect("should set additional_params for json_object");
-
-        assert_eq!(
-            value,
-            json!({
-                "response_format": { "type": "json_object" }
-            })
-        );
-    }
-
-    #[test]
-    fn json_schema_response_format_is_encoded_with_schema_value() {
-        let params = ChatParams::default();
-
-        let schema = json!({
-            "type": "object",
-            "properties": { "x": { "type": "number" } },
-            "required": ["x"]
-        });
-
-        let value = build_additional_params(
-            &params,
-            Some(&ChatResponseFormat::JsonSchema {
-                schema: schema.clone(),
-            }),
-        )
-        .expect("should set additional_params for json_schema");
-
-        assert_eq!(
-            value,
-            json!({
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": schema,
-                }
-            })
-        );
-    }
-
-    #[test]
     fn explicit_text_response_format_removes_extras_response_format() {
         let mut extras = BTreeMap::new();
         extras.insert(
@@ -555,24 +568,7 @@ mod tests {
             extras,
         };
 
-        let additional = build_additional_params(&params, None)
-            .expect("should emit additional_params when extras present");
-
-        let Value::Object(map) = additional else {
-            panic!("expected JSON object additional_params");
-        };
-
-        assert_eq!(map.len(), 2);
-        assert_eq!(map.get("seed"), Some(&json!(42)));
-
-        let top_p = map
-            .get("top_p")
-            .and_then(|v| v.as_f64())
-            .expect("top_p should be a number");
-        assert!(
-            (top_p - 0.8).abs() < 1e-6,
-            "top_p should be close to 0.8, got {top_p}"
-        );
+        assert_eq!(build_additional_params(&params, None), None);
     }
 
     #[test]
@@ -723,38 +719,24 @@ mod tests {
 
     #[test]
     fn map_chat_response_accumulates_text_and_tool_calls() {
-        let resp: CompletionResponse<Value> = CompletionResponse {
-            choice: OneOrMany::many(vec![
-                AssistantContent::Text(Text {
-                    text: "hello ".to_string(),
-                }),
-                AssistantContent::ToolCall(rig_rs::message::ToolCall {
-                    id: "t1".to_string(),
-                    call_id: None,
-                    function: rig_rs::message::ToolFunction {
-                        name: "do_it".to_string(),
-                        arguments: json!({"x": 1}),
-                    },
-                    signature: None,
-                    additional_params: None,
-                }),
-                AssistantContent::Text(Text {
-                    text: "world".to_string(),
-                }),
-            ])
-            .expect("non-empty choice"),
-            usage: rig_rs::completion::Usage {
-                input_tokens: 1,
-                output_tokens: 2,
-                total_tokens: 3,
-                cached_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            raw_response: json!({"ok": true}),
-            message_id: None,
-        };
+        let resp = CompletionResponse::new(
+            vec![
+                AssistantContent::text("hello "),
+                AssistantContent::ToolCall(RigToolCall::new(
+                    CallId::from_wire("t1"),
+                    ToolFunction::new(ToolName::new("do_it").unwrap(), json!({"x": 1})),
+                )),
+                AssistantContent::text("world"),
+            ],
+            rig_rs::completion::Usage::default()
+                .input_tokens(1)
+                .output_tokens(2)
+                .total_tokens(3),
+            Origin::new("fixture", "fixture", "fixture"),
+            json!({"ok": true}),
+        );
 
-        let out = map_chat_response(resp);
+        let out = map_chat_response(resp, responses_call_id).expect("reply maps");
         assert_eq!(out.text, "hello world".to_string());
         assert_eq!(out.tool_calls.len(), 1);
         assert_eq!(

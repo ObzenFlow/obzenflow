@@ -9,5 +9,6 @@
 mod chat_client;
 mod error_mapping;
 mod preflight;
+mod transport;
 
 pub use chat_client::RigChatClient;

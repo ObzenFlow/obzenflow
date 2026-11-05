@@ -12,6 +12,7 @@ use obzenflow_core::ai::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 
 /// A model provider port of one AI family.
@@ -53,9 +54,12 @@ pub trait AiEffect:
     const FAMILY: &'static str;
 
     /// The effect value for one prepared request on the stage's binding.
+    /// `citing` holds the citation numbers the call's input carries, and stays
+    /// out of the effect's identity.
     fn effect(
         label: &'static str,
         request: &Self::Request,
+        citing: Option<Range<u64>>,
         binding: EffectBindingUse<Self>,
     ) -> Result<Self, AiRequestError>;
 

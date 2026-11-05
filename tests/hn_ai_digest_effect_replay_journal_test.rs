@@ -42,7 +42,8 @@ use obzenflow_adapters::middleware::{circuit_breaker, CircuitBreaker};
 use obzenflow_core::ai::{
     AiClientError, AiMapReduceChunkFailed, AiMapReduceGroupingEnded, AiMapReduceMapInput,
     AiMapReduceReduceFailed, AiMapReduceRoleFailure, AiMapReduceTaggedPartial,
-    AiMapReduceWindowFailed, AiProviderFailureKind, AiUnavailableCause, ChatTarget,
+    AiMapReduceWindowFailed, AiProviderFailureKind, AiUnavailableCause, ChatResponseFormat,
+    ChatTarget,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
@@ -120,6 +121,7 @@ struct MapRole {
     convert_unavailable: bool,
     instructions: Option<&'static str>,
     prepare_calls: Option<Arc<AtomicUsize>>,
+    response_format: Option<ChatResponseFormat>,
 }
 
 impl AiRole<Chunk<DigestItem>> for MapRole {
@@ -135,10 +137,12 @@ impl AiRole<Chunk<DigestItem>> for MapRole {
                 "fixture preparation failure".to_string(),
             ));
         }
-        Ok(ChatRequestSpec::new(
+        let mut request = ChatRequestSpec::new(
             self.instructions.unwrap_or("Digest."),
             format!("{} items", chunk.len()),
-        ))
+        );
+        request.response_format = self.response_format.clone();
+        Ok(request)
     }
 
     fn interpret(
@@ -1365,6 +1369,117 @@ async fn live_history_replays_without_connecting_or_invoking_chat() {
     println!("HN omission/replay proof: {}", proof.display());
 }
 
+fn recorded_citations(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<(String, Vec<u64>)> {
+    envelopes
+        .iter()
+        .filter_map(|envelope| chat_completion_reply(&envelope.authored()))
+        .map(|reply| {
+            let removed = reply["observability"]
+                .get("removed_citations")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            (
+                reply["response"]["text"]
+                    .as_str()
+                    .expect("recorded reply text")
+                    .to_string(),
+                serde_json::from_value(removed).expect("removed citation numbers"),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn removed_citation_replay_unchanged() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let live = FakeChatModels::replying(|_| "story [^1], other [^99]".to_string());
+
+    enforced_app(&journal_base, &live)
+        .with_cli_args(["obzenflow"])
+        .run_async(build_flow(
+            journal_base.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            2,
+            MapRole::default(),
+        ))
+        .await
+        .expect("live map-reduce run succeeds");
+
+    let live_archive = latest_run_dir(&journal_base);
+    let live_map = stage_envelopes(&live_archive, "digest__map").await;
+    let live_reduce = stage_envelopes(&live_archive, "digest__reduce").await;
+    assert_eq!(
+        recorded_citations(&live_map),
+        vec![
+            ("story [^1], other".to_string(), vec![99]),
+            ("story, other".to_string(), vec![1, 99]),
+        ]
+    );
+    assert_eq!(
+        recorded_citations(&live_reduce),
+        vec![("story [^1], other".to_string(), vec![99])]
+    );
+
+    let replay = FakeChatModels::forbidden();
+    enforced_app(&journal_base, &replay)
+        .with_cli_args(replay_args(&live_archive))
+        .run_async(build_flow(
+            journal_base.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            2,
+            MapRole::default(),
+        ))
+        .await
+        .expect("strict replay reads the recorded replies");
+
+    assert_eq!(replay.call_count(), 0);
+    let replay_archive = latest_run_dir(&journal_base);
+    let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
+    assert_eq!(
+        recorded_citations(&replay_map),
+        recorded_citations(&live_map)
+    );
+    let verification = verify_run_dirs(
+        &live_archive,
+        &replay_archive,
+        &VerifyOptions {
+            write_report: false,
+            ..VerifyOptions::default()
+        },
+    )
+    .expect("run-directory verification executes");
+    assert_eq!(verification.exit_code(), 0);
+}
+
+#[tokio::test]
+async fn constrained_reply_citation_unchanged() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let reply = "{\"summary\": \"story [^99]\"}";
+    let live = FakeChatModels::replying(move |_| reply.to_string());
+
+    enforced_app(&journal_base, &live)
+        .with_cli_args(["obzenflow"])
+        .run_async(build_flow(
+            journal_base.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            1,
+            MapRole {
+                response_format: Some(ChatResponseFormat::JsonObject),
+                ..MapRole::default()
+            },
+        ))
+        .await
+        .expect("live map-reduce run succeeds");
+
+    let map = stage_envelopes(&latest_run_dir(&journal_base), "digest__map").await;
+    assert_eq!(
+        recorded_citations(&map),
+        vec![(reply.to_string(), Vec::new())]
+    );
+}
+
 #[tokio::test]
 async fn recovery_abandonment_fails_the_window_without_start_two() {
     let temp = tempfile::tempdir().expect("temporary recovery-composition journal root");
@@ -1825,7 +1940,7 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     assert_eq!(
         row.9,
         "recorded [^1]\n\n### Links\n\n\
-         [^1]: [Rust: tooling update #100](<https://example.com/hn/100>) · \
+         [^1]: [Rust: tooling update](<https://example.com/hn/100>) · \
          [HN discussion](<https://news.ycombinator.com/item?id=100>)"
     );
 

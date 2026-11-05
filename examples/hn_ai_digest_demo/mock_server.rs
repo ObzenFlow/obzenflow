@@ -141,7 +141,7 @@ fn build_mock_hn_payloads() -> (HashMap<u64, String>, String) {
         let score = 180_u64.saturating_sub((offset as u64) * 2);
         let descendants = (offset % 29) as u64;
         let author = format!("author{}", (offset % 17) + 1);
-        let title = format!("{topic}: {verb} #{id}");
+        let title = format!("{topic}: {verb}");
         let url = format!("https://example.com/hn/{id}");
 
         items.insert(
