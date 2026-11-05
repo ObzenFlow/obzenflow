@@ -45,6 +45,18 @@ impl TypedPayload for HnDigestGroupSummary {
     const EVENT_TYPE: &'static str = "hn.digest_group_summary";
 }
 
+impl HnDigestGroupSummary {
+    fn from_reply(text: &str, chunk: &Chunk<FormattedStory>) -> Self {
+        let group = chunk.numbered().map(|(number, _)| number).collect();
+        let (output_markdown, dropped_citations) =
+            keep_group_citations(&strip_accidental_story_echo(text), &group);
+        Self {
+            output_markdown,
+            dropped_citations,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnDigestSummary {
     mode: String,
@@ -133,13 +145,7 @@ impl AiRole<Chunk<FormattedStory>> for HnDigest {
         outcome: AiOutcome<ChatCompletionReply>,
     ) -> Result<HnDigestGroupSummary, HandlerError> {
         let reply = outcome.replied()?;
-        let group = chunk.numbered().map(|(number, _)| number).collect();
-        let (output_markdown, dropped_citations) =
-            keep_group_citations(&strip_accidental_story_echo(reply.text()), &group);
-        Ok(HnDigestGroupSummary {
-            output_markdown,
-            dropped_citations,
-        })
+        Ok(HnDigestGroupSummary::from_reply(reply.text(), &chunk))
     }
 }
 
