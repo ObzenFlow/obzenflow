@@ -5,6 +5,7 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fmt;
 use std::num::NonZeroU64;
+use std::ops::Range;
 
 /// Zero-based position of a group among its key's groups, in the stage's
 /// input order.
@@ -166,6 +167,12 @@ impl<T> Chunk<T> {
             .enumerate()
             .map(|(index, item)| (self.first_number + index as u64, item))
     }
+
+    /// The citation numbers this chunk's items carry. A chat reply is held to
+    /// them when it is recorded.
+    pub fn citation_numbers(&self) -> Range<u64> {
+        self.first_number..self.first_number + self.items.len() as u64
+    }
 }
 
 impl<'a, T> IntoIterator for &'a Chunk<T> {
@@ -213,6 +220,12 @@ impl<T, P> Partials<T, P> {
             .iter()
             .enumerate()
             .map(|(index, item)| (index as u64 + 1, item))
+    }
+
+    /// The citation numbers this window's items carry. A chat reply is held to
+    /// them when it is recorded.
+    pub fn citation_numbers(&self) -> Range<u64> {
+        1..self.items.len() as u64 + 1
     }
 
     pub fn into_parts(self) -> (Vec<T>, Vec<P>) {

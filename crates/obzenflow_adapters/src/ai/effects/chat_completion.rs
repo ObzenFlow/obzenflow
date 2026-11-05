@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use obzenflow_core::ai::{
     params_hash_for_chat, prompt_hash_for_chat, schema_hash_for_response_format, AiEndpoint,
     AiModelSpec, CanonicalizationComponent, ChatClient, ChatCompletionOutcome, ChatCompletionReply,
-    ChatModelDescription, ChatModelProvider, ChatRequest, ChatRequestSpec, ChatTarget, LlmHashes,
-    LlmObservability, ResolvedTokenEstimator, CHAT_CLIENT_PORT,
+    ChatModelDescription, ChatModelProvider, ChatRequest, ChatRequestSpec, ChatResponseFormat,
+    ChatTarget, LlmHashes, LlmObservability, ResolvedTokenEstimator, CHAT_CLIENT_PORT,
 };
 use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::ai::{AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError};
@@ -19,6 +19,8 @@ use obzenflow_runtime::effects::{
     EffectPortSlot, EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety,
     LogicalEffectBindingName, RecordedReply, ResolvedEffectPort,
 };
+use std::collections::BTreeSet;
+use std::ops::Range;
 use std::sync::Arc;
 
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
@@ -115,6 +117,7 @@ pub struct ChatCompletion {
     request: ChatRequest,
     binding: EffectBindingUse<Self>,
     hashes: LlmHashes,
+    citing: Option<Range<u64>>,
 }
 
 impl std::fmt::Debug for ChatCompletion {
@@ -156,6 +159,7 @@ impl ChatCompletion {
             request,
             binding,
             hashes,
+            citing: None,
         })
     }
 
@@ -208,10 +212,16 @@ impl Effect for ChatCompletion {
             .estimator()
             .estimator()
             .estimate_chat_request(&self.request);
-        let response = client
+        let mut response = client
             .chat(self.request.clone())
             .await
             .map_err(|error| ai_client_error_to_effect_error(error, CHAT_CLIENT, "chat_client"))?;
+        let removed_citations = match (&self.citing, &self.request.response_format) {
+            (Some(numbers), None | Some(ChatResponseFormat::Text)) => {
+                response.remove_citations_outside(numbers)
+            }
+            _ => BTreeSet::new(),
+        };
 
         let mut observability = LlmObservability::new(
             self.request.provider.clone(),
@@ -219,6 +229,7 @@ impl Effect for ChatCompletion {
             self.hashes.clone(),
         );
         observability.usage = response.usage.clone();
+        observability.removed_citations = removed_citations;
         observability.estimated_input_tokens = Some(estimated_input_tokens);
         observability.estimated_input_resolution =
             Some(self.binding.evidence().estimator().info().clone());
@@ -257,10 +268,13 @@ impl AiEffect for ChatCompletion {
     fn effect(
         label: &'static str,
         request: &ChatRequestSpec,
+        citing: Option<Range<u64>>,
         binding: EffectBindingUse<Self>,
     ) -> Result<Self, AiRequestError> {
         let bound = request.bind_target(binding.evidence().target());
-        Self::new(label, bound, binding).map_err(|error| AiRequestError(error.to_string()))
+        let effect =
+            Self::new(label, bound, binding).map_err(|error| AiRequestError(error.to_string()))?;
+        Ok(Self { citing, ..effect })
     }
 
     fn reply(request: ChatRequestSpec, outcome: ChatCompletionOutcome) -> ChatCompletionReply {

@@ -22,6 +22,7 @@ use obzenflow_core::{StageFactSet, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
+use std::ops::Range;
 use std::sync::Arc;
 
 const INFER_LABEL: &str = "ai.infer";
@@ -37,6 +38,7 @@ async fn call<E, Output, Allowed, At>(
     fx: &mut Effects<Output, Allowed>,
     label: &'static str,
     request: &E::Request,
+    citing: Option<Range<u64>>,
 ) -> Result<AiOutcome<E::Reply>, CallFailure>
 where
     E: AiEffect
@@ -46,7 +48,9 @@ where
     Allowed: EffectSet,
 {
     let effect = fx
-        .configured_effect_for_next_cursor::<E, At, _>(|binding| E::effect(label, request, binding))
+        .configured_effect_for_next_cursor::<E, At, _>(|binding| {
+            E::effect(label, request, citing.clone(), binding)
+        })
         .map_err(|error| CallFailure::Integrity(integrity_failure(error)))?
         .map_err(|error| CallFailure::Request(error.to_string()))?;
     match fx.perform::<E, At, SubsetProofEnd>(effect).await {
@@ -133,7 +137,7 @@ where
         fx: &mut Effects<R::Out, Self::AllowedEffects>,
     ) -> Result<StageCompletion<R::Out>, HandlerError> {
         let request = self.role.prepare(&input)?;
-        let outcome = match call::<R::Effect, _, _, _>(fx, INFER_LABEL, &request).await {
+        let outcome = match call::<R::Effect, _, _, _>(fx, INFER_LABEL, &request, None).await {
             Ok(outcome) => outcome,
             Err(CallFailure::Request(message)) => return Err(HandlerError::Validation(message)),
             Err(CallFailure::Integrity(error)) => return Err(error),
@@ -205,7 +209,8 @@ where
     ) -> Result<StageCompletion<R::Out>, HandlerError> {
         let chunk = chunk_of(group);
         let request = self.role.prepare(&chunk)?;
-        let outcome = match call::<R::Effect, _, _, _>(fx, MAP_LABEL, &request).await {
+        let numbers = Some(chunk.citation_numbers());
+        let outcome = match call::<R::Effect, _, _, _>(fx, MAP_LABEL, &request, numbers).await {
             Ok(outcome) => outcome,
             Err(CallFailure::Request(message)) => return Err(HandlerError::Validation(message)),
             Err(CallFailure::Integrity(error)) => return Err(error),
@@ -294,7 +299,8 @@ where
                     .map_err(integrity_failure);
             }
         };
-        let outcome = match call::<R::Effect, _, _, _>(fx, MAP_LABEL, &request).await {
+        let numbers = Some(chunk.citation_numbers());
+        let outcome = match call::<R::Effect, _, _, _>(fx, MAP_LABEL, &request, numbers).await {
             Ok(outcome) => outcome,
             Err(CallFailure::Request(message)) => {
                 return fx
@@ -417,7 +423,8 @@ where
                     .map_err(integrity_failure);
             }
         };
-        let outcome = match call::<S::Effect, _, _, _>(fx, REDUCE_LABEL, &request).await {
+        let numbers = Some(partials.citation_numbers());
+        let outcome = match call::<S::Effect, _, _, _>(fx, REDUCE_LABEL, &request, numbers).await {
             Ok(outcome) => outcome,
             Err(CallFailure::Request(message)) => {
                 return fx

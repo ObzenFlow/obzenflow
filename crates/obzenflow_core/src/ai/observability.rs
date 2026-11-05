@@ -8,6 +8,7 @@ use crate::ai::{
 use crate::event::chain_event::ChainEvent;
 use crate::event::observability::{CaptureStamp, ObservabilityContext, ObservationRecord};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LlmHashes {
@@ -58,6 +59,10 @@ pub struct LlmObservability {
     pub estimated_input_resolution: Option<TokenEstimatorResolutionInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<LlmCacheInfo>,
+    /// Citation numbers removed from the reply's text because the call's input
+    /// holds no such item.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub removed_citations: BTreeSet<u64>,
 }
 
 impl LlmObservability {
@@ -73,6 +78,7 @@ impl LlmObservability {
             estimated_input_tokens: None,
             estimated_input_resolution: None,
             cache: None,
+            removed_citations: BTreeSet::new(),
         }
     }
 }
