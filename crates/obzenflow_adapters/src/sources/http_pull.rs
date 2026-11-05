@@ -24,9 +24,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-pub use obzenflow_core::http_client::{HttpResponse, RequestSpec};
+pub use obzenflow_core::http_client::{HttpRequest, HttpResponse};
 
-type RequestSpecFn<C> = Arc<dyn Fn(Option<&C>) -> RequestSpec + Send + Sync>;
+type HttpRequestFn<C> = Arc<dyn Fn(Option<&C>) -> HttpRequest + Send + Sync>;
 type DecodeSuccessFn<C, T> =
     Arc<dyn Fn(Option<&C>, &HttpResponse) -> Result<DecodeResult<C, T>, DecodeError> + Send + Sync>;
 
@@ -67,7 +67,7 @@ pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
     /// Build the next HTTP request.
     ///
     /// INFALLIBLE: decoder must store pre-validated URL/headers.
-    fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec;
+    fn http_request(&self, cursor: Option<&Self::Cursor>) -> HttpRequest;
 
     /// Decode a successful response (2xx) into items + optional next cursor.
     ///
@@ -134,7 +134,7 @@ pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
 pub trait CursorlessPullDecoder: Clone + Debug + Send + Sync + 'static {
     type Output: TypedPayload + Debug + Send + Sync + 'static;
 
-    fn request_spec(&self) -> RequestSpec;
+    fn http_request(&self) -> HttpRequest;
 
     fn decode_success(&self, response: &HttpResponse) -> Result<Vec<Self::Output>, DecodeError>;
 
@@ -173,8 +173,8 @@ where
     type Cursor = ();
     type Output = D::Output;
 
-    fn request_spec(&self, _cursor: Option<&Self::Cursor>) -> RequestSpec {
-        CursorlessPullDecoder::request_spec(self)
+    fn http_request(&self, _cursor: Option<&Self::Cursor>) -> HttpRequest {
+        CursorlessPullDecoder::http_request(self)
     }
 
     fn decode_success(
@@ -204,14 +204,14 @@ where
 
 /// Closure-based decoder to minimize boilerplate in demos/examples.
 pub struct FnPullDecoder<C, T> {
-    request_spec: RequestSpecFn<C>,
+    http_request: HttpRequestFn<C>,
     decode_success: DecodeSuccessFn<C, T>,
 }
 
 impl<C, T> Clone for FnPullDecoder<C, T> {
     fn clone(&self) -> Self {
         Self {
-            request_spec: self.request_spec.clone(),
+            http_request: self.http_request.clone(),
             decode_success: self.decode_success.clone(),
         }
     }
@@ -220,14 +220,14 @@ impl<C, T> Clone for FnPullDecoder<C, T> {
 impl<C, T> FnPullDecoder<C, T> {
     pub fn new<B, D>(build_request: B, decode_success: D) -> Self
     where
-        B: Fn(Option<&C>) -> RequestSpec + Send + Sync + 'static,
+        B: Fn(Option<&C>) -> HttpRequest + Send + Sync + 'static,
         D: Fn(Option<&C>, &HttpResponse) -> Result<DecodeResult<C, T>, DecodeError>
             + Send
             + Sync
             + 'static,
     {
         Self {
-            request_spec: Arc::new(build_request),
+            http_request: Arc::new(build_request),
             decode_success: Arc::new(decode_success),
         }
     }
@@ -250,8 +250,8 @@ where
     type Cursor = C;
     type Output = T;
 
-    fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
-        (self.request_spec)(cursor)
+    fn http_request(&self, cursor: Option<&Self::Cursor>) -> HttpRequest {
+        (self.http_request)(cursor)
     }
 
     fn decode_success(
@@ -263,10 +263,10 @@ where
     }
 }
 
-type ListRequestFn = Arc<dyn Fn() -> RequestSpec + Send + Sync>;
+type ListRequestFn = Arc<dyn Fn() -> HttpRequest + Send + Sync>;
 type ListParseFn<K> =
     Arc<dyn for<'a> Fn(&'a HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync>;
-type DetailRequestFn<K> = Arc<dyn for<'a> Fn(&'a K) -> RequestSpec + Send + Sync>;
+type DetailRequestFn<K> = Arc<dyn for<'a> Fn(&'a K) -> HttpRequest + Send + Sync>;
 type DetailPathFn<K> = Arc<dyn for<'a> Fn(&'a K) -> String + Send + Sync>;
 type ItemParseFn<T> =
     Arc<dyn for<'a> Fn(&'a HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync>;
@@ -337,7 +337,7 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
     /// Set the list request directly.
     pub fn list_request<F>(mut self, list_request: F) -> Self
     where
-        F: Fn() -> RequestSpec + Send + Sync + 'static,
+        F: Fn() -> HttpRequest + Send + Sync + 'static,
     {
         self.list_request = Some(Arc::new(list_request));
         self.list_path = None;
@@ -346,7 +346,7 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
 
     /// Set the list request as a `GET` to `list_url`.
     pub fn list_url(self, list_url: obzenflow_core::http_client::Url) -> Self {
-        self.list_request(move || RequestSpec::get(list_url.clone()))
+        self.list_request(move || HttpRequest::get(list_url.clone()))
     }
 
     /// Set the list request as a `GET` to `base_url.join(list_path)`.
@@ -368,7 +368,7 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
     /// Set the detail request directly.
     pub fn detail_request<F>(mut self, detail_request: F) -> Self
     where
-        F: Fn(&K) -> RequestSpec + Send + Sync + 'static,
+        F: Fn(&K) -> HttpRequest + Send + Sync + 'static,
     {
         self.detail_request = Some(Arc::new(detail_request));
         self.detail_path = None;
@@ -380,7 +380,7 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
     where
         F: Fn(&K) -> obzenflow_core::http_client::Url + Send + Sync + 'static,
     {
-        self.detail_request(move |key| RequestSpec::get(detail_url(key)))
+        self.detail_request(move |key| HttpRequest::get(detail_url(key)))
     }
 
     /// Set the detail request as a `GET` to `base_url.join(detail_path(key))`.
@@ -429,7 +429,7 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
                 let list_url = base_url
                     .join(&list_path)
                     .map_err(|e| anyhow::anyhow!("invalid list_path: {e}"))?;
-                Arc::new(move || RequestSpec::get(list_url.clone()))
+                Arc::new(move || HttpRequest::get(list_url.clone()))
             }
             (None, None) => anyhow::bail!("list_request or list_path required"),
         };
@@ -445,7 +445,7 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
                     let detail_url = base_url
                         .join(&detail_path)
                         .expect("detail_path should produce a valid URL path");
-                    RequestSpec::get(detail_url)
+                    HttpRequest::get(detail_url)
                 });
                 detail_request
             }
@@ -509,7 +509,7 @@ impl<K: 'static, T> ListDetailDecoder<K, T> {
     ) -> Self
     where
         PL: Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync + 'static,
-        DR: Fn(&K) -> RequestSpec + Send + Sync + 'static,
+        DR: Fn(&K) -> HttpRequest + Send + Sync + 'static,
         PI: Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync + 'static,
     {
         Self::builder()
@@ -529,9 +529,9 @@ impl<K: 'static, T> ListDetailDecoder<K, T> {
         parse_item: PI,
     ) -> Self
     where
-        LR: Fn() -> RequestSpec + Send + Sync + 'static,
+        LR: Fn() -> HttpRequest + Send + Sync + 'static,
         PL: Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync + 'static,
-        DR: Fn(&K) -> RequestSpec + Send + Sync + 'static,
+        DR: Fn(&K) -> HttpRequest + Send + Sync + 'static,
         PI: Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync + 'static,
     {
         Self::builder()
@@ -578,7 +578,7 @@ where
     type Cursor = ListDetailState<K>;
     type Output = T;
 
-    fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
+    fn http_request(&self, cursor: Option<&Self::Cursor>) -> HttpRequest {
         match cursor {
             None => (self.list_request)(),
             Some(ListDetailState { pending }) => {
@@ -670,7 +670,7 @@ where
     D: Fn(&HttpResponse) -> Result<Vec<T>, DecodeError> + Send + Sync + 'static,
 {
     FnPullDecoder::new(
-        move |_cursor: Option<&()>| RequestSpec::get(url.clone()),
+        move |_cursor: Option<&()>| HttpRequest::get(url.clone()),
         move |_cursor: Option<&()>, response: &HttpResponse| {
             let items = decode_success(response)?;
             Ok(DecodeResult {
@@ -1227,6 +1227,7 @@ impl<D: PullDecoder> HttpPollReader<D> {
 enum FetchError {
     Timeout,
     Transport,
+    Unencodable,
     Decode { status: u16, error: DecodeError },
     Validation { status: u16 },
 }
@@ -1238,6 +1239,10 @@ impl FetchError {
             FetchError::Transport => {
                 SourceError::Transport(SourceDiagnosticReason::InputUnavailable.into())
             }
+            FetchError::Unencodable => SourceError::Terminal {
+                kind: SourcePollErrorKind::Validation,
+                diagnostic: SourceDiagnosticReason::InvalidValue.into(),
+            },
             FetchError::Decode { status, error } => match error {
                 DecodeError::Parse(_) => SourceError::Deserialization(http_diagnostic(
                     SourceDiagnosticReason::MalformedInput,
@@ -1273,7 +1278,7 @@ fn remote_rejected(status: u16) -> SourceError {
     ))
 }
 
-fn apply_default_headers(request: &mut RequestSpec, default_headers: &HeaderMap) {
+fn apply_default_headers(request: &mut HttpRequest, default_headers: &HeaderMap) {
     for (name, value) in default_headers.iter() {
         if !request.headers.contains_key(name) {
             request.headers.insert(name, value.clone());
@@ -1287,6 +1292,7 @@ fn map_http_client_error(err: HttpClientError) -> FetchError {
         HttpClientError::Connection(_)
         | HttpClientError::Transport(_)
         | HttpClientError::Cancelled => FetchError::Transport,
+        HttpClientError::Unencodable(_) => FetchError::Unencodable,
     }
 }
 
@@ -1296,13 +1302,10 @@ async fn fetch_decode_once<D: PullDecoder>(
     default_headers: &HeaderMap,
     cursor: Option<&D::Cursor>,
 ) -> Result<(u16, DecodeResult<D::Cursor, D::Output>), FetchError> {
-    let mut request = decoder.request_spec(cursor);
+    let mut request = decoder.http_request(cursor);
     apply_default_headers(&mut request, default_headers);
 
-    let http_response = client
-        .execute(request)
-        .await
-        .map_err(map_http_client_error)?;
+    let http_response = client.send(request).await.map_err(map_http_client_error)?;
     let status = http_response.status;
 
     match decoder.decode(cursor, &http_response) {
@@ -1389,6 +1392,12 @@ impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullReader<D> {
                         kind: SourcePollErrorKind::Validation,
                         diagnostic: http_diagnostic(SourceDiagnosticReason::RemoteRejected, status),
                     });
+                }
+
+                Err(FetchError::Unencodable) => {
+                    set_terminal(&mut inner.telemetry);
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                    return Err(FetchError::Unencodable.into_source_error());
                 }
 
                 Err(FetchError::Decode {
@@ -1574,6 +1583,12 @@ impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollReader<D> {
                     ));
                     report_http_pull_snapshot(&observation_sink, &inner.telemetry);
                     return Err(remote_rejected(status));
+                }
+
+                Err(FetchError::Unencodable) => {
+                    set_terminal(&mut inner.telemetry);
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                    return Err(FetchError::Unencodable.into_source_error());
                 }
 
                 Err(FetchError::Decode {
@@ -1860,11 +1875,11 @@ mod tests {
         type Cursor = u32;
         type Output = TestItem;
 
-        fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
+        fn http_request(&self, cursor: Option<&Self::Cursor>) -> HttpRequest {
             let page = cursor.copied().unwrap_or(1);
             let mut url = self.base_url.clone();
             url.query_pairs_mut().append_pair("page", &page.to_string());
-            let mut request = RequestSpec::get(url);
+            let mut request = HttpRequest::get(url);
             request
                 .headers
                 .insert("authorization", "Bearer decoder".parse().unwrap());
@@ -1897,7 +1912,7 @@ mod tests {
             |response: &HttpResponse| Ok(response.json::<Vec<TestItem>>()?),
         );
 
-        let request = decoder.request_spec(None);
+        let request = decoder.http_request(None);
         assert_eq!(request.url.as_str(), "http://example.invalid/items");
 
         let response = HttpResponse::new(
@@ -1983,7 +1998,7 @@ mod tests {
         let mut default_headers = HeaderMap::new();
         default_headers.insert("authorization", "Bearer config".parse().unwrap());
 
-        let mut request = RequestSpec::get("http://example.invalid/".parse().unwrap());
+        let mut request = HttpRequest::get("http://example.invalid/".parse().unwrap());
         apply_default_headers(&mut request, &default_headers);
         assert_eq!(
             request
@@ -1995,7 +2010,7 @@ mod tests {
             "Bearer config"
         );
 
-        let mut request = RequestSpec::get("http://example.invalid/".parse().unwrap());
+        let mut request = HttpRequest::get("http://example.invalid/".parse().unwrap());
         request
             .headers
             .insert("authorization", "Bearer decoder".parse().unwrap());
@@ -2365,15 +2380,15 @@ mod tests {
     #[test]
     fn list_detail_decoder_new_with_list_request_uses_request_spec_from_fn() {
         let decoder = ListDetailDecoder::<u32, TestItem>::new_with_list_request(
-            || RequestSpec::post("http://example.invalid/list".parse().unwrap()),
+            || HttpRequest::post("http://example.invalid/list".parse().unwrap()),
             |response| Ok(response.json()?),
             |id: &u32| {
-                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
+                HttpRequest::get(format!("http://example.invalid/item/{id}").parse().unwrap())
             },
             |response| Ok(response.json()?),
         );
 
-        let req = decoder.request_spec(None);
+        let req = decoder.http_request(None);
         assert_eq!(req.method, HttpMethod::Post);
         assert_eq!(req.url.as_str(), "http://example.invalid/list");
     }
@@ -2394,14 +2409,14 @@ mod tests {
     fn list_detail_decoder_builder_supports_base_url_path_sugar() {
         let decoder = test_list_detail_path_decoder();
 
-        let req = decoder.request_spec(None);
+        let req = decoder.http_request(None);
         assert_eq!(req.url.as_str(), "http://example.invalid/api/list");
 
         let list = HttpResponse::new(200, HeaderMap::new(), "[7]");
         let out = decoder.decode_success(None, &list).expect("decode ok");
         let cursor = out.next_cursor.expect("cursor expected");
 
-        let req = decoder.request_spec(Some(&cursor));
+        let req = decoder.http_request(Some(&cursor));
         assert_eq!(req.url.as_str(), "http://example.invalid/api/item/7");
     }
 
@@ -2444,7 +2459,7 @@ mod tests {
         assert!(out.items.is_empty());
         let cursor = out.next_cursor.expect("cursor expected");
 
-        let req = decoder.request_spec(Some(&cursor));
+        let req = decoder.http_request(Some(&cursor));
         assert_eq!(req.url.as_str(), "http://example.invalid/item/1");
 
         let item = HttpResponse::new(200, HeaderMap::new(), r#"{"n": 1}"#);
@@ -2454,7 +2469,7 @@ mod tests {
         assert_eq!(out.items, vec![TestItem(serde_json::json!({"n": 1}))]);
         let cursor = out.next_cursor.expect("cursor expected");
 
-        let req = decoder.request_spec(Some(&cursor));
+        let req = decoder.http_request(Some(&cursor));
         assert_eq!(req.url.as_str(), "http://example.invalid/item/2");
 
         let item = HttpResponse::new(200, HeaderMap::new(), r#"{"n": 2}"#);
@@ -2494,7 +2509,7 @@ mod tests {
         assert_eq!(skips.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         let cursor = out.next_cursor.expect("cursor expected");
-        let req = decoder.request_spec(Some(&cursor));
+        let req = decoder.http_request(Some(&cursor));
         assert_eq!(req.url.as_str(), "http://example.invalid/item/2");
     }
 

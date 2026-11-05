@@ -44,16 +44,14 @@ pub fn resolve_estimator_for_model(model: &str) -> ResolvedTokenEstimator {
         ),
         Err(err) => {
             let fallback_detail = match err {
-                obzenflow_core::ai::AiClientError::Unsupported { message }
-                | obzenflow_core::ai::AiClientError::InvalidRequest { message }
-                | obzenflow_core::ai::AiClientError::Other { message }
-                | obzenflow_core::ai::AiClientError::Remote { message }
-                | obzenflow_core::ai::AiClientError::Timeout { message }
-                | obzenflow_core::ai::AiClientError::Auth { message } => message,
-                obzenflow_core::ai::AiClientError::RateLimited { message, .. } => message,
-                obzenflow_core::ai::AiClientError::TargetMismatch { requested, bound } => {
-                    format!("requested target {requested} does not match bound target {bound}")
-                }
+                obzenflow_core::ai::AiProviderError::Unsupported { message }
+                | obzenflow_core::ai::AiProviderError::InvalidRequest { message }
+                | obzenflow_core::ai::AiProviderError::Other { message }
+                | obzenflow_core::ai::AiProviderError::Remote { message }
+                | obzenflow_core::ai::AiProviderError::Timeout { message }
+                | obzenflow_core::ai::AiProviderError::Auth { message }
+                | obzenflow_core::ai::AiProviderError::ConnectFailed { message } => message,
+                obzenflow_core::ai::AiProviderError::RateLimited { message, .. } => message,
             };
             ResolvedTokenEstimator::new(
                 Arc::new(HeuristicTokenEstimator::default()),

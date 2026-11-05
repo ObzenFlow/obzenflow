@@ -5,11 +5,11 @@
 #![cfg(feature = "ai-rig")]
 
 use obzenflow_core::ai::{
-    AiClientError, AiProvider, ChatClient, ChatMessage, ChatParams, ChatRequest, ChatResponse,
+    AiProvider, AiProviderError, ChatMessage, ChatModel, ChatParams, ChatRequest, ChatResponse,
     ChatResponseFormat, ToolDefinition,
 };
 use obzenflow_core::http_client::Url;
-use obzenflow_infra::ai::rig::RigChatClient;
+use obzenflow_infra::ai::rig::RigChatModel;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,6 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 const MODEL: &str = "fixture-model";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug)]
 enum Route {
@@ -34,15 +35,15 @@ impl Route {
         }
     }
 
-    fn client(self, address: std::net::SocketAddr) -> RigChatClient {
+    fn client(self, address: std::net::SocketAddr) -> RigChatModel {
         match self {
             Self::Ollama => {
                 let url = Url::parse(&format!("http://{address}/")).unwrap();
-                RigChatClient::ollama(MODEL, Some(url)).unwrap()
+                RigChatModel::ollama(MODEL, Some(url), REQUEST_TIMEOUT)
             }
             Self::Responses => {
                 let url = Url::parse(&format!("http://{address}/v1")).unwrap();
-                RigChatClient::openai_compatible(MODEL, "fixture-key", url).unwrap()
+                RigChatModel::openai_compatible(MODEL, "fixture-key", url, REQUEST_TIMEOUT)
             }
         }
     }
@@ -115,9 +116,10 @@ async fn read_request(stream: &mut TcpStream) -> Sent {
 async fn exchange_raw(
     route: Route,
     status: u16,
+    headers: &'static str,
     reply: String,
     request: ChatRequest,
-) -> (Result<ChatResponse, AiClientError>, Sent) {
+) -> (Result<ChatResponse, AiProviderError>, Sent) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let connections = Arc::new(Mutex::new(Vec::new()));
@@ -130,7 +132,7 @@ async fn exchange_raw(
             stream
                 .write_all(
                     format!(
-                        "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                        "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{reply}",
                         reply.len()
                     )
                     .as_bytes(),
@@ -151,8 +153,8 @@ async fn exchange(
     status: u16,
     reply: Value,
     request: ChatRequest,
-) -> (Result<ChatResponse, AiClientError>, Sent) {
-    exchange_raw(route, status, reply.to_string(), request).await
+) -> (Result<ChatResponse, AiProviderError>, Sent) {
+    exchange_raw(route, status, "", reply.to_string(), request).await
 }
 
 fn chat_request(route: Route) -> ChatRequest {
@@ -191,9 +193,9 @@ fn responses_reply(output: Value) -> Value {
     })
 }
 
-fn assert_other(result: &Result<ChatResponse, AiClientError>) {
+fn assert_other(result: &Result<ChatResponse, AiProviderError>) {
     assert!(
-        matches!(result, Err(AiClientError::Other { .. })),
+        matches!(result, Err(AiProviderError::Other { .. })),
         "{result:?}"
     );
 }
@@ -333,7 +335,7 @@ async fn responses_unknown_extra_reaches_provider() {
 async fn call_without_server(
     route: Route,
     request: ChatRequest,
-) -> Result<ChatResponse, AiClientError> {
+) -> Result<ChatResponse, AiProviderError> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
@@ -349,7 +351,7 @@ async fn responses_seed_fails_invalid_request() {
     let result = call_without_server(route, request).await;
 
     assert!(
-        matches!(result, Err(AiClientError::InvalidRequest { .. })),
+        matches!(result, Err(AiProviderError::InvalidRequest { .. })),
         "{result:?}"
     );
 }
@@ -364,7 +366,7 @@ async fn responses_request_overrides_fail_invalid_request() {
         let result = call_without_server(route, request).await;
 
         assert!(
-            matches!(result, Err(AiClientError::InvalidRequest { .. })),
+            matches!(result, Err(AiProviderError::InvalidRequest { .. })),
             "{field}: {result:?}"
         );
     }
@@ -440,7 +442,7 @@ async fn invalid_schema_fails_invalid_request() {
         let result = call_without_server(route, request).await;
 
         assert!(
-            matches!(result, Err(AiClientError::InvalidRequest { .. })),
+            matches!(result, Err(AiProviderError::InvalidRequest { .. })),
             "{route:?}: {result:?}"
         );
     }
@@ -526,7 +528,7 @@ async fn responses_missing_call_id_fails_other() {
 #[tokio::test]
 async fn empty_reply_body_fails_other() {
     for route in ROUTES {
-        let (result, _) = exchange_raw(route, 200, String::new(), chat_request(route)).await;
+        let (result, _) = exchange_raw(route, 200, "", String::new(), chat_request(route)).await;
 
         assert_other(&result);
     }
@@ -551,18 +553,23 @@ async fn ollama_tool_call_takes_function_name() {
 
 #[tokio::test]
 async fn provider_status_maps_failure_class() {
-    type ClassCheck = fn(&AiClientError) -> bool;
-    let cases: [(u16, ClassCheck); 6] = [
-        (401, |error| matches!(error, AiClientError::Auth { .. })),
-        (403, |error| matches!(error, AiClientError::Auth { .. })),
+    type ClassCheck = fn(&AiProviderError) -> bool;
+    let cases: [(u16, ClassCheck); 9] = [
+        (401, |error| matches!(error, AiProviderError::Auth { .. })),
+        (403, |error| matches!(error, AiProviderError::Auth { .. })),
         (429, |error| {
-            matches!(error, AiClientError::RateLimited { .. })
+            matches!(error, AiProviderError::RateLimited { .. })
         }),
-        (404, |error| {
-            matches!(error, AiClientError::InvalidRequest { .. })
+        (400, |error| {
+            matches!(error, AiProviderError::InvalidRequest { .. })
         }),
-        (500, |error| matches!(error, AiClientError::Remote { .. })),
-        (503, |error| matches!(error, AiClientError::Remote { .. })),
+        (404, |error| matches!(error, AiProviderError::Other { .. })),
+        (408, |error| {
+            matches!(error, AiProviderError::Timeout { .. })
+        }),
+        (409, |error| matches!(error, AiProviderError::Remote { .. })),
+        (500, |error| matches!(error, AiProviderError::Remote { .. })),
+        (503, |error| matches!(error, AiProviderError::Remote { .. })),
     ];
     for route in ROUTES {
         for (status, class) in cases {
@@ -581,7 +588,30 @@ async fn provider_status_maps_failure_class() {
 }
 
 #[tokio::test]
-async fn refused_connection_fails_remote() {
+async fn rate_limit_carries_retry_after() {
+    for route in ROUTES {
+        let (result, _) = exchange_raw(
+            route,
+            429,
+            "retry-after: 3\r\n",
+            json!({"error": {"message": "slow down"}}).to_string(),
+            chat_request(route),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(AiProviderError::RateLimited { retry_after, .. })
+                    if retry_after == Duration::from_secs(3)
+            ),
+            "{route:?}: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn refused_connection_returns_connect_failed() {
     for route in ROUTES {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -590,10 +620,34 @@ async fn refused_connection_fails_remote() {
         let result = route.client(address).chat(chat_request(route)).await;
 
         assert!(
-            matches!(result, Err(AiClientError::Remote { .. })),
+            matches!(result, Err(AiProviderError::ConnectFailed { .. })),
             "{route:?}: {result:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn deadline_expiry_returns_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let url = Url::parse(&format!("http://{address}/")).unwrap();
+    let model = RigChatModel::ollama(MODEL, Some(url), Duration::from_millis(200));
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        model.chat(chat_request(Route::Ollama)),
+    )
+    .await
+    .expect("the configured deadline ends the call");
+
+    let Err(AiProviderError::Timeout { message }) = result else {
+        panic!("a silent provider times out: {result:?}");
+    };
+    assert_eq!(
+        message,
+        "no reply within 200 ms; request_timeout_ms under [ai.models] sets this"
+    );
+    drop(listener);
 }
 
 #[tokio::test]
@@ -607,7 +661,7 @@ async fn https_endpoint_opens_tls_handshake() {
         first_byte[0]
     });
     let url = Url::parse(&format!("https://{address}/v1")).unwrap();
-    let client = RigChatClient::openai_compatible(MODEL, "fixture-key", url).unwrap();
+    let client = RigChatModel::openai_compatible(MODEL, "fixture-key", url, REQUEST_TIMEOUT);
 
     let result = client.chat(chat_request(Route::Responses)).await;
 
@@ -616,7 +670,7 @@ async fn https_endpoint_opens_tls_handshake() {
         .expect("the client connects")
         .unwrap();
     assert_eq!(first_byte, 0x16, "a TLS handshake record");
-    assert!(matches!(result, Err(AiClientError::Remote { .. })));
+    assert!(matches!(result, Err(AiProviderError::ConnectFailed { .. })));
 }
 
 #[tokio::test]

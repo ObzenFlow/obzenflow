@@ -7,16 +7,17 @@ use super::endpoint_identity::{
     endpoint_has_credentials,
 };
 use super::resolve_estimator_for_model;
-use crate::ai::rig::RigChatClient;
-use crate::ai::NativeEmbeddingClient;
+use crate::ai::rig::RigChatModel;
+use crate::ai::NativeEmbeddingModel;
 use obzenflow_core::ai::{
-    AiEndpoint, AiModelProviderError, AiModelSpec, AiProvider, ChatBindingFingerprint, ChatClient,
-    ChatModelDescription, ChatModelProvider, ChatTarget, EmbeddingBindingFingerprint,
-    EmbeddingClient, EmbeddingModelDescription, EmbeddingModelProvider, EmbeddingTarget,
+    AiEndpoint, AiModelSpec, AiProvider, AiResolutionError, ChatBindingFingerprint, ChatModel,
+    ChatModelDescription, ChatModelResolver, ChatTarget, EmbeddingBindingFingerprint,
+    EmbeddingModel, EmbeddingModelDescription, EmbeddingModelResolver, EmbeddingTarget,
     ResolvedTokenEstimator,
 };
 use obzenflow_core::http_client::Url;
 use std::sync::Arc;
+use std::time::Duration;
 
 const OLLAMA: &str = "ollama";
 const OPENAI: &str = "openai";
@@ -25,12 +26,12 @@ const OPENAI_COMPATIBLE: &str = "openai_compatible";
 /// Chat models on `ollama`, `openai` and `openai_compatible` endpoints,
 /// served by rig.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct RigChatModelProvider;
+pub struct RigChatModelResolver;
 
 /// Embedding models on `ollama`, `openai` and `openai_compatible` endpoints,
 /// served over each provider's own wire protocol.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct NativeEmbeddingModelProvider;
+pub struct NativeEmbeddingModelResolver;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wire {
@@ -48,61 +49,54 @@ fn wire(provider: &AiProvider) -> Option<Wire> {
     }
 }
 
-fn served_wire(endpoint: &AiEndpoint, family: &'static str) -> Result<Wire, AiModelProviderError> {
-    wire(&endpoint.provider).ok_or_else(|| AiModelProviderError::UnsupportedProvider {
+fn served_wire(endpoint: &AiEndpoint, family: &'static str) -> Result<Wire, AiResolutionError> {
+    wire(&endpoint.provider).ok_or_else(|| AiResolutionError::UnsupportedProvider {
         provider: endpoint.provider.to_string(),
         family,
     })
 }
 
-fn endpoint_url(endpoint: &AiEndpoint, wire: Wire) -> Result<Url, AiModelProviderError> {
+fn endpoint_url(endpoint: &AiEndpoint, wire: Wire) -> Result<Url, AiResolutionError> {
     let url = match (wire, &endpoint.base_url) {
         (Wire::Ollama, base_url) => base_url.clone().unwrap_or_else(default_ollama_base_url),
         (Wire::OpenAi, _) => default_openai_base_url(),
         (Wire::OpenAiCompatible, Some(base_url)) => base_url.clone(),
         (Wire::OpenAiCompatible, None) => {
-            return Err(AiModelProviderError::MissingBaseUrl {
+            return Err(AiResolutionError::MissingBaseUrl {
                 endpoint: endpoint.name.clone(),
                 provider: endpoint.provider.to_string(),
             })
         }
     };
     if endpoint_has_credentials(&url) {
-        return Err(AiModelProviderError::CredentialedBaseUrl {
+        return Err(AiResolutionError::CredentialedBaseUrl {
             endpoint: endpoint.name.clone(),
         });
     }
     Ok(url)
 }
 
-fn credential(endpoint: &AiEndpoint) -> Result<String, AiModelProviderError> {
+fn credential(endpoint: &AiEndpoint) -> Result<String, AiResolutionError> {
     match &endpoint.api_key_env {
         None => Ok(String::new()),
         Some(reference) => reference
             .resolve()
             .map(|secret| secret.expose().to_string())
-            .map_err(|_| AiModelProviderError::CredentialUnavailable {
+            .map_err(|_| AiResolutionError::CredentialUnavailable {
                 endpoint: endpoint.name.clone(),
                 env: reference.env_name().to_string(),
             }),
     }
 }
 
-fn client_error(endpoint: &AiEndpoint, error: impl std::fmt::Display) -> AiModelProviderError {
-    AiModelProviderError::Client {
-        endpoint: endpoint.name.clone(),
-        detail: error.to_string(),
-    }
-}
-
-fn recorded_error(spec: &AiModelSpec, detail: &str) -> AiModelProviderError {
-    AiModelProviderError::Recorded {
+fn recorded_error(spec: &AiModelSpec, detail: &str) -> AiResolutionError {
+    AiResolutionError::Recorded {
         spec: spec.to_string(),
         detail: detail.to_string(),
     }
 }
 
-impl ChatModelProvider for RigChatModelProvider {
+impl ChatModelResolver for RigChatModelResolver {
     fn serves(&self, provider: &AiProvider) -> bool {
         wire(provider).is_some()
     }
@@ -111,7 +105,7 @@ impl ChatModelProvider for RigChatModelProvider {
         &self,
         endpoint: &AiEndpoint,
         model: &str,
-    ) -> Result<ChatModelDescription, AiModelProviderError> {
+    ) -> Result<ChatModelDescription, AiResolutionError> {
         let url = endpoint_url(endpoint, served_wire(endpoint, "chat")?)?;
         Ok(ChatModelDescription {
             target: bound_chat_target(endpoint.provider.clone(), model, &url),
@@ -122,7 +116,7 @@ impl ChatModelProvider for RigChatModelProvider {
     fn describe_recorded(
         &self,
         spec: &AiModelSpec,
-    ) -> Result<ChatModelDescription, AiModelProviderError> {
+    ) -> Result<ChatModelDescription, AiResolutionError> {
         if spec.binding_fingerprint.is_empty() {
             return Err(recorded_error(spec, "no binding fingerprint was recorded"));
         }
@@ -147,23 +141,23 @@ impl ChatModelProvider for RigChatModelProvider {
         &self,
         endpoint: &AiEndpoint,
         description: &ChatModelDescription,
-    ) -> Result<Arc<dyn ChatClient>, AiModelProviderError> {
+        request_timeout: Duration,
+    ) -> Result<Arc<dyn ChatModel>, AiResolutionError> {
         let wire = served_wire(endpoint, "chat")?;
         let url = endpoint_url(endpoint, wire)?;
         let model = description.target.model.clone();
-        let client = match wire {
-            Wire::Ollama => RigChatClient::ollama(model, endpoint.base_url.clone()),
-            Wire::OpenAi => RigChatClient::openai(model, credential(endpoint)?),
+        let chat = match wire {
+            Wire::Ollama => RigChatModel::ollama(model, endpoint.base_url.clone(), request_timeout),
+            Wire::OpenAi => RigChatModel::openai(model, credential(endpoint)?, request_timeout),
             Wire::OpenAiCompatible => {
-                RigChatClient::openai_compatible(model, credential(endpoint)?, url)
+                RigChatModel::openai_compatible(model, credential(endpoint)?, url, request_timeout)
             }
-        }
-        .map_err(|error| client_error(endpoint, error))?;
-        Ok(Arc::new(client))
+        };
+        Ok(Arc::new(chat))
     }
 }
 
-impl EmbeddingModelProvider for NativeEmbeddingModelProvider {
+impl EmbeddingModelResolver for NativeEmbeddingModelResolver {
     fn serves(&self, provider: &AiProvider) -> bool {
         wire(provider).is_some()
     }
@@ -172,7 +166,7 @@ impl EmbeddingModelProvider for NativeEmbeddingModelProvider {
         &self,
         endpoint: &AiEndpoint,
         model: &str,
-    ) -> Result<EmbeddingModelDescription, AiModelProviderError> {
+    ) -> Result<EmbeddingModelDescription, AiResolutionError> {
         let url = endpoint_url(endpoint, served_wire(endpoint, "embeddings")?)?;
         Ok(EmbeddingModelDescription {
             target: bound_embedding_target(endpoint.provider.clone(), model, &url),
@@ -182,7 +176,7 @@ impl EmbeddingModelProvider for NativeEmbeddingModelProvider {
     fn describe_recorded(
         &self,
         spec: &AiModelSpec,
-    ) -> Result<EmbeddingModelDescription, AiModelProviderError> {
+    ) -> Result<EmbeddingModelDescription, AiResolutionError> {
         if spec.binding_fingerprint.is_empty() {
             return Err(recorded_error(spec, "no binding fingerprint was recorded"));
         }
@@ -199,19 +193,26 @@ impl EmbeddingModelProvider for NativeEmbeddingModelProvider {
         &self,
         endpoint: &AiEndpoint,
         description: &EmbeddingModelDescription,
-    ) -> Result<Arc<dyn EmbeddingClient>, AiModelProviderError> {
+        request_timeout: Duration,
+    ) -> Result<Arc<dyn EmbeddingModel>, AiResolutionError> {
         let wire = served_wire(endpoint, "embeddings")?;
         let url = endpoint_url(endpoint, wire)?;
         let model = description.target.model.clone();
-        let client = match wire {
-            Wire::Ollama => NativeEmbeddingClient::ollama(model, endpoint.base_url.clone()),
-            Wire::OpenAi => NativeEmbeddingClient::openai(model, credential(endpoint)?),
-            Wire::OpenAiCompatible => {
-                NativeEmbeddingClient::openai_compatible(model, credential(endpoint)?, url)
+        let embedding = match wire {
+            Wire::Ollama => {
+                NativeEmbeddingModel::ollama(model, endpoint.base_url.clone(), request_timeout)
             }
-        }
-        .map_err(|error| client_error(endpoint, error))?;
-        Ok(Arc::new(client))
+            Wire::OpenAi => {
+                NativeEmbeddingModel::openai(model, credential(endpoint)?, request_timeout)
+            }
+            Wire::OpenAiCompatible => NativeEmbeddingModel::openai_compatible(
+                model,
+                credential(endpoint)?,
+                url,
+                request_timeout,
+            ),
+        };
+        Ok(Arc::new(embedding))
     }
 }
 
@@ -236,12 +237,12 @@ mod tests {
 
     #[test]
     fn a_compatible_endpoint_needs_its_own_url() {
-        let error = RigChatModelProvider
+        let error = RigChatModelResolver
             .describe(&endpoint("groq", OPENAI_COMPATIBLE, None, None), "m")
             .unwrap_err();
         assert_eq!(
             error,
-            AiModelProviderError::MissingBaseUrl {
+            AiResolutionError::MissingBaseUrl {
                 endpoint: "groq".to_string(),
                 provider: OPENAI_COMPATIBLE.to_string(),
             }
@@ -250,13 +251,13 @@ mod tests {
 
     #[test]
     fn endpoints_on_different_urls_bind_different_targets() {
-        let left = RigChatModelProvider
+        let left = RigChatModelResolver
             .describe(
                 &endpoint("a", OPENAI_COMPATIBLE, Some("http://127.0.0.1:1/v1"), None),
                 "m",
             )
             .unwrap();
-        let right = RigChatModelProvider
+        let right = RigChatModelResolver
             .describe(
                 &endpoint("b", OPENAI_COMPATIBLE, Some("http://127.0.0.1:2/v1"), None),
                 "m",
@@ -298,7 +299,7 @@ mod tests {
 
     #[test]
     fn a_recorded_spec_rebuilds_the_described_target() {
-        let described = RigChatModelProvider
+        let described = RigChatModelResolver
             .describe(&endpoint(OLLAMA, OLLAMA, None, None), "llama3.1:8b")
             .unwrap();
         let spec = AiModelSpec {
@@ -315,15 +316,15 @@ mod tests {
                 .to_string(),
             estimator: Some(described.estimator.info().clone()),
         };
-        let recorded = RigChatModelProvider.describe_recorded(&spec).unwrap();
+        let recorded = RigChatModelResolver.describe_recorded(&spec).unwrap();
         assert_eq!(recorded.target, described.target);
         assert_eq!(recorded.estimator.info(), described.estimator.info());
     }
 
     #[test]
     fn unknown_providers_are_not_served() {
-        assert!(!RigChatModelProvider.serves(&AiProvider::from("jev")));
-        assert!(!NativeEmbeddingModelProvider.serves(&AiProvider::from("jev")));
-        assert!(RigChatModelProvider.serves(&AiProvider::from(OLLAMA)));
+        assert!(!RigChatModelResolver.serves(&AiProvider::from("jev")));
+        assert!(!NativeEmbeddingModelResolver.serves(&AiProvider::from("jev")));
+        assert!(RigChatModelResolver.serves(&AiProvider::from(OLLAMA)));
     }
 }

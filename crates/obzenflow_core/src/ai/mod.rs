@@ -34,7 +34,7 @@ pub use chunking::{
     ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary, ChunkRenderContext,
     OversizeExhaustion, OversizePolicy,
 };
-pub use error::{AiClientError, StructuredOutputError};
+pub use error::{AiProviderError, StructuredOutputError};
 pub use hashing::{
     chat_binding_fingerprint, embedding_binding_fingerprint, params_hash_for_chat,
     params_hash_for_embedding, prompt_hash_for_chat, prompt_hash_for_embedding_inputs,
@@ -53,9 +53,9 @@ pub use observability::{
     LlmObservability,
 };
 pub use outcome::{AiOutcome, AiProviderFailureKind, AiUnavailable, AiUnavailableCause};
-pub use ports::{ChatClient, ChatModelProvider, EmbeddingClient, EmbeddingModelProvider};
+pub use ports::{ChatModel, ChatModelResolver, EmbeddingModel, EmbeddingModelResolver};
 pub use provider::{
-    AiEndpoint, AiModelProviderError, AiModelSpec, ChatModelDescription, EmbeddingModelDescription,
+    AiEndpoint, AiModelSpec, AiResolutionError, ChatModelDescription, EmbeddingModelDescription,
 };
 pub use structured_output::{StructuredOutputSchema, StructuredOutputSpec, ValidationHook};
 pub use token_estimation::{
@@ -69,8 +69,8 @@ pub use types::{
     ChatResponseFormat, ChatRole, ChatTarget, EmbeddingBindingFingerprint, EmbeddingDimensions,
     EmbeddingDimensionsError, EmbeddingGenerationOutcome, EmbeddingGenerationReply,
     EmbeddingParams, EmbeddingRequest, EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget,
-    SystemPrompt, ToolCall, ToolDefinition, Usage, UsageSource, UserPrompt, CHAT_CLIENT_PORT,
-    EMBEDDING_CLIENT_PORT,
+    SystemPrompt, ToolCall, ToolDefinition, Usage, UsageSource, UserPrompt, CHAT_MODEL_PORT,
+    EMBEDDING_MODEL_PORT,
 };
 pub use windowing::{
     AiKey, Chunk, GroupClosedBy, GroupOrdinal, Partials, ReduceTrigger, WindowOrdinal,

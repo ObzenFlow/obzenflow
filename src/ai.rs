@@ -47,20 +47,20 @@ pub use obzenflow_adapters::ai::{
     EmbeddingGenerationBuildError, Infer, Keyed, Map, MapReduce, TriggeredMapReduce, Unkeyed,
 };
 
-pub use obzenflow_runtime::ai::{AiEffect, AiModelProviders, AiReply, AiRequest, AiRole};
+pub use obzenflow_runtime::ai::{AiEffect, AiModelResolvers, AiReply, AiRequest, AiRole};
 
 pub use obzenflow_core::ai::{
-    plan_chat_input_budget, plan_chunks_by_budget, remaining_budget, split_to_budget,
-    AiClientError, AiEndpoint, AiKey, AiModelProviderError, AiModelSpec, AiOutcome, AiProvider,
-    AiProviderFailureKind, AiUnavailable, AiUnavailableCause, ChatBindingFingerprint,
-    ChatBudgetError, ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec, ChatBudgetTemplate,
-    ChatClient, ChatCompletionOutcome, ChatCompletionReply, ChatMessage, ChatModelDescription,
-    ChatModelProfile, ChatModelProvider, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
-    ChatResponseFormat, ChatRole, ChatTarget, Chunk, ChunkEnvelope, ChunkExclusionReason,
-    ChunkPlan, ChunkPlanningConfig, ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary,
-    ChunkRenderContext, ContextWindowSource, EmbeddingBindingFingerprint, EmbeddingClient,
-    EmbeddingDimensions, EmbeddingGenerationOutcome, EmbeddingGenerationReply,
-    EmbeddingModelDescription, EmbeddingModelProvider, EmbeddingParams, EmbeddingRequest,
+    plan_chat_input_budget, plan_chunks_by_budget, remaining_budget, split_to_budget, AiEndpoint,
+    AiKey, AiModelSpec, AiOutcome, AiProvider, AiProviderError, AiProviderFailureKind,
+    AiResolutionError, AiUnavailable, AiUnavailableCause, ChatBindingFingerprint, ChatBudgetError,
+    ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec, ChatBudgetTemplate, ChatCompletionOutcome,
+    ChatCompletionReply, ChatMessage, ChatModel, ChatModelDescription, ChatModelProfile,
+    ChatModelResolver, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatResponseFormat,
+    ChatRole, ChatTarget, Chunk, ChunkEnvelope, ChunkExclusionReason, ChunkPlan,
+    ChunkPlanningConfig, ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary,
+    ChunkRenderContext, ContextWindowSource, EmbeddingBindingFingerprint, EmbeddingDimensions,
+    EmbeddingGenerationOutcome, EmbeddingGenerationReply, EmbeddingModel,
+    EmbeddingModelDescription, EmbeddingModelResolver, EmbeddingParams, EmbeddingRequest,
     EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, EstimateSource, GroupOrdinal,
     HeuristicTokenEstimator, OversizeExhaustion, OversizePolicy, Partials, ResolvedTokenEstimator,
     SplitGroup, SystemPrompt, TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator,
@@ -77,4 +77,4 @@ pub use obzenflow_infra::ai::{
 pub use obzenflow_infra::ai::TiktokenEstimator;
 
 #[cfg(feature = "ai")]
-pub use obzenflow_infra::ai::{NativeEmbeddingModelProvider, RigChatModelProvider};
+pub use obzenflow_infra::ai::{NativeEmbeddingModelResolver, RigChatModelResolver};

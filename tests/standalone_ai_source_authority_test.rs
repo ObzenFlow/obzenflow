@@ -48,8 +48,8 @@ fn ai_role_members_and_builders_have_no_direct_provider_call_authority() {
         for forbidden in [
             ".chat(",
             ".embed(",
-            "Arc<dyn ChatClient>",
-            "Arc<dyn EmbeddingClient>",
+            "Arc<dyn ChatModel>",
+            "Arc<dyn EmbeddingModel>",
             ".connect(",
         ] {
             assert!(

@@ -4,21 +4,25 @@
 
 use std::time::Duration;
 
-use super::ChatTarget;
-
-/// Provider-agnostic client error taxonomy for AI calls.
+/// The provider's answer to one AI call that produced no reply.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-pub enum AiClientError {
+pub enum AiProviderError {
     #[error("timeout: {message}")]
     Timeout { message: String },
+
+    /// The provider refused the connection, so it did not act on the call.
+    #[error("connection refused: {message}")]
+    ConnectFailed { message: String },
 
     #[error("remote failure: {message}")]
     Remote { message: String },
 
+    /// The provider refused the call for now; `retry_after` is its delay, zero
+    /// when it gave none.
     #[error("rate limited: {message}")]
     RateLimited {
         message: String,
-        retry_after: Option<Duration>,
+        retry_after: Duration,
     },
 
     #[error("authentication failed: {message}")]
@@ -30,23 +34,8 @@ pub enum AiClientError {
     #[error("unsupported operation: {message}")]
     Unsupported { message: String },
 
-    #[error("chat target mismatch: requested {requested}, bound {bound}")]
-    TargetMismatch {
-        requested: Box<ChatTarget>,
-        bound: Box<ChatTarget>,
-    },
-
-    #[error("other AI client error: {message}")]
+    #[error("provider failure: {message}")]
     Other { message: String },
-}
-
-impl AiClientError {
-    pub fn target_mismatch(requested: ChatTarget, bound: ChatTarget) -> Self {
-        Self::TargetMismatch {
-            requested: Box::new(requested),
-            bound: Box::new(bound),
-        }
-    }
 }
 
 /// Provider/runtime-agnostic structured-output failure taxonomy.

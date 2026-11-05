@@ -4,23 +4,24 @@
 
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    chat_binding_fingerprint, embedding_binding_fingerprint, AiClientError, AiEndpoint,
-    AiModelProviderError, AiModelSpec, ChatBindingFingerprint, ChatClient, ChatModelDescription,
-    ChatModelProvider, ChatRequest, ChatResponse, ChatTarget, EmbeddingBindingFingerprint,
-    EmbeddingClient, EmbeddingDimensions, EmbeddingModelDescription, EmbeddingModelProvider,
+    chat_binding_fingerprint, embedding_binding_fingerprint, AiEndpoint, AiModelSpec,
+    AiProviderError, AiResolutionError, ChatBindingFingerprint, ChatModel, ChatModelDescription,
+    ChatModelResolver, ChatRequest, ChatResponse, ChatTarget, EmbeddingBindingFingerprint,
+    EmbeddingDimensions, EmbeddingModel, EmbeddingModelDescription, EmbeddingModelResolver,
     EmbeddingRequest, EmbeddingResponse, EmbeddingTarget, HeuristicTokenEstimator,
     ResolvedTokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::config::{ConfigScope, ConfigSource};
-use obzenflow_runtime::ai::AiModelProviders;
+use obzenflow_runtime::ai::AiModelResolvers;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     AiEndpointTables, CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-pub type Reply = Arc<dyn Fn(&ChatRequest) -> Result<ChatResponse, AiClientError> + Send + Sync>;
+pub type Reply = Arc<dyn Fn(&ChatRequest) -> Result<ChatResponse, AiProviderError> + Send + Sync>;
 
 pub type HangFilter = Arc<dyn Fn(&ChatRequest) -> bool + Send + Sync>;
 
@@ -38,6 +39,7 @@ pub struct FakeChatModels {
     pub calls: Arc<AtomicUsize>,
     pub connects: Arc<AtomicUsize>,
     pub recorded: Arc<Mutex<Vec<RecordedCall>>>,
+    pub request_timeouts: Arc<Mutex<Vec<Duration>>>,
     reply: Reply,
     forbidden: bool,
     hang: Option<(HangFilter, Arc<tokio::sync::Notify>)>,
@@ -59,12 +61,13 @@ impl FakeChatModels {
     }
 
     pub fn with_reply(
-        reply: impl Fn(&ChatRequest) -> Result<ChatResponse, AiClientError> + Send + Sync + 'static,
+        reply: impl Fn(&ChatRequest) -> Result<ChatResponse, AiProviderError> + Send + Sync + 'static,
     ) -> Self {
         Self {
             calls: Arc::new(AtomicUsize::new(0)),
             connects: Arc::new(AtomicUsize::new(0)),
             recorded: Arc::new(Mutex::new(Vec::new())),
+            request_timeouts: Arc::new(Mutex::new(Vec::new())),
             reply: Arc::new(reply),
             forbidden: false,
             hang: None,
@@ -115,8 +118,8 @@ impl FakeChatModels {
         Self::hanging_when(entered, |_| true, "")
     }
 
-    pub fn providers(&self) -> AiModelProviders {
-        AiModelProviders::default().chat(self.clone())
+    pub fn resolvers(&self) -> AiModelResolvers {
+        AiModelResolvers::default().chat(self.clone())
     }
 
     pub fn call_count(&self) -> usize {
@@ -162,7 +165,7 @@ fn endpoint_identity(endpoint: &AiEndpoint) -> String {
     )
 }
 
-impl ChatModelProvider for FakeChatModels {
+impl ChatModelResolver for FakeChatModels {
     fn serves(&self, _: &obzenflow_core::ai::AiProvider) -> bool {
         true
     }
@@ -171,7 +174,7 @@ impl ChatModelProvider for FakeChatModels {
         &self,
         endpoint: &AiEndpoint,
         model: &str,
-    ) -> Result<ChatModelDescription, AiModelProviderError> {
+    ) -> Result<ChatModelDescription, AiResolutionError> {
         Ok(ChatModelDescription {
             target: ChatTarget::with_binding_fingerprint(
                 endpoint.provider.clone(),
@@ -188,7 +191,7 @@ impl ChatModelProvider for FakeChatModels {
     fn describe_recorded(
         &self,
         spec: &AiModelSpec,
-    ) -> Result<ChatModelDescription, AiModelProviderError> {
+    ) -> Result<ChatModelDescription, AiResolutionError> {
         Ok(ChatModelDescription {
             target: ChatTarget::with_binding_fingerprint(
                 spec.provider.clone(),
@@ -208,9 +211,11 @@ impl ChatModelProvider for FakeChatModels {
         &self,
         endpoint: &AiEndpoint,
         description: &ChatModelDescription,
-    ) -> Result<Arc<dyn ChatClient>, AiModelProviderError> {
+        request_timeout: Duration,
+    ) -> Result<Arc<dyn ChatModel>, AiResolutionError> {
         self.connects.fetch_add(1, Ordering::SeqCst);
-        Ok(Arc::new(FakeChatClient {
+        self.request_timeouts.lock().unwrap().push(request_timeout);
+        Ok(Arc::new(FakeChatModel {
             target: self
                 .client_target
                 .clone()
@@ -226,7 +231,7 @@ impl ChatModelProvider for FakeChatModels {
     }
 }
 
-struct FakeChatClient {
+struct FakeChatModel {
     target: ChatTarget,
     endpoint: String,
     url: Option<String>,
@@ -235,12 +240,12 @@ struct FakeChatClient {
 }
 
 #[async_trait]
-impl ChatClient for FakeChatClient {
+impl ChatModel for FakeChatModel {
     fn target(&self) -> &ChatTarget {
         &self.target
     }
 
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiClientError> {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiProviderError> {
         self.models.calls.fetch_add(1, Ordering::SeqCst);
         assert!(
             !self.models.forbidden,
@@ -293,12 +298,13 @@ impl ChatClient for FakeChatClient {
 }
 
 pub type EmbeddingReply =
-    Arc<dyn Fn(&EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError> + Send + Sync>;
+    Arc<dyn Fn(&EmbeddingRequest) -> Result<EmbeddingResponse, AiProviderError> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct FakeEmbeddingModels {
     pub calls: Arc<AtomicUsize>,
     pub connects: Arc<AtomicUsize>,
+    pub request_timeouts: Arc<Mutex<Vec<Duration>>>,
     reply: EmbeddingReply,
     forbidden: bool,
     hang: Option<Arc<tokio::sync::Notify>>,
@@ -318,7 +324,7 @@ impl FakeEmbeddingModels {
     }
 
     pub fn with_reply(
-        reply: impl Fn(&EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError>
+        reply: impl Fn(&EmbeddingRequest) -> Result<EmbeddingResponse, AiProviderError>
             + Send
             + Sync
             + 'static,
@@ -326,6 +332,7 @@ impl FakeEmbeddingModels {
         Self {
             calls: Arc::new(AtomicUsize::new(0)),
             connects: Arc::new(AtomicUsize::new(0)),
+            request_timeouts: Arc::new(Mutex::new(Vec::new())),
             reply: Arc::new(reply),
             forbidden: false,
             hang: None,
@@ -363,7 +370,7 @@ impl FakeEmbeddingModels {
     }
 }
 
-impl EmbeddingModelProvider for FakeEmbeddingModels {
+impl EmbeddingModelResolver for FakeEmbeddingModels {
     fn serves(&self, provider: &obzenflow_core::ai::AiProvider) -> bool {
         self.serves_only
             .as_ref()
@@ -374,7 +381,7 @@ impl EmbeddingModelProvider for FakeEmbeddingModels {
         &self,
         endpoint: &AiEndpoint,
         model: &str,
-    ) -> Result<EmbeddingModelDescription, AiModelProviderError> {
+    ) -> Result<EmbeddingModelDescription, AiResolutionError> {
         Ok(EmbeddingModelDescription {
             target: EmbeddingTarget::new(
                 endpoint.provider.clone(),
@@ -391,7 +398,7 @@ impl EmbeddingModelProvider for FakeEmbeddingModels {
     fn describe_recorded(
         &self,
         spec: &AiModelSpec,
-    ) -> Result<EmbeddingModelDescription, AiModelProviderError> {
+    ) -> Result<EmbeddingModelDescription, AiResolutionError> {
         Ok(EmbeddingModelDescription {
             target: EmbeddingTarget::new(
                 spec.provider.clone(),
@@ -405,27 +412,29 @@ impl EmbeddingModelProvider for FakeEmbeddingModels {
         &self,
         _: &AiEndpoint,
         description: &EmbeddingModelDescription,
-    ) -> Result<Arc<dyn EmbeddingClient>, AiModelProviderError> {
+        request_timeout: Duration,
+    ) -> Result<Arc<dyn EmbeddingModel>, AiResolutionError> {
         self.connects.fetch_add(1, Ordering::SeqCst);
-        Ok(Arc::new(FakeEmbeddingClient {
+        self.request_timeouts.lock().unwrap().push(request_timeout);
+        Ok(Arc::new(FakeEmbeddingModel {
             target: description.target.clone(),
             models: self.clone(),
         }))
     }
 }
 
-struct FakeEmbeddingClient {
+struct FakeEmbeddingModel {
     target: EmbeddingTarget,
     models: FakeEmbeddingModels,
 }
 
 #[async_trait]
-impl EmbeddingClient for FakeEmbeddingClient {
+impl EmbeddingModel for FakeEmbeddingModel {
     fn target(&self) -> &EmbeddingTarget {
         &self.target
     }
 
-    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError> {
+    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AiProviderError> {
         self.models.calls.fetch_add(1, Ordering::SeqCst);
         assert!(
             !self.models.forbidden,
@@ -439,8 +448,8 @@ impl EmbeddingClient for FakeEmbeddingClient {
     }
 }
 
-pub fn providers(chat: &FakeChatModels, embedding: &FakeEmbeddingModels) -> AiModelProviders {
-    AiModelProviders::default()
+pub fn resolvers(chat: &FakeChatModels, embedding: &FakeEmbeddingModels) -> AiModelResolvers {
+    AiModelResolvers::default()
         .chat(chat.clone())
         .embedding(embedding.clone())
 }
@@ -509,5 +518,5 @@ pub fn build_context_with(
     candidates: impl IntoIterator<Item = Candidate>,
 ) -> FlowBuildContext {
     FlowBuildContext::new(runtime_config(candidates, AiEndpointTables::default()))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
 }

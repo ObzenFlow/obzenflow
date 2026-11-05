@@ -608,7 +608,7 @@ where
                     .copied()
                     .unwrap_or(descriptor.name());
                 for (section, effect_type) in descriptor.ai_config_sections() {
-                    for knob in ["endpoint", "model"] {
+                    for knob in ["endpoint", "model", "request_timeout_ms"] {
                         __dsl_candidates.declare_effect_consumption(
                             format!("{section}.{knob}"),
                             obzenflow_core::StageKey::from(descriptor.name()),

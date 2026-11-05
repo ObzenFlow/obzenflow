@@ -19,7 +19,7 @@ use obzenflow::ai::{
 };
 use obzenflow::stages::sources;
 use obzenflow_adapters::middleware::{circuit_breaker, MiddlewareFactory};
-use obzenflow_core::ai::AiClientError;
+use obzenflow_core::ai::AiProviderError;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{
@@ -472,7 +472,7 @@ async fn a_stage_whose_roles_perform_two_effects_refuses_an_unscoped_breaker() {
     let error = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(ai_config(temp.path(), None))
-        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .with_ai_models(fake_ai::resolvers(&chat, &embed))
         .run_async(FlowDefinition::materialize(move |_| {
             let tickets = sources::ValuesSource::new(two_tickets());
             let digest = ai::map(SummarizeTickets)
@@ -515,7 +515,7 @@ async fn a_stage_whose_roles_perform_two_effects_builds_one_breaker_per_effect()
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
     let chat = FakeChatModels::with_reply(|_| {
-        Err(AiClientError::Timeout {
+        Err(AiProviderError::Timeout {
             message: "endpoint down".to_string(),
         })
     });
@@ -525,7 +525,7 @@ async fn a_stage_whose_roles_perform_two_effects_builds_one_breaker_per_effect()
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(ai_config(temp.path(), None))
-        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .with_ai_models(fake_ai::resolvers(&chat, &embed))
         .run_async(FlowDefinition::materialize({
             let outputs = outputs.clone();
             move |_| {
@@ -598,7 +598,7 @@ async fn an_embedding_endpoint_whose_provider_serves_only_chat_fails_the_build()
     let error = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(config)
-        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .with_ai_models(fake_ai::resolvers(&chat, &embed))
         .run_async(chat_and_embedding_flow(
             temp.path().join("journals"),
             one_ticket(),
@@ -621,6 +621,44 @@ async fn an_embedding_endpoint_whose_provider_serves_only_chat_fails_the_build()
 }
 
 #[tokio::test]
+async fn embedding_stage_deadline_reaches_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal_base = temp.path().join("journals");
+    let config = temp.path().join("deadline.toml");
+    std::fs::write(
+        &config,
+        "[ai.models]\nmodel = \"fixture-chat\"\n\n\
+         [ai.embeddings]\nmodel = \"fixture-embedding\"\nrequest_timeout_ms = 150000\n\n\
+         [ai.embeddings.stages.embedding]\nrequest_timeout_ms = 2500\n",
+    )
+    .expect("write the AI configuration");
+    let (chat, embed) = (summarizing(), embedding());
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .with_config_file(config)
+        .with_ai_models(fake_ai::resolvers(&chat, &embed))
+        .run_async(chat_and_embedding_flow(
+            journal_base,
+            one_ticket(),
+            Arc::new(Mutex::new(Vec::new())),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
+        ))
+        .await
+        .expect("the flow completes");
+
+    assert_eq!(
+        *embed.request_timeouts.lock().unwrap(),
+        vec![std::time::Duration::from_millis(2500)]
+    );
+    assert_eq!(
+        *chat.request_timeouts.lock().unwrap(),
+        vec![std::time::Duration::from_millis(600_000)]
+    );
+}
+
+#[tokio::test]
 async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() {
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
@@ -631,7 +669,7 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(config.clone())
-        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .with_ai_models(fake_ai::resolvers(&chat, &embed))
         .run_async(chat_and_embedding_flow(
             journal_base.clone(),
             one_ticket(),
@@ -733,7 +771,7 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
     FlowApplication::builder()
         .with_cli_args(replay_args(&live_archive, "--replay-from"))
         .with_config_file(config.clone())
-        .with_ai_models(fake_ai::providers(&replay_chat, &replay_embed))
+        .with_ai_models(fake_ai::resolvers(&replay_chat, &replay_embed))
         .run_async(chat_and_embedding_flow(
             journal_base.clone(),
             one_ticket(),
@@ -757,7 +795,7 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
     FlowApplication::builder()
         .with_cli_args(resume)
         .with_config_file(config)
-        .with_ai_models(fake_ai::providers(&resume_chat, &resume_embed))
+        .with_ai_models(fake_ai::resolvers(&resume_chat, &resume_embed))
         .run_async(chat_and_embedding_flow(
             journal_base,
             one_ticket(),
@@ -803,7 +841,7 @@ async fn request_drift_fails_strict_replay_before_any_client_is_connected() {
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
             .with_config_file(config.clone())
-            .with_ai_models(fake_ai::providers(&summarizing(), &embedding()))
+            .with_ai_models(fake_ai::resolvers(&summarizing(), &embedding()))
             .run_async(chat_and_embedding_flow(
                 journal_base.clone(),
                 one_ticket(),
@@ -818,7 +856,7 @@ async fn request_drift_fails_strict_replay_before_any_client_is_connected() {
         let result = FlowApplication::builder()
             .with_cli_args(replay_args(&archive, "--replay-from"))
             .with_config_file(config)
-            .with_ai_models(fake_ai::providers(&chat_models, &embedding_models))
+            .with_ai_models(fake_ai::resolvers(&chat_models, &embedding_models))
             .run_async(chat_and_embedding_flow(
                 journal_base,
                 one_ticket(),
@@ -843,7 +881,7 @@ async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_moves() {
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(ai_config(temp.path(), None))
-        .with_ai_models(fake_ai::providers(&summarizing(), &embedding()))
+        .with_ai_models(fake_ai::resolvers(&summarizing(), &embedding()))
         .run_async(chat_and_embedding_flow(
             journal_base.clone(),
             one_ticket(),
@@ -863,7 +901,7 @@ async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_moves() {
     FlowApplication::builder()
         .with_cli_args(replay_args(&archive, "--replay-from"))
         .with_config_file(ai_config(temp.path(), Some("http://127.0.0.1:11435")))
-        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .with_ai_models(fake_ai::resolvers(&chat, &embed))
         .run_async(chat_and_embedding_flow(
             journal_base.clone(),
             one_ticket(),

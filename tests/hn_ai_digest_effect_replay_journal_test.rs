@@ -40,23 +40,21 @@ use obzenflow::ai::{
 };
 use obzenflow_adapters::middleware::{circuit_breaker, CircuitBreaker};
 use obzenflow_core::ai::{
-    AiClientError, AiMapReduceChunkFailed, AiMapReduceGroupingEnded, AiMapReduceMapInput,
-    AiMapReduceReduceFailed, AiMapReduceRoleFailure, AiMapReduceTaggedPartial,
-    AiMapReduceWindowFailed, AiProviderFailureKind, AiUnavailableCause, ChatResponseFormat,
-    ChatTarget,
+    AiMapReduceChunkFailed, AiMapReduceGroupingEnded, AiMapReduceMapInput, AiMapReduceReduceFailed,
+    AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapReduceWindowFailed, AiProviderError,
+    AiProviderFailureKind, AiUnavailableCause, ChatResponseFormat, ChatTarget,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::observability::ObservationRecord;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload, RecoveryFact,
+    CircuitBreakerFact, ExecutionPayload, RecoveryFact,
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
-    ChainPayload, EffectAttemptStarted, EffectFailureDetail, EffectOutcomePayload,
-    EffectRecoveryAbandoned,
+    ChainPayload, EffectAttemptStarted, EffectOutcomePayload, EffectRecoveryAbandoned,
 };
 use obzenflow_core::{id::StageId, EventId, TypedPayload, WriterId};
 use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
@@ -272,7 +270,7 @@ fn enforced_app(journal_base: &Path, models: &FakeChatModels) -> FlowApplication
             journal_base,
             "[ai.models]\nmodel = \"deterministic\"\n",
         ))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
 }
 
 fn build_flow(
@@ -819,7 +817,7 @@ fn breaker_transitions(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<(Writer
 fn outage_models(fail_reduce: bool) -> FakeChatModels {
     FakeChatModels::with_reply(move |request| {
         if is_reduce_request(request) == fail_reduce {
-            Err(AiClientError::Timeout {
+            Err(AiProviderError::Timeout {
                 message: "endpoint down".to_string(),
             })
         } else {
@@ -869,7 +867,8 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
         ".reduce(roles)",
         ".on_eof();",
         "circuit_breaker().consecutive_failures(HN_AI_BREAKER_FAILURES)",
-        "digest = ai!(FormattedStory -> HnDigestSummary with ai_breaker => digest);",
+        "let ai_retry = retry();",
+        "digest = ai!(FormattedStory -> HnDigestSummary with { ai_breaker, ai_retry } => digest);",
         "impl AiRole<Chunk<FormattedStory>> for HnDigest {",
         "impl AiRole<Partials<FormattedStory, HnDigestGroupSummary>> for HnDigest {",
         "let hn_source = HttpPullSource::new(decoder, http_source_config);",
@@ -890,7 +889,7 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
     }
     for forbidden in [
         "ModelConfig",
-        "RigChatClient",
+        "RigChatModel",
         "LazyRigChatClient",
         "ChatEffectBinding",
         "chat_binding_override",
@@ -916,7 +915,7 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
         "EffectRegistrationBuilder",
         "LogicalEffectBindingName",
         "ResolvedEffectPort",
-        "CHAT_CLIENT",
+        "CHAT_MODEL",
         "bind_deferred_with_metadata",
         "chat_registration",
         "HnSinkSelectionProbe",
@@ -1040,7 +1039,7 @@ async fn map_failure_branches_preserve_their_distinct_durable_contracts() {
 
     let provider_temp = tempfile::tempdir().expect("temporary provider-failure journal root");
     let provider_models = FakeChatModels::with_reply(|_| {
-        Err(AiClientError::InvalidRequest {
+        Err(AiProviderError::InvalidRequest {
             message: "fixture rejected request".to_string(),
         })
     });
@@ -1885,7 +1884,7 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
             OsString::from("--config"),
             config_path.as_os_str().to_os_string(),
         ])
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .run_async(hn_demo_flow::build_flow_definition(
             inputs,
             hn_demo_flow::HnFlowOptions {
@@ -2046,6 +2045,76 @@ async fn hn_settings_convert_to_the_run_inputs_the_flow_reads() {
 }
 
 #[tokio::test]
+async fn digest_rate_limit_delivers_summary() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
+    let inputs = config::HnRunInputs {
+        max_stories: 60,
+        poll_timeout_secs: 10,
+        source_rate_limit: 1_000.0,
+        max_stories_per_group: 10,
+        interests: None,
+        mode_label: "mock".to_string(),
+        base_url: server.base_url(),
+    };
+    let config_path = witness_config(temp.path(), |_| {});
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let models = FakeChatModels::with_reply(move |_| {
+        if counted.fetch_add(1, Ordering::SeqCst) == 1 {
+            return Err(AiProviderError::RateLimited {
+                message: "429 Too Many Requests".to_string(),
+                retry_after: Duration::from_millis(50),
+            });
+        }
+        Ok(fake_ai::response(FIXTURE_REPLY))
+    });
+
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--config"),
+            config_path.as_os_str().to_os_string(),
+        ])
+        .with_ai_models(models.resolvers())
+        .run_async(hn_demo_flow::build_flow_definition(
+            inputs,
+            hn_demo_flow::HnFlowOptions {
+                journal_base: journal_base.clone(),
+            },
+        ))
+        .await
+        .expect("a rate-limited chunk is retried and the digest delivered");
+
+    let archive = latest_run_dir(&journal_base);
+    let map = stage_envelopes(&archive, "digest__map").await;
+    let collect = stage_envelopes(&archive, "digest__collect").await;
+    let reduce = stage_envelopes(&archive, "digest__reduce").await;
+    let count = |envelopes: &[JournalRecord<ChainPayload>], event_type: &str| {
+        envelopes
+            .iter()
+            .filter(|envelope| envelope.event_type() == event_type)
+            .count()
+    };
+    assert_eq!(count(&map, "ai.map_reduce.tagged_partial"), 6);
+    assert_eq!(
+        map.iter()
+            .filter(|envelope| matches!(
+                envelope.authored().payload,
+                ChainPayload::Execution(ExecutionPayload::Recovery(
+                    RecoveryFact::RetrySucceeded { .. }
+                ))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(count(&reduce, "hn.digest_summary"), 1);
+    assert!(window_failures(&collect).is_empty());
+    assert_eq!(models.call_count(), 8);
+}
+
+#[tokio::test]
 async fn hn_group_size_zero_fails_the_build_naming_the_stage() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
@@ -2067,7 +2136,7 @@ async fn hn_group_size_zero_fails_the_build_naming_the_stage() {
             OsString::from("--config"),
             config_path.as_os_str().to_os_string(),
         ])
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .run_async(hn_demo_flow::build_flow_definition(
             inputs,
             hn_demo_flow::HnFlowOptions { journal_base },
@@ -2121,7 +2190,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
             OsString::from("--config"),
             config_path.as_os_str().to_os_string(),
         ])
-        .with_ai_models(live.providers())
+        .with_ai_models(live.resolvers())
         .run_async(hn_demo_flow::build_flow_definition(
             demo_inputs.clone(),
             hn_demo_flow::HnFlowOptions {
@@ -2194,7 +2263,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
             OsString::from("--replay-from"),
             live_archive.as_os_str().to_os_string(),
         ])
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .run_async(hn_demo_flow::build_flow_definition(
             replay_inputs,
             hn_demo_flow::HnFlowOptions {
@@ -2445,7 +2514,7 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
     assert_eq!(
         models.call_count(),
         0,
-        "target validation must precede ChatClient::chat"
+        "target validation must precede ChatModel::chat"
     );
 
     let archive = latest_run_dir(&journal_base);
@@ -2496,7 +2565,7 @@ async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_names_anot
             &journal_base,
             &endpoint("http://fixture-a.invalid/v1"),
         ))
-        .with_ai_models(live.providers())
+        .with_ai_models(live.resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -2516,7 +2585,7 @@ async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_names_anot
             &journal_base,
             &endpoint("http://fixture-b.invalid/v1"),
         ))
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .with_cli_args(replay_args(&live_archive))
         .run_async(build_flow(
             journal_base.clone(),
@@ -2528,132 +2597,6 @@ async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_names_anot
         .expect("strict replay binds the recorded endpoint and reads no endpoint table");
     assert_eq!(*outputs.lock().unwrap(), vec![DigestOut { total: 15 }]);
     assert_eq!(replay.connect_count() + replay.call_count(), 0);
-}
-
-#[tokio::test]
-async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
-    let temp = tempfile::tempdir().expect("temporary journal root");
-    let journal_base = temp.path().join("journals");
-    let models = FakeChatModels::with_reply(|request| {
-        Err(AiClientError::target_mismatch(
-            ChatTarget::new("ollama", "mutated-after-start"),
-            request.target(),
-        ))
-    });
-    let result = enforced_app(&journal_base, &models)
-        .with_cli_args(["obzenflow"])
-        .run_async(build_flow(
-            journal_base.clone(),
-            Arc::new(Mutex::new(Vec::new())),
-            5,
-            MapRole::default(),
-        ))
-        .await;
-
-    assert!(
-        result.is_err(),
-        "a post-Start target invariant must terminate the stage"
-    );
-    assert_eq!(models.connect_count(), 1);
-    assert_eq!(models.call_count(), 1);
-
-    let archive = latest_run_dir(&journal_base);
-    let map = stage_envelopes(&archive, "digest__map").await;
-    assert_eq!(
-        attempt_starts(&map),
-        1,
-        "one physical chat invocation has one Start"
-    );
-
-    let failed = map
-        .iter()
-        .find(|envelope| envelope.event_type() == "effect.execution_failed")
-        .expect("post-Start invariant commits a generic failed outcome");
-    let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &failed.payload else {
-        panic!("effect failure is a typed execution record");
-    };
-    let EffectOutcomePayload::Failed {
-        detail:
-            Some(EffectFailureDetail::PortBindingInvariantViolation {
-                port,
-                expected,
-                observed,
-            }),
-        ..
-    } = &record.outcome
-    else {
-        panic!("the target mismatch retains its typed physical failure shape")
-    };
-    assert_eq!(port, "chat");
-    assert_eq!(expected, "<not disclosed>");
-    assert_eq!(observed, "<not disclosed>");
-    assert_eq!(
-        failed
-            .envelope
-            .provenance
-            .event
-            .effect_provenance
-            .as_ref()
-            .and_then(|provenance| provenance.attempt),
-        Some(obzenflow_core::event::EffectAttemptOrdinal::new(1))
-    );
-    assert!(failed
-        .envelope
-        .provenance
-        .journal
-        .journal_group_id
-        .as_deref()
-        .is_some_and(|group| group.starts_with("effect-outcome:v1:")));
-    assert_eq!(
-        failed
-            .envelope
-            .provenance
-            .journal
-            .journal_group_member
-            .expect("failed terminal has atomic membership")
-            .index,
-        0
-    );
-
-    let mut saw_ignored_settlement = false;
-    let mut saw_completed_recovery = false;
-    for envelope in &map {
-        match &envelope.payload {
-            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                CircuitBreakerFact::AttemptSettled {
-                    attempt,
-                    health_classification,
-                    ..
-                },
-            )) => {
-                assert_eq!(*attempt, 1);
-                assert!(matches!(
-                    health_classification,
-                    CircuitBreakerHealthClassification::Ignored
-                ));
-                assert_eq!(
-                    envelope.envelope.provenance.journal.journal_group_id,
-                    failed.envelope.provenance.journal.journal_group_id,
-                    "attempt settlement belongs to the same atomic terminal"
-                );
-                saw_ignored_settlement = true;
-            }
-            ChainPayload::Execution(ExecutionPayload::Recovery(
-                RecoveryFact::RecoveryCompleted { total_attempts, .. },
-            )) => {
-                assert_eq!(*total_attempts, 1);
-                assert_eq!(
-                    envelope.envelope.provenance.journal.journal_group_id,
-                    failed.envelope.provenance.journal.journal_group_id,
-                    "recovery completion belongs to the same atomic terminal"
-                );
-                saw_completed_recovery = true;
-            }
-            _ => {}
-        }
-    }
-    assert!(saw_ignored_settlement);
-    assert!(saw_completed_recovery);
 }
 
 fn parity(item: &DigestItem) -> u64 {
@@ -2784,7 +2727,7 @@ async fn exceed_the_open_key_limit(journal_base: &Path) -> PathBuf {
     let live = recording();
     let error = FlowApplication::builder()
         .with_config_file(open_key_limit(journal_base, 1))
-        .with_ai_models(live.providers())
+        .with_ai_models(live.resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(build_keyed_flow(
             journal_base.to_path_buf(),
@@ -2808,7 +2751,7 @@ async fn strict_replay_stops_at_the_key_that_exceeded_the_recorded_limit() {
     args.push(OsString::from("--allow-incomplete-archive"));
     let error = FlowApplication::builder()
         .with_config_file(open_key_limit(&journal_base, 10))
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .with_cli_args(args)
         .run_async(build_keyed_flow(
             journal_base.clone(),
@@ -2830,7 +2773,7 @@ async fn resume_after_raising_the_open_key_limit_completes() {
     let outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_config_file(open_key_limit(&journal_base, 10))
-        .with_ai_models(recording().providers())
+        .with_ai_models(recording().resolvers())
         .with_cli_args(resume_args(&archive, true))
         .run_async(build_keyed_flow(
             journal_base.clone(),
@@ -2859,7 +2802,7 @@ async fn an_open_key_limit_for_a_stage_without_a_key_fails_the_build() {
             &journal_base,
             "[ai.models]\nmodel = \"deterministic\"\n\n[runtime.ai.stages.digest]\nmax_open_keys = 5\n",
         ))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base,
@@ -2901,7 +2844,7 @@ async fn an_operator_stop_finalizes_no_open_key_and_resume_completes_each_window
     let control_base = temp.path().join("control");
     FlowApplication::builder()
         .with_config_file(config(&control_base))
-        .with_ai_models(recording().providers())
+        .with_ai_models(recording().resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(build_keyed_flow(
             control_base.clone(),
@@ -2958,7 +2901,7 @@ async fn an_operator_stop_finalizes_no_open_key_and_resume_completes_each_window
     let resumed = recording();
     FlowApplication::builder()
         .with_config_file(config(&journal_base))
-        .with_ai_models(resumed.providers())
+        .with_ai_models(resumed.resolvers())
         .with_cli_args(resume_args(&stopped, true))
         .run_async(build_keyed_flow(
             journal_base.clone(),
@@ -2990,7 +2933,7 @@ async fn a_map_only_provider_failure_reaches_the_error_journal() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
     let models = FakeChatModels::with_reply(|_| {
-        Err(AiClientError::Timeout {
+        Err(AiProviderError::Timeout {
             message: "endpoint down".to_string(),
         })
     });
@@ -2999,7 +2942,7 @@ async fn a_map_only_provider_failure_reaches_the_error_journal() {
             &journal_base,
             "[ai.models]\nmodel = \"deterministic\"\n",
         ))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize({
             let journal_base = journal_base.clone();
@@ -3127,7 +3070,7 @@ async fn bumping_only_the_reduce_version_refuses_replay_at_the_reduce_members_fi
 
     FlowApplication::builder()
         .with_config_file(config.clone())
-        .with_ai_models(recording().providers())
+        .with_ai_models(recording().resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(build_one_role_flow(journal_base.clone(), "reduce-v1"))
         .await
@@ -3160,7 +3103,7 @@ async fn bumping_only_the_reduce_version_refuses_replay_at_the_reduce_members_fi
     let replay = FakeChatModels::forbidden();
     let error = FlowApplication::builder()
         .with_config_file(config)
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .with_cli_args(replay_args(&archive))
         .run_async(build_one_role_flow(journal_base.clone(), "reduce-v2"))
         .await
@@ -3199,7 +3142,7 @@ async fn a_middleware_table_for_an_ai_stage_without_middleware_fails_the_build()
             "[ai.models]\nmodel = \"deterministic\"\n\n\
              [middleware.stages.digest.circuit_breaker]\nconsecutive_failures = 1\n",
         ))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(build_one_role_flow(journal_base, "reduce-v1"))
         .await
@@ -3223,7 +3166,7 @@ async fn the_authored_stage_table_sets_the_model_for_every_member() {
             &journal_base,
             "[ai.models.stages.digest]\nmodel = \"digest-model\"\n",
         ))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -3305,7 +3248,7 @@ async fn interrupt_during_first_map_call(journal_base: &Path, ai: &str) -> PathB
         async move {
             FlowApplication::builder()
                 .with_config_file(config)
-                .with_ai_models(hanging.providers())
+                .with_ai_models(hanging.resolvers())
                 .with_cli_args(["obzenflow"])
                 .run_async(build_interruption_flow(
                     journal_base,
@@ -3353,7 +3296,7 @@ async fn resume_keeps_the_recorded_model_for_an_in_doubt_call_and_configures_new
     let outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_config_file(run_config(&journal_base, &model("model-b")))
-        .with_ai_models(resumed.providers())
+        .with_ai_models(resumed.resolvers())
         .with_cli_args(resume_args(&interrupted, true))
         .run_async(build_interruption_flow(
             journal_base.clone(),
@@ -3389,7 +3332,7 @@ async fn resume_keeps_the_recorded_model_for_an_in_doubt_call_and_configures_new
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_config_file(run_config(&journal_base, ""))
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .with_cli_args(replay_args(&resumed_archive))
         .run_async(build_interruption_flow(
             journal_base.clone(),
@@ -3419,7 +3362,7 @@ async fn resume_fails_an_in_doubt_call_whose_recorded_endpoint_is_gone() {
     let resumed = recording();
     FlowApplication::builder()
         .with_config_file(run_config(&journal_base, &endpoint("west")))
-        .with_ai_models(resumed.providers())
+        .with_ai_models(resumed.resolvers())
         .with_cli_args(resume_args(&interrupted, true))
         .run_async(build_interruption_flow(
             journal_base.clone(),
@@ -3551,7 +3494,7 @@ async fn the_authored_stage_configures_the_shared_breaker_and_a_member_table_fai
     let models = outage_models(false);
     FlowApplication::builder()
         .with_config_file(config(&journal_base, "middleware.stages.digest"))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -3575,7 +3518,7 @@ async fn the_authored_stage_configures_the_shared_breaker_and_a_member_table_fai
     let models = outage_models(false);
     let error = FlowApplication::builder()
         .with_config_file(config(&journal_base, "middleware.stages.digest__map"))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base,

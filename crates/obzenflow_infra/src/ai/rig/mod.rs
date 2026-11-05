@@ -6,9 +6,9 @@
 //!
 //! Embeddings use the native provider-wire client exported from [`crate::ai`].
 
-mod chat_client;
+mod chat_model;
 mod error_mapping;
 mod preflight;
 mod transport;
 
-pub use chat_client::RigChatClient;
+pub use chat_model::RigChatModel;

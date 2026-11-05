@@ -353,6 +353,22 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 env: EnvBinding::Canonical,
             },
             KnobSpec {
+                key_path: "ai.embeddings.request_timeout_ms",
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::Value(ConfigValue::U64(
+                    super::ai::DEFAULT_AI_REQUEST_TIMEOUT_MS,
+                )),
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
                 key_path: "ai.models.endpoint",
                 file_path: None,
                 value_type: KnobType::Text,
@@ -369,6 +385,22 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 value_type: KnobType::Text,
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: "ai.models.request_timeout_ms",
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::Value(ConfigValue::U64(
+                    super::ai::DEFAULT_AI_REQUEST_TIMEOUT_MS,
+                )),
                 mutability: Mutability::Restartful,
                 role: KnobRole::Configuration,
                 redaction: Redaction::Plain,

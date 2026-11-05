@@ -12,10 +12,10 @@ use std::ops::Range;
 ///
 /// User-facing AI syntax selects a typed effect binding lexically. It does not
 /// select or manufacture a runtime registry coordinate.
-pub const CHAT_CLIENT_PORT: &str = "chat";
+pub const CHAT_MODEL_PORT: &str = "chat";
 
 /// The sealed runtime coordinate for ObzenFlow's concrete embedding capability.
-pub const EMBEDDING_CLIENT_PORT: &str = "embedding";
+pub const EMBEDDING_MODEL_PORT: &str = "embedding";
 
 /// Provider identifier for AI requests.
 ///

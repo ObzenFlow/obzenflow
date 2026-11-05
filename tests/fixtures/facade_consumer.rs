@@ -498,3 +498,20 @@ fn renamed_facade_ai_rows_compile() {
     let digest = of::ai::map(Pure).chunks(1).reduce(Pure).on_eof();
     ai!(Fact -> Fact => digest);
 }
+
+#[test]
+fn renamed_facade_vendor_header_compiles() {
+    use self::of::effects::http::{Body, HeaderName, HeaderValue, HttpRequest};
+    let request = HttpRequest::post(
+        "https://api.stripe.test/v1/payment_intents"
+            .parse()
+            .unwrap(),
+    )
+    .with_header(
+        HeaderName::from_static("stripe-version"),
+        HeaderValue::from_static("2026-01-01"),
+    )
+    .with_idempotency_key("invoice:INV-1:1");
+    std::assert_eq!(request.headers.get("stripe-version").unwrap(), "2026-01-01");
+    std::assert!(std::matches!(request.body, Body::Empty));
+}

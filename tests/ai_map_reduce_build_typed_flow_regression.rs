@@ -901,12 +901,12 @@ async fn a_build_without_a_chat_provider_fails_naming_the_stage() {
     .await;
 
     let error = match result {
-        Ok(_) => panic!("an ai! stage needs a chat model provider"),
+        Ok(_) => panic!("an ai! stage needs a chat model resolver"),
         Err(error) => error.to_string(),
     };
     assert!(
         error.contains(
-            "stage `digest`: this build has no chat model provider; enable the `ai` feature or install one with FlowBuildContext::with_ai_models"
+            "stage `digest`: this build has no chat model resolver; enable the `ai` feature or install one with FlowBuildContext::with_ai_models"
         ),
         "{error}"
     );

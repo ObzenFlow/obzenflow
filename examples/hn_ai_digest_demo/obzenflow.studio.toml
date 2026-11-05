@@ -7,16 +7,17 @@
 #
 # The HN feed is mocked by default (set source = "live" under [app] for the
 # real API). The stage's endpoint and model resolve from [ai.models] below.
-# The client and any credential remain deferred until the first live call.
+# The model and any credential remain deferred until the first live call.
 
 [runtime.backpressure.flow]
 mode = "enforce"
 window = 3
-stall_timeout_ms = 30000
+stall_timeout_ms = 300000
 
 [ai.models]
 endpoint = "ollama"
 model = "llama3.1:8b"
+request_timeout_ms = 150000
 
 [sinks]
 handler = "console_sink"

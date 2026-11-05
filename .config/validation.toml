@@ -229,6 +229,13 @@ rationale = "Real probe and PostgreSQL entry points execute a retained Cargo-bui
 
 [[prerequisites]]
 binary = "obzenflow_infra::standalone_embedding_wire_test"
+test = "deadline_expiry_returns_timeout"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned silent provider proves the model's request deadline ends the call as a timeout."
+
+[[prerequisites]]
+binary = "obzenflow_infra::standalone_embedding_wire_test"
 test = "native_adapters_reject_bad_cardinality_order_and_width_without_retrying"
 lanes = ["production-features"]
 capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
@@ -242,8 +249,22 @@ capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
 rationale = "Owned mock provider records complete native embedding requests and response validation."
 
 [[prerequisites]]
+binary = "obzenflow_infra::standalone_embedding_wire_test"
+test = "provider_status_maps_failure_class"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned provider answers each status the failure table classifies."
+
+[[prerequisites]]
+binary = "obzenflow_infra::standalone_embedding_wire_test"
+test = "refused_connection_returns_connect_failed"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "A released loopback port proves a refused connection is a connect failure."
+
+[[prerequisites]]
 binary = "obzenflow_infra"
-test = "ai::rig::chat_client::tests::one_chat_invocation_can_follow_a_body_preserving_redirect"
+test = "ai::rig::chat_model::tests::one_chat_invocation_can_follow_a_body_preserving_redirect"
 lanes = ["production-features"]
 capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
 rationale = "Owned HTTP peer proves redirect body preservation at the adapter wire boundary."
@@ -397,10 +418,24 @@ rationale = "Owned HTTP peer verifies real wire requests and client initialisati
 
 [[prerequisites]]
 binary = "obzenflow_infra"
-test = "http_client::reqwest_client::tests::concurrent_execute_initializes_once_across_clones"
+test = "http_client::reqwest_client::tests::concurrent_send_initializes_client_once"
 lanes = ["production-features"]
 capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
 rationale = "Owned HTTP peer verifies real wire requests and client initialisation under cancellation or concurrency."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "http_client::reqwest_client::tests::send_to_silent_server_times_out"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned silent listener proves the client's default and explicit request deadlines."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "http_client::reqwest_client::tests::unencodable_request_never_sends"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned HTTP peer proves an unencodable request never reaches the wire."
 
 [[prerequisites]]
 binary = "obzenflow_infra"

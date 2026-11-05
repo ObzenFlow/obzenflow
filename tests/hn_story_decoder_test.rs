@@ -89,7 +89,7 @@ fn hn_decoder_parses_topstories_and_seeds_cursor() {
 
     let cursor = out.next_cursor.expect("cursor expected");
 
-    let req = decoder.request_spec(Some(&cursor));
+    let req = decoder.http_request(Some(&cursor));
     assert_eq!(
         req.url.as_str(),
         "https://hacker-news.firebaseio.com/v0/item/101.json"
@@ -103,7 +103,7 @@ fn hn_decoder_parses_topstories_and_seeds_cursor() {
     assert_eq!(out.items.len(), 1);
     assert_eq!(out.items[0].id, HnStoryId(101));
 
-    let req = decoder.request_spec(Some(&cursor));
+    let req = decoder.http_request(Some(&cursor));
     assert_eq!(
         req.url.as_str(),
         "https://hacker-news.firebaseio.com/v0/item/102.json"
@@ -117,7 +117,7 @@ fn hn_decoder_parses_topstories_and_seeds_cursor() {
     assert_eq!(out.items.len(), 1);
     assert_eq!(out.items[0].id, HnStoryId(102));
 
-    let req = decoder.request_spec(Some(&cursor));
+    let req = decoder.http_request(Some(&cursor));
     assert_eq!(
         req.url.as_str(),
         "https://hacker-news.firebaseio.com/v0/item/103.json"
@@ -168,7 +168,7 @@ fn hn_decoder_parses_item_and_advances_cursor() {
     assert_eq!(out.items[0].id, HnStoryId(42));
 
     let next = out.next_cursor.expect("cursor expected");
-    let req = decoder.request_spec(Some(&next));
+    let req = decoder.http_request(Some(&next));
     assert_eq!(
         req.url.as_str(),
         "https://hacker-news.firebaseio.com/v0/item/43.json"
@@ -190,7 +190,7 @@ fn hn_decoder_skips_null_items() {
     assert!(out.items.is_empty());
 
     let next = out.next_cursor.expect("cursor expected");
-    let req = decoder.request_spec(Some(&next));
+    let req = decoder.http_request(Some(&next));
     assert_eq!(
         req.url.as_str(),
         "https://hacker-news.firebaseio.com/v0/item/43.json"
@@ -200,7 +200,7 @@ fn hn_decoder_skips_null_items() {
 #[test]
 fn hn_decoder_builds_expected_urls() {
     let decoder = hn_story_decoder(1);
-    let req = decoder.request_spec(None);
+    let req = decoder.http_request(None);
     assert_eq!(
         req.url.as_str(),
         "https://hacker-news.firebaseio.com/v0/topstories.json"
@@ -209,7 +209,7 @@ fn hn_decoder_builds_expected_urls() {
     let resp = http_ok("[123]");
     let out = decoder.decode_success(None, &resp).expect("decode ok");
     let cursor = out.next_cursor.expect("cursor expected");
-    let req = decoder.request_spec(Some(&cursor));
+    let req = decoder.http_request(Some(&cursor));
     assert_eq!(
         req.url.as_str(),
         "https://hacker-news.firebaseio.com/v0/item/123.json"

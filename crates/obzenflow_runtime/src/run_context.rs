@@ -13,7 +13,7 @@
 //! It also holds the build's one extraction of the `[app]` table until the
 //! flow build records it; the snapshot stays immutable.
 
-use crate::ai::AiModelProviders;
+use crate::ai::AiModelResolvers;
 use crate::runtime_config::{ApplicationSettingsError, ResolvedRuntimeConfig};
 use obzenflow_core::metrics::MetricsSnapshotExporter;
 use serde::de::DeserializeOwned;
@@ -25,7 +25,7 @@ pub struct FlowBuildContext {
     runtime_config: Arc<ResolvedRuntimeConfig>,
     metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
     app_settings: Arc<OnceLock<serde_json::Value>>,
-    ai_models: AiModelProviders,
+    ai_models: AiModelResolvers,
 }
 
 impl FlowBuildContext {
@@ -34,17 +34,17 @@ impl FlowBuildContext {
             runtime_config,
             metrics_exporter: None,
             app_settings: Arc::new(OnceLock::new()),
-            ai_models: AiModelProviders::default(),
+            ai_models: AiModelResolvers::default(),
         }
     }
 
-    /// Install the model providers this build binds AI stages with.
-    pub fn with_ai_models(mut self, providers: AiModelProviders) -> Self {
-        self.ai_models = providers;
+    /// Install the model resolvers this build binds AI stages with.
+    pub fn with_ai_models(mut self, resolvers: AiModelResolvers) -> Self {
+        self.ai_models = resolvers;
         self
     }
 
-    pub fn ai_models(&self) -> &AiModelProviders {
+    pub fn ai_models(&self) -> &AiModelResolvers {
         &self.ai_models
     }
 

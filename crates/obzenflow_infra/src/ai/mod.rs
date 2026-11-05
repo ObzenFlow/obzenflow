@@ -13,10 +13,13 @@ mod endpoint_identity;
 mod prompt;
 
 #[cfg(feature = "ai-rig")]
-mod model_providers;
+mod model_resolvers;
 
 #[cfg(feature = "ai-rig")]
-mod native_embedding_client;
+mod native_embedding_model;
+
+#[cfg(feature = "ai-rig")]
+mod provider_errors;
 
 mod model_profile;
 mod token_estimation;
@@ -34,18 +37,18 @@ pub use token_estimation::{
 pub use tiktoken::TiktokenEstimator;
 
 #[cfg(feature = "ai-rig")]
-pub use model_providers::{NativeEmbeddingModelProvider, RigChatModelProvider};
+pub use model_resolvers::{NativeEmbeddingModelResolver, RigChatModelResolver};
 
 #[cfg(feature = "ai-rig")]
-pub use native_embedding_client::NativeEmbeddingClient;
+pub use native_embedding_model::NativeEmbeddingModel;
 
-/// The model providers a host installs in each flow's build context. With the
+/// The model resolvers a host installs in each flow's build context. With the
 /// `ai-rig` feature these are rig chat and native embeddings; without it, none.
-pub fn builtin_ai_models() -> obzenflow_runtime::ai::AiModelProviders {
-    let providers = obzenflow_runtime::ai::AiModelProviders::default();
+pub fn builtin_ai_models() -> obzenflow_runtime::ai::AiModelResolvers {
+    let resolvers = obzenflow_runtime::ai::AiModelResolvers::default();
     #[cfg(feature = "ai-rig")]
-    let providers = providers
-        .chat(RigChatModelProvider)
-        .embedding(NativeEmbeddingModelProvider);
-    providers
+    let resolvers = resolvers
+        .chat(RigChatModelResolver)
+        .embedding(NativeEmbeddingModelResolver);
+    resolvers
 }

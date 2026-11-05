@@ -8,14 +8,14 @@ mod collect;
 mod effect;
 mod grouping;
 mod handlers;
-mod providers;
+mod resolvers;
 mod role;
 mod unavailable;
 
 pub use effect::{
-    AiBinding, AiBindingError, AiEffect, AiModelSource, AiProviderPort, AiRequestError,
+    AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError, AiResolverPort,
 };
-pub use providers::AiModelProviders;
+pub use resolvers::AiModelResolvers;
 pub use role::{AiReply, AiRequest, AiRole};
 
 #[doc(hidden)]

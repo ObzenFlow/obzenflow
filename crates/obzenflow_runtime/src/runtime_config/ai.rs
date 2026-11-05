@@ -15,6 +15,7 @@ use obzenflow_core::event::EffectType;
 use obzenflow_core::http_client::Url;
 use obzenflow_core::StageKey;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// The chat family's configuration section.
 pub const AI_MODELS_SECTION: &str = "ai.models";
@@ -24,6 +25,8 @@ pub const AI_EMBEDDINGS_SECTION: &str = "ai.embeddings";
 pub const MAX_OPEN_KEYS_KEY: &str = "runtime.ai.max_open_keys";
 /// The open-key limit when configuration sets none.
 pub const DEFAULT_MAX_OPEN_KEYS: u64 = 1_000;
+/// An AI call's deadline, in milliseconds, when configuration sets none.
+pub const DEFAULT_AI_REQUEST_TIMEOUT_MS: u64 = 600_000;
 /// Endpoint names that need no table and that no table may reuse.
 pub const BUILTIN_AI_ENDPOINTS: &[&str] = &["ollama", "openai"];
 
@@ -187,11 +190,12 @@ impl AiEndpointTables {
 }
 
 /// One AI stage's endpoint and model for one effect, with the configuration
-/// that chose each.
+/// that chose each and the deadline each call carries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedAiModel {
     pub endpoint: AiEndpoint,
     pub model: String,
+    pub request_timeout: Duration,
     pub endpoint_choice: Resolved<ConfigValue>,
     pub model_choice: Resolved<ConfigValue>,
 }
@@ -238,9 +242,13 @@ impl ResolvedRuntimeConfig {
             .unwrap_or_default()
             .trim()
             .to_string();
+        let request_timeout = resolve(format!("{section}.request_timeout_ms"))?
+            .and_then(|resolved| resolved.value.as_u64())
+            .unwrap_or(DEFAULT_AI_REQUEST_TIMEOUT_MS);
         Ok(ResolvedAiModel {
             endpoint,
             model,
+            request_timeout: Duration::from_millis(request_timeout),
             endpoint_choice,
             model_choice,
         })

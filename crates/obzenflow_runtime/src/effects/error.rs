@@ -304,6 +304,20 @@ impl EffectError {
         }
     }
 
+    /// Whether the failure proves the dependency did not act: a rate limit, or
+    /// a dependency failure marked retryable. Repeating a definite no cannot
+    /// duplicate work, whatever the effect's safety.
+    pub fn is_definite_no(&self) -> bool {
+        matches!(
+            self,
+            EffectError::RateLimited { .. }
+                | EffectError::DependencyFailed {
+                    retry: RetryDisposition::Retryable,
+                    ..
+                }
+        )
+    }
+
     /// Construct a target-invariant failure from a validated typed slot.
     pub fn target_invariant_violation<P, M>(slot: EffectPortSlot<P, M>) -> Self
     where
@@ -364,6 +378,7 @@ impl EffectError {
             "validation" | "invalid_request" | "unsupported" => ErrorKind::Validation,
             "domain" => ErrorKind::Domain,
             "authentication"
+            | "other"
             | "binding_authority_fault"
             | "serialization"
             | "journal"
@@ -608,7 +623,7 @@ mod tests {
 
     fn dependency(code: &str) -> EffectError {
         EffectError::DependencyFailed {
-            failure_source: EffectFailureSource::new("chat_client"),
+            failure_source: EffectFailureSource::new("chat_model"),
             code: EffectFailureCode::new(code),
             message: "provider".to_string(),
             retry: RetryDisposition::NotRetryable,
@@ -659,7 +674,7 @@ mod tests {
             (dependency("authentication"), ErrorKind::PermanentFailure),
             (dependency("invalid_request"), ErrorKind::Validation),
             (dependency("unsupported"), ErrorKind::Validation),
-            (dependency("other"), ErrorKind::Unknown),
+            (dependency("other"), ErrorKind::PermanentFailure),
         ];
         for (live, kind) in cases {
             assert_eq!(live.error_kind(), kind, "{live:?}");

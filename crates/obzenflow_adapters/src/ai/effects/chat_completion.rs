@@ -2,14 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::ai::error_mapping::{ai_client_error_to_effect_error, provider_error_to_resolution};
-use crate::ai::unreachable::UnreachableChatClient;
+use crate::ai::error_mapping::{ai_provider_error_to_effect_error, resolution_error_to_port};
+use crate::ai::unreachable::UnreachableChatModel;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     params_hash_for_chat, prompt_hash_for_chat, schema_hash_for_response_format, AiEndpoint,
-    AiModelSpec, CanonicalizationComponent, ChatClient, ChatCompletionOutcome, ChatCompletionReply,
-    ChatModelDescription, ChatModelProvider, ChatRequest, ChatRequestSpec, ChatResponseFormat,
-    ChatTarget, LlmHashes, LlmObservability, ResolvedTokenEstimator, CHAT_CLIENT_PORT,
+    AiModelSpec, CanonicalizationComponent, ChatCompletionOutcome, ChatCompletionReply, ChatModel,
+    ChatModelDescription, ChatModelResolver, ChatRequest, ChatRequestSpec, ChatResponseFormat,
+    ChatTarget, LlmHashes, LlmObservability, ResolvedTokenEstimator, CHAT_MODEL_PORT,
 };
 use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::ai::{AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError};
@@ -22,8 +22,10 @@ use obzenflow_runtime::effects::{
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
+const FAILURE_SOURCE: &str = "chat_model";
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum ChatCompletionBuildError {
@@ -107,8 +109,8 @@ impl EffectBindingEvidence for ChatBindingEvidence {
     }
 }
 
-pub const CHAT_CLIENT: EffectPortSlot<dyn ChatClient, ChatTarget> =
-    EffectPortSlot::new(CHAT_CLIENT_PORT);
+pub const CHAT_MODEL: EffectPortSlot<dyn ChatModel, ChatTarget> =
+    EffectPortSlot::new(CHAT_MODEL_PORT);
 
 /// Replay-safe chat completion, performed only by an `ai!` stage.
 #[derive(Clone)]
@@ -197,25 +199,25 @@ impl Effect for ChatCompletion {
 
     fn validate_port_metadata(&self, ctx: &EffectPortMetadataContext) -> Result<(), EffectError> {
         let expected = self.binding.evidence().target();
-        let observed = ctx.metadata(CHAT_CLIENT)?;
+        let observed = ctx.metadata(CHAT_MODEL)?;
         if expected != observed.as_ref() {
-            return Err(EffectError::target_invariant_violation(CHAT_CLIENT));
+            return Err(EffectError::target_invariant_violation(CHAT_MODEL));
         }
         Ok(())
     }
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<ChatCompletionOutcome, EffectError> {
-        let client = ctx.port(CHAT_CLIENT)?;
+        let model = ctx.port(CHAT_MODEL)?;
         let estimated_input_tokens = self
             .binding
             .evidence()
             .estimator()
             .estimator()
             .estimate_chat_request(&self.request);
-        let mut response = client
+        let mut response = model
             .chat(self.request.clone())
             .await
-            .map_err(|error| ai_client_error_to_effect_error(error, CHAT_CLIENT, "chat_client"))?;
+            .map_err(|error| ai_provider_error_to_effect_error(error, FAILURE_SOURCE))?;
         let removed_citations = match (&self.citing, &self.request.response_format) {
             (Some(numbers), None | Some(ChatResponseFormat::Text)) => {
                 response.remove_citations_outside(numbers)
@@ -249,7 +251,7 @@ impl BoundEffect for ChatCompletion {
     }
 
     fn required_slots() -> EffectPortSlotSet {
-        EffectPortSlotSet::single(CHAT_CLIENT)
+        EffectPortSlotSet::single(CHAT_MODEL)
     }
 }
 
@@ -260,7 +262,7 @@ impl EffectName for ChatCompletion {
 impl AiEffect for ChatCompletion {
     type Request = ChatRequestSpec;
     type Reply = ChatCompletionReply;
-    type Provider = dyn ChatModelProvider;
+    type Resolver = dyn ChatModelResolver;
 
     const SECTION: &'static str = "ai.models";
     const FAMILY: &'static str = "chat";
@@ -282,9 +284,9 @@ impl AiEffect for ChatCompletion {
     }
 
     fn bind(
-        source: AiModelSource<dyn ChatModelProvider>,
+        source: AiModelSource<dyn ChatModelResolver>,
     ) -> Result<AiBinding<Self>, AiBindingError> {
-        let (stage, endpoint_name, description, resolver): (
+        let (stage, endpoint_name, description, port): (
             String,
             String,
             _,
@@ -294,42 +296,46 @@ impl AiEffect for ChatCompletion {
                 stage,
                 endpoint,
                 model,
-                provider,
+                request_timeout,
+                resolver,
             } => {
-                let description = provider.describe(&endpoint, &model)?;
+                let description = resolver.describe(&endpoint, &model)?;
                 let name = endpoint.name.clone();
-                let resolver = connecting(provider, endpoint, description.clone());
-                (stage, name, description, resolver)
+                let port = connecting(resolver, endpoint, description.clone(), request_timeout);
+                (stage, name, description, port)
             }
             AiModelSource::Recorded {
                 stage,
                 spec,
-                provider,
+                resolver,
             } => {
-                let description = provider.describe_recorded(&spec)?;
-                let resolver = unreachable(description.target.clone(), spec.endpoint.clone());
-                (stage, spec.endpoint, description, resolver)
+                let description = resolver.describe_recorded(&spec)?;
+                let port = unreachable(description.target.clone(), spec.endpoint.clone());
+                (stage, spec.endpoint, description, port)
             }
             AiModelSource::Kept {
                 stage,
                 spec,
                 endpoint,
-                provider,
+                request_timeout,
+                resolver,
             } => {
-                let description = provider.describe_recorded(&spec)?;
+                let description = resolver.describe_recorded(&spec)?;
                 let serving = endpoint.filter(|endpoint| {
-                    provider
+                    resolver
                         .describe(endpoint, &spec.model)
                         .is_ok_and(|current| {
                             current.target.binding_fingerprint
                                 == description.target.binding_fingerprint
                         })
                 });
-                let resolver = match serving {
-                    Some(endpoint) => connecting(provider, endpoint, description.clone()),
+                let port = match serving {
+                    Some(endpoint) => {
+                        connecting(resolver, endpoint, description.clone(), request_timeout)
+                    }
                     None => unreachable(description.target.clone(), spec.endpoint.clone()),
                 };
-                (stage, spec.endpoint, description, resolver)
+                (stage, spec.endpoint, description, port)
             }
         };
         let spec = AiModelSpec {
@@ -350,34 +356,35 @@ impl AiEffect for ChatCompletion {
         let logical_name = LogicalEffectBindingName::new(stage)
             .map_err(|error| AiBindingError::Evidence(error.to_string()))?;
         let binding = EffectRegistrationBuilder::<Self>::new(logical_name, evidence)
-            .bind_deferred_with_metadata(CHAT_CLIENT, resolver)?
+            .bind_deferred_with_metadata(CHAT_MODEL, port)?
             .finish()?;
         Ok(AiBinding { binding, spec })
     }
 }
 
 fn connecting(
-    provider: Arc<dyn ChatModelProvider>,
+    resolver: Arc<dyn ChatModelResolver>,
     endpoint: AiEndpoint,
     description: ChatModelDescription,
-) -> EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> {
+    request_timeout: Duration,
+) -> EffectPortResolverWithMetadata<dyn ChatModel, ChatTarget> {
     Arc::new(move || {
-        let client = provider
-            .connect(&endpoint, &description)
-            .map_err(provider_error_to_resolution)?;
-        let metadata = Arc::new(client.target().clone());
-        Ok(ResolvedEffectPort::new(client, metadata))
+        let model = resolver
+            .connect(&endpoint, &description, request_timeout)
+            .map_err(resolution_error_to_port)?;
+        let metadata = Arc::new(model.target().clone());
+        Ok(ResolvedEffectPort::new(model, metadata))
     })
 }
 
 fn unreachable(
     target: ChatTarget,
     endpoint: String,
-) -> EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> {
+) -> EffectPortResolverWithMetadata<dyn ChatModel, ChatTarget> {
     Arc::new(move || {
-        let client: Arc<dyn ChatClient> =
-            Arc::new(UnreachableChatClient::new(target.clone(), endpoint.clone()));
-        Ok(ResolvedEffectPort::new(client, Arc::new(target.clone())))
+        let model: Arc<dyn ChatModel> =
+            Arc::new(UnreachableChatModel::new(target.clone(), endpoint.clone()));
+        Ok(ResolvedEffectPort::new(model, Arc::new(target.clone())))
     })
 }
 

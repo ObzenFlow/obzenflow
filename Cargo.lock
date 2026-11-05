@@ -1737,6 +1737,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "serde_urlencoded",
  "strum_macros",
  "thiserror 1.0.69",
  "tokio",

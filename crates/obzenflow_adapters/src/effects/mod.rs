@@ -3,3 +3,5 @@
 // https://obzenflow.dev
 
 //! Adapter-owned effect integrations.
+
+pub mod http;

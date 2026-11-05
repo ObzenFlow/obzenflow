@@ -4,12 +4,15 @@
 
 use async_trait::async_trait;
 use futures::future::{BoxFuture, FutureExt, Shared};
-use obzenflow_core::http_client::{HttpClient, HttpClientError, HttpResponse, RequestSpec};
+use obzenflow_core::http_client::{Body, HttpClient, HttpClientError, HttpRequest, HttpResponse};
 use obzenflow_core::web::HttpMethod;
+use reqwest::header::CONTENT_TYPE;
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 struct NativeRootsStatus {
@@ -330,16 +333,35 @@ fn map_reqwest_error(err: reqwest::Error) -> HttpClientError {
 
 #[async_trait]
 impl HttpClient for ReqwestHttpClient {
-    async fn execute(&self, request: RequestSpec) -> Result<HttpResponse, HttpClientError> {
+    async fn send(&self, request: HttpRequest) -> Result<HttpResponse, HttpClientError> {
+        let HttpRequest {
+            method,
+            url,
+            mut headers,
+            body,
+            timeout,
+        } = request;
+        let body = match body {
+            Body::Empty => None,
+            Body::Encoded {
+                content_type,
+                bytes,
+            } => {
+                headers.insert(CONTENT_TYPE, content_type);
+                Some(bytes)
+            }
+            Body::Unencodable(message) => return Err(HttpClientError::Unencodable(message)),
+        };
         entered_tokio_runtime("HTTP request execution")?;
         let client = self.client().await?;
-        ensure_native_roots_for_https(request.url.scheme()).await?;
+        ensure_native_roots_for_https(url.scheme()).await?;
 
         let mut builder = client
-            .request(map_method(request.method), request.url)
-            .headers(request.headers);
+            .request(map_method(method), url)
+            .headers(headers)
+            .timeout(timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
 
-        if let Some(body) = request.body {
+        if let Some(body) = body {
             builder = builder.body(body);
         }
 
@@ -355,10 +377,8 @@ impl HttpClient for ReqwestHttpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::http_client::RequestSpec;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
-    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use url::Url;
@@ -414,14 +434,14 @@ mod tests {
     }
 
     #[test]
-    fn execute_without_an_entered_tokio_runtime_returns_a_typed_error() {
+    fn send_outside_tokio_runtime_returns_error() {
         let client = ReqwestHttpClient::new();
-        let request = RequestSpec::new(
+        let request = HttpRequest::new(
             HttpMethod::Get,
             Url::parse("http://127.0.0.1:9/never-sent").expect("test URL"),
         );
 
-        let error = futures::executor::block_on(client.execute(request))
+        let error = futures::executor::block_on(client.send(request))
             .expect_err("request execution outside Tokio must fail before setup");
 
         assert_eq!(
@@ -470,7 +490,7 @@ mod tests {
         let first = tokio::spawn(async move {
             tokio::time::timeout(
                 Duration::from_millis(50),
-                first_client.execute(RequestSpec::new(HttpMethod::Get, first_url)),
+                first_client.send(HttpRequest::new(HttpMethod::Get, first_url)),
             )
             .await
         });
@@ -483,7 +503,7 @@ mod tests {
         .expect("blocking-pool initialization starts without blocking current-thread Tokio");
 
         assert!(
-            first.await.expect("first execute task").is_err(),
+            first.await.expect("first send task").is_err(),
             "the first waiter must time out while physical setup continues"
         );
         assert_eq!(requests.load(Ordering::SeqCst), 0);
@@ -497,7 +517,7 @@ mod tests {
 
         let response = client
             .clone()
-            .execute(RequestSpec::new(HttpMethod::Get, url))
+            .send(HttpRequest::new(HttpMethod::Get, url))
             .await
             .expect("a later waiter reuses the retained setup verdict");
         assert_eq!(response.status, 200);
@@ -508,7 +528,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_execute_initializes_once_across_clones() {
+    async fn concurrent_send_initializes_client_once() {
         const CALLERS: usize = 8;
         let initializations = Arc::new(AtomicUsize::new(0));
         let init_count = initializations.clone();
@@ -528,14 +548,14 @@ mod tests {
             let url = url.clone();
             tasks.push(tokio::spawn(async move {
                 client
-                    .execute(RequestSpec::new(HttpMethod::Get, url))
+                    .send(HttpRequest::new(HttpMethod::Get, url))
                     .await
                     .expect("fixture request succeeds")
             }));
         }
 
         for task in tasks {
-            assert_eq!(task.await.expect("execute task").status, 200);
+            assert_eq!(task.await.expect("send task").status, 200);
         }
         fixture.await.expect("HTTP fixture task");
         assert_eq!(initializations.load(Ordering::SeqCst), 1);
@@ -544,7 +564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialization_failure_is_cached_across_repeated_execute_calls() {
+    async fn initialization_failure_cached_across_sends() {
         let initializations = Arc::new(AtomicUsize::new(0));
         let init_count = initializations.clone();
         let client = ReqwestHttpClient::with_initializer(move || {
@@ -557,7 +577,7 @@ mod tests {
 
         for caller in [client.clone(), client.clone(), client.clone()] {
             let error = caller
-                .execute(RequestSpec::new(HttpMethod::Get, url.clone()))
+                .send(HttpRequest::new(HttpMethod::Get, url.clone()))
                 .await
                 .expect_err("initialization must fail before request send");
             assert_eq!(
@@ -580,12 +600,12 @@ mod tests {
         let url = Url::parse("http://127.0.0.1:9/never-sent").expect("test URL");
 
         let first = client
-            .execute(RequestSpec::new(HttpMethod::Get, url.clone()))
+            .send(HttpRequest::new(HttpMethod::Get, url.clone()))
             .await
             .expect_err("panic is converted to a transport error");
         let second = client
             .clone()
-            .execute(RequestSpec::new(HttpMethod::Get, url))
+            .send(HttpRequest::new(HttpMethod::Get, url))
             .await
             .expect_err("cached panic result is returned to clones");
 
@@ -614,13 +634,60 @@ mod tests {
 
         assert!(client.is_initialized());
         let response = client
-            .execute(RequestSpec::new(HttpMethod::Get, url))
+            .send(HttpRequest::new(HttpMethod::Get, url))
             .await
-            .expect("preseeded client executes request");
+            .expect("preseeded client sends request");
 
         assert_eq!(response.status, 200);
         fixture.await.expect("HTTP fixture task");
         assert_eq!(initializations.load(Ordering::SeqCst), 0);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn send_to_silent_server_times_out() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind silent server");
+        let url = Url::parse(&format!(
+            "http://{}/silent",
+            listener.local_addr().expect("silent server address")
+        ))
+        .expect("silent server URL");
+        let client = ReqwestHttpClient::new();
+        for (request, deadline) in [
+            (HttpRequest::get(url.clone()), DEFAULT_REQUEST_TIMEOUT),
+            (
+                HttpRequest::get(url.clone()).with_timeout(Duration::from_secs(2)),
+                Duration::from_secs(2),
+            ),
+        ] {
+            let started = tokio::time::Instant::now();
+            let error = client
+                .send(request)
+                .await
+                .expect_err("a silent server never answers");
+            assert!(matches!(error, HttpClientError::Timeout(_)), "{error:?}");
+            assert_eq!(started.elapsed().as_secs(), deadline.as_secs());
+        }
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn unencodable_request_never_sends() {
+        let (url, requests, fixture) = spawn_http_fixture(1).await;
+        let client = ReqwestHttpClient::new();
+
+        let refused = client
+            .send(HttpRequest::post(url.clone()).with_bearer_token("key\n"))
+            .await;
+        assert!(matches!(refused, Err(HttpClientError::Unencodable(_))));
+
+        client
+            .send(HttpRequest::get(url))
+            .await
+            .expect("the next request is sent");
+        fixture.await.expect("HTTP fixture task");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 }

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::ai::AiClientError;
+use obzenflow_core::ai::AiProviderError;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use std::sync::OnceLock;
@@ -37,7 +37,7 @@ impl NativeRootsStatus {
 
 static NATIVE_ROOTS_STATUS: OnceLock<NativeRootsStatus> = OnceLock::new();
 
-fn ensure_native_roots_for_https(provider: &str, base_url: &Url) -> Result<(), AiClientError> {
+fn ensure_native_roots_for_https(provider: &str, base_url: &Url) -> Result<(), AiProviderError> {
     if base_url.scheme() != "https" {
         return Ok(());
     }
@@ -72,7 +72,7 @@ fn ensure_native_roots_for_https(provider: &str, base_url: &Url) -> Result<(), A
         ));
     }
 
-    Err(AiClientError::Unsupported {
+    Err(AiProviderError::Unsupported {
         message: message.trim_end().to_string(),
     })
 }
@@ -110,13 +110,13 @@ pub(crate) fn normalize_base_url_for_join(mut base_url: Url) -> Url {
 pub(crate) async fn preflight_ollama(
     base_url: &Url,
     model: Option<&str>,
-) -> Result<(), AiClientError> {
+) -> Result<(), AiProviderError> {
     ensure_native_roots_for_https("ollama", base_url)?;
 
     let base_url = normalize_base_url_for_join(base_url.clone());
     let tags_url = base_url
         .join("api/tags")
-        .map_err(|err| AiClientError::InvalidRequest {
+        .map_err(|err| AiProviderError::InvalidRequest {
             message: format!("invalid ollama base url '{base_url}': {err}"),
         })?;
 
@@ -134,7 +134,7 @@ pub(crate) async fn preflight_ollama(
     }
 
     if !resp.status().is_success() {
-        return Err(AiClientError::Remote {
+        return Err(AiProviderError::Remote {
             message: format!(
                 "ollama preflight failed (GET {tags_url} -> HTTP {}): check that Ollama is running and reachable",
                 resp.status()
@@ -142,17 +142,18 @@ pub(crate) async fn preflight_ollama(
         });
     }
 
-    let body = resp.bytes().await.map_err(|err| AiClientError::Remote {
+    let body = resp.bytes().await.map_err(|err| AiProviderError::Remote {
         message: format!("ollama preflight failed to read tags response: {err}"),
     })?;
-    let tags: OllamaTags = serde_json::from_slice(&body).map_err(|err| AiClientError::Remote {
-        message: format!("ollama preflight failed to parse tags response: {err}"),
-    })?;
+    let tags: OllamaTags =
+        serde_json::from_slice(&body).map_err(|err| AiProviderError::Remote {
+            message: format!("ollama preflight failed to parse tags response: {err}"),
+        })?;
 
     if let Some(expected) = model {
         let found = tags.models.iter().any(|m| m.name == expected);
         if !found {
-            return Err(AiClientError::InvalidRequest {
+            return Err(AiProviderError::InvalidRequest {
                 message: format!(
                     "ollama model '{expected}' not found (GET {tags_url}). Try: `ollama pull {expected}`"
                 ),
@@ -166,11 +167,11 @@ pub(crate) async fn preflight_ollama(
 async fn preflight_ollama_version(
     client: &reqwest::Client,
     base_url: &Url,
-) -> Result<(), AiClientError> {
+) -> Result<(), AiProviderError> {
     let version_url =
         base_url
             .join("api/version")
-            .map_err(|err| AiClientError::InvalidRequest {
+            .map_err(|err| AiProviderError::InvalidRequest {
                 message: format!("invalid ollama base url '{base_url}': {err}"),
             })?;
 
@@ -185,7 +186,7 @@ async fn preflight_ollama_version(
         return Ok(());
     }
 
-    Err(AiClientError::Remote {
+    Err(AiProviderError::Remote {
         message: format!(
             "ollama preflight failed (GET {version_url} -> HTTP {}): check that Ollama is running and reachable",
             resp.status()
@@ -197,13 +198,13 @@ pub(crate) async fn preflight_openai_models(
     base_url: &Url,
     api_key: &str,
     model: Option<&str>,
-) -> Result<(), AiClientError> {
+) -> Result<(), AiProviderError> {
     ensure_native_roots_for_https("openai", base_url)?;
 
     let base_url = normalize_base_url_for_join(base_url.clone());
     let models_url = base_url
         .join("models")
-        .map_err(|err| AiClientError::InvalidRequest {
+        .map_err(|err| AiProviderError::InvalidRequest {
             message: format!("invalid openai base url '{base_url}': {err}"),
         })?;
 
@@ -218,7 +219,7 @@ pub(crate) async fn preflight_openai_models(
 
     match resp.status() {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            return Err(AiClientError::Auth {
+            return Err(AiProviderError::Auth {
                 message: format!(
                     "openai preflight failed (GET {models_url} -> HTTP {}): check your API key",
                     resp.status()
@@ -226,14 +227,14 @@ pub(crate) async fn preflight_openai_models(
             });
         }
         StatusCode::NOT_FOUND => {
-            return Err(AiClientError::InvalidRequest {
+            return Err(AiProviderError::InvalidRequest {
                 message: format!(
                     "openai preflight failed (GET {models_url} -> HTTP 404): base_url should typically end with `/v1`"
                 ),
             });
         }
         status if !status.is_success() => {
-            return Err(AiClientError::Remote {
+            return Err(AiProviderError::Remote {
                 message: format!(
                     "openai preflight failed (GET {models_url} -> HTTP {status}): provider returned an error"
                 ),
@@ -265,7 +266,7 @@ pub(crate) async fn preflight_openai_models(
     if let Some(expected) = model {
         let found = list.data.iter().any(|m| m.id == expected);
         if !found && !list.data.is_empty() {
-            return Err(AiClientError::InvalidRequest {
+            return Err(AiProviderError::InvalidRequest {
                 message: format!(
                     "openai model '{expected}' not found in /models listing at {base_url}"
                 ),
@@ -281,7 +282,7 @@ fn map_reqwest_error(
     provider: &str,
     base_url: &Url,
     request_url: &Url,
-) -> AiClientError {
+) -> AiProviderError {
     if err.is_timeout() {
         let mut message = String::new();
         message.push_str(&format!(
@@ -319,18 +320,18 @@ fn map_reqwest_error(
         }
         message.push_str(&format!("Cause: {err}"));
 
-        return AiClientError::Timeout {
+        return AiProviderError::Timeout {
             message: message.trim_end().to_string(),
         };
     }
 
     if err.is_connect() {
-        return AiClientError::Remote {
+        return AiProviderError::Remote {
             message: format_connect_error(provider, base_url, request_url, &err),
         };
     }
 
-    AiClientError::Remote {
+    AiProviderError::Remote {
         message: format!("{provider} preflight request failed (GET {request_url}): {err}"),
     }
 }

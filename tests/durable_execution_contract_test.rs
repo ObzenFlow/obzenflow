@@ -631,7 +631,7 @@ fn durable_execution_contract_child() {
             .run_blocking(lagging::fan_in_flow(scenario)),
         Graph::AiDigest => app
             .with_config_file(ai_digest::config(scenario))
-            .with_ai_models(ai_digest::models(scenario, plan.hold.as_ref()).providers())
+            .with_ai_models(ai_digest::models(scenario, plan.hold.as_ref()).resolvers())
             .run_blocking(ai_digest::build_flow(scenario, plan.hold)),
     };
     if let Err(error) = result {

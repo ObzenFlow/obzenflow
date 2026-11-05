@@ -14,7 +14,7 @@ use crate::application::config::{ResolvedStudioConfig, StartupMode};
 use crate::http_client::default_http_client;
 use crate::web::studio_presence::RuntimePresenceProjection;
 use crate::web::RuntimeInstanceId;
-use obzenflow_core::http_client::{HttpClient, HttpMethod, RequestSpec, Url};
+use obzenflow_core::http_client::{HttpClient, HttpMethod, HttpRequest, Url};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -119,8 +119,8 @@ async fn self_probe(
         if *shutdown_rx.borrow() {
             return false;
         }
-        let request = RequestSpec::new(HttpMethod::Get, url.clone());
-        if let Ok(response) = client.execute(request).await {
+        let request = HttpRequest::new(HttpMethod::Get, url.clone());
+        if let Ok(response) = client.send(request).await {
             if response.status == 200 {
                 return true;
             }
@@ -151,13 +151,8 @@ async fn register_once(
         "phase": phase.as_wire(),
         "lease_ttl_secs": ctx.studio.lease_ttl_secs,
     });
-    let mut request = RequestSpec::new(HttpMethod::Post, register_url.clone());
-    request.headers.insert(
-        "content-type",
-        "application/json".parse().expect("static header value"),
-    );
-    request.body = Some(payload.to_string().into());
-    match client.execute(request).await {
+    let request = HttpRequest::post(register_url.clone()).with_json(&payload);
+    match client.send(request).await {
         Ok(response) if (200..300).contains(&response.status) => Ok(()),
         Ok(response) => Err(format!("phonebook returned status {}", response.status)),
         Err(error) => Err(error.to_string()),
@@ -179,8 +174,8 @@ async fn deregister(client: &dyn HttpClient, ctx: &HeartbeatContext) {
     };
     url.query_pairs_mut()
         .append_pair("runtime_instance_id", ctx.runtime_instance_id.as_str());
-    let request = RequestSpec::new(HttpMethod::Delete, url);
-    if let Err(error) = client.execute(request).await {
+    let request = HttpRequest::new(HttpMethod::Delete, url);
+    if let Err(error) = client.send(request).await {
         tracing::warn!(%error, "phonebook deregistration failed; lease will expire instead");
     }
 }

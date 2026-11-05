@@ -8,11 +8,14 @@ use super::transport::ChatTransport;
 use crate::ai::endpoint_identity::{
     bound_chat_target, default_ollama_base_url, default_openai_base_url,
 };
+use crate::ai::provider_errors::ModelCalls;
+use crate::http_client::ReqwestHttpClient;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    AiClientError, AiProvider, ChatClient, ChatMessage, ChatParams, ChatRequest, ChatResponse,
+    AiProvider, AiProviderError, ChatMessage, ChatModel, ChatParams, ChatRequest, ChatResponse,
     ChatResponseFormat, ChatTarget, ToolCall, ToolDefinition, Usage, UsageSource,
 };
+use obzenflow_runtime::runtime_config::AI_MODELS_SECTION;
 use rig_rs::completion::{
     CompletionRequest, CompletionResponse, ToolDefinition as RigToolDefinition,
 };
@@ -24,6 +27,7 @@ use rig_rs::schemars::Schema;
 use rig_rs::Model;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 const TOOL_ROLE_UNSUPPORTED_MESSAGE: &str =
@@ -35,111 +39,150 @@ enum RigChatBackend {
     OpenAi { model: Arc<Model<Responses>> },
 }
 
-/// Rig-backed implementation of `ChatClient`.
-///
-/// This client is configured for exactly one provider+model pair. Incoming requests
-/// must match the configured `provider` and `model` (to keep hashes/observability honest).
+/// Rig-backed implementation of `ChatModel`, serving one provider and model.
 #[derive(Clone)]
-pub struct RigChatClient {
+pub struct RigChatModel {
     target: ChatTarget,
     backend: RigChatBackend,
+    calls: ModelCalls,
 }
 
-impl RigChatClient {
-    /// Create an Ollama-backed client.
-    pub fn ollama(model: impl Into<String>, base_url: Option<Url>) -> Result<Self, AiClientError> {
+impl RigChatModel {
+    /// An Ollama-backed model whose calls each carry `request_timeout`.
+    pub fn ollama(
+        model: impl Into<String>,
+        base_url: Option<Url>,
+        request_timeout: Duration,
+    ) -> Self {
+        Self::ollama_through(
+            model,
+            base_url,
+            ChatTransport::through(Arc::new(ReqwestHttpClient::new()), request_timeout),
+        )
+    }
+
+    fn ollama_through(
+        model: impl Into<String>,
+        base_url: Option<Url>,
+        transport: ChatTransport,
+    ) -> Self {
         let model = model.into();
         let endpoint = base_url.unwrap_or_else(default_ollama_base_url);
+        let calls = model_calls(&transport);
         let client = OllamaConfig::new()
             .with_base_url(endpoint.as_str())
-            .connect(ChatTransport::new());
+            .connect(transport);
 
-        Ok(Self {
+        Self {
             backend: RigChatBackend::Ollama {
                 model: Arc::new(client.native_completion(model.as_str())),
             },
             target: bound_chat_target("ollama", model, &endpoint),
-        })
+            calls,
+        }
     }
 
-    /// Create an Ollama-backed client and fail fast if the provider/model is not available.
-    ///
-    /// This performs a lightweight preflight call to the Ollama server (no inference)
-    /// and verifies the requested model exists in `/api/tags`.
+    /// An Ollama-backed model that fails fast when the provider or model is
+    /// not available, after a lightweight preflight of `/api/tags`.
     pub async fn ollama_checked(
         model: impl Into<String>,
         base_url: Option<Url>,
-    ) -> Result<Self, AiClientError> {
+        request_timeout: Duration,
+    ) -> Result<Self, AiProviderError> {
         let model = model.into();
         let base_url = base_url.unwrap_or_else(default_ollama_base_url);
 
         preflight_ollama(&base_url, Some(model.as_str())).await?;
-        Self::ollama(model, Some(base_url))
+        Ok(Self::ollama(model, Some(base_url), request_timeout))
     }
 
-    /// Create an OpenAI-compatible-backed client.
-    ///
-    /// This covers OpenAI-hosted APIs as well as OpenAI-compatible servers (vLLM, LM Studio, etc.)
-    /// by supplying a base URL.
+    /// An OpenAI-compatible model at `base_url`, such as vLLM or LM Studio.
     pub fn openai_compatible(
         model: impl Into<String>,
         api_key: impl Into<String>,
         base_url: Url,
-    ) -> Result<Self, AiClientError> {
-        let model = model.into();
-
-        Ok(Self {
-            backend: RigChatBackend::OpenAi {
-                model: Arc::new(responses_model(model.as_str(), api_key.into(), &base_url)),
-            },
-            target: bound_chat_target("openai_compatible", model, &base_url),
-        })
+        request_timeout: Duration,
+    ) -> Self {
+        Self::openai_through(
+            "openai_compatible",
+            model,
+            api_key,
+            base_url,
+            ChatTransport::through(Arc::new(ReqwestHttpClient::new()), request_timeout),
+        )
     }
 
-    /// Create an OpenAI-compatible-backed client and fail fast if the endpoint is not reachable.
-    ///
-    /// This preflights `GET /models` against the supplied base URL (no inference).
+    /// An OpenAI-compatible model that fails fast when the endpoint is not
+    /// reachable, after a preflight of `GET /models`.
     pub async fn openai_compatible_checked(
         model: impl Into<String>,
         api_key: impl Into<String>,
         base_url: Url,
-    ) -> Result<Self, AiClientError> {
+        request_timeout: Duration,
+    ) -> Result<Self, AiProviderError> {
         let model = model.into();
         let api_key = api_key.into();
 
         preflight_openai_models(&base_url, api_key.as_str(), Some(model.as_str())).await?;
-        Self::openai_compatible(model, api_key, base_url)
+        Ok(Self::openai_compatible(
+            model,
+            api_key,
+            base_url,
+            request_timeout,
+        ))
     }
 
-    /// Create an OpenAI-backed client that targets the default OpenAI base URL.
+    /// An OpenAI-backed model at the default OpenAI base URL.
     pub fn openai(
         model: impl Into<String>,
         api_key: impl Into<String>,
-    ) -> Result<Self, AiClientError> {
-        let model = model.into();
-        let endpoint = default_openai_base_url();
-
-        Ok(Self {
-            backend: RigChatBackend::OpenAi {
-                model: Arc::new(responses_model(model.as_str(), api_key.into(), &endpoint)),
-            },
-            target: bound_chat_target("openai", model, &endpoint),
-        })
+        request_timeout: Duration,
+    ) -> Self {
+        Self::openai_through(
+            "openai",
+            model,
+            api_key,
+            default_openai_base_url(),
+            ChatTransport::through(Arc::new(ReqwestHttpClient::new()), request_timeout),
+        )
     }
 
-    /// Create an OpenAI-backed client and fail fast if the endpoint is not reachable.
-    ///
-    /// This preflights `GET /models` against the default OpenAI base URL (no inference).
+    /// An OpenAI-backed model that fails fast when the endpoint is not
+    /// reachable, after a preflight of `GET /models`.
     pub async fn openai_checked(
         model: impl Into<String>,
         api_key: impl Into<String>,
-    ) -> Result<Self, AiClientError> {
+        request_timeout: Duration,
+    ) -> Result<Self, AiProviderError> {
         let model = model.into();
         let api_key = api_key.into();
         let base_url = default_openai_base_url();
 
         preflight_openai_models(&base_url, api_key.as_str(), Some(model.as_str())).await?;
-        Self::openai(model, api_key)
+        Ok(Self::openai(model, api_key, request_timeout))
+    }
+
+    fn openai_through(
+        provider: &'static str,
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        base_url: Url,
+        transport: ChatTransport,
+    ) -> Self {
+        let model = model.into();
+        let calls = model_calls(&transport);
+        Self {
+            backend: RigChatBackend::OpenAi {
+                model: Arc::new(responses_model(
+                    model.as_str(),
+                    api_key.into(),
+                    &base_url,
+                    transport,
+                )),
+            },
+            target: bound_chat_target(provider, model, &base_url),
+            calls,
+        }
     }
 
     pub fn provider(&self) -> &AiProvider {
@@ -152,21 +195,22 @@ impl RigChatClient {
 }
 
 #[async_trait]
-impl ChatClient for RigChatClient {
+impl ChatModel for RigChatModel {
     fn target(&self) -> &ChatTarget {
         &self.target
     }
 
-    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AiClientError> {
-        validate_request_target(&req, &self.target)?;
-
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AiProviderError> {
         let format = req.response_format.as_ref();
         let additional_params = build_additional_params(&req.params, format);
         match &self.backend {
             RigChatBackend::Ollama { model } => {
                 let request =
                     completion_request(&req, ollama_additional_params(additional_params, format))?;
-                let response = model.call(request).await.map_err(map_rig_error)?;
+                let response = model
+                    .call(request)
+                    .await
+                    .map_err(|error| map_rig_error(error, &self.calls))?;
                 map_chat_response(response, ollama_call_id)
             }
             RigChatBackend::OpenAi { model } => {
@@ -174,18 +218,34 @@ impl ChatClient for RigChatClient {
                     &req,
                     responses_additional_params(additional_params, format)?,
                 )?;
-                let response = model.call(request).await.map_err(map_rig_error)?;
+                let response = model
+                    .call(request)
+                    .await
+                    .map_err(|error| map_rig_error(error, &self.calls))?;
                 map_chat_response(response, responses_call_id)
             }
         }
     }
 }
 
-fn responses_model(model: &str, api_key: String, base_url: &Url) -> Model<Responses> {
+fn model_calls(transport: &ChatTransport) -> ModelCalls {
+    ModelCalls {
+        source: "chat_model",
+        section: AI_MODELS_SECTION,
+        request_timeout: transport.request_timeout(),
+    }
+}
+
+fn responses_model(
+    model: &str,
+    api_key: String,
+    base_url: &Url,
+    transport: ChatTransport,
+) -> Model<Responses> {
     let mut responses = OpenAIConfig::new(api_key)
         .with_base_url(base_url.as_str().trim_end_matches('/'))
         .with_system_instructions_as_messages()
-        .connect(ChatTransport::new())
+        .connect(transport)
         .responses(model);
     responses.wire = responses.wire.with_strict_tools();
     responses
@@ -194,7 +254,7 @@ fn responses_model(model: &str, api_key: String, base_url: &Url) -> Model<Respon
 fn completion_request(
     req: &ChatRequest,
     additional_params: Option<Value>,
-) -> Result<CompletionRequest, AiClientError> {
+) -> Result<CompletionRequest, AiProviderError> {
     let (preamble, chat_history) = preamble_and_history(&req.messages)?;
     let tools = req
         .tools
@@ -213,7 +273,7 @@ fn completion_request(
     request.additional_params = additional_params;
     if let Some(ChatResponseFormat::JsonSchema { schema }) = &req.response_format {
         let schema =
-            Schema::try_from(schema.clone()).map_err(|err| AiClientError::InvalidRequest {
+            Schema::try_from(schema.clone()).map_err(|err| AiProviderError::InvalidRequest {
                 message: format!("invalid JSON schema for the response format: {err}"),
             })?;
         request.output_schema = Some(schema);
@@ -245,14 +305,14 @@ fn ollama_additional_params(
 fn responses_additional_params(
     additional_params: Option<Value>,
     format: Option<&ChatResponseFormat>,
-) -> Result<Option<Value>, AiClientError> {
+) -> Result<Option<Value>, AiProviderError> {
     let mut map = match additional_params {
         Some(Value::Object(map)) => map,
         _ => Map::new(),
     };
     for field in ["model", "input"] {
         if map.contains_key(field) {
-            return Err(AiClientError::InvalidRequest {
+            return Err(AiProviderError::InvalidRequest {
                 message: format!("extras cannot replace the request's `{field}`"),
             });
         }
@@ -272,18 +332,9 @@ fn responses_additional_params(
     Ok((!map.is_empty()).then_some(Value::Object(map)))
 }
 
-fn validate_request_target(req: &ChatRequest, bound: &ChatTarget) -> Result<(), AiClientError> {
-    let requested = req.target();
-    if !requested.logically_matches(bound) {
-        return Err(AiClientError::target_mismatch(requested, bound.clone()));
-    }
-
-    Ok(())
-}
-
 fn preamble_and_history(
     messages: &[ChatMessage],
-) -> Result<(Option<String>, Vec<Message>), AiClientError> {
+) -> Result<(Option<String>, Vec<Message>), AiProviderError> {
     let mut preamble_parts = Vec::new();
     let mut history = Vec::new();
 
@@ -293,12 +344,12 @@ fn preamble_and_history(
             "user" => history.push(Message::user(message.content.clone())),
             "assistant" => history.push(Message::assistant(message.content.clone())),
             "tool" => {
-                return Err(AiClientError::InvalidRequest {
+                return Err(AiProviderError::InvalidRequest {
                     message: TOOL_ROLE_UNSUPPORTED_MESSAGE.to_string(),
                 })
             }
             other => {
-                return Err(AiClientError::InvalidRequest {
+                return Err(AiProviderError::InvalidRequest {
                     message: format!("unsupported chat role: '{other}'"),
                 })
             }
@@ -306,7 +357,7 @@ fn preamble_and_history(
     }
 
     if history.is_empty() {
-        return Err(AiClientError::InvalidRequest {
+        return Err(AiProviderError::InvalidRequest {
             message: "chat request requires at least one non-system message".to_string(),
         });
     }
@@ -353,10 +404,11 @@ fn build_additional_params(
     }
 }
 
-fn map_tool_definition(tool: &ToolDefinition) -> Result<RigToolDefinition, AiClientError> {
-    let name = ToolName::new(tool.name.as_str()).map_err(|err| AiClientError::InvalidRequest {
-        message: err.to_string(),
-    })?;
+fn map_tool_definition(tool: &ToolDefinition) -> Result<RigToolDefinition, AiProviderError> {
+    let name =
+        ToolName::new(tool.name.as_str()).map_err(|err| AiProviderError::InvalidRequest {
+            message: err.to_string(),
+        })?;
     let parameters = tool.parameters_schema.clone().unwrap_or_else(|| {
         json!({
             "type": "object",
@@ -371,13 +423,13 @@ fn map_tool_definition(tool: &ToolDefinition) -> Result<RigToolDefinition, AiCli
     ))
 }
 
-fn ollama_call_id(call: &RigToolCall) -> Result<String, AiClientError> {
+fn ollama_call_id(call: &RigToolCall) -> Result<String, AiProviderError> {
     Ok(call.function.name.as_str().to_string())
 }
 
-fn responses_call_id(call: &RigToolCall) -> Result<String, AiClientError> {
+fn responses_call_id(call: &RigToolCall) -> Result<String, AiProviderError> {
     if call.id.is_local() {
-        return Err(AiClientError::Other {
+        return Err(AiProviderError::Other {
             message: format!(
                 "the provider's tool call `{}` has no call_id",
                 call.function.name.as_str()
@@ -389,12 +441,12 @@ fn responses_call_id(call: &RigToolCall) -> Result<String, AiClientError> {
 
 fn map_tool_call(
     call: RigToolCall,
-    call_id: fn(&RigToolCall) -> Result<String, AiClientError>,
-) -> Result<ToolCall, AiClientError> {
+    call_id: fn(&RigToolCall) -> Result<String, AiProviderError>,
+) -> Result<ToolCall, AiProviderError> {
     let id = call_id(&call)?;
     let name = call.function.name.as_str().to_string();
     if let Some(arguments) = call.function.invalid_arguments {
-        return Err(AiClientError::Other {
+        return Err(AiProviderError::Other {
             message: format!(
                 "the provider's tool call `{name}` has invalid arguments: {arguments}"
             ),
@@ -409,8 +461,8 @@ fn map_tool_call(
 
 fn map_chat_response(
     resp: CompletionResponse,
-    call_id: fn(&RigToolCall) -> Result<String, AiClientError>,
-) -> Result<ChatResponse, AiClientError> {
+    call_id: fn(&RigToolCall) -> Result<String, AiProviderError>,
+) -> Result<ChatResponse, AiProviderError> {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
 
@@ -426,7 +478,7 @@ fn map_chat_response(
         let reported = resp
             .error
             .map_or_else(String::new, |error| format!(": {error}"));
-        return Err(AiClientError::Other {
+        return Err(AiProviderError::Other {
             message: format!("the provider's reply has no text and no tool call{reported}"),
         });
     }
@@ -529,7 +581,7 @@ mod tests {
         let err = preamble_and_history(&messages).expect_err("tool role should be rejected");
 
         match err {
-            AiClientError::InvalidRequest { message } => {
+            AiProviderError::InvalidRequest { message } => {
                 assert_eq!(message, TOOL_ROLE_UNSUPPORTED_MESSAGE);
             }
             other => panic!("expected InvalidRequest, got {other:?}"),
@@ -683,8 +735,12 @@ mod tests {
 
         let base_url = Url::parse(&format!("http://{address}/v1"))
             .expect("controlled OpenAI-compatible URL should parse");
-        let client = RigChatClient::openai_compatible("fixture-model", "fixture-key", base_url)
-            .expect("Rig client should build without preflight");
+        let client = RigChatModel::openai_compatible(
+            "fixture-model",
+            "fixture-key",
+            base_url,
+            std::time::Duration::from_secs(30),
+        );
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             client.chat(ChatRequest {

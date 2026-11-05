@@ -15,7 +15,7 @@ use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk, Partials,
 };
 use obzenflow_core::ai::{
-    AiClientError, AiMapReduceGroupingEnded, AiMapReduceMapInput, AiMapReduceReduceFailed,
+    AiMapReduceGroupingEnded, AiMapReduceMapInput, AiMapReduceReduceFailed, AiProviderError,
     AiProviderFailureKind, AiUnavailable, AiUnavailableCause, ChatTarget,
 };
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
@@ -815,7 +815,7 @@ async fn exercise(placement: Placement) {
             FlowApplication::builder()
                 .with_cli_args(args)
                 .with_config_file(config)
-                .with_ai_models(models.providers())
+                .with_ai_models(models.resolvers())
                 .run_async(build_flow(
                     root.clone(),
                     placement,
@@ -1080,7 +1080,7 @@ async fn a_multi_fact_infer_feeds_the_map_reduce_through_a_selected_feed_and_rep
     let live = TriageRun::default();
     let models = FakeChatModels::with_reply(|request| {
         if fake_ai::last_user_message(request) == "triage 24" {
-            Err(AiClientError::Timeout {
+            Err(AiProviderError::Timeout {
                 message: "endpoint down".to_string(),
             })
         } else {
@@ -1090,7 +1090,7 @@ async fn a_multi_fact_infer_feeds_the_map_reduce_through_a_selected_feed_and_rep
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(triage_config(&live_root))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .run_async(build_triage_flow(live_root.clone(), live.clone()))
         .await
         .expect("the composition runs live");
@@ -1117,7 +1117,7 @@ async fn a_multi_fact_infer_feeds_the_map_reduce_through_a_selected_feed_and_rep
             live_archive.clone().into_os_string(),
         ])
         .with_config_file(triage_config(&replay_root))
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .run_async(build_triage_flow(replay_root.clone(), replayed.clone()))
         .await
         .expect("the composition replays");
@@ -1148,7 +1148,7 @@ async fn an_integrity_failure_fails_the_infer_stage_before_its_role_interprets()
     let result = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(triage_config(&root))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .run_async(build_triage_flow(root, run.clone()))
         .await;
 

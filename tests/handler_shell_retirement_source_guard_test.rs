@@ -1046,19 +1046,15 @@ fn default_http_source_transport_stays_cold_until_execute() {
     let mut source_client_sites = Vec::new();
     let mut allowed_ai_sites = 0;
     let mut allowed_cli_sites = 0;
-    let native_embedding = Path::new("crates/obzenflow_infra/src/ai/native_embedding_client.rs");
     let ai_preflight = Path::new("crates/obzenflow_infra/src/ai/rig/preflight.rs");
     let cli = Path::new("src/bin/obzenflow.rs");
     for site @ (path, constructor, context) in &sites {
-        let allowed_ai_site = (path == native_embedding
-            && constructor == "reqwest::Client::builder"
-            && context == "build_http_client")
-            || (path == ai_preflight
-                && constructor == "reqwest::Client::new"
-                && matches!(
-                    context.as_str(),
-                    "preflight_ollama" | "preflight_openai_models"
-                ));
+        let allowed_ai_site = path == ai_preflight
+            && constructor == "reqwest::Client::new"
+            && matches!(
+                context.as_str(),
+                "preflight_ollama" | "preflight_openai_models"
+            );
         if allowed_ai_site {
             allowed_ai_sites += 1;
         } else if path == cli && constructor == "reqwest::Client::builder" && context == "start" {
@@ -1069,8 +1065,8 @@ fn default_http_source_transport_stays_cold_until_execute() {
         }
     }
     assert_eq!(
-        allowed_ai_sites, 3,
-        "the three explicit AI-owned reqwest constructors must remain accounted for: {sites:?}"
+        allowed_ai_sites, 2,
+        "the two explicit AI-owned reqwest constructors must remain accounted for: {sites:?}"
     );
     assert_eq!(
         allowed_cli_sites, 1,
@@ -1097,8 +1093,8 @@ fn default_http_source_transport_stays_cold_until_execute() {
         .find("pub fn new() -> Self")
         .expect("ReqwestHttpClient::new");
     let execute_start = reqwest_source
-        .find("async fn execute(&self")
-        .expect("HttpClient::execute implementation");
+        .find("async fn send(&self")
+        .expect("HttpClient::send implementation");
     let wrappers = &reqwest_source[constructor_start..execute_start];
     assert!(wrappers.contains("pub fn with_client(client: reqwest::Client)"));
 

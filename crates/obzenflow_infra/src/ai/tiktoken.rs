@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow_core::ai::{
-    AiClientError, ChatRequest, ChatResponseFormat, EstimateSource, TokenCount, TokenEstimate,
+    AiProviderError, ChatRequest, ChatResponseFormat, EstimateSource, TokenCount, TokenEstimate,
     TokenEstimator,
 };
 use tiktoken_rs::tokenizer::Tokenizer;
@@ -26,16 +26,16 @@ impl std::fmt::Debug for TiktokenEstimator {
 }
 
 impl TiktokenEstimator {
-    pub fn for_model(model: &str) -> Result<Self, AiClientError> {
+    pub fn for_model(model: &str) -> Result<Self, AiProviderError> {
         let encoding =
-            tiktoken_rs::get_bpe_from_model(model).map_err(|err| AiClientError::Unsupported {
+            tiktoken_rs::get_bpe_from_model(model).map_err(|err| AiProviderError::Unsupported {
                 message: format!("no tiktoken encoding for model '{model}': {err}"),
             })?;
 
         Ok(Self { encoding })
     }
 
-    pub fn from_encoding(encoding_name: &str) -> Result<Self, AiClientError> {
+    pub fn from_encoding(encoding_name: &str) -> Result<Self, AiProviderError> {
         let tokenizer = match encoding_name {
             "o200k_harmony" => Tokenizer::O200kHarmony,
             "o200k_base" => Tokenizer::O200kBase,
@@ -45,14 +45,14 @@ impl TiktokenEstimator {
             "p50k_edit" => Tokenizer::P50kEdit,
             "gpt2" => Tokenizer::Gpt2,
             _ => {
-                return Err(AiClientError::Unsupported {
+                return Err(AiProviderError::Unsupported {
                     message: format!("no tiktoken encoding named '{encoding_name}'"),
                 });
             }
         };
 
         let encoding = tiktoken_rs::get_bpe_from_tokenizer(tokenizer).map_err(|err| {
-            AiClientError::Unsupported {
+            AiProviderError::Unsupported {
                 message: format!("failed to initialise tiktoken encoding '{encoding_name}': {err}"),
             }
         })?;
@@ -122,7 +122,7 @@ mod tests {
     fn for_model_unknown_returns_unsupported() {
         let err = TiktokenEstimator::for_model("definitely-not-a-real-model")
             .expect_err("unknown model should fail");
-        assert!(matches!(err, AiClientError::Unsupported { .. }));
+        assert!(matches!(err, AiProviderError::Unsupported { .. }));
     }
 
     #[test]

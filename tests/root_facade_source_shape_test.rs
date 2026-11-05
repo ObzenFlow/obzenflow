@@ -113,8 +113,8 @@ fn root_facades_export_the_owned_authoring_surfaces() {
     let ai_facade =
         fs::read_to_string(root.join("src/ai.rs")).expect("AI facade module should be readable");
     assert!(
-        ai_facade.contains("pub use obzenflow_runtime::ai::{AiEffect, AiModelProviders, AiReply, AiRequest, AiRole};"),
-        "obzenflow::ai must remain the root facade for AI roles and model providers"
+        ai_facade.contains("pub use obzenflow_runtime::ai::{AiEffect, AiModelResolvers, AiReply, AiRequest, AiRole};"),
+        "obzenflow::ai must remain the root facade for AI roles and model resolvers"
     );
     for retired in [
         "inference_handler",
