@@ -303,11 +303,6 @@ async fn responses_extras_forward_accepted_fields() {
             "parameters": {"type": "object", "properties": {}}
         }]),
     );
-    request
-        .params
-        .extras
-        .insert("frequency_penalty".to_string(), json!(0.5));
-    request.params.seed = Some(7);
 
     let (_, sent) = exchange(route, 200, route.reply_without_counts(), request).await;
 
@@ -319,8 +314,59 @@ async fn responses_extras_forward_accepted_fields() {
         .unwrap()
         .contains(&json!("file_search_call.results")));
     assert_eq!(sent.body["tools"][0]["name"], json!("extra_tool"));
-    for key in ["frequency_penalty", "seed"] {
-        assert!(sent.body.get(key).is_none(), "{key}");
+}
+
+#[tokio::test]
+async fn responses_unknown_extra_reaches_provider() {
+    let route = Route::Responses;
+    let mut request = chat_request(route);
+    request
+        .params
+        .extras
+        .insert("conversation".to_string(), json!("conv_1"));
+
+    let (_, sent) = exchange(route, 200, route.reply_without_counts(), request).await;
+
+    assert_eq!(sent.body["conversation"], json!("conv_1"));
+}
+
+async fn call_without_server(
+    route: Route,
+    request: ChatRequest,
+) -> Result<ChatResponse, AiClientError> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    route.client(address).chat(request).await
+}
+
+#[tokio::test]
+async fn responses_seed_fails_invalid_request() {
+    let route = Route::Responses;
+    let mut request = chat_request(route);
+    request.params.seed = Some(7);
+
+    let result = call_without_server(route, request).await;
+
+    assert!(
+        matches!(result, Err(AiClientError::InvalidRequest { .. })),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn responses_request_overrides_fail_invalid_request() {
+    let route = Route::Responses;
+    for field in ["model", "input"] {
+        let mut request = chat_request(route);
+        request.params.extras.insert(field.to_string(), json!([]));
+
+        let result = call_without_server(route, request).await;
+
+        assert!(
+            matches!(result, Err(AiClientError::InvalidRequest { .. })),
+            "{field}: {result:?}"
+        );
     }
 }
 
@@ -386,15 +432,12 @@ async fn json_object_sends_provider_format() {
 #[tokio::test]
 async fn invalid_schema_fails_invalid_request() {
     for route in ROUTES {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
         let mut request = chat_request(route);
         request.response_format = Some(ChatResponseFormat::JsonSchema {
             schema: json!("not an object"),
         });
 
-        let result = route.client(address).chat(request).await;
+        let result = call_without_server(route, request).await;
 
         assert!(
             matches!(result, Err(AiClientError::InvalidRequest { .. })),

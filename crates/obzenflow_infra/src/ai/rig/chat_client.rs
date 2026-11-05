@@ -29,22 +29,6 @@ use url::Url;
 const TOOL_ROLE_UNSUPPORTED_MESSAGE: &str =
     "tool-role messages require tool execution (not supported in P0)";
 
-const RESPONSES_ADDITIONAL_FIELDS: [&str; 13] = [
-    "background",
-    "include",
-    "metadata",
-    "parallel_tool_calls",
-    "previous_response_id",
-    "reasoning",
-    "service_tier",
-    "store",
-    "text",
-    "tools",
-    "top_p",
-    "truncation",
-    "user",
-];
-
 #[derive(Clone)]
 enum RigChatBackend {
     Ollama { model: Arc<Model<ollama::Chat>> },
@@ -188,7 +172,7 @@ impl ChatClient for RigChatClient {
             RigChatBackend::OpenAi { model } => {
                 let request = completion_request(
                     &req,
-                    responses_additional_params(additional_params, format),
+                    responses_additional_params(additional_params, format)?,
                 )?;
                 let response = model.call(request).await.map_err(map_rig_error)?;
                 map_chat_response(response, responses_call_id)
@@ -224,6 +208,8 @@ fn completion_request(
     }
     request.temperature = req.params.temperature.map(|t| t as f64);
     request.max_tokens = req.params.max_tokens.map(|n| n as u64);
+    request.options.top_p = req.params.top_p.map(|p| p as f64);
+    request.options.seed = req.params.seed;
     request.additional_params = additional_params;
     if let Some(ChatResponseFormat::JsonSchema { schema }) = &req.response_format {
         let schema =
@@ -259,12 +245,18 @@ fn ollama_additional_params(
 fn responses_additional_params(
     additional_params: Option<Value>,
     format: Option<&ChatResponseFormat>,
-) -> Option<Value> {
+) -> Result<Option<Value>, AiClientError> {
     let mut map = match additional_params {
         Some(Value::Object(map)) => map,
         _ => Map::new(),
     };
-    map.retain(|key, _| RESPONSES_ADDITIONAL_FIELDS.contains(&key.as_str()));
+    for field in ["model", "input"] {
+        if map.contains_key(field) {
+            return Err(AiClientError::InvalidRequest {
+                message: format!("extras cannot replace the request's `{field}`"),
+            });
+        }
+    }
     match format {
         Some(ChatResponseFormat::JsonObject) => {
             map.insert(
@@ -277,7 +269,7 @@ fn responses_additional_params(
         }
         None => {}
     }
-    (!map.is_empty()).then_some(Value::Object(map))
+    Ok((!map.is_empty()).then_some(Value::Object(map)))
 }
 
 fn validate_request_target(req: &ChatRequest, bound: &ChatTarget) -> Result<(), AiClientError> {
@@ -338,21 +330,18 @@ fn build_additional_params(
         map.insert(key.clone(), value.clone());
     }
 
-    // Typed fields win over extras.
     if params.temperature.is_some() {
         map.remove("temperature");
     }
     if params.max_tokens.is_some() {
         map.remove("max_tokens");
     }
-
-    if let Some(value) = params.top_p {
-        map.insert("top_p".to_string(), json!(value));
+    if params.top_p.is_some() {
+        map.remove("top_p");
     }
-    if let Some(value) = params.seed {
-        map.insert("seed".to_string(), json!(value));
+    if params.seed.is_some() {
+        map.remove("seed");
     }
-
     if response_format.is_some() {
         map.remove("response_format");
     }
@@ -579,24 +568,7 @@ mod tests {
             extras,
         };
 
-        let additional = build_additional_params(&params, None)
-            .expect("should emit additional_params when extras present");
-
-        let Value::Object(map) = additional else {
-            panic!("expected JSON object additional_params");
-        };
-
-        assert_eq!(map.len(), 2);
-        assert_eq!(map.get("seed"), Some(&json!(42)));
-
-        let top_p = map
-            .get("top_p")
-            .and_then(|v| v.as_f64())
-            .expect("top_p should be a number");
-        assert!(
-            (top_p - 0.8).abs() < 1e-6,
-            "top_p should be close to 0.8, got {top_p}"
-        );
+        assert_eq!(build_additional_params(&params, None), None);
     }
 
     #[test]
