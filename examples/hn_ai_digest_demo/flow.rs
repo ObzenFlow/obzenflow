@@ -37,6 +37,8 @@ const SYSTEM_PROMPT: &str = "You write concise, skimmable Hacker News digests fr
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnDigestGroupSummary {
     output_markdown: String,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    dropped_citations: BTreeSet<u64>,
 }
 
 impl TypedPayload for HnDigestGroupSummary {
@@ -127,12 +129,16 @@ impl AiRole<Chunk<FormattedStory>> for HnDigest {
 
     fn interpret(
         &self,
-        _: Chunk<FormattedStory>,
+        chunk: Chunk<FormattedStory>,
         outcome: AiOutcome<ChatCompletionReply>,
     ) -> Result<HnDigestGroupSummary, HandlerError> {
         let reply = outcome.replied()?;
+        let group = chunk.numbered().map(|(number, _)| number).collect();
+        let (output_markdown, dropped_citations) =
+            keep_group_citations(&strip_accidental_story_echo(reply.text()), &group);
         Ok(HnDigestGroupSummary {
-            output_markdown: strip_accidental_story_echo(reply.text()),
+            output_markdown,
+            dropped_citations,
         })
     }
 }
@@ -420,6 +426,32 @@ fn strip_accidental_story_echo(markdown: &str) -> String {
     out.trim_end().to_string()
 }
 
+fn keep_group_citations(markdown: &str, group: &BTreeSet<u64>) -> (String, BTreeSet<u64>) {
+    let bytes = markdown.as_bytes();
+    let mut output = String::with_capacity(markdown.len());
+    let mut dropped = BTreeSet::new();
+    let mut copied_through = 0;
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'[' && bytes.get(cursor + 1) == Some(&b'^') {
+            if let Some((end, ordinal)) = decimal_marker(bytes, cursor + 2, b']') {
+                if !group.contains(&(ordinal as u64)) {
+                    output.push_str(markdown[copied_through..cursor].trim_end_matches(' '));
+                    dropped.insert(ordinal as u64);
+                    copied_through = end;
+                    cursor = end;
+                    continue;
+                }
+            }
+        }
+        cursor += 1;
+    }
+
+    output.push_str(&markdown[copied_through..]);
+    (output, dropped)
+}
+
 fn render_digest_links(markdown: &str, stories: &[FormattedStory]) -> Result<String, HandlerError> {
     let authored = markdown
         .lines()
@@ -611,6 +643,22 @@ mod tests {
             description.redelivery_safety(),
             Some(SinkRedeliverySafety::DuplicateSensitive)
         );
+    }
+
+    #[test]
+    fn group_citations_outside_chunk_dropped() {
+        let group = (11..=20).collect();
+
+        let (kept, dropped) = keep_group_citations(
+            "- Databases [^12], Data Storage [^112]: launched.\n- \"Rust\" [^120]: systems. [^1]",
+            &group,
+        );
+
+        assert_eq!(
+            kept,
+            "- Databases [^12], Data Storage: launched.\n- \"Rust\": systems."
+        );
+        assert_eq!(dropped, BTreeSet::from([1, 112, 120]));
     }
 
     #[test]
