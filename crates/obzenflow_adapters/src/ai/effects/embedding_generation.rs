@@ -2,15 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::ai::error_mapping::{ai_client_error_to_effect_error, provider_error_to_resolution};
-use crate::ai::unreachable::UnreachableEmbeddingClient;
+use crate::ai::error_mapping::{ai_provider_error_to_effect_error, resolution_error_to_port};
+use crate::ai::unreachable::UnreachableEmbeddingModel;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     params_hash_for_embedding, prompt_hash_for_embedding_inputs, AiEndpoint, AiModelSpec,
-    CanonicalizationComponent, EmbeddingClient, EmbeddingDimensions, EmbeddingGenerationOutcome,
-    EmbeddingGenerationReply, EmbeddingModelDescription, EmbeddingModelProvider, EmbeddingRequest,
-    EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, LlmHashes, LlmObservability,
-    EMBEDDING_CLIENT_PORT,
+    CanonicalizationComponent, EmbeddingDimensions, EmbeddingGenerationOutcome,
+    EmbeddingGenerationReply, EmbeddingModel, EmbeddingModelDescription, EmbeddingModelResolver,
+    EmbeddingRequest, EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, LlmHashes,
+    LlmObservability, EMBEDDING_MODEL_PORT,
 };
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_core::BoundedBindingEvidence;
@@ -23,8 +23,10 @@ use obzenflow_runtime::effects::{
 };
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
+const FAILURE_SOURCE: &str = "embedding_model";
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum EmbeddingGenerationBuildError {
@@ -92,8 +94,8 @@ impl EffectBindingEvidence for EmbeddingBindingEvidence {
     }
 }
 
-pub const EMBEDDING_CLIENT: EffectPortSlot<dyn EmbeddingClient, EmbeddingTarget> =
-    EffectPortSlot::new(EMBEDDING_CLIENT_PORT);
+pub const EMBEDDING_MODEL: EffectPortSlot<dyn EmbeddingModel, EmbeddingTarget> =
+    EffectPortSlot::new(EMBEDDING_MODEL_PORT);
 
 /// Replay-safe embedding generation, performed only by an `ai!` stage.
 #[derive(Clone)]
@@ -174,9 +176,9 @@ impl Effect for EmbeddingGeneration {
     }
 
     fn validate_port_metadata(&self, ctx: &EffectPortMetadataContext) -> Result<(), EffectError> {
-        let observed = ctx.metadata(EMBEDDING_CLIENT)?;
+        let observed = ctx.metadata(EMBEDDING_MODEL)?;
         if self.binding.evidence().target() != observed.as_ref() {
-            return Err(EffectError::target_invariant_violation(EMBEDDING_CLIENT));
+            return Err(EffectError::target_invariant_violation(EMBEDDING_MODEL));
         }
         Ok(())
     }
@@ -185,10 +187,11 @@ impl Effect for EmbeddingGeneration {
         &self,
         ctx: &mut EffectContext,
     ) -> Result<EmbeddingGenerationOutcome, EffectError> {
-        let client = ctx.port(EMBEDDING_CLIENT)?;
-        let response = client.embed(self.request.clone()).await.map_err(|error| {
-            ai_client_error_to_effect_error(error, EMBEDDING_CLIENT, "embedding_client")
-        })?;
+        let model = ctx.port(EMBEDDING_MODEL)?;
+        let response = model
+            .embed(self.request.clone())
+            .await
+            .map_err(|error| ai_provider_error_to_effect_error(error, FAILURE_SOURCE))?;
         let response = validate_response(&self.request, response)?;
 
         let mut observability = LlmObservability::new(
@@ -213,7 +216,7 @@ impl BoundEffect for EmbeddingGeneration {
     }
 
     fn required_slots() -> EffectPortSlotSet {
-        EffectPortSlotSet::single(EMBEDDING_CLIENT)
+        EffectPortSlotSet::single(EMBEDDING_MODEL)
     }
 }
 
@@ -224,7 +227,7 @@ impl EffectName for EmbeddingGeneration {
 impl AiEffect for EmbeddingGeneration {
     type Request = EmbeddingRequestSpec;
     type Reply = EmbeddingGenerationReply;
-    type Provider = dyn EmbeddingModelProvider;
+    type Resolver = dyn EmbeddingModelResolver;
 
     const SECTION: &'static str = "ai.embeddings";
     const FAMILY: &'static str = "embedding";
@@ -247,9 +250,9 @@ impl AiEffect for EmbeddingGeneration {
     }
 
     fn bind(
-        source: AiModelSource<dyn EmbeddingModelProvider>,
+        source: AiModelSource<dyn EmbeddingModelResolver>,
     ) -> Result<AiBinding<Self>, AiBindingError> {
-        let (stage, endpoint_name, description, resolver): (
+        let (stage, endpoint_name, description, port): (
             String,
             String,
             _,
@@ -259,42 +262,46 @@ impl AiEffect for EmbeddingGeneration {
                 stage,
                 endpoint,
                 model,
-                provider,
+                request_timeout,
+                resolver,
             } => {
-                let description = provider.describe(&endpoint, &model)?;
+                let description = resolver.describe(&endpoint, &model)?;
                 let name = endpoint.name.clone();
-                let resolver = connecting(provider, endpoint, description.clone());
-                (stage, name, description, resolver)
+                let port = connecting(resolver, endpoint, description.clone(), request_timeout);
+                (stage, name, description, port)
             }
             AiModelSource::Recorded {
                 stage,
                 spec,
-                provider,
+                resolver,
             } => {
-                let description = provider.describe_recorded(&spec)?;
-                let resolver = unreachable(description.target.clone(), spec.endpoint.clone());
-                (stage, spec.endpoint, description, resolver)
+                let description = resolver.describe_recorded(&spec)?;
+                let port = unreachable(description.target.clone(), spec.endpoint.clone());
+                (stage, spec.endpoint, description, port)
             }
             AiModelSource::Kept {
                 stage,
                 spec,
                 endpoint,
-                provider,
+                request_timeout,
+                resolver,
             } => {
-                let description = provider.describe_recorded(&spec)?;
+                let description = resolver.describe_recorded(&spec)?;
                 let serving = endpoint.filter(|endpoint| {
-                    provider
+                    resolver
                         .describe(endpoint, &spec.model)
                         .is_ok_and(|current| {
                             current.target.binding_fingerprint
                                 == description.target.binding_fingerprint
                         })
                 });
-                let resolver = match serving {
-                    Some(endpoint) => connecting(provider, endpoint, description.clone()),
+                let port = match serving {
+                    Some(endpoint) => {
+                        connecting(resolver, endpoint, description.clone(), request_timeout)
+                    }
                     None => unreachable(description.target.clone(), spec.endpoint.clone()),
                 };
-                (stage, spec.endpoint, description, resolver)
+                (stage, spec.endpoint, description, port)
             }
         };
         let spec = AiModelSpec {
@@ -310,36 +317,37 @@ impl AiEffect for EmbeddingGeneration {
         let logical_name = LogicalEffectBindingName::new(stage)
             .map_err(|error| AiBindingError::Evidence(error.to_string()))?;
         let binding = EffectRegistrationBuilder::<Self>::new(logical_name, evidence)
-            .bind_deferred_with_metadata(EMBEDDING_CLIENT, resolver)?
+            .bind_deferred_with_metadata(EMBEDDING_MODEL, port)?
             .finish()?;
         Ok(AiBinding { binding, spec })
     }
 }
 
 fn connecting(
-    provider: Arc<dyn EmbeddingModelProvider>,
+    resolver: Arc<dyn EmbeddingModelResolver>,
     endpoint: AiEndpoint,
     description: EmbeddingModelDescription,
-) -> EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> {
+    request_timeout: Duration,
+) -> EffectPortResolverWithMetadata<dyn EmbeddingModel, EmbeddingTarget> {
     Arc::new(move || {
-        let client = provider
-            .connect(&endpoint, &description)
-            .map_err(provider_error_to_resolution)?;
-        let metadata = Arc::new(client.target().clone());
-        Ok(ResolvedEffectPort::new(client, metadata))
+        let model = resolver
+            .connect(&endpoint, &description, request_timeout)
+            .map_err(resolution_error_to_port)?;
+        let metadata = Arc::new(model.target().clone());
+        Ok(ResolvedEffectPort::new(model, metadata))
     })
 }
 
 fn unreachable(
     target: EmbeddingTarget,
     endpoint: String,
-) -> EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> {
+) -> EffectPortResolverWithMetadata<dyn EmbeddingModel, EmbeddingTarget> {
     Arc::new(move || {
-        let client: Arc<dyn EmbeddingClient> = Arc::new(UnreachableEmbeddingClient::new(
+        let model: Arc<dyn EmbeddingModel> = Arc::new(UnreachableEmbeddingModel::new(
             target.clone(),
             endpoint.clone(),
         ));
-        Ok(ResolvedEffectPort::new(client, Arc::new(target.clone())))
+        Ok(ResolvedEffectPort::new(model, Arc::new(target.clone())))
     })
 }
 
@@ -391,7 +399,7 @@ fn validate_response(
 
 fn invalid_response(message: impl Into<String>) -> EffectError {
     EffectError::BoundaryRejected {
-        rejected_by: EffectFailureSource::new("embedding_client"),
+        rejected_by: EffectFailureSource::new(FAILURE_SOURCE),
         code: EffectFailureCode::new("invalid_response"),
         message: message.into(),
         retry: RetryDisposition::NotRetryable,
@@ -449,7 +457,7 @@ mod tests {
             EmbeddingBindingEvidence::new(target()).unwrap(),
         )
         .bind_deferred_with_metadata(
-            EMBEDDING_CLIENT,
+            EMBEDDING_MODEL,
             Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
         )
         .unwrap()
@@ -517,6 +525,6 @@ mod tests {
         );
         assert!(declaration.public_outcome_fact_types().is_empty());
         assert_eq!(EmbeddingGeneration::required_slots().len(), 1);
-        assert_eq!(EMBEDDING_CLIENT.label(), EMBEDDING_CLIENT_PORT);
+        assert_eq!(EMBEDDING_MODEL.label(), EMBEDDING_MODEL_PORT);
     }
 }

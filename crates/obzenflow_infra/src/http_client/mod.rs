@@ -29,7 +29,7 @@ pub fn default_http_client() -> Result<Arc<dyn HttpClient>, HttpClientFactoryErr
     #[cfg(not(feature = "reqwest-client"))]
     {
         Err(HttpClientFactoryError::FeatureNotEnabled(
-            "http-pull".to_string(),
+            "http".to_string(),
         ))
     }
 }

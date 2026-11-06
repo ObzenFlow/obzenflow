@@ -486,40 +486,56 @@ impl SingleUseEffectBoundaryReport {
     }
 }
 
-/// Runtime-minted, single-use capability for one at-least-once effect
-/// execution attempt. It is deliberately non-`Clone`: executing or aborting
-/// consumes the only authority for this ordinal.
+type AffineCall = Box<dyn FnMut(PhysicalCallLifecycle) -> EffectCall + Send>;
+
+/// Runtime-minted capability for one at-least-once effect attempt ordinal.
+/// It is deliberately non-`Clone`: executing or aborting consumes it, and
+/// only [`AffineEffectExecution::after_definite_no`] hands it back.
 pub struct AffineEffectOperation {
-    inner: SingleUseEffectOperation,
+    call: AffineCall,
+    provenance: SingleUseEffectProvenance,
     highest_prior_attempt: u32,
 }
 
 pub struct PreparedAffineEffectCall {
-    inner: PreparedSingleUseEffectCall,
+    future: EffectCall,
+    call: AffineCall,
+    provenance: SingleUseEffectProvenance,
+    receipt: PhysicalCallReceipt,
     highest_prior_attempt: u32,
 }
 
 impl PreparedAffineEffectCall {
     pub fn receipt(&self) -> PhysicalCallReceipt {
-        self.inner.receipt()
+        self.receipt.clone()
     }
 
     pub async fn execute(self) -> AffineEffectExecution {
+        let Self {
+            future,
+            call,
+            provenance,
+            highest_prior_attempt,
+            ..
+        } = self;
         AffineEffectExecution {
-            inner: self.inner.execute().await,
-            highest_prior_attempt: self.highest_prior_attempt,
+            result: future.await,
+            call,
+            provenance,
+            highest_prior_attempt,
         }
     }
 }
 
 impl AffineEffectOperation {
-    pub(super) fn new_with_lifecycle<F, Fut>(highest_prior_attempt: u32, call: F) -> Self
+    pub(super) fn new_with_lifecycle<F, Fut>(highest_prior_attempt: u32, mut call: F) -> Self
     where
-        F: FnOnce(PhysicalCallLifecycle) -> Fut + Send + 'static,
+        F: FnMut(PhysicalCallLifecycle) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<Vec<ChainEvent>, EffectError>> + Send + 'static,
     {
         Self {
-            inner: SingleUseEffectOperation::new_with_lifecycle(call),
+            call: Box::new(move |lifecycle| Box::pin(call(lifecycle))),
+            provenance: SingleUseEffectProvenance::new(),
             highest_prior_attempt,
         }
     }
@@ -534,12 +550,19 @@ impl AffineEffectOperation {
     }
 
     pub(super) fn provenance(&self) -> SingleUseEffectProvenance {
-        self.inner.provenance()
+        self.provenance.clone()
     }
 
-    pub fn prepare(self) -> PreparedAffineEffectCall {
+    pub fn prepare(mut self) -> PreparedAffineEffectCall {
+        let receipt = PhysicalCallReceipt::new();
+        let lifecycle = PhysicalCallLifecycle {
+            receipt: receipt.clone(),
+        };
         PreparedAffineEffectCall {
-            inner: self.inner.prepare(),
+            future: (self.call)(lifecycle),
+            call: self.call,
+            provenance: self.provenance,
+            receipt,
             highest_prior_attempt: self.highest_prior_attempt,
         }
     }
@@ -553,31 +576,62 @@ impl AffineEffectOperation {
         reason: EffectAbortReason,
         control_events: Vec<ChainEvent>,
     ) -> AffineEffectBoundaryReport {
+        let Self {
+            provenance,
+            highest_prior_attempt,
+            ..
+        } = self;
         AffineEffectBoundaryReport {
-            inner: self.inner.abort(reason, control_events),
-            highest_prior_attempt: self.highest_prior_attempt,
+            inner: SingleUseEffectBoundaryReport {
+                outcome: SingleUseEffectBoundaryOutcome::Aborted(reason),
+                control_events,
+                provenance,
+            },
+            highest_prior_attempt,
         }
     }
 }
 
 pub struct AffineEffectExecution {
-    inner: SingleUseEffectExecution,
+    result: Result<Vec<ChainEvent>, EffectError>,
+    call: AffineCall,
+    provenance: SingleUseEffectProvenance,
     highest_prior_attempt: u32,
 }
 
 impl AffineEffectExecution {
     pub fn result(&self) -> &Result<Vec<ChainEvent>, EffectError> {
-        self.inner.result()
+        &self.result
     }
 
     pub fn attempt(&self) -> u32 {
         self.highest_prior_attempt.saturating_add(1)
     }
 
+    /// The capability for this attempt ordinal again, only when the call ended
+    /// in a definite no ([`EffectError::is_definite_no`]). Any other result
+    /// comes back unchanged, so no policy can repeat a call that may have
+    /// reached its dependency.
+    pub fn after_definite_no(self) -> Result<AffineEffectOperation, Box<Self>> {
+        match &self.result {
+            Err(error) if error.is_definite_no() => Ok(AffineEffectOperation {
+                call: self.call,
+                provenance: self.provenance,
+                highest_prior_attempt: self.highest_prior_attempt,
+            }),
+            _ => Err(Box::new(self)),
+        }
+    }
+
     pub fn into_report(self, control_events: Vec<ChainEvent>) -> AffineEffectBoundaryReport {
-        let highest_prior_attempt = self.highest_prior_attempt;
+        let Self {
+            result,
+            provenance,
+            highest_prior_attempt,
+            ..
+        } = self;
         AffineEffectBoundaryReport {
-            inner: self.inner.into_report(control_events),
+            inner: SingleUseEffectExecution { result, provenance }.into_report(control_events),
             highest_prior_attempt,
         }
     }
@@ -772,5 +826,36 @@ mod lifecycle_tests {
             receipt.observation(),
             PhysicalCallObservation::Started { .. }
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn maybe_failure_returns_no_capability() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let operation = AffineEffectOperation::new_with_lifecycle(0, {
+            let calls = calls.clone();
+            move |lifecycle| {
+                let calls = calls.clone();
+                async move {
+                    lifecycle.mark_started();
+                    let error = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        EffectError::RateLimited {
+                            message: "429 Too Many Requests".to_string(),
+                            retry_after: Duration::ZERO,
+                        }
+                    } else {
+                        EffectError::Timeout("no reply".to_string())
+                    };
+                    lifecycle.mark_completed(PhysicalCallOutcome::Failed);
+                    Err(error)
+                }
+            }
+        });
+
+        let Ok(repeated) = operation.execute().await.after_definite_no() else {
+            panic!("a rate limit hands back the capability");
+        };
+        assert_eq!(repeated.next_attempt(), 1);
+        assert!(repeated.execute().await.after_definite_no().is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

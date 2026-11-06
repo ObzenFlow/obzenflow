@@ -23,7 +23,7 @@ use obzenflow_core::event::payloads::execution_payload::{
 };
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord, SourceDiagnosticReason};
-use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, RequestSpec};
+use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, HttpRequest};
 use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
@@ -52,9 +52,9 @@ impl PullDecoder for PagedDecoder {
     type Cursor = u32;
     type Output = PullItem;
 
-    fn request_spec(&self, cursor: Option<&u32>) -> RequestSpec {
+    fn http_request(&self, cursor: Option<&u32>) -> HttpRequest {
         let page = cursor.copied().unwrap_or(1);
-        RequestSpec::get(
+        HttpRequest::get(
             format!("http://example.invalid/items?page={page}")
                 .parse()
                 .expect("test URL"),
@@ -80,7 +80,7 @@ struct PageThenUnauthorized {
 
 #[async_trait]
 impl HttpClient for PageThenUnauthorized {
-    async fn execute(&self, _request: RequestSpec) -> Result<HttpResponse, HttpClientError> {
+    async fn send(&self, _request: HttpRequest) -> Result<HttpResponse, HttpClientError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(if call == 0 {
             HttpResponse::new(200, HeaderMap::new(), r#"[{"id":1},{"id":2}]"#)

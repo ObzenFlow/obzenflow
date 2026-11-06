@@ -23,7 +23,7 @@ impl AiProviderFailureKind {
     pub fn from_code(code: &str) -> Self {
         match code {
             "timeout" => Self::Timeout,
-            "remote" | "transport" => Self::Remote,
+            "remote" | "transport" | "connect_failed" => Self::Remote,
             "rate_limited" => Self::RateLimited,
             "authentication" | "auth" => Self::Authentication,
             "invalid_request" | "validation" => Self::InvalidRequest,

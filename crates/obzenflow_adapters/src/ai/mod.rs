@@ -12,7 +12,7 @@ mod unreachable;
 pub use effects::{
     ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, ChatCompletionBuildError,
     EmbeddingBindingEvidence, EmbeddingBindingEvidenceBuildError, EmbeddingGeneration,
-    EmbeddingGenerationBuildError, CHAT_CLIENT, EMBEDDING_CLIENT,
+    EmbeddingGenerationBuildError, CHAT_MODEL, EMBEDDING_MODEL,
 };
 pub use shapes::{infer, map, Chunked, Infer, Keyed, Map, MapReduce, TriggeredMapReduce, Unkeyed};
 #[doc(hidden)]

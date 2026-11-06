@@ -222,7 +222,7 @@
 //! [`ChannelSource`]. The resumed run records the guarantee, and
 //! `obzenflow show` reports it.
 //!
-//! The default HTTP client requires the `http-pull` feature.
+//! The default HTTP client requires the `http` feature.
 //! Applications supplying their own [`HttpClient`] do not require that feature.
 
 /// CSV file source, decoder contract, and string-preserving row support.
@@ -254,9 +254,9 @@ pub use obzenflow_adapters::sources::{
     PullDecoder,
 };
 
-/// HTTP primitives re-exported from `obzenflow_core` for building request specs.
+/// HTTP primitives re-exported from `obzenflow_core` for building requests.
 pub use obzenflow_core::http_client::{
-    Bytes, HeaderMap, HttpClient, HttpClientError, HttpMethod, RequestSpec, Url,
+    Bytes, HeaderMap, HttpClient, HttpClientError, HttpMethod, HttpRequest, Url,
 };
 
 /// Default HTTP pull and poll configuration composed by the infra layer.

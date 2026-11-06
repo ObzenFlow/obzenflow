@@ -72,7 +72,7 @@ const JOBS: &[JobSpec] = &[
         example: "hn_ai_digest_demo",
         config: "examples/hn_ai_digest_demo/obzenflow.studio.toml",
         port: 9094,
-        extra_features: &["http-pull", "ai", "postgres"],
+        extra_features: &["http", "ai", "postgres"],
     },
 ];
 

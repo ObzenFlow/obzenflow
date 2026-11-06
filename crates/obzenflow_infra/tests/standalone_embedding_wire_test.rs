@@ -7,14 +7,18 @@
 #![cfg(feature = "ai-rig")]
 
 use obzenflow_core::ai::{
-    AiProvider, EmbeddingClient, EmbeddingDimensions, EmbeddingParams, EmbeddingRequest,
+    AiProvider, AiProviderError, EmbeddingDimensions, EmbeddingModel, EmbeddingParams,
+    EmbeddingRequest,
 };
 use obzenflow_core::http_client::Url;
-use obzenflow_infra::ai::NativeEmbeddingClient;
+use obzenflow_infra::ai::NativeEmbeddingModel;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 struct CapturedRequest {
@@ -131,7 +135,8 @@ async fn ollama_and_openai_send_default_and_explicit_dimensions_natively() {
         })
     })
     .await;
-    let ollama = NativeEmbeddingClient::ollama("fixture-embedding", Some(ollama_url)).unwrap();
+    let ollama =
+        NativeEmbeddingModel::ollama("fixture-embedding", Some(ollama_url), REQUEST_TIMEOUT);
     let default = ollama
         .embed(request("ollama", "fixture-embedding", None))
         .await
@@ -179,9 +184,12 @@ async fn ollama_and_openai_send_default_and_explicit_dimensions_natively() {
     })
     .await;
     let openai_url = openai_root.join("v1/").unwrap();
-    let openai =
-        NativeEmbeddingClient::openai_compatible("fixture-embedding", "fixture-secret", openai_url)
-            .unwrap();
+    let openai = NativeEmbeddingModel::openai_compatible(
+        "fixture-embedding",
+        "fixture-secret",
+        openai_url,
+        REQUEST_TIMEOUT,
+    );
     let default = openai
         .embed(request("openai_compatible", "fixture-embedding", None))
         .await
@@ -220,7 +228,7 @@ async fn native_adapters_reject_bad_cardinality_order_and_width_without_retrying
     ];
     for (index, response) in cases.into_iter().enumerate() {
         let (url, captured, task) = fixture_server(1, move |_| response.clone()).await;
-        let client = NativeEmbeddingClient::ollama("fixture", Some(url)).unwrap();
+        let client = NativeEmbeddingModel::ollama("fixture", Some(url), REQUEST_TIMEOUT);
         let requested = (index == 3).then(|| EmbeddingDimensions::try_from(2).unwrap());
         let result = client.embed(request("ollama", "fixture", requested)).await;
         assert!(result.is_err());
@@ -237,13 +245,143 @@ async fn native_adapters_reject_bad_cardinality_order_and_width_without_retrying
         })
     })
     .await;
-    let client =
-        NativeEmbeddingClient::openai_compatible("fixture", "secret", root.join("v1/").unwrap())
-            .unwrap();
+    let client = NativeEmbeddingModel::openai_compatible(
+        "fixture",
+        "secret",
+        root.join("v1/").unwrap(),
+        REQUEST_TIMEOUT,
+    );
     let result = client
         .embed(request("openai_compatible", "fixture", None))
         .await;
     assert!(result.is_err());
     task.await.unwrap();
     assert_eq!(captured.lock().unwrap().len(), 1, "no adapter-local retry");
+}
+
+async fn read_whole_request(stream: &mut TcpStream) {
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut chunk).await.unwrap();
+        assert!(read > 0, "client closed before request headers");
+        bytes.extend_from_slice(&chunk[..read]);
+        if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+    };
+    let content_length = String::from_utf8(bytes[..header_end].to_vec())
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().unwrap())
+        })
+        .unwrap_or_default();
+    while bytes.len() < header_end + content_length {
+        let read = stream.read(&mut chunk).await.unwrap();
+        assert!(read > 0, "client closed before request body");
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+}
+
+async fn status_server(status: u16, headers: &'static str) -> (Url, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_whole_request(&mut stream).await;
+        let body = r#"{"error":{"message":"fixture"}}"#;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    (Url::parse(&format!("http://{address}/")).unwrap(), task)
+}
+
+#[tokio::test]
+async fn provider_status_maps_failure_class() {
+    type ClassCheck = fn(&AiProviderError) -> bool;
+    let cases: [(u16, &'static str, ClassCheck); 6] = [
+        (401, "", |error| {
+            matches!(error, AiProviderError::Auth { .. })
+        }),
+        (403, "", |error| {
+            matches!(error, AiProviderError::Auth { .. })
+        }),
+        (404, "", |error| {
+            matches!(error, AiProviderError::Other { .. })
+        }),
+        (408, "", |error| {
+            matches!(error, AiProviderError::Timeout { .. })
+        }),
+        (409, "", |error| {
+            matches!(error, AiProviderError::Remote { .. })
+        }),
+        (429, "retry-after: 3\r\n", |error| {
+            matches!(
+                error,
+                AiProviderError::RateLimited { retry_after, .. }
+                    if *retry_after == Duration::from_secs(3)
+            )
+        }),
+    ];
+    for (status, headers, class) in cases {
+        let (url, task) = status_server(status, headers).await;
+        let model = NativeEmbeddingModel::ollama("fixture", Some(url), REQUEST_TIMEOUT);
+        let error = model
+            .embed(request("ollama", "fixture", None))
+            .await
+            .unwrap_err();
+        task.await.unwrap();
+        assert!(class(&error), "{status}: {error:?}");
+    }
+}
+
+#[tokio::test]
+async fn refused_connection_returns_connect_failed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let url = Url::parse(&format!("http://{address}/")).unwrap();
+    let model = NativeEmbeddingModel::ollama("fixture", Some(url), REQUEST_TIMEOUT);
+
+    let result = model.embed(request("ollama", "fixture", None)).await;
+
+    assert!(
+        matches!(result, Err(AiProviderError::ConnectFailed { .. })),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn deadline_expiry_returns_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let url = Url::parse(&format!("http://{address}/")).unwrap();
+    let model = NativeEmbeddingModel::ollama("fixture", Some(url), Duration::from_millis(200));
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        model.embed(request("ollama", "fixture", None)),
+    )
+    .await
+    .expect("the configured deadline ends the call");
+
+    let Err(AiProviderError::Timeout { message }) = result else {
+        panic!("a silent provider times out: {result:?}");
+    };
+    assert_eq!(
+        message,
+        "no reply within 200 ms; request_timeout_ms under [ai.embeddings] sets this"
+    );
+    drop(listener);
 }

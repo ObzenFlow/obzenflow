@@ -49,6 +49,29 @@ pub struct EffectContext {
 }
 
 impl EffectContext {
+    /// A context for a test that calls a port method directly. It holds no
+    /// ports and no commit handle, so a slot read or a transaction fails as
+    /// under a binding the runtime never made.
+    ///
+    /// ```
+    /// use obzenflow_core::FlowId;
+    /// use obzenflow_runtime::effects::EffectContext;
+    ///
+    /// let ctx = EffectContext::for_test(FlowId::new(), "charge_invoice", 0);
+    /// assert_eq!(ctx.stage_key(), "charge_invoice");
+    /// assert!(!ctx.is_replaying());
+    /// ```
+    pub fn for_test(flow_id: FlowId, stage_key: &str, input_seq: u64) -> Self {
+        Self {
+            is_replaying: false,
+            flow_id,
+            stage_key: stage_key.to_string(),
+            input_seq: StageInputPosition(input_seq),
+            ports: super::ports::EffectPortView::default(),
+            transaction: None,
+        }
+    }
+
     pub fn is_replaying(&self) -> bool {
         self.is_replaying
     }

@@ -30,7 +30,7 @@ use obzenflow::stages::sources::{
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainEvent, ChainPayload};
-use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, RequestSpec};
+use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, HttpRequest};
 use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -166,8 +166,8 @@ struct Items;
 impl CursorlessPullDecoder for Items {
     type Output = Order;
 
-    fn request_spec(&self) -> RequestSpec {
-        RequestSpec::get("http://example.invalid/orders".parse().unwrap())
+    fn http_request(&self) -> HttpRequest {
+        HttpRequest::get("http://example.invalid/orders".parse().unwrap())
     }
 
     fn decode_success(&self, response: &HttpResponse) -> Result<Vec<Order>, DecodeError> {
@@ -179,6 +179,7 @@ impl CursorlessPullDecoder for Items {
 enum Reply {
     Status(u16, Option<&'static str>),
     TimedOut,
+    Unencodable,
 }
 
 #[derive(Debug)]
@@ -186,9 +187,12 @@ struct Scripted(Reply);
 
 #[async_trait]
 impl HttpClient for Scripted {
-    async fn execute(&self, _request: RequestSpec) -> Result<HttpResponse, HttpClientError> {
+    async fn send(&self, _request: HttpRequest) -> Result<HttpResponse, HttpClientError> {
         match &self.0 {
             Reply::TimedOut => Err(HttpClientError::Timeout("deadline".into())),
+            Reply::Unencodable => Err(HttpClientError::Unencodable(
+                "idempotency-key: failed to parse header value".into(),
+            )),
             Reply::Status(status, retry_after) => {
                 let mut headers = HeaderMap::new();
                 if let Some(seconds) = retry_after {
@@ -325,6 +329,17 @@ async fn http_categories_keep_their_health_meaning() {
     assert_eq!(failed.kind(), SourcePollErrorKind::Transport);
     let code = failed.diagnostic().error_code().unwrap();
     assert_eq!((code.namespace(), code.value()), ("http.status", "503"));
+}
+
+#[tokio::test]
+async fn http_source_unencodable_request_returns_terminal() {
+    let refused = http(Reply::Unencodable).await;
+    assert!(refused.is_terminal());
+    assert_eq!(refused.kind(), SourcePollErrorKind::Validation);
+    assert_eq!(
+        refused.diagnostic().reason(),
+        SourceDiagnosticReason::InvalidValue
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

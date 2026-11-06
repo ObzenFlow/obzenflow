@@ -7,7 +7,7 @@
 //! Tutorials: `https://obzenflow.dev/tutorials/`
 //!
 //! Run (default: local mock HN server + Ollama; requires Ollama running):
-//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
+//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
 //!
 //! Ollama quickstart (macOS):
 //! - Install: `brew install ollama`
@@ -38,7 +38,7 @@
 //!   process is part of the application contract.
 //! - For the optional repository service, run `cargo xtask postgres up`, inspect its current
 //!   local connection settings with `cargo xtask postgres connection`, then run PostgreSQL output with
-//!   `cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.postgres.toml`.
+//!   `cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.postgres.toml`.
 //!
 //! AI model configuration:
 //! - `[ai.models]` in the selected TOML file picks the endpoint and model; another endpoint

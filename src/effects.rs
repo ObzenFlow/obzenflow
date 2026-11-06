@@ -36,3 +36,17 @@ pub use obzenflow_runtime::effects::{
 pub mod simulated {
     pub use obzenflow_infra::simulated::{CallLog, CallLogError};
 }
+
+/// The client a system speaks HTTP through, and the framework's one rule for
+/// a call that failed: [`unsent`](http::unsent) for a send that got no
+/// response, [`unreadable`](http::unreadable) for a body that would not parse,
+/// and [`unclaimed`](http::unclaimed) for a status the system did not claim.
+/// [`default_http_client`](http::default_http_client) needs the `http` feature.
+pub mod http {
+    pub use obzenflow_adapters::effects::http::{unclaimed, unreadable, unsent};
+    pub use obzenflow_core::http_client::{
+        Body, Bytes, HeaderMap, HeaderName, HeaderValue, HttpClient, HttpClientError, HttpMethod,
+        HttpRequest, HttpResponse, MockHttpClient, Url,
+    };
+    pub use obzenflow_infra::http_client::{default_http_client, HttpClientFactoryError};
+}

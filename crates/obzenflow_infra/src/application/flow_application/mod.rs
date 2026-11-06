@@ -64,7 +64,7 @@ struct LaunchParams {
     presentation: Option<Presentation>,
     cli_args: Option<Vec<OsString>>,
     ingress_slots: Vec<HostedIngressBindingSlot>,
-    ai_models: Option<obzenflow_runtime::ai::AiModelProviders>,
+    ai_models: Option<obzenflow_runtime::ai::AiModelResolvers>,
     #[cfg(all(test, feature = "tokio-console"))]
     test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
     #[cfg(all(test, feature = "warp-server"))]
@@ -223,7 +223,7 @@ pub struct FlowApplicationBuilder {
     cli_args: Option<Vec<OsString>>,
     /// FLOWIP-084l: registered hosted ingress, given `[server.ingress]` at launch.
     ingress_slots: Vec<HostedIngressBindingSlot>,
-    ai_models: Option<obzenflow_runtime::ai::AiModelProviders>,
+    ai_models: Option<obzenflow_runtime::ai::AiModelResolvers>,
     #[cfg(all(test, feature = "tokio-console"))]
     test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
     #[cfg(all(test, feature = "warp-server"))]
@@ -405,9 +405,9 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Serve `ai!` stages with these model providers instead of the built-in ones.
-    pub fn with_ai_models(mut self, providers: obzenflow_runtime::ai::AiModelProviders) -> Self {
-        self.ai_models = Some(providers);
+    /// Serve `ai!` stages with these model resolvers instead of the built-in ones.
+    pub fn with_ai_models(mut self, resolvers: obzenflow_runtime::ai::AiModelResolvers) -> Self {
+        self.ai_models = Some(resolvers);
         self
     }
 

@@ -17,10 +17,11 @@ pub use client::HttpClient;
 pub use error::HttpClientError;
 pub use mock::MockHttpClient;
 pub use response::HttpResponse;
-pub use types::RequestSpec;
+pub use types::{Body, HttpRequest};
 
 // Convenience re-exports for user code and adapters.
 pub use crate::web::HttpMethod;
 pub use bytes::Bytes;
+pub use http::header::{HeaderName, HeaderValue};
 pub use http::HeaderMap;
 pub use url::Url;

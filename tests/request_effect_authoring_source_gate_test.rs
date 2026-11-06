@@ -12,11 +12,11 @@ use proc_macro2::{TokenStream, TokenTree};
 const RETIRED_NAMES: &[&str] = &[
     "AtLeastOnce",
     "BoundedBindingEvidence",
-    "CHAT_CLIENT",
+    "CHAT_MODEL",
     "Call",
     "CallRequest",
     "CallSafety",
-    "EMBEDDING_CLIENT",
+    "EMBEDDING_MODEL",
     "EffectBindingUse",
     "EffectPortSlot",
     "EffectPortSlotSet",

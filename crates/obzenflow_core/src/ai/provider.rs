@@ -38,7 +38,7 @@ impl std::fmt::Display for AiModelSpec {
     }
 }
 
-/// A chat model provider's view of one configured model before any call,
+/// A chat model resolver's view of one configured model before any call,
 /// with the bound target and the estimator that sizes its requests.
 #[derive(Debug, Clone)]
 pub struct ChatModelDescription {
@@ -46,16 +46,16 @@ pub struct ChatModelDescription {
     pub estimator: ResolvedTokenEstimator,
 }
 
-/// What an embedding model provider knows about one configured model
+/// What an embedding model resolver knows about one configured model
 /// before any call.
 #[derive(Debug, Clone)]
 pub struct EmbeddingModelDescription {
     pub target: EmbeddingTarget,
 }
 
-/// Why a model provider cannot describe or connect a model.
+/// Why a resolver cannot describe or connect a model.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum AiModelProviderError {
+pub enum AiResolutionError {
     #[error("provider `{provider}` cannot serve {family}")]
     UnsupportedProvider {
         provider: String,
@@ -67,8 +67,6 @@ pub enum AiModelProviderError {
     CredentialedBaseUrl { endpoint: String },
     #[error("endpoint `{endpoint}` cannot read its credential from {env}")]
     CredentialUnavailable { endpoint: String, env: String },
-    #[error("endpoint `{endpoint}` could not build a client: {detail}")]
-    Client { endpoint: String, detail: String },
     #[error("recorded model {spec} cannot be rebuilt: {detail}")]
     Recorded { spec: String, detail: String },
 }

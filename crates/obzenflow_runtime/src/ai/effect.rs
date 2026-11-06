@@ -7,29 +7,30 @@ use crate::effects::{
     EffectName, RecordedReply,
 };
 use obzenflow_core::ai::{
-    AiEndpoint, AiModelProviderError, AiModelSpec, AiProvider, ChatModelProvider,
-    EmbeddingModelProvider,
+    AiEndpoint, AiModelSpec, AiProvider, AiResolutionError, ChatModelResolver,
+    EmbeddingModelResolver,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
-/// A model provider port of one AI family.
-pub trait AiProviderPort: Send + Sync + 'static {
+/// The model resolver port of one AI family.
+pub trait AiResolverPort: Send + Sync + 'static {
     /// Whether endpoints of `provider` can serve this family.
     fn serves(&self, provider: &AiProvider) -> bool;
 }
 
-impl AiProviderPort for dyn ChatModelProvider {
+impl AiResolverPort for dyn ChatModelResolver {
     fn serves(&self, provider: &AiProvider) -> bool {
-        ChatModelProvider::serves(self, provider)
+        ChatModelResolver::serves(self, provider)
     }
 }
 
-impl AiProviderPort for dyn EmbeddingModelProvider {
+impl AiResolverPort for dyn EmbeddingModelResolver {
     fn serves(&self, provider: &AiProvider) -> bool {
-        EmbeddingModelProvider::serves(self, provider)
+        EmbeddingModelResolver::serves(self, provider)
     }
 }
 
@@ -45,8 +46,8 @@ pub trait AiEffect:
     type Request: Clone + Send + Sync + 'static;
     /// What a role receives when the call replies.
     type Reply: Clone + Send + Sync + 'static;
-    /// The model provider port of this effect's family.
-    type Provider: ?Sized + AiProviderPort;
+    /// The model resolver port of this effect's family.
+    type Resolver: ?Sized + AiResolverPort;
 
     /// The configuration section that selects this family's models.
     const SECTION: &'static str;
@@ -67,24 +68,26 @@ pub trait AiEffect:
     fn reply(request: Self::Request, outcome: Self::Outcome) -> Self::Reply;
 
     /// Bind one configured or recorded model.
-    fn bind(source: AiModelSource<Self::Provider>) -> Result<AiBinding<Self>, AiBindingError>;
+    fn bind(source: AiModelSource<Self::Resolver>) -> Result<AiBinding<Self>, AiBindingError>;
 }
 
-/// Where an AI stage's model comes from.
-pub enum AiModelSource<P: ?Sized> {
+/// Where an AI stage's model comes from. A connected model writes
+/// `request_timeout` as the deadline of each call.
+pub enum AiModelSource<R: ?Sized> {
     /// Current configuration at the stage's point.
     Configured {
         stage: String,
         endpoint: AiEndpoint,
         model: String,
-        provider: Arc<P>,
+        request_timeout: Duration,
+        resolver: Arc<R>,
     },
     /// The spec a reconstructed run's archive recorded. Strict replay never
     /// calls it, and a call through it answers that the endpoint is unreachable.
     Recorded {
         stage: String,
         spec: AiModelSpec,
-        provider: Arc<P>,
+        resolver: Arc<R>,
     },
     /// A spec an earlier run recorded, kept on resume for cursors with history.
     /// It connects through `endpoint` while that endpoint still serves the
@@ -93,7 +96,8 @@ pub enum AiModelSource<P: ?Sized> {
         stage: String,
         spec: AiModelSpec,
         endpoint: Option<AiEndpoint>,
-        provider: Arc<P>,
+        request_timeout: Duration,
+        resolver: Arc<R>,
     },
 }
 
@@ -126,7 +130,7 @@ impl<E: BoundEffect> fmt::Debug for AiBinding<E> {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AiBindingError {
     #[error(transparent)]
-    Provider(#[from] AiModelProviderError),
+    Resolution(#[from] AiResolutionError),
     #[error("binding evidence is invalid: {0}")]
     Evidence(String),
     #[error(transparent)]

@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow::ai::{AiClientError, EmbeddingResponse};
+use obzenflow::ai::{AiProviderError, EmbeddingResponse};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
@@ -16,7 +16,7 @@ const MAX_MEASURED_EMBEDDING_DIMENSIONS: u32 = 3_072;
 
 fn failing_chat() -> FakeChatModels {
     FakeChatModels::with_reply(|_| {
-        Err(AiClientError::Remote {
+        Err(AiProviderError::Remote {
             message: "fixture provider unavailable".to_string(),
         })
     })
@@ -199,12 +199,12 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     let live_task = tokio::spawn({
         let journal_base = journal_base.clone();
         let config = config.clone();
-        let providers = fake_ai::providers(&initial_chat, &initial_embed);
+        let resolvers = fake_ai::resolvers(&initial_chat, &initial_embed);
         async move {
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
                 .with_config_file(config)
-                .with_ai_models(providers)
+                .with_ai_models(resolvers)
                 .run_async(chat_and_embedding_flow(
                     journal_base,
                     ticket(1, "ambiguous embedding"),
@@ -259,7 +259,7 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     FlowApplication::builder()
         .with_cli_args(resume)
         .with_config_file(config)
-        .with_ai_models(fake_ai::providers(&resumed_chat, &resumed_embed))
+        .with_ai_models(fake_ai::resolvers(&resumed_chat, &resumed_embed))
         .run_async(chat_and_embedding_flow(
             journal_base.clone(),
             ticket(1, "ambiguous embedding"),
@@ -304,7 +304,7 @@ async fn recorded_provider_failure_replays_with_the_same_public_classification()
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(config.clone())
-        .with_ai_models(fake_ai::providers(&live_chat, &embedding()))
+        .with_ai_models(fake_ai::resolvers(&live_chat, &embedding()))
         .run_async(chat_and_embedding_flow(
             journal_base.clone(),
             ticket(1, "provider failure"),
@@ -334,7 +334,7 @@ async fn recorded_provider_failure_replays_with_the_same_public_classification()
     FlowApplication::builder()
         .with_cli_args(replay_args(&live_archive, "--replay-from"))
         .with_config_file(config)
-        .with_ai_models(fake_ai::providers(
+        .with_ai_models(fake_ai::resolvers(
             &FakeChatModels::forbidden(),
             &FakeEmbeddingModels::forbidden(),
         ))
@@ -375,7 +375,7 @@ async fn deterministic_role_failures_round_trip_on_their_distinct_error_routes()
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
             .with_config_file(config.clone())
-            .with_ai_models(fake_ai::providers(&chat, &embed))
+            .with_ai_models(fake_ai::resolvers(&chat, &embed))
             .run_async(chat_and_embedding_flow(
                 journal_base.clone(),
                 ticket(1, "deterministic role failure"),
@@ -403,7 +403,7 @@ async fn deterministic_role_failures_round_trip_on_their_distinct_error_routes()
         FlowApplication::builder()
             .with_cli_args(replay_args(&live_archive, "--replay-from"))
             .with_config_file(config)
-            .with_ai_models(fake_ai::providers(
+            .with_ai_models(fake_ai::resolvers(
                 &FakeChatModels::forbidden(),
                 &FakeEmbeddingModels::forbidden(),
             ))
@@ -432,7 +432,7 @@ async fn empty_embedding_inputs_fail_validation_before_connect_attempt_or_effect
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(ai_config(temp.path(), None))
-        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .with_ai_models(fake_ai::resolvers(&chat, &embed))
         .run_async(chat_and_embedding_flow(
             journal_base.clone(),
             ticket(1, "empty embedding request"),
@@ -481,12 +481,12 @@ async fn held_provider_serializes_data_and_keeps_eof_out_of_roles() {
         let outputs = outputs.clone();
         let mapper_counters = mapper_counters.clone();
         let config = ai_config(temp.path(), None);
-        let providers = fake_ai::providers(&chat, &embed);
+        let resolvers = fake_ai::resolvers(&chat, &embed);
         async move {
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
                 .with_config_file(config)
-                .with_ai_models(providers)
+                .with_ai_models(resolvers)
                 .run_async(control_interleaving_flow(
                     journal_base,
                     outputs,
@@ -591,7 +591,7 @@ async fn maximum_release_fixture_measures_one_normalised_reply_and_one_domain_ve
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(ai_config(temp.path(), None))
-        .with_ai_models(fake_ai::providers(&summarizing(), &wide))
+        .with_ai_models(fake_ai::resolvers(&summarizing(), &wide))
         .run_async(chat_and_embedding_flow(
             journal_base.clone(),
             ticket(1, "maximum measured embedding"),

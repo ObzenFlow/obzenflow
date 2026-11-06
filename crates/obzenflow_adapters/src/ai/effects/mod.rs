@@ -7,9 +7,9 @@ mod embedding_generation;
 
 pub use chat_completion::{
     ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, ChatCompletionBuildError,
-    CHAT_CLIENT,
+    CHAT_MODEL,
 };
 pub use embedding_generation::{
     EmbeddingBindingEvidence, EmbeddingBindingEvidenceBuildError, EmbeddingGeneration,
-    EmbeddingGenerationBuildError, EMBEDDING_CLIENT,
+    EmbeddingGenerationBuildError, EMBEDDING_MODEL,
 };

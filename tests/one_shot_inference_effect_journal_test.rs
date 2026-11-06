@@ -15,9 +15,9 @@ use fake_ai::FakeChatModels;
 use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
 };
-use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, MiddlewareFactory};
+use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry, MiddlewareFactory};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RecoveryFact};
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, EffectAttemptStarted, EffectFactOwner, EffectOutcomePayload,
     EffectRecord, PipelineLifecycleEvent, SystemEvent, SystemPayload,
@@ -25,6 +25,7 @@ use obzenflow_core::event::{
 use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
@@ -83,7 +84,7 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
         "EffectRegistrationBuilder",
         "LogicalEffectBindingName",
         "ResolvedEffectPort",
-        "CHAT_CLIENT",
+        "CHAT_MODEL",
         "bind_deferred_with_metadata",
     ] {
         assert!(
@@ -618,7 +619,7 @@ async fn two_ai_stages_run_live_and_strict_replay_without_connecting() {
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(backpressure_config(&journal_base, "off", None))
-        .with_ai_models(live.providers())
+        .with_ai_models(live.resolvers())
         .run_async(build_two_stage_flow(
             journal_base.clone(),
             live_outputs.clone(),
@@ -649,7 +650,7 @@ async fn two_ai_stages_run_live_and_strict_replay_without_connecting() {
             OsString::from("--verify"),
         ])
         .with_config_file(backpressure_config(&journal_base, "off", None))
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .run_async(build_two_stage_flow(journal_base, replay_outputs.clone()))
         .await
         .expect("strict replay serves both recorded replies");
@@ -681,7 +682,7 @@ async fn two_ai_stages_take_their_models_from_their_own_stage_tables() {
             "[ai.models.stages.brief]\nmodel = \"brief-model\"\n\n\
              [ai.models.stages.reviewed]\nmodel = \"review-model\"\n",
         ))
-        .with_ai_models(live.providers())
+        .with_ai_models(live.resolvers())
         .run_async(build_two_stage_flow(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
@@ -732,7 +733,7 @@ async fn two_endpoints_each_receive_only_their_own_credential_and_replay_reads_n
              [ai.models.stages.brief]\nendpoint = \"east\"\nmodel = \"brief-model\"\n\n\
              [ai.models.stages.reviewed]\nendpoint = \"west\"\nmodel = \"review-model\"\n",
         ))
-        .with_ai_models(live.providers())
+        .with_ai_models(live.resolvers())
         .run_async(build_two_stage_flow(
             journal_base.clone(),
             live_outputs.clone(),
@@ -778,7 +779,7 @@ async fn two_endpoints_each_receive_only_their_own_credential_and_replay_reads_n
             OsString::from("--verify"),
         ])
         .with_config_file(ai_config(&journal_base, ""))
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .run_async(build_two_stage_flow(journal_base, replay_outputs.clone()))
         .await
         .expect("strict replay needs no endpoint table");
@@ -803,7 +804,7 @@ async fn an_embeddings_table_for_a_chat_stage_fails_the_build() {
             "[ai.models]\nmodel = \"deterministic\"\n\n\
              [ai.embeddings.stages.brief]\nmodel = \"embedding-model\"\n",
         ))
-        .with_ai_models(live.providers())
+        .with_ai_models(live.resolvers())
         .run_async(build_two_stage_flow(
             journal_base,
             Arc::new(Mutex::new(Vec::new())),
@@ -831,7 +832,7 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(live.providers())
+        .with_ai_models(live.resolvers())
         .run_async(build_flow(
             journal_base.clone(),
             live_outputs.clone(),
@@ -927,7 +928,7 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
             live_archive.as_os_str().to_os_string(),
         ])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .run_async(build_flow(
             journal_base.clone(),
             replay_outputs.clone(),
@@ -974,7 +975,7 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
             replay_archive.as_os_str().to_os_string(),
         ])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(FakeChatModels::forbidden().providers())
+        .with_ai_models(FakeChatModels::forbidden().resolvers())
         .run_async(build_flow(
             journal_base.clone(),
             replay_of_replay_outputs.clone(),
@@ -1006,7 +1007,7 @@ async fn strict_replay_reads_the_recorded_model_and_never_the_configured_one() {
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(answering().providers())
+        .with_ai_models(answering().resolvers())
         .run_async(build_flow(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
@@ -1034,7 +1035,7 @@ async fn strict_replay_reads_the_recorded_model_and_never_the_configured_one() {
             live_archive.as_os_str().to_os_string(),
         ])
         .with_config_file(unconfigured)
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .run_async(build_flow(
             journal_base,
             outputs.clone(),
@@ -1060,7 +1061,7 @@ async fn inference_windows_one_and_two_fail_before_handler_or_port_resolution() 
         let result = FlowApplication::builder()
             .with_cli_args(["obzenflow"])
             .with_config_file(enforced_config(&journal_base, window))
-            .with_ai_models(models.providers())
+            .with_ai_models(models.resolvers())
             .run_async(build_flow(
                 journal_base,
                 Arc::new(Mutex::new(Vec::new())),
@@ -1107,12 +1108,12 @@ async fn inference_waits_at_zero_credit_until_all_three_rows_are_retired() {
         let prepare_calls = prepare_calls.clone();
         let interpret_calls = interpret_calls.clone();
         let outputs = outputs.clone();
-        let providers = models.providers();
+        let resolvers = models.resolvers();
         async move {
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
                 .with_config_file(enforced_config(&journal_base, 3))
-                .with_ai_models(providers)
+                .with_ai_models(resolvers)
                 .run_async(build_credit_flow(
                     journal_base,
                     outputs,
@@ -1184,12 +1185,12 @@ async fn inference_fan_out_acquires_once_against_the_slowest_edge() {
         let prepare_calls = prepare_calls.clone();
         let fast_outputs = fast_outputs.clone();
         let slow_outputs = slow_outputs.clone();
-        let providers = models.providers();
+        let resolvers = models.resolvers();
         async move {
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
                 .with_config_file(enforced_config(&journal_base, 3))
-                .with_ai_models(providers)
+                .with_ai_models(resolvers)
                 .run_async(build_fan_out_flow(
                     journal_base,
                     fast_outputs,
@@ -1235,59 +1236,306 @@ async fn inference_fan_out_acquires_once_against_the_slowest_edge() {
     assert_eq!(slow_outputs.lock().expect("slow output lock").len(), 2);
 }
 
-#[tokio::test]
-async fn a_retry_policy_is_refused_before_any_role_or_client_runs() {
-    let temp = tempfile::tempdir().expect("temporary journal root");
-    let prepare_calls = Arc::new(AtomicUsize::new(0));
-    let interpret_calls = Arc::new(AtomicUsize::new(0));
-    let models = answering();
+#[derive(Clone, Debug)]
+struct AvailabilityRole;
 
-    let invalid_journals = temp.path().join("invalid-journals");
-    let result = FlowApplication::builder()
-        .with_cli_args(["obzenflow"])
-        .with_config_file(enforced_config(&invalid_journals, 3))
-        .with_ai_models(models.providers())
-        .run_async(build_flow_for_role(
-            invalid_journals,
-            Arc::new(Mutex::new(Vec::new())),
-            vec![ReducedEvidence { value: 7 }],
-            BriefRole::counted(prepare_calls.clone(), interpret_calls.clone()),
-            obzenflow_adapters::middleware::retry(),
+impl AiRole<ReducedEvidence> for AvailabilityRole {
+    type Effect = ChatCompletion;
+    type Out = DecisionBrief;
+
+    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, HandlerError> {
+        Ok(ChatRequestSpec::new(
+            "Decide.",
+            format!("decide {}", input.value),
         ))
-        .await;
+    }
 
-    let detail = result
-        .expect_err("a non-idempotent AI effect refuses retry")
-        .to_string();
-    assert!(detail.contains("retry"), "{detail}");
-    assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(interpret_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(models.connect_count(), 0);
-    assert_eq!(models.call_count(), 0);
+    fn interpret(
+        &self,
+        input: ReducedEvidence,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<DecisionBrief, HandlerError> {
+        let answer = match outcome.unavailable() {
+            Some(unavailable) => format!("unavailable: {}", unavailable.cause),
+            None => outcome.replied()?.text().to_string(),
+        };
+        Ok(DecisionBrief {
+            value: input.value,
+            answer,
+        })
+    }
+}
 
-    let corrected_outputs = Arc::new(Mutex::new(Vec::new()));
-    let corrected_journals = temp.path().join("corrected-journals");
+const RATE_LIMIT_FLOOR: Duration = Duration::from_millis(300);
+
+fn rate_limited() -> obzenflow_core::ai::AiProviderError {
+    obzenflow_core::ai::AiProviderError::RateLimited {
+        message: "429 Too Many Requests".to_string(),
+        retry_after: RATE_LIMIT_FLOOR,
+    }
+}
+
+async fn run_availability_flow(
+    journal_base: &Path,
+    models: &FakeChatModels,
+    policy: impl MiddlewareFactory + 'static,
+) -> Vec<DecisionBrief> {
+    let outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .with_config_file(enforced_config(&corrected_journals, 3))
-        .with_ai_models(models.providers())
+        .with_config_file(enforced_config(journal_base, 3))
+        .with_ai_models(models.resolvers())
         .run_async(build_flow_for_role(
-            corrected_journals,
-            corrected_outputs.clone(),
+            journal_base.to_path_buf(),
+            outputs.clone(),
             vec![ReducedEvidence { value: 7 }],
-            BriefRole::counted(prepare_calls.clone(), interpret_calls.clone()),
+            AvailabilityRole,
+            policy,
+        ))
+        .await
+        .expect("the flow completes");
+    let outputs = outputs.lock().expect("output lock").clone();
+    outputs
+}
+
+async fn durable_starts(journal_base: &Path) -> usize {
+    stage_events(&latest_run_dir(journal_base), "brief")
+        .await
+        .iter()
+        .filter(|event| EffectAttemptStarted::matches_event_type(&event.event_type()))
+        .count()
+}
+
+async fn wait_for_writers_released(archive: &Path) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while DiskReplayArchive::open_for_resume(archive.to_path_buf(), true)
+            .await
+            .is_ok_and(|opened| opened.evidence().live_writer)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the aborted run releases its journal writers");
+}
+
+fn recovery_facts(events: &[ChainEvent]) -> Vec<RecoveryFact> {
+    events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(ExecutionPayload::Recovery(fact)) => Some(fact.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn ai_rate_limit_retried_after_floor() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    let models = FakeChatModels::with_reply(move |_| {
+        let mut calls = seen.lock().expect("call times lock");
+        calls.push(std::time::Instant::now());
+        if calls.len() == 1 {
+            Err(rate_limited())
+        } else {
+            Ok(fake_ai::response(ANSWER))
+        }
+    });
+
+    let outputs = run_availability_flow(&journal_base, &models, retry()).await;
+
+    assert_eq!(outputs, vec![expected_brief(7)]);
+    let calls = calls.lock().expect("call times lock").clone();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].duration_since(calls[0]) >= RATE_LIMIT_FLOOR);
+    assert_eq!(durable_starts(&journal_base).await, 1);
+}
+
+#[tokio::test]
+async fn ai_server_error_returns_unavailable() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let models = FakeChatModels::with_reply(|_| {
+        Err(obzenflow_core::ai::AiProviderError::Remote {
+            message: "500 Internal Server Error".to_string(),
+        })
+    });
+
+    let outputs = run_availability_flow(&journal_base, &models, retry()).await;
+
+    assert_eq!(models.call_count(), 1);
+    assert_eq!(
+        outputs,
+        vec![DecisionBrief {
+            value: 7,
+            answer: "unavailable: provider remote".to_string(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn ai_retry_exhausted_returns_unavailable() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let models = FakeChatModels::with_reply(|_| Err(rate_limited()));
+
+    let outputs = run_availability_flow(&journal_base, &models, retry().max_attempts(2)).await;
+
+    assert_eq!(models.call_count(), 2);
+    assert_eq!(
+        outputs,
+        vec![DecisionBrief {
+            value: 7,
+            answer: "unavailable: provider rate_limited".to_string(),
+        }]
+    );
+    assert_eq!(durable_starts(&journal_base).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resumed_call_retry_rows_count_calls() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let entered = Arc::new(Notify::new());
+    let hanging = FakeChatModels::hanging(entered.clone());
+    let live = tokio::spawn({
+        let journal_base = journal_base.clone();
+        let resolvers = hanging.resolvers();
+        async move {
+            FlowApplication::builder()
+                .with_cli_args(["obzenflow"])
+                .with_config_file(enforced_config(&journal_base, 3))
+                .with_ai_models(resolvers)
+                .run_async(build_flow_for_role(
+                    journal_base,
+                    Arc::new(Mutex::new(Vec::new())),
+                    vec![ReducedEvidence { value: 7 }],
+                    AvailabilityRole,
+                    retry(),
+                ))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .expect("the first call starts under its Start");
+    live.abort();
+    assert!(live.await.is_err_and(|error| error.is_cancelled()));
+    let in_doubt_archive = latest_run_dir(&journal_base);
+    wait_for_writers_released(&in_doubt_archive).await;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let models = FakeChatModels::with_reply({
+        let calls = calls.clone();
+        move |_| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(rate_limited())
+            } else {
+                Ok(fake_ai::response(ANSWER))
+            }
+        }
+    });
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args([
+            OsString::from("obzenflow"),
+            OsString::from("--resume-from"),
+            in_doubt_archive.as_os_str().to_os_string(),
+            OsString::from("--allow-incomplete-archive"),
+        ])
+        .with_config_file(enforced_config(&journal_base, 3))
+        .with_ai_models(models.resolvers())
+        .run_async(build_flow_for_role(
+            journal_base.clone(),
+            outputs.clone(),
+            vec![ReducedEvidence { value: 7 }],
+            AvailabilityRole,
+            retry(),
+        ))
+        .await
+        .expect("the resumed flow completes");
+
+    assert_eq!(
+        outputs.lock().expect("output lock").clone(),
+        vec![expected_brief(7)]
+    );
+    assert_eq!(models.call_count(), 2);
+    let events = stage_events(&latest_run_dir(&journal_base), "brief").await;
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(EffectAttemptStarted::from_event)
+            .map(|started| started.attempt.get())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let facts = recovery_facts(&events);
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            RecoveryFact::RetryScheduled {
+                next_attempt: 2,
+                ..
+            }
+        )),
+        "{facts:?}"
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            RecoveryFact::RetrySucceeded {
+                total_attempts: 2,
+                ..
+            }
+        )),
+        "{facts:?}"
+    );
+    assert_eq!(
+        facts
+            .iter()
+            .filter_map(|fact| match fact {
+                RecoveryFact::AttemptCompleted { attempt, .. } => Some(*attempt),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[tokio::test]
+async fn stage_deadline_reaches_model() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let config = journal_base.with_extension("toml");
+    std::fs::write(
+        &config,
+        "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 5000\n\n\
+         [ai.models]\nmodel = \"deterministic\"\nrequest_timeout_ms = 150000\n\n\
+         [ai.models.stages.brief]\nrequest_timeout_ms = 2500\n",
+    )
+    .expect("write the run configuration");
+    let models = answering();
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .with_config_file(config)
+        .with_ai_models(models.resolvers())
+        .run_async(build_flow_for_role(
+            journal_base,
+            Arc::new(Mutex::new(Vec::new())),
+            vec![ReducedEvidence { value: 7 }],
+            AvailabilityRole,
             circuit_breaker().consecutive_failures(5),
         ))
         .await
-        .expect("the same provider serves a corrected build");
+        .expect("the flow completes");
 
-    assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(interpret_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(models.connect_count(), 1);
-    assert_eq!(models.call_count(), 1);
     assert_eq!(
-        *corrected_outputs.lock().expect("corrected output lock"),
-        vec![expected_brief(7)]
+        *models.request_timeouts.lock().expect("deadline lock"),
+        vec![Duration::from_millis(2500)]
     );
 }
 
@@ -1302,7 +1550,7 @@ async fn inference_track_and_off_modes_remain_nonblocking_and_locally_bounded() 
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
             .with_config_file(backpressure_config(&journal_base, mode, None))
-            .with_ai_models(models.providers())
+            .with_ai_models(models.resolvers())
             .run_async(build_flow_for_role(
                 journal_base.clone(),
                 outputs.clone(),
@@ -1336,12 +1584,12 @@ async fn cancelling_an_active_inference_leaves_only_committed_physical_debt() {
 
     let run_task = tokio::spawn({
         let journal_base = journal_base.clone();
-        let providers = models.providers();
+        let resolvers = models.resolvers();
         async move {
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
                 .with_config_file(enforced_config(&journal_base, 3))
-                .with_ai_models(providers)
+                .with_ai_models(resolvers)
                 .run_async(build_flow(
                     journal_base,
                     Arc::new(Mutex::new(Vec::new())),
@@ -1399,7 +1647,7 @@ fn reply_cut_child_process() {
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
                 .with_config_file(enforced_config(&journal_base, 3))
-                .with_ai_models(answering().providers())
+                .with_ai_models(answering().resolvers())
                 .run_async(build_flow_for_role(
                     journal_base,
                     Arc::new(Mutex::new(Vec::new())),
@@ -1493,7 +1741,7 @@ async fn resume_after_a_durable_reply_reinterprets_without_another_chat_call() {
             OsString::from("--allow-incomplete-archive"),
         ])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(resume.providers())
+        .with_ai_models(resume.resolvers())
         .run_async(build_flow(
             journal_base.clone(),
             resume_outputs.clone(),
@@ -1529,7 +1777,7 @@ async fn changed_inference_request_is_replay_divergence_before_port_resolution()
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(live.providers())
+        .with_ai_models(live.resolvers())
         .run_async(build_flow(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
@@ -1550,7 +1798,7 @@ async fn changed_inference_request_is_replay_divergence_before_port_resolution()
             live_archive.as_os_str().to_os_string(),
         ])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .run_async(build_flow(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
@@ -1579,7 +1827,7 @@ async fn changed_inference_logic_version_is_replay_divergence_with_identical_req
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(answering().providers())
+        .with_ai_models(answering().resolvers())
         .run_async(build_flow(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
@@ -1600,7 +1848,7 @@ async fn changed_inference_logic_version_is_replay_divergence_with_identical_req
             live_archive.as_os_str().to_os_string(),
         ])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(replay.providers())
+        .with_ai_models(replay.resolvers())
         .run_async(build_flow_for_role(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
@@ -1644,7 +1892,7 @@ async fn inference_accepts_limiter_only_effect_control() {
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .with_config_file(enforced_config(&journal_base, 3))
-        .with_ai_models(models.providers())
+        .with_ai_models(models.resolvers())
         .run_async(build_flow_for_role(
             journal_base,
             outputs.clone(),

@@ -25,15 +25,16 @@ use obzenflow_core::event::payloads::execution_payload::{
 use obzenflow_core::event::provenance::causality_context::CausalInput;
 use obzenflow_core::event::{
     ChainEventFactory, CircuitBreakerAttemptSettledEventParams, EffectFailureCause,
-    RecoveryCompletedEventParams,
+    RecoveryCompletedEventParams, RetryDisposition,
 };
 #[cfg(feature = "test-support")]
-use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
+use obzenflow_core::event::{EffectFailureCode, EffectFailureSource};
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 #[cfg(test)]
 use obzenflow_runtime::effects::EffectCursor;
 use obzenflow_runtime::effects::{
-    EffectAbortReason, EffectBoundaryOutcome, EffectBoundaryReport, EffectError, EffectIdentity,
+    AffineEffectBoundaryReport, AffineEffectExecution, AffineEffectOperation, EffectAbortReason,
+    EffectBoundaryOutcome, EffectBoundaryReport, EffectError, EffectIdentity,
     PhysicalCallObservation, PhysicalCallOutcome, PhysicalCallReceipt, RepeatableEffectOperation,
     SingleUseEffectBoundaryReport, SingleUseEffectOperation,
 };
@@ -48,6 +49,7 @@ use obzenflow_runtime::runtime_config::{
     RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY, RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
 };
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -392,6 +394,7 @@ impl EffectPlanFactory {
                 effect.safety,
                 obzenflow_runtime::effects::EffectSafety::Idempotent
                     | obzenflow_runtime::effects::EffectSafety::NonIdempotentRequiresKey
+                    | obzenflow_runtime::effects::EffectSafety::NonIdempotentAtLeastOnce
             )
         {
             return Err(MiddlewareFactoryError::invalid_configuration(
@@ -668,12 +671,10 @@ struct EffectRecoveryController {
     attempt_start_deadline: Option<Instant>,
     initial_breaker_epoch: Option<EffectAdmissionEpoch>,
     reservation_epoch: Option<EffectAdmissionEpoch>,
-    attempt_ordinal: u32,
-    retry_count: u32,
     cumulative_backoff: Duration,
     current_reservation: Option<RateLimitReservation>,
     cancellation_state: RecoveryCancellationState,
-    last_physical_error: Option<EffectError>,
+    physical_calls: u32,
     terminal_decision: Option<RecoveryTerminalDecision>,
     completion: Option<RecoveryCompletion>,
 }
@@ -686,22 +687,13 @@ impl EffectRecoveryController {
             attempt_start_deadline: None,
             initial_breaker_epoch: None,
             reservation_epoch: None,
-            attempt_ordinal: 0,
-            retry_count: 0,
             cumulative_backoff: Duration::ZERO,
             current_reservation: None,
             cancellation_state: RecoveryCancellationState::Idle,
-            last_physical_error: None,
+            physical_calls: 0,
             terminal_decision: None,
             completion: None,
         }
-    }
-
-    fn with_attempt_base(highest_prior_attempt: u32) -> Self {
-        let mut controller = Self::new();
-        controller.attempt_ordinal = highest_prior_attempt;
-        controller.retry_count = highest_prior_attempt.saturating_sub(1);
-        controller
     }
 
     fn initial_epoch(&self) -> Option<EffectAdmissionEpoch> {
@@ -747,14 +739,14 @@ impl EffectRecoveryController {
     }
 
     fn later_attempt_may_start(&self) -> bool {
-        self.attempt_ordinal == 0
+        self.physical_calls == 0
             || self
                 .attempt_start_deadline
                 .is_some_and(|deadline| Instant::now() < deadline)
     }
 
     fn backoff_fits_attempt_window(&self, delay: Duration) -> bool {
-        debug_assert!(self.attempt_ordinal > 0);
+        debug_assert!(self.physical_calls > 0);
         self.attempt_start_deadline.is_some_and(|deadline| {
             Instant::now()
                 .checked_add(delay)
@@ -786,17 +778,13 @@ impl EffectRecoveryController {
             self.attempt_start_deadline =
                 attempt_start_window.and_then(|window| now.checked_add(window));
         }
-        self.attempt_ordinal = self.attempt_ordinal.saturating_add(1);
-        self.retry_count = self.attempt_ordinal.saturating_sub(1);
+        self.physical_calls = self.physical_calls.saturating_add(1);
         self.cancellation_state = RecoveryCancellationState::InFlight;
-        self.attempt_ordinal
+        self.physical_calls
     }
 
-    fn finish_physical_attempt(&mut self, result: &Result<Vec<ChainEvent>, EffectError>) {
+    fn finish_physical_attempt(&mut self) {
         debug_assert_eq!(self.cancellation_state, RecoveryCancellationState::InFlight);
-        if let Err(error) = result {
-            self.last_physical_error = Some(error.clone());
-        }
         self.cancellation_state = RecoveryCancellationState::Idle;
     }
 
@@ -804,12 +792,12 @@ impl EffectRecoveryController {
         self.cumulative_backoff = self.cumulative_backoff.saturating_add(elapsed);
     }
 
-    fn attempts(&self) -> u32 {
-        self.attempt_ordinal
+    fn physical_calls(&self) -> u32 {
+        self.physical_calls
     }
 
     fn next_attempt(&self) -> u32 {
-        self.attempt_ordinal.saturating_add(1)
+        self.physical_calls.saturating_add(1)
     }
 
     fn finish_from_admission(
@@ -817,22 +805,11 @@ impl EffectRecoveryController {
         cause: Box<crate::middleware::MiddlewareAbortCause>,
     ) -> RecoveryTerminalDecision {
         self.cancel_reservation();
-        self.terminal_decision = Some(if self.attempt_ordinal == 0 {
+        self.terminal_decision = Some(if self.physical_calls == 0 {
             RecoveryTerminalDecision::BoundaryRejected(cause)
         } else {
-            debug_assert!(self.last_physical_error.is_some());
-            drop(cause);
             RecoveryTerminalDecision::ReturnLastPhysicalError
         });
-        self.take_terminal_decision()
-    }
-
-    fn finish_affine_admission(
-        &mut self,
-        cause: Box<crate::middleware::MiddlewareAbortCause>,
-    ) -> RecoveryTerminalDecision {
-        self.cancel_reservation();
-        self.terminal_decision = Some(RecoveryTerminalDecision::BoundaryRejected(cause));
         self.take_terminal_decision()
     }
 
@@ -848,23 +825,17 @@ impl EffectRecoveryController {
         self.take_terminal_decision()
     }
 
-    fn take_last_physical_error(&mut self) -> EffectError {
-        self.last_physical_error
-            .take()
-            .expect("a continuation terminal must preserve a prior physical error")
-    }
-
     fn take_terminal_decision(&mut self) -> RecoveryTerminalDecision {
         self.cancellation_state = RecoveryCancellationState::Complete;
         let completion = RecoveryCompletion {
-            total_attempts: self.attempt_ordinal,
+            total_attempts: self.physical_calls,
             backoff_elapsed: self.cumulative_backoff,
             recovery_elapsed: self.session_started.elapsed(),
         };
         self.completion = Some(completion);
         tracing::trace!(
-            attempts = self.attempt_ordinal,
-            retries = self.retry_count,
+            calls = self.physical_calls,
+            retries = self.physical_calls.saturating_sub(1),
             recovery_elapsed_ms = duration_ms(completion.recovery_elapsed),
             backoff_elapsed_ms = duration_ms(completion.backoff_elapsed),
             "effect recovery reached a terminal decision"
@@ -1041,12 +1012,44 @@ impl EffectResilienceMiddleware {
             MiddlewareExecutionScope::LiveEffectBoundary
         );
         let mut recovery = EffectRecoveryController::new();
+        let mut calls = RepeatableCalls {
+            operation,
+            latest: None,
+        };
+        match self
+            .recover(identity, event, ctx, &mut recovery, &mut calls)
+            .await
+        {
+            RecoveryTerminalDecision::BoundaryRejected(cause) => {
+                report_from_admission(PolicyAdmission::Reject(cause), ctx)
+            }
+            RecoveryTerminalDecision::ReturnLastPhysicalError
+            | RecoveryTerminalDecision::ReturnPhysicalResult => executed(
+                calls
+                    .latest
+                    .take()
+                    .expect("a terminal after a call returns that call's result"),
+                ctx,
+            ),
+        }
+    }
 
+    async fn recover<C: RecoveryCalls + Send>(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        ctx: &mut crate::middleware::MiddlewareContext,
+        recovery: &mut EffectRecoveryController,
+        calls: &mut C,
+    ) -> RecoveryTerminalDecision {
+        let attempt_start_window = self
+            .retry
+            .as_ref()
+            .map(|retry| retry.limits.max_attempt_start_window);
         loop {
-            if recovery.attempts() > 0 && !recovery.later_attempt_may_start() {
-                return repeatable_retry_exhausted(
-                    &mut recovery,
-                    self.writer_id,
+            if !recovery.later_attempt_may_start() {
+                return self.retry_exhausted(
+                    recovery,
                     identity,
                     RetryStopReason::AttemptStartWindow,
                     event,
@@ -1055,21 +1058,12 @@ impl EffectResilienceMiddleware {
             }
 
             if let Some(breaker) = &self.breaker {
-                let reservation_epoch = match breaker.effect_precheck(ctx, recovery.initial_epoch())
-                {
-                    Ok(epoch) => epoch,
+                match breaker.effect_precheck(ctx, recovery.initial_epoch()) {
+                    Ok(reservation_epoch) => recovery.observe_precheck(reservation_epoch),
                     Err(cause) => {
-                        return repeatable_admission_rejected(
-                            &mut recovery,
-                            self.writer_id,
-                            identity,
-                            cause,
-                            event,
-                            ctx,
-                        )
+                        return self.admission_rejected(recovery, identity, cause, event, ctx)
                     }
-                };
-                recovery.observe_precheck(reservation_epoch);
+                }
             }
 
             let admission_started = Instant::now();
@@ -1081,16 +1075,12 @@ impl EffectResilienceMiddleware {
             recovery.install_reservation(reservation);
 
             #[cfg(test)]
-            self.pause_before_final_admission(&identity.cursor, recovery.attempts())
+            self.pause_before_final_admission(&identity.cursor, recovery.physical_calls())
                 .await;
 
-            // The attempt-start window is anchored at the first physical call,
-            // not at session creation. Recheck after every limiter wait, while
-            // the reservation is still affine and refundable.
-            if recovery.attempts() > 0 && !recovery.later_attempt_may_start() {
-                return repeatable_retry_exhausted(
-                    &mut recovery,
-                    self.writer_id,
+            if !recovery.later_attempt_may_start() {
+                return self.retry_exhausted(
+                    recovery,
                     identity,
                     RetryStopReason::AttemptStartWindow,
                     event,
@@ -1103,26 +1093,15 @@ impl EffectResilienceMiddleware {
                 .as_ref()
                 .map(|breaker| breaker.effect_admit(ctx, recovery.admission_fence()))
             {
-                return repeatable_admission_rejected(
-                    &mut recovery,
-                    self.writer_id,
-                    identity,
-                    cause,
-                    event,
-                    ctx,
-                );
+                return self.admission_rejected(recovery, identity, cause, event, ctx);
             }
 
-            // Keep the final time decision adjacent to physical admission. If
-            // the tiny breaker critical section crossed the deadline, release
-            // any probe lease and refund the limiter reservation.
-            if recovery.attempts() > 0 && !recovery.later_attempt_may_start() {
+            if !recovery.later_attempt_may_start() {
                 if let Some(breaker) = &self.breaker {
                     breaker.settle_not_executed(ctx);
                 }
-                return repeatable_retry_exhausted(
-                    &mut recovery,
-                    self.writer_id,
+                return self.retry_exhausted(
+                    recovery,
                     identity,
                     RetryStopReason::AttemptStartWindow,
                     event,
@@ -1131,192 +1110,42 @@ impl EffectResilienceMiddleware {
             }
             let admission_wait = admission_started.elapsed();
 
-            let prepared = operation.prepare();
-            let receipt = prepared.receipt();
-            let mut settlement_guard = self
-                .breaker
-                .as_ref()
-                .map(|breaker| AttemptSettlementGuard::new(breaker.clone(), receipt.clone()));
-            let attempt = recovery.begin_physical_attempt(
-                self.retry
-                    .as_ref()
-                    .map(|retry| retry.limits.max_attempt_start_window),
-            );
-            let result = prepared.execute().await;
-            let observation = receipt.observation();
-            if let Some(guard) = &mut settlement_guard {
-                guard.disarm();
-            }
-            recovery.finish_physical_attempt(&result);
-            let (physical_outcome, dependency_elapsed) = match observation {
-                PhysicalCallObservation::Completed {
+            let (attempt, observation) = calls
+                .call(recovery, attempt_start_window, self.breaker.as_ref())
+                .await;
+            let PhysicalCallObservation::Completed {
+                outcome,
+                dependency_elapsed,
+            } = observation
+            else {
+                if let Some(breaker) = &self.breaker {
+                    breaker.settle_not_executed(ctx);
+                }
+                return self.physical_terminal(recovery, identity, event, ctx);
+            };
+            let delay = match self.after_call(
+                identity,
+                event,
+                ctx,
+                recovery,
+                &*calls,
+                CompletedCall {
+                    attempt,
                     outcome,
                     dependency_elapsed,
-                } => (outcome, dependency_elapsed),
-                PhysicalCallObservation::Prepared | PhysicalCallObservation::Started { .. } => {
-                    if let Some(breaker) = &self.breaker {
-                        breaker.settle_not_executed(ctx);
-                    }
-                    return repeatable_physical_terminal(
-                        &mut recovery,
-                        self.writer_id,
-                        identity,
-                        result,
-                        event,
-                        ctx,
-                    );
-                }
+                    admission_wait,
+                },
+            ) {
+                ControlFlow::Continue(delay) => delay,
+                ControlFlow::Break(decision) => return decision,
             };
-            ctx.insert::<EffectCallDurationNanos>(
-                dependency_elapsed.as_nanos().min(u64::MAX as u128) as u64,
-            );
-            if self.breaker.is_some() {
-                prepare_retry_context(&result, ctx);
-            }
-            let classification = self.breaker.as_ref().and_then(|breaker| {
-                classify_physical_result(breaker, event, &result, physical_outcome, ctx)
-            });
-            if let Some(breaker) = &self.breaker {
-                if let Some(classification) = classification.as_ref() {
-                    breaker.settle_classified_call(classification, ctx);
-                } else {
-                    breaker.settle_unobserved_call(ctx);
-                }
-                ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
-                    self.writer_id,
-                    CircuitBreakerAttemptSettledEventParams {
-                        unit: breaker.unit().clone(),
-                        cursor: identity.cursor.clone(),
-                        attempt,
-                        health_classification: evidence_classification(classification.as_ref()),
-                        slow: breaker.is_slow_dependency_call(dependency_elapsed),
-                        dependency_elapsed_ms: duration_ms(dependency_elapsed),
-                        admission_wait_ms: duration_ms(admission_wait),
-                    },
-                    CausalInput::of(event),
-                ));
-            } else {
-                ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
-                    self.writer_id,
-                    identity.cursor.clone(),
-                    attempt,
-                    duration_ms(dependency_elapsed),
-                    duration_ms(admission_wait),
-                    CausalInput::of(event),
-                ));
-            }
 
-            if let Some(limiter) = &self.limiter {
-                limiter.observe_resilience_attempt(ctx);
-            }
-
-            let Some(retry) = &self.retry else {
-                return repeatable_physical_terminal(
-                    &mut recovery,
-                    self.writer_id,
-                    identity,
-                    result,
-                    event,
-                    ctx,
-                );
-            };
-            let Err(error) = &result else {
-                if recovery.attempts() > 1 {
-                    ctx.write_control_event(ChainEventFactory::retry_succeeded(
-                        self.writer_id,
-                        identity.cursor.clone(),
-                        recovery.attempts(),
-                        CausalInput::of(event),
-                    ));
-                }
-                return repeatable_physical_terminal(
-                    &mut recovery,
-                    self.writer_id,
-                    identity,
-                    result,
-                    event,
-                    ctx,
-                );
-            };
-            if physical_outcome != PhysicalCallOutcome::Failed || !retryable_error(error) {
-                if recovery.attempts() > 1 {
-                    ctx.write_control_event(ChainEventFactory::retry_stopped_non_retryable(
-                        self.writer_id,
-                        identity.cursor.clone(),
-                        recovery.attempts(),
-                        CausalInput::of(event),
-                    ));
-                }
-                return repeatable_physical_terminal(
-                    &mut recovery,
-                    self.writer_id,
-                    identity,
-                    result,
-                    event,
-                    ctx,
-                );
-            }
-            if recovery.attempts() >= retry.policy.max_attempts {
-                write_exhausted(
-                    self.writer_id,
-                    identity,
-                    recovery.attempts(),
-                    RetryStopReason::AttemptLimit,
-                    event,
-                    ctx,
-                );
-                return repeatable_physical_terminal(
-                    &mut recovery,
-                    self.writer_id,
-                    identity,
-                    result,
-                    event,
-                    ctx,
-                );
-            }
-            if self.breaker.as_ref().is_some_and(|breaker| {
-                breaker.is_effect_probe(ctx)
-                    || !breaker.effect_recovery_epoch_is_current(
-                        recovery
-                            .initial_epoch()
-                            .expect("a breaker attempt captures its epoch"),
-                    )
-            }) {
-                return repeatable_retry_exhausted(
-                    &mut recovery,
-                    self.writer_id,
-                    identity,
-                    RetryStopReason::CircuitNoLongerClosed,
-                    event,
-                    ctx,
-                );
-            }
-
-            let delay = retry_delay(retry, recovery.attempts(), error);
-            if !recovery.backoff_fits_attempt_window(delay) {
-                return repeatable_retry_exhausted(
-                    &mut recovery,
-                    self.writer_id,
-                    identity,
-                    RetryStopReason::AttemptStartWindow,
-                    event,
-                    ctx,
-                );
-            }
-            ctx.write_control_event(ChainEventFactory::retry_scheduled(
-                self.writer_id,
-                identity.cursor.clone(),
-                recovery.next_attempt(),
-                duration_ms(delay),
-                CausalInput::of(event),
-            ));
             let backoff_started = Instant::now();
             tokio::time::sleep(delay).await;
             recovery.record_backoff(backoff_started.elapsed());
             if !recovery.later_attempt_may_start() {
-                return repeatable_retry_exhausted(
-                    &mut recovery,
-                    self.writer_id,
+                return self.retry_exhausted(
+                    recovery,
                     identity,
                     RetryStopReason::AttemptStartWindow,
                     event,
@@ -1330,9 +1159,8 @@ impl EffectResilienceMiddleware {
                         .expect("a breaker attempt captures its epoch"),
                 )
             }) {
-                return repeatable_retry_exhausted(
-                    &mut recovery,
-                    self.writer_id,
+                return self.retry_exhausted(
+                    recovery,
                     identity,
                     RetryStopReason::CircuitNoLongerClosed,
                     event,
@@ -1340,6 +1168,188 @@ impl EffectResilienceMiddleware {
                 );
             }
         }
+    }
+
+    fn after_call<C: RecoveryCalls>(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        ctx: &mut crate::middleware::MiddlewareContext,
+        recovery: &mut EffectRecoveryController,
+        calls: &C,
+        call: CompletedCall,
+    ) -> ControlFlow<RecoveryTerminalDecision, Duration> {
+        let result = calls.latest();
+        ctx.insert::<EffectCallDurationNanos>(
+            call.dependency_elapsed.as_nanos().min(u64::MAX as u128) as u64,
+        );
+        if self.breaker.is_some() {
+            prepare_retry_context(result, ctx);
+        }
+        let classification = self.breaker.as_ref().and_then(|breaker| {
+            classify_physical_result(breaker, event, result, call.outcome, ctx)
+        });
+        if let Some(breaker) = &self.breaker {
+            if let Some(classification) = classification.as_ref() {
+                breaker.settle_classified_call(classification, ctx);
+            } else {
+                breaker.settle_unobserved_call(ctx);
+            }
+            ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
+                self.writer_id,
+                CircuitBreakerAttemptSettledEventParams {
+                    unit: breaker.unit().clone(),
+                    cursor: identity.cursor.clone(),
+                    attempt: call.attempt,
+                    health_classification: evidence_classification(classification.as_ref()),
+                    slow: breaker.is_slow_dependency_call(call.dependency_elapsed),
+                    dependency_elapsed_ms: duration_ms(call.dependency_elapsed),
+                    admission_wait_ms: duration_ms(call.admission_wait),
+                },
+                CausalInput::of(event),
+            ));
+        } else {
+            ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
+                self.writer_id,
+                identity.cursor.clone(),
+                call.attempt,
+                duration_ms(call.dependency_elapsed),
+                duration_ms(call.admission_wait),
+                CausalInput::of(event),
+            ));
+        }
+
+        if let Some(limiter) = &self.limiter {
+            limiter.observe_resilience_attempt(ctx);
+        }
+
+        let Some(retry) = &self.retry else {
+            return ControlFlow::Break(self.physical_terminal(recovery, identity, event, ctx));
+        };
+        let Err(error) = result else {
+            if recovery.physical_calls() > 1 {
+                ctx.write_control_event(ChainEventFactory::retry_succeeded(
+                    self.writer_id,
+                    identity.cursor.clone(),
+                    recovery.physical_calls(),
+                    CausalInput::of(event),
+                ));
+            }
+            return ControlFlow::Break(self.physical_terminal(recovery, identity, event, ctx));
+        };
+        if call.outcome != PhysicalCallOutcome::Failed || !calls.repeats(error) {
+            if recovery.physical_calls() > 1 {
+                ctx.write_control_event(ChainEventFactory::retry_stopped_non_retryable(
+                    self.writer_id,
+                    identity.cursor.clone(),
+                    recovery.physical_calls(),
+                    CausalInput::of(event),
+                ));
+            }
+            return ControlFlow::Break(self.physical_terminal(recovery, identity, event, ctx));
+        }
+        if recovery.physical_calls() >= retry.policy.max_attempts {
+            write_exhausted(
+                self.writer_id,
+                identity,
+                recovery.physical_calls(),
+                RetryStopReason::AttemptLimit,
+                event,
+                ctx,
+            );
+            return ControlFlow::Break(self.physical_terminal(recovery, identity, event, ctx));
+        }
+        if self.breaker.as_ref().is_some_and(|breaker| {
+            breaker.is_effect_probe(ctx)
+                || !breaker.effect_recovery_epoch_is_current(
+                    recovery
+                        .initial_epoch()
+                        .expect("a breaker attempt captures its epoch"),
+                )
+        }) {
+            return ControlFlow::Break(self.retry_exhausted(
+                recovery,
+                identity,
+                RetryStopReason::CircuitNoLongerClosed,
+                event,
+                ctx,
+            ));
+        }
+
+        let delay = retry_delay(retry, recovery.physical_calls(), error);
+        if !recovery.backoff_fits_attempt_window(delay) {
+            return ControlFlow::Break(self.retry_exhausted(
+                recovery,
+                identity,
+                RetryStopReason::AttemptStartWindow,
+                event,
+                ctx,
+            ));
+        }
+        ctx.write_control_event(ChainEventFactory::retry_scheduled(
+            self.writer_id,
+            identity.cursor.clone(),
+            recovery.next_attempt(),
+            duration_ms(delay),
+            CausalInput::of(event),
+        ));
+        ControlFlow::Continue(delay)
+    }
+
+    fn admission_rejected(
+        &self,
+        recovery: &mut EffectRecoveryController,
+        identity: &EffectIdentity,
+        cause: Box<crate::middleware::MiddlewareAbortCause>,
+        event: &ChainEvent,
+        ctx: &mut crate::middleware::MiddlewareContext,
+    ) -> RecoveryTerminalDecision {
+        let decision = recovery.finish_from_admission(cause);
+        write_recovery_completed(recovery, self.writer_id, identity, event, ctx);
+        if matches!(decision, RecoveryTerminalDecision::ReturnLastPhysicalError) {
+            write_exhausted(
+                self.writer_id,
+                identity,
+                recovery.physical_calls(),
+                RetryStopReason::CircuitNoLongerClosed,
+                event,
+                ctx,
+            );
+        }
+        decision
+    }
+
+    fn retry_exhausted(
+        &self,
+        recovery: &mut EffectRecoveryController,
+        identity: &EffectIdentity,
+        reason: RetryStopReason,
+        event: &ChainEvent,
+        ctx: &mut crate::middleware::MiddlewareContext,
+    ) -> RecoveryTerminalDecision {
+        write_exhausted(
+            self.writer_id,
+            identity,
+            recovery.physical_calls(),
+            reason,
+            event,
+            ctx,
+        );
+        let decision = recovery.finish_with_last_physical_error();
+        write_recovery_completed(recovery, self.writer_id, identity, event, ctx);
+        decision
+    }
+
+    fn physical_terminal(
+        &self,
+        recovery: &mut EffectRecoveryController,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        ctx: &mut crate::middleware::MiddlewareContext,
+    ) -> RecoveryTerminalDecision {
+        let decision = recovery.finish_with_physical_result();
+        write_recovery_completed(recovery, self.writer_id, identity, event, ctx);
+        decision
     }
 
     pub(in crate::middleware::control) async fn execute_single_use(
@@ -1377,7 +1387,7 @@ impl EffectResilienceMiddleware {
         recovery.install_reservation(reservation);
 
         #[cfg(test)]
-        self.pause_before_final_admission(&identity.cursor, recovery.attempts())
+        self.pause_before_final_admission(&identity.cursor, recovery.physical_calls())
             .await;
 
         if let Some(PolicyAdmission::Reject(cause)) = self
@@ -1402,7 +1412,7 @@ impl EffectResilienceMiddleware {
         if let Some(guard) = &mut settlement_guard {
             guard.disarm();
         }
-        recovery.finish_physical_attempt(execution.result());
+        recovery.finish_physical_attempt();
         let PhysicalCallObservation::Completed {
             outcome,
             dependency_elapsed,
@@ -1477,148 +1487,33 @@ impl EffectResilienceMiddleware {
         identity: &EffectIdentity,
         event: &ChainEvent,
         ctx: &mut crate::middleware::MiddlewareContext,
-        operation: obzenflow_runtime::effects::AffineEffectOperation,
-    ) -> obzenflow_runtime::effects::AffineEffectBoundaryReport {
+        operation: AffineEffectOperation,
+    ) -> AffineEffectBoundaryReport {
         debug_assert_eq!(
             identity.safety,
             obzenflow_runtime::effects::EffectSafety::NonIdempotentAtLeastOnce
         );
-        debug_assert!(self.retry.is_none());
-        let highest_prior_attempt = operation.highest_prior_attempt();
-        let mut recovery = EffectRecoveryController::with_attempt_base(highest_prior_attempt);
+        let mut recovery = EffectRecoveryController::new();
 
         #[cfg(feature = "test-support")]
-        if self.reject_affine_recovery_for_test && highest_prior_attempt > 0 {
-            let decision = recovery.finish_affine_admission(Box::new(
-                crate::middleware::MiddlewareAbortCause {
+        if self.reject_affine_recovery_for_test && operation.highest_prior_attempt() > 0 {
+            let decision =
+                recovery.finish_from_admission(Box::new(crate::middleware::MiddlewareAbortCause {
                     source: EffectFailureSource::new("circuit_breaker"),
                     code: EffectFailureCode::new("circuit_open"),
                     message: "test fixture rejected affine recovery".to_string(),
                     retry: RetryDisposition::Retryable,
                     event: None,
-                },
-            ));
+                }));
             write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
-            return affine_admission_terminal(decision, ctx, operation);
+            return affine_report(decision, AffineCalls::Ready(operation), ctx);
         }
 
-        if let Some(breaker) = &self.breaker {
-            let reservation_epoch = match breaker.effect_precheck(ctx, None) {
-                Ok(epoch) => epoch,
-                Err(cause) => {
-                    let decision = recovery.finish_affine_admission(cause);
-                    write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
-                    return affine_admission_terminal(decision, ctx, operation);
-                }
-            };
-            recovery.observe_precheck(reservation_epoch);
-        }
-
-        let admission_started = Instant::now();
-        recovery.begin_limiter_wait();
-        let reservation = match &self.limiter {
-            Some(limiter) => Some(limiter.reserve_permit_async(ctx).await),
-            None => None,
-        };
-        recovery.install_reservation(reservation);
-
-        #[cfg(test)]
-        self.pause_before_final_admission(&identity.cursor, recovery.attempts())
+        let mut calls = AffineCalls::Ready(operation);
+        let decision = self
+            .recover(identity, event, ctx, &mut recovery, &mut calls)
             .await;
-
-        if let Some(PolicyAdmission::Reject(cause)) = self
-            .breaker
-            .as_ref()
-            .map(|breaker| breaker.effect_admit(ctx, recovery.admission_fence()))
-        {
-            let decision = recovery.finish_affine_admission(cause);
-            write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
-            return affine_admission_terminal(decision, ctx, operation);
-        }
-        let admission_wait = admission_started.elapsed();
-
-        let prepared = operation.prepare();
-        let receipt = prepared.receipt();
-        let mut settlement_guard = self
-            .breaker
-            .as_ref()
-            .map(|breaker| AttemptSettlementGuard::new(breaker.clone(), receipt.clone()));
-        let (attempt, reservation) = recovery.begin_affine_attempt(None);
-        let mut limiter_settlement =
-            AffineLimiterSettlementGuard::new(receipt.clone(), reservation);
-        let execution = prepared.execute().await;
-        limiter_settlement.settle();
-        if let Some(guard) = &mut settlement_guard {
-            guard.disarm();
-        }
-        recovery.finish_physical_attempt(execution.result());
-        let PhysicalCallObservation::Completed {
-            outcome,
-            dependency_elapsed,
-        } = receipt.observation()
-        else {
-            if let Some(breaker) = &self.breaker {
-                breaker.settle_not_executed(ctx);
-            }
-            let terminal = recovery.finish_with_physical_result();
-            debug_assert!(matches!(
-                terminal,
-                RecoveryTerminalDecision::ReturnPhysicalResult
-            ));
-            write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
-            return execution.into_report(ctx.take_control_events());
-        };
-
-        ctx.insert::<EffectCallDurationNanos>(
-            dependency_elapsed.as_nanos().min(u64::MAX as u128) as u64
-        );
-        if self.breaker.is_some() {
-            prepare_retry_context(execution.result(), ctx);
-        }
-        let classification = self.breaker.as_ref().and_then(|breaker| {
-            classify_physical_result(breaker, event, execution.result(), outcome, ctx)
-        });
-        if let Some(breaker) = &self.breaker {
-            if let Some(classification) = classification.as_ref() {
-                breaker.settle_classified_call(classification, ctx);
-            } else {
-                breaker.settle_unobserved_call(ctx);
-            }
-            ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
-                self.writer_id,
-                CircuitBreakerAttemptSettledEventParams {
-                    unit: breaker.unit().clone(),
-                    cursor: identity.cursor.clone(),
-                    attempt,
-                    health_classification: evidence_classification(classification.as_ref()),
-                    slow: breaker.is_slow_dependency_call(dependency_elapsed),
-                    dependency_elapsed_ms: duration_ms(dependency_elapsed),
-                    admission_wait_ms: duration_ms(admission_wait),
-                },
-                CausalInput::of(event),
-            ));
-        } else {
-            ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
-                self.writer_id,
-                identity.cursor.clone(),
-                attempt,
-                duration_ms(dependency_elapsed),
-                duration_ms(admission_wait),
-                CausalInput::of(event),
-            ));
-        }
-
-        if let Some(limiter) = &self.limiter {
-            limiter.observe_resilience_attempt(ctx);
-        }
-
-        let terminal = recovery.finish_with_physical_result();
-        debug_assert!(matches!(
-            terminal,
-            RecoveryTerminalDecision::ReturnPhysicalResult
-        ));
-        write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
-        execution.into_report(ctx.take_control_events())
+        affine_report(decision, calls, ctx)
     }
 }
 
@@ -1642,76 +1537,115 @@ fn write_recovery_completed(
     ));
 }
 
-fn repeatable_admission_rejected(
-    recovery: &mut EffectRecoveryController,
-    writer_id: obzenflow_core::WriterId,
-    identity: &EffectIdentity,
-    cause: Box<crate::middleware::MiddlewareAbortCause>,
-    event: &ChainEvent,
-    ctx: &mut crate::middleware::MiddlewareContext,
-) -> EffectBoundaryReport {
-    let decision = recovery.finish_from_admission(cause);
-    write_recovery_completed(recovery, writer_id, identity, event, ctx);
-    match decision {
-        RecoveryTerminalDecision::BoundaryRejected(cause) => {
-            report_from_admission(PolicyAdmission::Reject(cause), ctx)
+trait RecoveryCalls {
+    fn repeats(&self, error: &EffectError) -> bool;
+
+    fn call(
+        &mut self,
+        recovery: &mut EffectRecoveryController,
+        attempt_start_window: Option<Duration>,
+        breaker: Option<&Arc<CircuitBreakerMiddleware>>,
+    ) -> impl std::future::Future<Output = (u32, PhysicalCallObservation)> + Send;
+
+    fn latest(&self) -> &Result<Vec<ChainEvent>, EffectError>;
+}
+
+struct RepeatableCalls<'operation> {
+    operation: &'operation mut RepeatableEffectOperation,
+    latest: Option<Result<Vec<ChainEvent>, EffectError>>,
+}
+
+impl RecoveryCalls for RepeatableCalls<'_> {
+    fn repeats(&self, error: &EffectError) -> bool {
+        retryable_error(error)
+    }
+
+    async fn call(
+        &mut self,
+        recovery: &mut EffectRecoveryController,
+        attempt_start_window: Option<Duration>,
+        breaker: Option<&Arc<CircuitBreakerMiddleware>>,
+    ) -> (u32, PhysicalCallObservation) {
+        let prepared = self.operation.prepare();
+        let receipt = prepared.receipt();
+        let mut settlement_guard =
+            breaker.map(|breaker| AttemptSettlementGuard::new(breaker.clone(), receipt.clone()));
+        let attempt = recovery.begin_physical_attempt(attempt_start_window);
+        let result = prepared.execute().await;
+        let observation = receipt.observation();
+        if let Some(guard) = &mut settlement_guard {
+            guard.disarm();
         }
-        RecoveryTerminalDecision::ReturnLastPhysicalError => {
-            write_exhausted(
-                writer_id,
-                identity,
-                recovery.attempts(),
-                RetryStopReason::CircuitNoLongerClosed,
-                event,
-                ctx,
-            );
-            executed(Err(recovery.take_last_physical_error()), ctx)
+        recovery.finish_physical_attempt();
+        self.latest = Some(result);
+        (attempt, observation)
+    }
+
+    fn latest(&self) -> &Result<Vec<ChainEvent>, EffectError> {
+        self.latest
+            .as_ref()
+            .expect("the recovery loop reads a result only after a call")
+    }
+}
+
+enum AffineCalls {
+    Ready(AffineEffectOperation),
+    Calling,
+    Executed(AffineEffectExecution),
+}
+
+impl RecoveryCalls for AffineCalls {
+    fn repeats(&self, error: &EffectError) -> bool {
+        error.is_definite_no()
+    }
+
+    async fn call(
+        &mut self,
+        recovery: &mut EffectRecoveryController,
+        attempt_start_window: Option<Duration>,
+        breaker: Option<&Arc<CircuitBreakerMiddleware>>,
+    ) -> (u32, PhysicalCallObservation) {
+        let operation = match std::mem::replace(self, AffineCalls::Calling) {
+            AffineCalls::Ready(operation) => operation,
+            AffineCalls::Executed(execution) => match execution.after_definite_no() {
+                Ok(operation) => operation,
+                Err(_) => unreachable!("the recovery loop repeats only a definite no"),
+            },
+            AffineCalls::Calling => unreachable!("the recovery loop makes one call at a time"),
+        };
+        let prepared = operation.prepare();
+        let receipt = prepared.receipt();
+        let mut settlement_guard =
+            breaker.map(|breaker| AttemptSettlementGuard::new(breaker.clone(), receipt.clone()));
+        let (attempt, reservation) = recovery.begin_affine_attempt(attempt_start_window);
+        let mut limiter_settlement =
+            AffineLimiterSettlementGuard::new(receipt.clone(), reservation);
+        let execution = prepared.execute().await;
+        limiter_settlement.settle();
+        if let Some(guard) = &mut settlement_guard {
+            guard.disarm();
         }
-        RecoveryTerminalDecision::ReturnPhysicalResult => {
-            unreachable!("admission rejection cannot return a new physical result")
+        recovery.finish_physical_attempt();
+        let observation = receipt.observation();
+        *self = AffineCalls::Executed(execution);
+        (attempt, observation)
+    }
+
+    fn latest(&self) -> &Result<Vec<ChainEvent>, EffectError> {
+        match self {
+            AffineCalls::Executed(execution) => execution.result(),
+            AffineCalls::Ready(_) | AffineCalls::Calling => {
+                unreachable!("the recovery loop reads a result only after a call")
+            }
         }
     }
 }
 
-fn repeatable_retry_exhausted(
-    recovery: &mut EffectRecoveryController,
-    writer_id: obzenflow_core::WriterId,
-    identity: &EffectIdentity,
-    reason: RetryStopReason,
-    event: &ChainEvent,
-    ctx: &mut crate::middleware::MiddlewareContext,
-) -> EffectBoundaryReport {
-    write_exhausted(writer_id, identity, recovery.attempts(), reason, event, ctx);
-    let decision = recovery.finish_with_last_physical_error();
-    write_recovery_completed(recovery, writer_id, identity, event, ctx);
-    match decision {
-        RecoveryTerminalDecision::ReturnLastPhysicalError => {
-            executed(Err(recovery.take_last_physical_error()), ctx)
-        }
-        RecoveryTerminalDecision::BoundaryRejected(_)
-        | RecoveryTerminalDecision::ReturnPhysicalResult => {
-            unreachable!("retry exhaustion must preserve the last physical error")
-        }
-    }
-}
-
-fn repeatable_physical_terminal(
-    recovery: &mut EffectRecoveryController,
-    writer_id: obzenflow_core::WriterId,
-    identity: &EffectIdentity,
-    result: Result<Vec<ChainEvent>, EffectError>,
-    event: &ChainEvent,
-    ctx: &mut crate::middleware::MiddlewareContext,
-) -> EffectBoundaryReport {
-    let decision = recovery.finish_with_physical_result();
-    write_recovery_completed(recovery, writer_id, identity, event, ctx);
-    match decision {
-        RecoveryTerminalDecision::ReturnPhysicalResult => executed(result, ctx),
-        RecoveryTerminalDecision::BoundaryRejected(_)
-        | RecoveryTerminalDecision::ReturnLastPhysicalError => {
-            unreachable!("a completed physical result must retain terminal precedence")
-        }
-    }
+struct CompletedCall {
+    attempt: u32,
+    outcome: PhysicalCallOutcome,
+    dependency_elapsed: Duration,
+    admission_wait: Duration,
 }
 
 fn single_use_admission_terminal(
@@ -1730,13 +1664,13 @@ fn single_use_admission_terminal(
     }
 }
 
-fn affine_admission_terminal(
+fn affine_report(
     decision: RecoveryTerminalDecision,
+    calls: AffineCalls,
     ctx: &mut crate::middleware::MiddlewareContext,
-    operation: obzenflow_runtime::effects::AffineEffectOperation,
-) -> obzenflow_runtime::effects::AffineEffectBoundaryReport {
-    match decision {
-        RecoveryTerminalDecision::BoundaryRejected(cause) => {
+) -> AffineEffectBoundaryReport {
+    match (decision, calls) {
+        (RecoveryTerminalDecision::BoundaryRejected(cause), AffineCalls::Ready(operation)) => {
             let cause = *cause;
             operation.abort(
                 EffectAbortReason {
@@ -1750,10 +1684,12 @@ fn affine_admission_terminal(
                 ctx.take_control_events(),
             )
         }
-        RecoveryTerminalDecision::ReturnLastPhysicalError
-        | RecoveryTerminalDecision::ReturnPhysicalResult => {
-            unreachable!("affine admission occurs before the next physical call")
-        }
+        (
+            RecoveryTerminalDecision::ReturnLastPhysicalError
+            | RecoveryTerminalDecision::ReturnPhysicalResult,
+            AffineCalls::Executed(execution),
+        ) => execution.into_report(ctx.take_control_events()),
+        _ => unreachable!("a refusal leaves the capability unused and a call leaves its execution"),
     }
 }
 
@@ -1900,7 +1836,13 @@ fn error_has_health_observation(error: &EffectError) -> bool {
 fn retryable_error(error: &EffectError) -> bool {
     matches!(
         error,
-        EffectError::Timeout(_) | EffectError::Transport(_) | EffectError::RateLimited { .. }
+        EffectError::Timeout(_)
+            | EffectError::Transport(_)
+            | EffectError::RateLimited { .. }
+            | EffectError::DependencyFailed {
+                retry: RetryDisposition::Retryable,
+                ..
+            }
     )
 }
 
@@ -2118,6 +2060,16 @@ mod tests {
         assert!(!retryable_error(&EffectError::Domain(
             "declined".to_string()
         )));
+        assert!(retryable_error(&crate::effects::http::unsent_from(
+            "stripe",
+            obzenflow_core::http_client::HttpClientError::Connection("refused".to_string()),
+        )));
+        assert!(!retryable_error(&EffectError::DependencyFailed {
+            failure_source: obzenflow_core::event::EffectFailureSource::new("chat_model"),
+            code: obzenflow_core::event::EffectFailureCode::new("timeout"),
+            message: "no reply".to_string(),
+            retry: RetryDisposition::NotRetryable,
+        }));
     }
 
     #[test]
@@ -2168,6 +2120,12 @@ mod tests {
             ),
             Duration::from_millis(250)
         );
+        let mut headers = obzenflow_core::http_client::HeaderMap::new();
+        headers.insert("retry-after", "3".parse().expect("header value"));
+        let classified = crate::effects::http::unclaimed(
+            &obzenflow_core::http_client::HttpResponse::new(429, headers, ""),
+        );
+        assert_eq!(retry_delay(&retry, 1, &classified), Duration::from_secs(3));
     }
 
     #[test]

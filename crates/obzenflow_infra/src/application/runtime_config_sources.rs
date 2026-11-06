@@ -168,6 +168,17 @@ fn admit_ai_fields(
             )?;
         }
     }
+    if let Some(raw) = fields.request_timeout_ms {
+        let at = format!("{table}.request_timeout_ms");
+        admit(
+            set,
+            &format!("{section}.request_timeout_ms"),
+            address,
+            ConfigSource::File,
+            u64_value(&at, raw)?,
+            &at,
+        )?;
+    }
     Ok(())
 }
 
@@ -179,6 +190,7 @@ fn admit_ai_family(
     let global = RawAiModelFields {
         endpoint: family.endpoint.clone(),
         model: family.model.clone(),
+        request_timeout_ms: family.request_timeout_ms,
         provider: family.provider.clone(),
         base_url: family.base_url.clone(),
         api_key_env: family.api_key_env.clone(),
@@ -195,6 +207,7 @@ fn admit_ai_family(
         let stage_fields = RawAiModelFields {
             endpoint: entry.endpoint.clone(),
             model: entry.model.clone(),
+            request_timeout_ms: entry.request_timeout_ms,
             provider: entry.provider.clone(),
             base_url: entry.base_url.clone(),
             api_key_env: entry.api_key_env.clone(),
@@ -953,6 +966,7 @@ mod tests {
         RATE_LIMITER_EVENTS_PER_SECOND_KEY, SINK_HANDLER_KEY,
     };
     use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
 
     fn parse_file(toml: &str) -> RawFileStartupConfig {
         toml::from_str(toml).expect("test TOML should parse")
@@ -987,6 +1001,7 @@ mod tests {
             [ai.models.stages.digest]
             endpoint = "groq"
             model = "llama-3.3-70b-versatile"
+            request_timeout_ms = 150000
 
             [ai.models.stages.summarize.by_type."obzenflow.ai.chat_completion"]
             model = "llama3.2:3b"
@@ -1014,6 +1029,7 @@ mod tests {
             Some("GROQ_API_KEY")
         );
         assert_eq!(digest.model, "llama-3.3-70b-versatile");
+        assert_eq!(digest.request_timeout, Duration::from_millis(150_000));
 
         let summarize = snapshot
             .resolve_ai_model(AI_MODELS_SECTION, "summarize", chat)
@@ -1025,6 +1041,7 @@ mod tests {
             .resolve_ai_model(AI_MODELS_SECTION, "other", chat)
             .unwrap();
         assert_eq!(other.model, "llama3.1:70b");
+        assert_eq!(other.request_timeout, Duration::from_secs(600));
 
         let embed = snapshot
             .resolve_ai_model(

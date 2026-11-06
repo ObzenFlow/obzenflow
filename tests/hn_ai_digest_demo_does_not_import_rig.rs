@@ -7,15 +7,15 @@ fn hn_ai_digest_demo_does_not_import_rig_clients_directly() {
     let source = include_str!("../examples/hn_ai_digest_demo/flow.rs");
 
     assert!(
-        !source.contains("RigChatClient"),
-        "hn_ai_digest_demo should not reference RigChatClient directly"
+        !source.contains("RigChatModel"),
+        "hn_ai_digest_demo should not reference RigChatModel directly"
     );
     assert!(
         !source.contains("obzenflow_infra::ai"),
         "hn_ai_digest_demo should not import from obzenflow_infra::ai"
     );
     assert!(
-        !source.contains("Arc<dyn ChatClient>"),
-        "hn_ai_digest_demo should not require manual Arc<dyn ChatClient> wiring"
+        !source.contains("Arc<dyn ChatModel>"),
+        "hn_ai_digest_demo should not require manual Arc<dyn ChatModel> wiring"
     );
 }

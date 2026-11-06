@@ -826,6 +826,7 @@ pub(crate) struct RawAiEndpointTable {
 pub(crate) struct RawAiFamilySection {
     pub(crate) endpoint: Option<String>,
     pub(crate) model: Option<String>,
+    pub(crate) request_timeout_ms: Option<i64>,
     pub(crate) provider: Option<toml::Value>,
     pub(crate) base_url: Option<toml::Value>,
     pub(crate) api_key_env: Option<toml::Value>,
@@ -838,6 +839,7 @@ pub(crate) struct RawAiFamilySection {
 pub(crate) struct RawAiModelFields {
     pub(crate) endpoint: Option<String>,
     pub(crate) model: Option<String>,
+    pub(crate) request_timeout_ms: Option<i64>,
     pub(crate) provider: Option<toml::Value>,
     pub(crate) base_url: Option<toml::Value>,
     pub(crate) api_key_env: Option<toml::Value>,
@@ -848,6 +850,7 @@ pub(crate) struct RawAiModelFields {
 pub(crate) struct RawAiStageScope {
     pub(crate) endpoint: Option<String>,
     pub(crate) model: Option<String>,
+    pub(crate) request_timeout_ms: Option<i64>,
     pub(crate) provider: Option<toml::Value>,
     pub(crate) base_url: Option<toml::Value>,
     pub(crate) api_key_env: Option<toml::Value>,

@@ -93,6 +93,12 @@ pub(crate) fn unavailable_or_integrity(error: EffectError) -> Result<AiUnavailab
             },
             message,
         )),
+        EffectError::RateLimited { message, .. } => Ok(AiUnavailable::new(
+            AiUnavailableCause::Provider {
+                failure: AiProviderFailureKind::RateLimited,
+            },
+            message,
+        )),
         EffectError::RecordedFailure {
             error_type,
             error_message,
@@ -148,7 +154,7 @@ mod tests {
     #[test]
     fn live_and_replayed_provider_failures_reach_the_role_as_one_value() {
         let live = unavailable_or_integrity(EffectError::DependencyFailed {
-            failure_source: EffectFailureSource::new("chat_client"),
+            failure_source: EffectFailureSource::new("chat_model"),
             code: EffectFailureCode::new("remote"),
             message: "provider unavailable".to_string(),
             retry: RetryDisposition::NotRetryable,
@@ -159,7 +165,7 @@ mod tests {
             error_message: "provider unavailable".to_string(),
             retry: RetryDisposition::NotRetryable,
             cause: Some(EffectFailureCause {
-                source: EffectFailureSource::new("chat_client"),
+                source: EffectFailureSource::new("chat_model"),
                 code: EffectFailureCode::new("remote"),
             }),
             detail: None,

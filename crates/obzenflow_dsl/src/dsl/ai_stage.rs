@@ -25,7 +25,7 @@ use obzenflow_core::journal::archive::manifest::AI_MODEL_SPECS_CAPABILITY;
 use obzenflow_core::{StageFactSet, TypedPayload};
 use obzenflow_runtime::ai::{
     AiBinding, AiCollector, AiEffect, AiGrouping, AiInferHandler, AiKeying, AiMapHandler,
-    AiModelSource, AiPartialMapHandler, AiProviderPort, AiReduceHandler, AiRole,
+    AiModelSource, AiPartialMapHandler, AiReduceHandler, AiResolverPort, AiRole,
 };
 use obzenflow_runtime::bootstrap::{replay_archive, replay_bootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{Effect, EffectDeclaration};
@@ -36,6 +36,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::time::Duration;
 
 const AI_SURFACE: &str = "ai!";
 const DIRECT_FACT_BOUND: NonZeroU64 = NonZeroU64::MIN.saturating_add(2);
@@ -305,7 +306,7 @@ fn recorded_binding_name(stage: &str, index: usize) -> String {
 
 fn bind<E: AiEffect>(
     stage: &str,
-    source: AiModelSource<E::Provider>,
+    source: AiModelSource<E::Resolver>,
 ) -> LoweringResult<AiBinding<E>> {
     E::bind(source).map_err(|error| ai_error(format!("stage `{stage}`: {error}")))
 }
@@ -315,20 +316,20 @@ fn resolve_bindings<E: AiEffect>(
     recorded_members: &[String],
     build: &FlowBuildContext,
 ) -> LoweringResult<AiStageBindings<E>> {
-    let provider = build.ai_models().provider::<E::Provider>().ok_or_else(|| {
+    let resolver = build.ai_models().resolver::<E::Resolver>().ok_or_else(|| {
         ai_error(format!(
-            "stage `{stage}`: this build has no {} model provider; enable the `ai` feature or install one with FlowBuildContext::with_ai_models",
+            "stage `{stage}`: this build has no {} model resolver; enable the `ai` feature or install one with FlowBuildContext::with_ai_models",
             E::FAMILY
         ))
     })?;
     if strict_replay() {
-        return replay_bindings(stage, recorded_members, provider);
+        return replay_bindings(stage, recorded_members, resolver);
     }
     let resolved = build
         .runtime_config()
         .resolve_ai_model(E::SECTION, stage, E::EFFECT_TYPE)
         .map_err(|error| ai_error(error.to_string()))?;
-    if !provider.serves(&resolved.endpoint.provider) {
+    if !resolver.serves(&resolved.endpoint.provider) {
         return Err(ai_error(format!(
             "config: stage `{stage}` names endpoint `{}`, whose provider `{}` cannot serve {}",
             resolved.endpoint.name,
@@ -336,17 +337,28 @@ fn resolve_bindings<E: AiEffect>(
             E::EFFECT_TYPE
         )));
     }
+    let request_timeout = resolved.request_timeout;
     let current = bind::<E>(
         stage,
         AiModelSource::Configured {
             stage: stage.to_string(),
             endpoint: resolved.endpoint,
             model: resolved.model,
-            provider: provider.clone(),
+            request_timeout,
+            resolver: resolver.clone(),
         },
     )?;
     let recorded = if resuming() {
-        kept_bindings(stage, recorded_members, &current.spec, provider, build)?
+        kept_bindings(
+            stage,
+            recorded_members,
+            &current.spec,
+            KeptModels {
+                resolver,
+                request_timeout,
+            },
+            build,
+        )?
     } else {
         Vec::new()
     };
@@ -356,7 +368,7 @@ fn resolve_bindings<E: AiEffect>(
 fn replay_bindings<E: AiEffect>(
     stage: &str,
     recorded_members: &[String],
-    provider: Arc<E::Provider>,
+    resolver: Arc<E::Resolver>,
 ) -> LoweringResult<AiStageBindings<E>> {
     let archive = replay_archive().ok_or_else(|| {
         ai_error(format!(
@@ -380,7 +392,7 @@ fn replay_bindings<E: AiEffect>(
         AiModelSource::Recorded {
             stage: stage.to_string(),
             spec: current,
-            provider: provider.clone(),
+            resolver: resolver.clone(),
         },
     )?;
     let recorded = specs
@@ -391,7 +403,7 @@ fn replay_bindings<E: AiEffect>(
                 AiModelSource::Recorded {
                     stage: recorded_binding_name(stage, index),
                     spec,
-                    provider: provider.clone(),
+                    resolver: resolver.clone(),
                 },
             )
         })
@@ -399,13 +411,22 @@ fn replay_bindings<E: AiEffect>(
     Ok(AiStageBindings { current, recorded })
 }
 
+struct KeptModels<R: ?Sized> {
+    resolver: Arc<R>,
+    request_timeout: Duration,
+}
+
 fn kept_bindings<E: AiEffect>(
     stage: &str,
     recorded_members: &[String],
     configured: &AiModelSpec,
-    provider: Arc<E::Provider>,
+    kept_models: KeptModels<E::Resolver>,
     build: &FlowBuildContext,
 ) -> LoweringResult<Vec<AiBinding<E>>> {
+    let KeptModels {
+        resolver,
+        request_timeout,
+    } = kept_models;
     let kept = archived_specs(recorded_members, E::EFFECT_TYPE)
         .into_iter()
         .filter(|spec| spec != configured)
@@ -431,14 +452,15 @@ fn kept_bindings<E: AiEffect>(
                 .ai_endpoints()
                 .resolve(stage, &spec.endpoint)
                 .ok()
-                .filter(|endpoint| provider.serves(&endpoint.provider));
+                .filter(|endpoint| resolver.serves(&endpoint.provider));
             bind::<E>(
                 stage,
                 AiModelSource::Kept {
                     stage: recorded_binding_name(stage, index),
                     spec,
                     endpoint,
-                    provider: provider.clone(),
+                    request_timeout,
+                    resolver: resolver.clone(),
                 },
             )
         })

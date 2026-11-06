@@ -15,7 +15,7 @@ use obzenflow::error::HandlerError;
 use obzenflow::flow::FlowBuildError;
 use obzenflow::flow::{ai, async_source, flow, sink, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::{circuit_breaker, rate_limit};
+use obzenflow::middleware::{circuit_breaker, rate_limit, retry};
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};
 use obzenflow::stages::sinks::SinkRedeliverySafety;
@@ -298,6 +298,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             .reduce(roles)
             .on_eof();
         let ai_breaker = circuit_breaker().consecutive_failures(HN_AI_BREAKER_FAILURES);
+        let ai_retry = retry();
         let decoder = hn_story_decoder(base_url, max_stories);
         let http_source_config = http_pull_config()
             .map_err(|error| {
@@ -341,7 +342,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                     source_limiter
                 } => hn_source);
                 formatter = transform!(HnStory -> FormattedStory => formatter);
-                digest = ai!(FormattedStory -> HnDigestSummary with ai_breaker => digest);
+                digest = ai!(FormattedStory -> HnDigestSummary with { ai_breaker, ai_retry } => digest);
                 digest_summary = sink!(
                     HnDigestSummary => handler_set!(console_sink, postgres_sink)
                 )?;

@@ -2,16 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[cfg(feature = "http-pull")]
+#[cfg(feature = "http")]
 use std::time::Duration;
 
-#[cfg(feature = "http-pull")]
+#[cfg(feature = "http")]
 use obzenflow_core::http_client::{HttpClient, MockHttpClient};
 
-#[cfg(feature = "http-pull")]
+#[cfg(feature = "http")]
 use std::sync::Arc;
 
-#[cfg(feature = "http-pull")]
+#[cfg(feature = "http")]
 #[test]
 fn http_pull_config_preloads_default_client_when_feature_enabled() {
     obzenflow::stages::sources::http_pull_config()
@@ -20,7 +20,7 @@ fn http_pull_config_preloads_default_client_when_feature_enabled() {
         .expect("build ok");
 }
 
-#[cfg(not(feature = "http-pull"))]
+#[cfg(not(feature = "http"))]
 #[test]
 fn http_pull_config_errors_when_feature_disabled() {
     let err =
@@ -28,11 +28,11 @@ fn http_pull_config_errors_when_feature_disabled() {
     assert!(matches!(
         err,
         obzenflow::stages::sources::HttpClientFactoryError::FeatureNotEnabled(ref capability)
-            if capability == "http-pull"
+            if capability == "http"
     ));
 }
 
-#[cfg(feature = "http-pull")]
+#[cfg(feature = "http")]
 #[test]
 fn http_poll_config_preloads_default_client_when_feature_enabled() {
     obzenflow::stages::sources::http_poll_config()
@@ -42,7 +42,7 @@ fn http_poll_config_preloads_default_client_when_feature_enabled() {
         .expect("build ok");
 }
 
-#[cfg(feature = "http-pull")]
+#[cfg(feature = "http")]
 #[test]
 fn facade_helpers_preserve_custom_client_overrides() {
     let pull_client: Arc<dyn HttpClient> = Arc::new(MockHttpClient::new());
@@ -63,7 +63,7 @@ fn facade_helpers_preserve_custom_client_overrides() {
     assert!(Arc::ptr_eq(&poll.client, &poll_client));
 }
 
-#[cfg(not(feature = "http-pull"))]
+#[cfg(not(feature = "http"))]
 #[test]
 fn http_poll_config_errors_when_feature_disabled() {
     let err =
@@ -71,6 +71,6 @@ fn http_poll_config_errors_when_feature_disabled() {
     assert!(matches!(
         err,
         obzenflow::stages::sources::HttpClientFactoryError::FeatureNotEnabled(ref capability)
-            if capability == "http-pull"
+            if capability == "http"
     ));
 }

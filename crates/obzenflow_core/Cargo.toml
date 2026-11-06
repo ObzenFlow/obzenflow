@@ -28,6 +28,7 @@ ulid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
+serde_urlencoded = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

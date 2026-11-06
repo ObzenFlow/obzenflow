@@ -2,9 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::http_client::ReqwestHttpClient;
 use futures::stream::once;
-use obzenflow_core::http_client::{HttpClient, HttpMethod, RequestSpec, Url};
+use obzenflow_core::http_client::{HeaderValue, HttpClient, HttpMethod, HttpRequest, Url};
 use rig_rs::http_client::{
     BoxedStream, Bytes, Error, HttpClientExt, LazyBody, Method, MultipartForm, Request, Response,
     StatusCode, StreamingResponse,
@@ -12,6 +11,7 @@ use rig_rs::http_client::{
 use rig_rs::wasm_compat::WasmCompatSend;
 use std::future::{ready, Future};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 enum TransportError {
@@ -26,13 +26,19 @@ enum TransportError {
 #[derive(Clone)]
 pub(super) struct ChatTransport {
     client: Arc<dyn HttpClient>,
+    request_timeout: Duration,
 }
 
 impl ChatTransport {
-    pub(super) fn new() -> Self {
+    pub(super) fn through(client: Arc<dyn HttpClient>, request_timeout: Duration) -> Self {
         Self {
-            client: Arc::new(ReqwestHttpClient::new()),
+            client,
+            request_timeout,
         }
+    }
+
+    pub(super) fn request_timeout(&self) -> Duration {
+        self.request_timeout
     }
 }
 
@@ -49,18 +55,26 @@ fn http_method(method: &Method) -> Option<HttpMethod> {
     }
 }
 
-fn request_spec<T: Into<Bytes>>(request: Request<T>) -> Result<RequestSpec, TransportError> {
+fn http_request<T: Into<Bytes>>(
+    request: Request<T>,
+    request_timeout: Duration,
+) -> Result<HttpRequest, TransportError> {
     let (parts, body) = request.into_parts();
     let method =
         http_method(&parts.method).ok_or_else(|| TransportError::Method(parts.method.clone()))?;
     let url = Url::parse(&parts.uri.to_string()).map_err(TransportError::Url)?;
     let body: Bytes = body.into();
-    Ok(RequestSpec {
-        method,
-        url,
-        headers: parts.headers,
-        body: (!body.is_empty()).then_some(body),
-    })
+    let content_type = parts
+        .headers
+        .get("content-type")
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"));
+    let mut request = HttpRequest::new(method, url).with_timeout(request_timeout);
+    request.headers = parts.headers;
+    if body.is_empty() {
+        return Ok(request);
+    }
+    Ok(request.with_body(content_type, body))
 }
 
 fn no_response<E>(source: E) -> Box<Error>
@@ -72,13 +86,13 @@ where
 
 async fn send_whole(
     client: Arc<dyn HttpClient>,
-    request: Result<RequestSpec, TransportError>,
+    request: Result<HttpRequest, TransportError>,
 ) -> Result<Response<Bytes>, Box<Error>> {
     let request = request.map_err(no_response)?;
-    let reply = client.execute(request).await.map_err(no_response)?;
+    let reply = client.send(request).await.map_err(no_response)?;
     let status = StatusCode::from_u16(reply.status)
         .map_err(|source| Box::new(Error::Protocol(source.into())))?;
-    if !status.is_success() {
+    if status != StatusCode::OK {
         return Err(Box::new(Error::non_success_with_details(
             status,
             reply.headers,
@@ -102,7 +116,10 @@ impl HttpClientExt for ChatTransport {
         U: From<Bytes>,
         U: WasmCompatSend + 'static,
     {
-        let reply = send_whole(Arc::clone(&self.client), request_spec(req));
+        let reply = send_whole(
+            Arc::clone(&self.client),
+            http_request(req, self.request_timeout),
+        );
         async move {
             let response = reply.await.map_err(|failure| *failure)?;
             Ok(response.map(|body| -> LazyBody<U> { Box::pin(ready(Ok(U::from(body)))) }))
@@ -127,7 +144,10 @@ impl HttpClientExt for ChatTransport {
     where
         T: Into<Bytes> + WasmCompatSend,
     {
-        let reply = send_whole(Arc::clone(&self.client), request_spec(req));
+        let reply = send_whole(
+            Arc::clone(&self.client),
+            http_request(req, self.request_timeout),
+        );
         async move {
             let response = reply.await.map_err(|failure| *failure)?;
             Ok(response.map(|body| -> BoxedStream { Box::pin(once(ready(Ok(body)))) }))

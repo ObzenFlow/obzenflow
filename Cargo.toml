@@ -93,6 +93,7 @@ console-subscriber = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_path_to_error = "0.1"
+serde_urlencoded = "0.7"
 toml = "0.8"
 ulid = { version = "1", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
@@ -219,7 +220,7 @@ prometheus = ["obzenflow_infra/prometheus"]
 web-host = ["obzenflow_infra/warp-server"]
 studio = ["prometheus", "web-host", "obzenflow_infra/studio-registration"]
 tokio-console = ["obzenflow_infra/tokio-console"]
-http-pull = ["obzenflow_infra/reqwest-client"]
+http = ["obzenflow_infra/reqwest-client"]
 ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
 postgres = ["obzenflow_adapters/postgres"]
 # Selection gate for tests that require repository-managed external services.
@@ -295,12 +296,12 @@ required-features = ["ai"]
 [[example]]
 name = "hn_ai_digest_demo"
 path = "examples/hn_ai_digest_demo/main.rs"
-required-features = ["http-pull", "ai", "postgres"]
+required-features = ["http", "ai", "postgres"]
 
 [[test]]
 name = "hn_ai_digest_effect_replay_journal_test"
 path = "tests/hn_ai_digest_effect_replay_journal_test.rs"
-required-features = ["http-pull", "ai", "postgres", "test-support"]
+required-features = ["http", "ai", "postgres", "test-support"]
 
 [[test]]
 name = "standalone_ai_effect_replay_test"

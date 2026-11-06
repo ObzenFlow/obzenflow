@@ -3,38 +3,39 @@
 // https://obzenflow.dev
 
 use crate::ai::{
-    AiClientError, AiEndpoint, AiModelProviderError, AiModelSpec, AiProvider, ChatModelDescription,
+    AiEndpoint, AiModelSpec, AiProvider, AiProviderError, AiResolutionError, ChatModelDescription,
     ChatRequest, ChatResponse, ChatTarget, EmbeddingModelDescription, EmbeddingRequest,
     EmbeddingResponse, EmbeddingTarget,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 
+/// What an AI stage calls: one configured chat model.
 #[async_trait]
-pub trait ChatClient: Send + Sync + 'static {
-    /// Immutable logical provider/model target served by this client.
+pub trait ChatModel: Send + Sync + 'static {
+    /// Immutable logical provider/model target served by this model.
     fn target(&self) -> &ChatTarget;
 
-    /// Execute one caller-visible chat-port invocation.
-    ///
-    /// Implementations may perform SDK or transport retries internally.
-    /// Callers must not infer HTTP-send or provider-execution cardinality from
-    /// this invocation.
-    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AiClientError>;
+    /// One call to the provider: one send, never repeated here. Repetition
+    /// belongs to the retry middleware.
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AiProviderError>;
 }
 
+/// What an AI stage calls: one configured embedding model.
 #[async_trait]
-pub trait EmbeddingClient: Send + Sync + 'static {
-    /// Immutable provider, model, and endpoint identity served by this client.
+pub trait EmbeddingModel: Send + Sync + 'static {
+    /// Immutable provider, model, and endpoint identity served by this model.
     fn target(&self) -> &EmbeddingTarget;
 
-    async fn embed(&self, req: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError>;
+    /// One call to the provider: one send, never repeated here.
+    async fn embed(&self, req: EmbeddingRequest) -> Result<EmbeddingResponse, AiProviderError>;
 }
 
 /// Describes and connects the chat models an operator configures. A host
 /// installs one in the build context.
-pub trait ChatModelProvider: Send + Sync + 'static {
-    /// Whether endpoints of `provider` can serve chat through this provider.
+pub trait ChatModelResolver: Send + Sync + 'static {
+    /// Whether endpoints of `provider` can serve chat through this resolver.
     fn serves(&self, provider: &AiProvider) -> bool;
 
     /// Describe one configured model. Performs no I/O and reads no secret.
@@ -42,27 +43,29 @@ pub trait ChatModelProvider: Send + Sync + 'static {
         &self,
         endpoint: &AiEndpoint,
         model: &str,
-    ) -> Result<ChatModelDescription, AiModelProviderError>;
+    ) -> Result<ChatModelDescription, AiResolutionError>;
 
     /// Rebuild the description of a recorded model. Performs no I/O.
     fn describe_recorded(
         &self,
         spec: &AiModelSpec,
-    ) -> Result<ChatModelDescription, AiModelProviderError>;
+    ) -> Result<ChatModelDescription, AiResolutionError>;
 
-    /// Build the client that serves a described model. Called only when a
-    /// live call first needs it, never on strict replay.
+    /// Build the model that serves a description, writing `request_timeout` as
+    /// the deadline of each call. Called only when a live call first needs it,
+    /// never on strict replay.
     fn connect(
         &self,
         endpoint: &AiEndpoint,
         description: &ChatModelDescription,
-    ) -> Result<Arc<dyn ChatClient>, AiModelProviderError>;
+        request_timeout: Duration,
+    ) -> Result<Arc<dyn ChatModel>, AiResolutionError>;
 }
 
 /// Describes and connects the embedding models an operator configures.
-pub trait EmbeddingModelProvider: Send + Sync + 'static {
+pub trait EmbeddingModelResolver: Send + Sync + 'static {
     /// Whether endpoints of `provider` can serve embeddings through this
-    /// provider.
+    /// resolver.
     fn serves(&self, provider: &AiProvider) -> bool;
 
     /// Describe one configured model. Performs no I/O and reads no secret.
@@ -70,19 +73,21 @@ pub trait EmbeddingModelProvider: Send + Sync + 'static {
         &self,
         endpoint: &AiEndpoint,
         model: &str,
-    ) -> Result<EmbeddingModelDescription, AiModelProviderError>;
+    ) -> Result<EmbeddingModelDescription, AiResolutionError>;
 
     /// Rebuild the description of a recorded model. Performs no I/O.
     fn describe_recorded(
         &self,
         spec: &AiModelSpec,
-    ) -> Result<EmbeddingModelDescription, AiModelProviderError>;
+    ) -> Result<EmbeddingModelDescription, AiResolutionError>;
 
-    /// Build the client that serves a described model. Called only when a
-    /// live call first needs it, never on strict replay.
+    /// Build the model that serves a description, writing `request_timeout` as
+    /// the deadline of each call. Called only when a live call first needs it,
+    /// never on strict replay.
     fn connect(
         &self,
         endpoint: &AiEndpoint,
         description: &EmbeddingModelDescription,
-    ) -> Result<Arc<dyn EmbeddingClient>, AiModelProviderError>;
+        request_timeout: Duration,
+    ) -> Result<Arc<dyn EmbeddingModel>, AiResolutionError>;
 }
