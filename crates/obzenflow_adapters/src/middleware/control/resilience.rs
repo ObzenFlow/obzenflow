@@ -671,8 +671,6 @@ struct EffectRecoveryController {
     attempt_start_deadline: Option<Instant>,
     initial_breaker_epoch: Option<EffectAdmissionEpoch>,
     reservation_epoch: Option<EffectAdmissionEpoch>,
-    attempt_ordinal: u32,
-    retry_count: u32,
     cumulative_backoff: Duration,
     current_reservation: Option<RateLimitReservation>,
     cancellation_state: RecoveryCancellationState,
@@ -689,8 +687,6 @@ impl EffectRecoveryController {
             attempt_start_deadline: None,
             initial_breaker_epoch: None,
             reservation_epoch: None,
-            attempt_ordinal: 0,
-            retry_count: 0,
             cumulative_backoff: Duration::ZERO,
             current_reservation: None,
             cancellation_state: RecoveryCancellationState::Idle,
@@ -698,13 +694,6 @@ impl EffectRecoveryController {
             terminal_decision: None,
             completion: None,
         }
-    }
-
-    fn with_attempt_base(highest_prior_attempt: u32) -> Self {
-        let mut controller = Self::new();
-        controller.attempt_ordinal = highest_prior_attempt;
-        controller.retry_count = highest_prior_attempt.saturating_sub(1);
-        controller
     }
 
     fn initial_epoch(&self) -> Option<EffectAdmissionEpoch> {
@@ -789,11 +778,9 @@ impl EffectRecoveryController {
             self.attempt_start_deadline =
                 attempt_start_window.and_then(|window| now.checked_add(window));
         }
-        self.attempt_ordinal = self.attempt_ordinal.saturating_add(1);
-        self.retry_count = self.attempt_ordinal.saturating_sub(1);
         self.physical_calls = self.physical_calls.saturating_add(1);
         self.cancellation_state = RecoveryCancellationState::InFlight;
-        self.attempt_ordinal
+        self.physical_calls
     }
 
     fn finish_physical_attempt(&mut self) {
@@ -805,16 +792,12 @@ impl EffectRecoveryController {
         self.cumulative_backoff = self.cumulative_backoff.saturating_add(elapsed);
     }
 
-    fn attempts(&self) -> u32 {
-        self.attempt_ordinal
-    }
-
     fn physical_calls(&self) -> u32 {
         self.physical_calls
     }
 
     fn next_attempt(&self) -> u32 {
-        self.attempt_ordinal.saturating_add(1)
+        self.physical_calls.saturating_add(1)
     }
 
     fn finish_from_admission(
@@ -845,14 +828,14 @@ impl EffectRecoveryController {
     fn take_terminal_decision(&mut self) -> RecoveryTerminalDecision {
         self.cancellation_state = RecoveryCancellationState::Complete;
         let completion = RecoveryCompletion {
-            total_attempts: self.attempt_ordinal,
+            total_attempts: self.physical_calls,
             backoff_elapsed: self.cumulative_backoff,
             recovery_elapsed: self.session_started.elapsed(),
         };
         self.completion = Some(completion);
         tracing::trace!(
-            attempts = self.attempt_ordinal,
-            retries = self.retry_count,
+            calls = self.physical_calls,
+            retries = self.physical_calls.saturating_sub(1),
             recovery_elapsed_ms = duration_ms(completion.recovery_elapsed),
             backoff_elapsed_ms = duration_ms(completion.backoff_elapsed),
             "effect recovery reached a terminal decision"
@@ -1092,7 +1075,7 @@ impl EffectResilienceMiddleware {
             recovery.install_reservation(reservation);
 
             #[cfg(test)]
-            self.pause_before_final_admission(&identity.cursor, recovery.attempts())
+            self.pause_before_final_admission(&identity.cursor, recovery.physical_calls())
                 .await;
 
             if !recovery.later_attempt_may_start() {
@@ -1248,7 +1231,7 @@ impl EffectResilienceMiddleware {
                 ctx.write_control_event(ChainEventFactory::retry_succeeded(
                     self.writer_id,
                     identity.cursor.clone(),
-                    recovery.attempts(),
+                    recovery.physical_calls(),
                     CausalInput::of(event),
                 ));
             }
@@ -1259,17 +1242,17 @@ impl EffectResilienceMiddleware {
                 ctx.write_control_event(ChainEventFactory::retry_stopped_non_retryable(
                     self.writer_id,
                     identity.cursor.clone(),
-                    recovery.attempts(),
+                    recovery.physical_calls(),
                     CausalInput::of(event),
                 ));
             }
             return ControlFlow::Break(self.physical_terminal(recovery, identity, event, ctx));
         }
-        if recovery.attempts() >= retry.policy.max_attempts {
+        if recovery.physical_calls() >= retry.policy.max_attempts {
             write_exhausted(
                 self.writer_id,
                 identity,
-                recovery.attempts(),
+                recovery.physical_calls(),
                 RetryStopReason::AttemptLimit,
                 event,
                 ctx,
@@ -1327,7 +1310,7 @@ impl EffectResilienceMiddleware {
             write_exhausted(
                 self.writer_id,
                 identity,
-                recovery.attempts(),
+                recovery.physical_calls(),
                 RetryStopReason::CircuitNoLongerClosed,
                 event,
                 ctx,
@@ -1347,7 +1330,7 @@ impl EffectResilienceMiddleware {
         write_exhausted(
             self.writer_id,
             identity,
-            recovery.attempts(),
+            recovery.physical_calls(),
             reason,
             event,
             ctx,
@@ -1404,7 +1387,7 @@ impl EffectResilienceMiddleware {
         recovery.install_reservation(reservation);
 
         #[cfg(test)]
-        self.pause_before_final_admission(&identity.cursor, recovery.attempts())
+        self.pause_before_final_admission(&identity.cursor, recovery.physical_calls())
             .await;
 
         if let Some(PolicyAdmission::Reject(cause)) = self
@@ -1510,8 +1493,7 @@ impl EffectResilienceMiddleware {
             identity.safety,
             obzenflow_runtime::effects::EffectSafety::NonIdempotentAtLeastOnce
         );
-        let mut recovery =
-            EffectRecoveryController::with_attempt_base(operation.highest_prior_attempt());
+        let mut recovery = EffectRecoveryController::new();
 
         #[cfg(feature = "test-support")]
         if self.reject_affine_recovery_for_test && operation.highest_prior_attempt() > 0 {

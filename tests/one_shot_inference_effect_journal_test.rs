@@ -17,7 +17,7 @@ use obzenflow::ai::{
 };
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry, MiddlewareFactory};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RecoveryFact};
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, EffectAttemptStarted, EffectFactOwner, EffectOutcomePayload,
     EffectRecord, PipelineLifecycleEvent, SystemEvent, SystemPayload,
@@ -25,6 +25,7 @@ use obzenflow_core::event::{
 use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
@@ -1305,6 +1306,29 @@ async fn durable_starts(journal_base: &Path) -> usize {
         .count()
 }
 
+async fn wait_for_writers_released(archive: &Path) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while DiskReplayArchive::open_for_resume(archive.to_path_buf(), true)
+            .await
+            .is_ok_and(|opened| opened.evidence().live_writer)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the aborted run releases its journal writers");
+}
+
+fn recovery_facts(events: &[ChainEvent]) -> Vec<RecoveryFact> {
+    events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(ExecutionPayload::Recovery(fact)) => Some(fact.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn ai_rate_limit_retried_after_floor() {
     let temp = tempfile::tempdir().expect("temporary journal root");
@@ -1369,6 +1393,116 @@ async fn ai_retry_exhausted_returns_unavailable() {
         }]
     );
     assert_eq!(durable_starts(&journal_base).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resumed_call_retry_rows_count_calls() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let entered = Arc::new(Notify::new());
+    let hanging = FakeChatModels::hanging(entered.clone());
+    let live = tokio::spawn({
+        let journal_base = journal_base.clone();
+        let resolvers = hanging.resolvers();
+        async move {
+            FlowApplication::builder()
+                .with_cli_args(["obzenflow"])
+                .with_config_file(enforced_config(&journal_base, 3))
+                .with_ai_models(resolvers)
+                .run_async(build_flow_for_role(
+                    journal_base,
+                    Arc::new(Mutex::new(Vec::new())),
+                    vec![ReducedEvidence { value: 7 }],
+                    AvailabilityRole,
+                    retry(),
+                ))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .expect("the first call starts under its Start");
+    live.abort();
+    assert!(live.await.is_err_and(|error| error.is_cancelled()));
+    let in_doubt_archive = latest_run_dir(&journal_base);
+    wait_for_writers_released(&in_doubt_archive).await;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let models = FakeChatModels::with_reply({
+        let calls = calls.clone();
+        move |_| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(rate_limited())
+            } else {
+                Ok(fake_ai::response(ANSWER))
+            }
+        }
+    });
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args([
+            OsString::from("obzenflow"),
+            OsString::from("--resume-from"),
+            in_doubt_archive.as_os_str().to_os_string(),
+            OsString::from("--allow-incomplete-archive"),
+        ])
+        .with_config_file(enforced_config(&journal_base, 3))
+        .with_ai_models(models.resolvers())
+        .run_async(build_flow_for_role(
+            journal_base.clone(),
+            outputs.clone(),
+            vec![ReducedEvidence { value: 7 }],
+            AvailabilityRole,
+            retry(),
+        ))
+        .await
+        .expect("the resumed flow completes");
+
+    assert_eq!(
+        outputs.lock().expect("output lock").clone(),
+        vec![expected_brief(7)]
+    );
+    assert_eq!(models.call_count(), 2);
+    let events = stage_events(&latest_run_dir(&journal_base), "brief").await;
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(EffectAttemptStarted::from_event)
+            .map(|started| started.attempt.get())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let facts = recovery_facts(&events);
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            RecoveryFact::RetryScheduled {
+                next_attempt: 2,
+                ..
+            }
+        )),
+        "{facts:?}"
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            RecoveryFact::RetrySucceeded {
+                total_attempts: 2,
+                ..
+            }
+        )),
+        "{facts:?}"
+    );
+    assert_eq!(
+        facts
+            .iter()
+            .filter_map(|fact| match fact {
+                RecoveryFact::AttemptCompleted { attempt, .. } => Some(*attempt),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 }
 
 #[tokio::test]
