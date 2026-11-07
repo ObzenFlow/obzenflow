@@ -266,6 +266,35 @@ mod tests {
         // topology, then construct the endpoint with the simplified
         // 3-arg signature.
         let stage_topology_id = stage;
+        let provenance = obzenflow_topology::SettingProvenanceInfo {
+            source: "dsl".into(),
+            scope: "stage:rate_limited".into(),
+            winner_subject: obzenflow_topology::SettingSubject::Unqualified,
+        };
+        let limiter_settings = obzenflow_topology::MiddlewareSettingsInfo::try_new(
+            [
+                (
+                    "middleware.rate_limiter.events_per_second",
+                    2.0,
+                    " events/s",
+                ),
+                ("middleware.rate_limiter.burst_capacity", 5.0, " tokens"),
+                ("middleware.rate_limiter.cost_per_attempt", 5.0, " tokens"),
+            ]
+            .into_iter()
+            .map(|(key, value, unit)| {
+                let setting = obzenflow_topology::ResolvedSettingInfo {
+                    value: obzenflow_topology::SettingValueInfo::F64(value),
+                    provenance: provenance.clone(),
+                };
+                let display = format!("{value}{unit}");
+                let row = obzenflow_topology::MiddlewareSettingInfo::Active { setting, display };
+                (key.to_owned(), row)
+            })
+            .collect(),
+            Some("2".into()),
+        )
+        .unwrap();
         let stages: Vec<StageInfo> = topology
             .stages()
             .cloned()
@@ -280,27 +309,7 @@ mod tests {
                             operation: obzenflow_topology::MiddlewareOperation::SourcePoll,
                             details: obzenflow_topology::MiddlewareDetailsInfo::try_from_settings(
                                 obzenflow_topology::MiddlewareFamily::RateLimiter,
-                                [
-                                    ("middleware.rate_limiter.events_per_second", 2.0),
-                                    ("middleware.rate_limiter.burst_capacity", 5.0),
-                                    ("middleware.rate_limiter.cost_per_attempt", 5.0),
-                                ]
-                                .into_iter()
-                                .map(|(key, value)| {
-                                    (
-                                        key.to_owned(),
-                                        obzenflow_topology::ResolvedSettingInfo {
-                                            value: obzenflow_topology::SettingValueInfo::F64(value),
-                                            provenance: obzenflow_topology::SettingProvenanceInfo {
-                                                source: "dsl".into(),
-                                                scope: "stage:rate_limited".into(),
-                                                winner_subject:
-                                                    obzenflow_topology::SettingSubject::Unqualified,
-                                            },
-                                        },
-                                    )
-                                })
-                                .collect(),
+                                limiter_settings.clone(),
                             )
                             .unwrap(),
                         }],
@@ -348,13 +357,18 @@ mod tests {
             rate_limiter.operation,
             obzenflow_topology::MiddlewareOperation::SourcePoll
         );
-        let obzenflow_topology::MiddlewareDetailsInfo::RateLimiter(info) = &rate_limiter.details
-        else {
-            panic!("expected typed limiter information");
-        };
-        assert_eq!(info.events_per_second().value, 2.0);
-        assert_eq!(info.burst_capacity().unwrap().value, 5.0);
-        assert_eq!(info.cost_per_attempt().value, 5.0);
+        let settings = rate_limiter.details.settings().settings();
+        for (key, value) in [
+            ("middleware.rate_limiter.events_per_second", 2.0),
+            ("middleware.rate_limiter.burst_capacity", 5.0),
+            ("middleware.rate_limiter.cost_per_attempt", 5.0),
+        ] {
+            assert_eq!(
+                settings[key].setting().map(|setting| &setting.value),
+                Some(&obzenflow_topology::SettingValueInfo::F64(value)),
+                "{key}"
+            );
+        }
     }
 
     #[tokio::test]

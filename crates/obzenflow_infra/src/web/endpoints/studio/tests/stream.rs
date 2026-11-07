@@ -1493,14 +1493,14 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
             attachment.family() == obzenflow_topology::MiddlewareFamily::CircuitBreaker
         })
         .unwrap();
-    let obzenflow_topology::MiddlewareDetailsInfo::CircuitBreaker(info) = &config.details else {
-        panic!("expected typed breaker information");
-    };
-    assert_eq!(info.open_for_ms().value, 1);
-    assert_eq!(info.open_for_ms().provenance.source, "dsl");
-    assert_eq!(info.open_for_ms().provenance.scope, "stage:input");
+    let open_for = config.details.settings().settings()["middleware.circuit_breaker.open_for_ms"]
+        .setting()
+        .expect("open_for_ms has a resolved value");
+    assert_eq!(open_for.value, obzenflow_topology::SettingValueInfo::U64(1));
+    assert_eq!(open_for.provenance.source, "dsl");
+    assert_eq!(open_for.provenance.scope, "stage:input");
     assert_eq!(
-        info.open_for_ms().provenance.winner_subject,
+        open_for.provenance.winner_subject,
         obzenflow_topology::SettingSubject::Unqualified
     );
     let journal = handle.system_journal().unwrap();

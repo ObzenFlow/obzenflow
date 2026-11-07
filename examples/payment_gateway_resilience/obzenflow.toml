@@ -1,8 +1,8 @@
-# FLOWIP-115e: backpressure is operator-owned runtime configuration, resolved
-# from this file, never baked into flow.rs. Config declares policy; the topology
-# stays in Rust. You do not restate the topology here.
+# Backpressure is operator-owned runtime configuration, resolved from this file,
+# never baked into flow.rs. Config declares policy; the topology stays in Rust.
+# You do not restate the topology here.
 #
-# Authoring posture (FLOWIP-010 scope ladder, most specific wins):
+# Authoring posture (most specific wins):
 #   - This flow's default:   [runtime.backpressure.flow]          <- the common case
 #   - Wider app default:     [runtime.backpressure]               <- governs every flow in the process
 #   - Per-stage override:    [runtime.backpressure.stages.<upstream>]

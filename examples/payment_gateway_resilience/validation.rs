@@ -2,27 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Local order validation for the resilience tutorial.
-//!
-//! Validation is deterministic business classification, performed once per
-//! order by a single stage with a multi-type output contract:
-//!
-//! ```text
-//! CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, CancelledOrder }
-//! ```
-//! `ValidationOutcome` is the handler-side carrier proven leaf-equal to that
-//! flat fact set; it is not a topology payload.
-//!
-//! A valid order becomes `ValidatedOrder` and proceeds to payment
-//! authorization. An invalid order records two facts: `InvalidOrder` (the
-//! validation outcome, the provenance for anyone asking "why") and the derived
-//! lifecycle consequence `CancelledOrder` (the order's fate, which the
-//! cancelled-orders subscriber consumes regardless of where cancellation
-//! originated).
-//!
-//! The stage performs no external I/O, so it returns a typed, deterministic
-//! classifier outcome rather than using the effectful surface.
-
 use super::domain::{
     CancelledOrder, CustomerOrderPlaced, InvalidOrder, InvalidOrderReason, OrderCancellationReason,
     PaymentMethodState, ValidatedOrder,
@@ -31,10 +10,6 @@ use obzenflow::error::HandlerError;
 use obzenflow::schema::StageOutputFacts;
 use obzenflow::stages::transforms::TypedTransformHandler;
 
-/// In-memory carrier for the flat facts authored by local validation.
-///
-/// The carrier itself is never journalled. Its selected variant is lowered to
-/// one `ValidatedOrder`, or to `InvalidOrder` followed by `CancelledOrder`.
 #[derive(Debug, Clone, StageOutputFacts)]
 pub enum ValidationOutcome {
     Validated(ValidatedOrder),
@@ -44,7 +19,6 @@ pub enum ValidationOutcome {
     },
 }
 
-/// The validation stage handler. Classifies each order exactly once.
 #[derive(Debug, Clone)]
 pub struct ValidateOrder;
 
@@ -56,8 +30,6 @@ impl TypedTransformHandler for ValidateOrder {
         match invalid_reason_for(&order) {
             None => Ok(ValidationOutcome::Validated(validated_order(order))),
             Some(reason) => {
-                // Fact first, consequence second: the validation outcome is the
-                // provenance, the cancellation is the derived lifecycle fact.
                 let invalid = invalid_order(&order, reason.clone());
                 let cancelled = cancelled_order(&order, reason);
                 Ok(ValidationOutcome::Invalid { invalid, cancelled })
@@ -132,7 +104,6 @@ mod tests {
             invalid_reason_for(&order(PaymentMethodState::Valid, 1000)),
             None
         );
-        // Gateway-declined states are locally valid: the gateway decides those.
         assert_eq!(
             invalid_reason_for(&order(PaymentMethodState::InsufficientFunds, 1000)),
             None

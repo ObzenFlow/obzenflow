@@ -186,6 +186,8 @@ pub use control::composition::{
     compose_effect_controls, BuiltinControlContribution, BuiltinControlFamily,
     ControlCompositionError,
 };
+#[doc(hidden)]
+pub use control::{BuiltinControlDescription, BuiltinSettingRow};
 
 // Middleware validation helpers
 pub use validation::{validate_middleware_safety, ValidationResult};

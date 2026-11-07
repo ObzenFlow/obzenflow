@@ -400,11 +400,29 @@ fn assert_topology_records_resolved_retry(topology: &obzenflow_topology::Topolog
         retry_attachments[0].operation,
         obzenflow_topology::MiddlewareOperation::Effect { .. }
     ));
-    let obzenflow_topology::MiddlewareDetailsInfo::Retry(info) = &retry_attachments[0].details
-    else {
-        panic!("expected typed retry information");
+    let settings = retry_attachments[0].details.settings();
+    let active = |key: &str| match &settings.settings()[key] {
+        obzenflow_topology::MiddlewareSettingInfo::Active { setting, display } => {
+            (setting.value.clone(), display.as_str())
+        }
+        other => panic!("{key} must be active, got {other:?}"),
     };
-    assert_eq!(info.max_attempts().value, 2);
+    assert_eq!(
+        active("middleware.retry.kind"),
+        (
+            obzenflow_topology::SettingValueInfo::Text("fixed".into()),
+            "Fixed"
+        )
+    );
+    assert_eq!(
+        active("middleware.retry.max_attempts"),
+        (obzenflow_topology::SettingValueInfo::U64(2), "2")
+    );
+    assert_eq!(
+        active("middleware.retry.fixed_delay_ms"),
+        (obzenflow_topology::SettingValueInfo::U64(1), "1 ms")
+    );
+    assert_eq!(settings.summary(), None);
 }
 
 fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {

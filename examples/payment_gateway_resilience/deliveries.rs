@@ -2,13 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Passive application diagnostics for terminal deliveries.
-
 use super::domain::{PaymentAuthorizationUnavailable, PaymentAuthorized};
 use obzenflow::middleware::{ObserverResult, SinkDeliveryObserver, SinkDeliveryObserverContext};
 
-/// Emits an application diagnostic after the runtime classifies a shipping
-/// delivery. It receives an immutable view and cannot alter settlement.
 pub struct ShippingDeliveryLog;
 
 impl SinkDeliveryObserver for ShippingDeliveryLog {
@@ -24,7 +20,6 @@ impl SinkDeliveryObserver for ShippingDeliveryLog {
     }
 }
 
-/// Log the manual-review notice after console delivery succeeds.
 pub struct ManualReviewDeliveryLog;
 
 impl SinkDeliveryObserver for ManualReviewDeliveryLog {
