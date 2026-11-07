@@ -3997,25 +3997,30 @@ mod tests {
             .iter()
             .find(|a| a.label == "rate_limiter")
             .unwrap();
-        let obzenflow_topology::MiddlewareDetailsInfo::RateLimiter(limiter) = &limiter.details
-        else {
-            panic!("expected typed limiter information");
-        };
-        assert_eq!(limiter.events_per_second().value, 17.0);
-        assert!(
-            limiter.burst_capacity().is_none(),
-            "automatic capacity stays absent"
+        let limiter = limiter.details.settings().settings();
+        assert_eq!(
+            limiter["middleware.rate_limiter.events_per_second"]
+                .setting()
+                .map(|setting| &setting.value),
+            Some(&obzenflow_topology::SettingValueInfo::F64(17.0))
+        );
+        assert_eq!(
+            limiter["middleware.rate_limiter.burst_capacity"],
+            obzenflow_topology::MiddlewareSettingInfo::Automatic {
+                display: "Automatic".into()
+            }
         );
         let breaker = first
             .attachments
             .iter()
             .find(|a| a.label == "circuit_breaker")
             .unwrap();
-        let obzenflow_topology::MiddlewareDetailsInfo::CircuitBreaker(breaker) = &breaker.details
-        else {
-            panic!("expected typed breaker information");
-        };
-        assert_eq!(breaker.open_for_ms().value, 5000);
+        assert_eq!(
+            breaker.details.settings().settings()["middleware.circuit_breaker.open_for_ms"]
+                .setting()
+                .map(|setting| &setting.value),
+            Some(&obzenflow_topology::SettingValueInfo::U64(5000))
+        );
         let restored: obzenflow_topology::MiddlewareInfo =
             serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
         assert_eq!(

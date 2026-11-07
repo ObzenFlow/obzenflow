@@ -73,7 +73,7 @@ obzenflow_infra = { version = "=0.4.0", path = "crates/obzenflow_infra" }
 obzenflow_benchmarks = { version = "=0.4.0", path = "crates/obzenflow_benchmarks" }
 
 # External ObzenFlow crates
-obzenflow-topology = "0.7.0"
+obzenflow-topology = "0.8.0"
 obzenflow-fsm = "0.4.0"
 
 	# Async/runtime + utilities
@@ -283,6 +283,10 @@ path = "examples/payment_gateway_resilience/main.rs"
 [[example]]
 name = "flash_sale_allocation"
 path = "examples/flash_sale_allocation/main.rs"
+
+[[example]]
+name = "parcel_notifications"
+path = "examples/parcel_notifications/main.rs"
 
 [[example]]
 name = "aml_overnight_monitoring"

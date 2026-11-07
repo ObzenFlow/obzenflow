@@ -2,14 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Pure console projections for the tutorial's terminal outcomes.
-//!
-//! The console adapter owns output and replay labelling. In production, paid
-//! orders could feed shipping, declines and cancellations could feed customer
-//! notification, and unavailable authorizations could feed retry or
-//! manual-review workflows. `InvalidOrder` remains a journalled fact; its
-//! lifecycle consequence reaches the terminal destination as `CancelledOrder`.
-
 use super::domain::{
     CancelledOrder, PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined,
 };

@@ -1,0 +1,60 @@
+# Studio walkthrough config. Start studiod, then select this file with
+#   --config examples/parcel_notifications/obzenflow.studio.toml
+# The run registers with the phonebook and waits for Start, so every stage's
+# middleware can be inspected before any parcel moves.
+
+[server]
+enabled = true
+host = "127.0.0.1"
+port = 9095
+startup_mode = "manual"
+# Stay up after the run ends, so Studio keeps showing the final stage states,
+# metrics and contract results. Stop with Ctrl-C.
+on_terminal = "park"
+
+# The Studio bundle is served from the phonebook origin, so every browser
+# request to this runtime is cross-origin. 7010 is the studiod bundle origin and
+# 8080 the `trunk serve` origin; 127.0.0.1 and localhost are distinct origins.
+[server.cors]
+mode = "allow-list"
+allow_origins = [
+    "http://127.0.0.1:7010",
+    "http://localhost:7010",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+]
+
+[studio]
+enabled = true
+phonebook_url = "http://127.0.0.1:7010"
+job_id = "parcel_notifications"
+advertise_url = "http://127.0.0.1:9095"
+
+# Operator tuning. flow.rs attaches every middleware and sets its values; the
+# tables below refine some of those values for this run without a code change.
+# A file can refine middleware the code attached but never add any.
+#
+# Scopes, narrowest wins:
+#   [middleware.<family>]                                     every stage
+#   [middleware.flow.<family>]                                this flow
+#   [middleware.stages.<stage>.<family>]                      one stage
+#   [middleware.stages.<stage>.by_type."<effect>".<family>]   one effect of a stage
+#
+# Studio lists each setting with the source that won, dsl for flow.rs or file
+# for this file.
+
+# Raise the carrier's poll rate to 8 events a second. Only the rate changes, and
+# the burst comes from the code.
+[middleware.stages.carrier_updates.rate_limiter]
+events_per_second = 8.0
+
+# Open the email breaker after two failures in a row instead of on a failure
+# rate. The code's rate-based settings stay listed, marked inactive.
+[middleware.stages.notify_customer.by_type."notify.email".circuit_breaker]
+mode = "consecutive"
+consecutive_failures = 2
+
+# Back off exponentially between email attempts. The code's fixed delay stays
+# listed, marked inactive.
+[middleware.stages.notify_customer.by_type."notify.email".retry]
+kind = "exponential"

@@ -126,17 +126,17 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
             attachment.family() == obzenflow_topology::MiddlewareFamily::CircuitBreaker
         })
         .unwrap();
-    let obzenflow_topology::MiddlewareDetailsInfo::CircuitBreaker(info) = &breaker.details else {
-        panic!("expected typed breaker information");
-    };
-    assert_eq!(info.open_for_ms().value, 5_000);
-    assert_eq!(info.open_for_ms().provenance.source, "dsl");
+    let open_for = breaker.details.settings().settings()["middleware.circuit_breaker.open_for_ms"]
+        .setting()
+        .expect("open_for_ms has a resolved value");
     assert_eq!(
-        info.open_for_ms().provenance.scope,
-        "stage:high_volume_source"
+        open_for.value,
+        obzenflow_topology::SettingValueInfo::U64(5_000)
     );
+    assert_eq!(open_for.provenance.source, "dsl");
+    assert_eq!(open_for.provenance.scope, "stage:high_volume_source");
     assert_eq!(
-        info.open_for_ms().provenance.winner_subject,
+        open_for.provenance.winner_subject,
         obzenflow_topology::SettingSubject::Unqualified
     );
     assert!(

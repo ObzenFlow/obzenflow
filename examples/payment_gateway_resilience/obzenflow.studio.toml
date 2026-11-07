@@ -1,4 +1,4 @@
-# FLOWIP-114d Studio walkthrough config: select with
+# Studio walkthrough config. Select it with
 #   --config examples/payment_gateway_resilience/obzenflow.studio.toml
 # The runtime registers with the phonebook and the browser attaches directly
 # to this process's port; the phonebook never proxies the data path.

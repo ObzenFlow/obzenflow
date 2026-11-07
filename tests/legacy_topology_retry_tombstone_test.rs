@@ -18,38 +18,50 @@ fn resolved_retry_attachment_round_trips_with_its_operation() {
     use obzenflow_topology::{
         MiddlewareAttachmentInfo, MiddlewareAttachmentKey, MiddlewareAuthoredSite,
         MiddlewareDetailsInfo, MiddlewareFamily, MiddlewareInfo, MiddlewareOperation,
-        ResolvedSettingInfo, SettingProvenanceInfo, SettingSubject, SettingValueInfo,
+        MiddlewareSettingInfo, MiddlewareSettingsInfo, ResolvedSettingInfo, SettingProvenanceInfo,
+        SettingSubject, SettingValueInfo,
     };
     let settings = [
-        ("middleware.retry.max_attempts", SettingValueInfo::U64(3)),
+        (
+            "middleware.retry.max_attempts",
+            SettingValueInfo::U64(3),
+            "3",
+        ),
         (
             "middleware.retry.kind",
             SettingValueInfo::Text("fixed".into()),
+            "Fixed",
         ),
         (
             "middleware.retry.fixed_delay_ms",
             SettingValueInfo::U64(100),
+            "100 ms",
         ),
         (
             "middleware.retry.max_backoff_ms",
             SettingValueInfo::U64(30_000),
+            "30000 ms",
         ),
         (
             "middleware.retry.attempt_start_window_ms",
             SettingValueInfo::U64(120_000),
+            "120000 ms",
         ),
     ]
     .into_iter()
-    .map(|(key, value)| {
+    .map(|(key, value, display)| {
         (
             key.to_owned(),
-            ResolvedSettingInfo {
-                value,
-                provenance: SettingProvenanceInfo {
-                    source: "dsl".into(),
-                    scope: "stage:payments".into(),
-                    winner_subject: SettingSubject::Unqualified,
+            MiddlewareSettingInfo::Active {
+                setting: ResolvedSettingInfo {
+                    value,
+                    provenance: SettingProvenanceInfo {
+                        source: "dsl".into(),
+                        scope: "stage:payments".into(),
+                        winner_subject: SettingSubject::Unqualified,
+                    },
                 },
+                display: display.into(),
             },
         )
     })
@@ -62,8 +74,11 @@ fn resolved_retry_attachment_round_trips_with_its_operation() {
             operation: MiddlewareOperation::Effect {
                 effect_type: "payments.authorize".into(),
             },
-            details: MiddlewareDetailsInfo::try_from_settings(MiddlewareFamily::Retry, settings)
-                .unwrap(),
+            details: MiddlewareDetailsInfo::try_from_settings(
+                MiddlewareFamily::Retry,
+                MiddlewareSettingsInfo::try_new(settings, None).unwrap(),
+            )
+            .unwrap(),
         }],
     };
     let encoded = serde_json::to_value(&expected).unwrap();

@@ -49,7 +49,10 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
 use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
-use obzenflow_topology::{EdgeKind, StageTypingInfo, Topology, TypeHintInfo};
+use obzenflow_topology::{
+    EdgeKind, EdgeTypingInfo, EdgeTypingLabelSource, EdgeTypingRole, StageTypingInfo, Topology,
+    TypeHintInfo,
+};
 use std::any::{type_name, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -223,15 +226,8 @@ where
 {
 }
 
-/// Two-way model for declared type positions.
-///
-/// `Exact` carries a runtime fingerprint of the Rust type (`type_id`) plus a
-/// canonical display name for rendering. Identity is by `type_id`; the
-/// `display_name` is for error messages and topology rendering only. See
-/// FLOWIP-114c "Canonical type identity" for the rationale. The earlier
-/// `Mixed` variant was removed in PR D of FLOWIP-114c; the wire-side
-/// `TypeHintInfo::Mixed` is kept for snapshot round-tripping but is no longer
-/// emitted by the DSL.
+/// A declared type position, either unspecified or exact. An exact hint is identified by
+/// its `type_id`, and its `display_name` is for error messages and topology rendering only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeHint {
     Unspecified,
@@ -295,8 +291,7 @@ impl From<&TypeHint> for TypeHintInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StageTypingMetadata {
     pub input_type: TypeHint,
-    /// Legacy scalar output projection retained for the published
-    /// `obzenflow-topology` 0.4 render model and scalar handler trait anchors.
+    /// Legacy scalar output projection retained for scalar handler trait anchors.
     ///
     /// Runtime routing and edge validation must use `output_contract`, not this
     /// field. For `In -> { A, B, C }`, no member is semantically privileged.
@@ -422,18 +417,19 @@ fn output_contract_from_output_type(output_type: &TypeHint) -> Vec<TypeHint> {
 }
 
 fn output_type_projection_for_topology(value: &StageTypingMetadata) -> TypeHintInfo {
-    let mut members = value
+    let mut names: Vec<String> = value
         .output_contract
         .iter()
-        .filter(|member| !matches!(member, TypeHint::Unspecified));
-    let Some(first) = members.next() else {
-        return (&value.output_type).into();
-    };
+        .filter_map(|member| match member {
+            TypeHint::Exact { display_name, .. } => Some(display_name.clone()),
+            TypeHint::Unspecified => None,
+        })
+        .collect();
 
-    if members.next().is_some() {
-        TypeHintInfo::Mixed
-    } else {
-        first.into()
+    match names.len() {
+        0 => (&value.output_type).into(),
+        1 => TypeHintInfo::exact(names.remove(0)),
+        _ => TypeHintInfo::mixed(names),
     }
 }
 
@@ -471,6 +467,44 @@ pub fn collect_stage_typing_info(
     }
 
     stage_typing
+}
+
+pub(crate) fn routed_edge_typing(
+    feed_plan: &FeedPlan,
+    upstream: StageId,
+    downstream: StageId,
+) -> Option<EdgeTypingInfo> {
+    let outputs = &feed_plan.output_contract(upstream)?.outputs;
+    if outputs.len() < 2 {
+        return None;
+    }
+
+    let mut routed: Vec<String> = outputs
+        .iter()
+        .filter(|output| {
+            let payload_key = output.payload_key();
+            feed_plan.all_feeds().iter().any(|feed| {
+                feed.key.matches_stage_pair(upstream, downstream)
+                    && feed.key.role == FeedRole::Input
+                    && feed.key.selected_payload_key == payload_key
+            })
+        })
+        .filter_map(|output| match &output.type_hint {
+            TypeHintInfo::Exact { name } => Some(name.clone()),
+            TypeHintInfo::Unspecified | TypeHintInfo::Mixed { .. } => None,
+        })
+        .collect();
+
+    let payload_type = match routed.len() {
+        0 => return None,
+        1 => TypeHintInfo::exact(routed.remove(0)),
+        _ => TypeHintInfo::mixed(routed),
+    };
+    Some(EdgeTypingInfo::new(
+        EdgeTypingRole::Input,
+        EdgeTypingLabelSource::UpstreamOutputType,
+        payload_type,
+    ))
 }
 
 /// Which downstream input position was compared for an edge hint.

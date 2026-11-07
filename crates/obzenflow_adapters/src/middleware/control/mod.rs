@@ -4,6 +4,7 @@
 
 pub mod circuit_breaker;
 pub mod composition;
+mod description;
 pub mod policy;
 pub mod provider;
 pub mod rate_limiter;
@@ -17,6 +18,7 @@ pub use composition::{
     compose_effect_controls, BuiltinControlContribution, BuiltinControlFamily,
     ControlCompositionError,
 };
+pub use description::{BuiltinControlDescription, BuiltinSettingRow};
 pub use provider::ControlMiddlewareAggregator;
 pub use rate_limiter::{rate_limit, RateLimiter, RateLimiterMiddleware};
 pub use resilience::ControlConfigurationError;

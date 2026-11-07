@@ -59,7 +59,7 @@ impl RateLimiter {
         )
     }
 
-    fn resolved_config(
+    pub(in crate::middleware::control) fn resolved_config(
         &self,
         view: &obzenflow_runtime::runtime_config::ExactConfigView<'_>,
     ) -> Result<ValidatedRateLimiterConfig, RateLimiterConfigError> {

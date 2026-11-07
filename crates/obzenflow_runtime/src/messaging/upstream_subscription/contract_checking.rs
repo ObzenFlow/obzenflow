@@ -17,7 +17,7 @@ use obzenflow_core::event::types::{
 use obzenflow_core::event::{
     ChainEventFactory, ConsumptionFinalEventParams, ConsumptionProgressEventParams, JournalEvent,
 };
-use obzenflow_core::{ContractResult, ViolationCause};
+use obzenflow_core::{ContractResult, EventDescriptor, TransportContract, ViolationCause};
 use tokio::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +36,18 @@ fn contract_result_labels_for_emission(
             Some(v.cause.cause_label().to_string()),
         ),
         ContractResult::Pending { .. } => (ContractResultStatusLabel::Pending, None),
+    }
+}
+
+fn reported_feed(
+    contract_name: &ContractName,
+    selected_event_type: Option<&EventDescriptor>,
+    feed_role: Option<SystemFeedRole>,
+) -> (Option<EventDescriptor>, Option<SystemFeedRole>) {
+    if contract_name.as_str() == TransportContract::NAME {
+        (selected_event_type.cloned(), feed_role)
+    } else {
+        (None, None)
     }
 }
 
@@ -648,14 +660,16 @@ where
                 }
 
                 let (status_label, cause_label) = contract_result_labels_for_emission(result);
+                let (result_event_type, result_feed_role) =
+                    reported_feed(contract_name, selected_event_type.as_ref(), feed_role);
 
                 let result_event = ChainEventFactory::execution_event(
                     tracker.writer_id,
                     ExecutionPayload::ContractResult {
                         upstream: progress.stage_id,
                         reader: reader_stage,
-                        selected_event_type: None,
-                        feed_role: None,
+                        selected_event_type: result_event_type,
+                        feed_role: result_feed_role,
                         contract_name: contract_name.clone(),
                         status: status_label,
                         phase: ContractPhase::Progress,
@@ -870,28 +884,16 @@ where
                 let journal = &tracker.journal;
                 for (contract_name, result) in &results {
                     let (status_label, cause_label) = contract_result_labels_for_emission(result);
+                    let (result_event_type, result_feed_role) =
+                        reported_feed(contract_name, selected_event_type.as_ref(), feed_role);
 
                     let result_event = ChainEventFactory::execution_event(
                         tracker.writer_id,
                         ExecutionPayload::ContractResult {
                             upstream: progress.stage_id,
                             reader: reader_stage,
-                            selected_event_type: if matches!(
-                                result.details(),
-                                obzenflow_core::contracts::ContractEvidenceDetails::Transport { .. }
-                            ) {
-                                selected_event_type.clone()
-                            } else {
-                                None
-                            },
-                            feed_role: if matches!(
-                                result.details(),
-                                obzenflow_core::contracts::ContractEvidenceDetails::Transport { .. }
-                            ) {
-                                feed_role
-                            } else {
-                                None
-                            },
+                            selected_event_type: result_event_type,
+                            feed_role: result_feed_role,
                             contract_name: contract_name.clone(),
                             status: status_label,
                             phase: ContractPhase::Final,

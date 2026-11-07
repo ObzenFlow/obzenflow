@@ -5,15 +5,6 @@
 use obzenflow::schema::TypedPayload;
 use serde::{Deserialize, Serialize};
 
-/// High-level phase of the traffic pattern.
-///
-/// We deliberately script three phases so it is easy to
-/// correlate behaviour in logs and metrics:
-///
-/// - Warmup: dependency is healthy, all gateway calls succeed.
-/// - Outage: dependency starts failing, circuit breaker opens.
-/// - Recovery: dependency is healthy again; the finite demo leaves a real
-///   cooldown window before its first gateway-eligible recovery order.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum TrafficPhase {
     Warmup,
@@ -21,12 +12,6 @@ pub enum TrafficPhase {
     Recovery,
 }
 
-/// The order channel an upstream event arrived on (FLOWIP-095d).
-///
-/// Two channels feed the flow concurrently; the canonical deterministic merge
-/// at `validate_order` makes their interleaving a pure function of the two
-/// recorded streams, so live runs with different arrival timing and replays
-/// all consume orders in the same merged order.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum OrderChannel {
     Web,
@@ -42,19 +27,6 @@ impl OrderChannel {
     }
 }
 
-/// Upstream business event saying a customer placed an order.
-///
-/// This is the input boundary of the tutorial. In production it might be read
-/// from an HTTP ingestion source, Kafka topic, database outbox, or another flow.
-/// Here it comes from a scripted source so the tutorial is deterministic.
-///
-/// This is deliberately not called a command. The flow reacts to a fact that
-/// already happened upstream, then decides whether to issue the outbound
-/// `payment.authorize` effect command to the gateway.
-///
-/// `payment_method_state` is a demo fixture knob: `InvalidNumber` fails local
-/// validation, while `InsufficientFunds` and `AddressMismatch` are valid enough
-/// to call the gateway but are declined by the simulated remote gateway.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CustomerOrderPlaced {
     pub order_id: String,
@@ -70,7 +42,6 @@ impl TypedPayload for CustomerOrderPlaced {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Scripted payment-method state used by this tutorial.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum PaymentMethodState {
     Valid,
@@ -79,11 +50,6 @@ pub enum PaymentMethodState {
     AddressMismatch,
 }
 
-/// Locally valid order ready for gateway authorization.
-///
-/// Only orders that pass deterministic business validation enter this type.
-/// Invalid orders are emitted on a separate `InvalidOrder` channel instead of
-/// being modeled as framework processing errors.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ValidatedOrder {
     pub order_id: String,
@@ -99,7 +65,6 @@ impl TypedPayload for ValidatedOrder {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Business reason an order cannot proceed to payment authorization locally.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum InvalidOrderReason {
     InvalidPaymentMethod,
@@ -115,10 +80,6 @@ impl InvalidOrderReason {
     }
 }
 
-/// Business event emitted when this flow rejects an order before gateway I/O.
-///
-/// This is not an exception rail. It is a normal domain outcome that a website,
-/// order-status service, or customer-notification workflow could subscribe to.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InvalidOrder {
     pub order_id: String,
@@ -133,12 +94,6 @@ impl TypedPayload for InvalidOrder {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Why an order's lifecycle ended in cancellation.
-///
-/// Cancellation is a lifecycle consequence derived from a more specific fact,
-/// local validation failed (`InvalidOrder`). The specific fact stays in the
-/// journal as provenance; this reason carries enough for subscribers that only
-/// care about the order's fate.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum OrderCancellationReason {
     LocalValidationFailed { reason: InvalidOrderReason },
@@ -154,15 +109,6 @@ impl OrderCancellationReason {
     }
 }
 
-/// Lifecycle fact: this order will not proceed and is cancelled.
-///
-/// Authored by `validate_order` for locally invalid orders. A gateway decline
-/// is a payment outcome, not a cancellation, so it reaches its own sink as
-/// `PaymentDeclined`; a subscriber that wants every failed order joins the two
-/// feeds downstream.
-///
-/// A gateway that was merely unavailable reaches no decision, so those orders
-/// go to manual review instead.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CancelledOrder {
     pub order_id: String,
@@ -177,7 +123,6 @@ impl TypedPayload for CancelledOrder {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Material business reason the gateway declined payment.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum PaymentDeclineReason {
     InsufficientFunds,
@@ -193,9 +138,6 @@ impl PaymentDeclineReason {
     }
 }
 
-/// Result of authorizing payment at the external gateway.
-///
-/// This is a fact produced by this flow after the gateway authorizes the order.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PaymentAuthorized {
     pub order_id: String,
@@ -214,7 +156,6 @@ impl TypedPayload for PaymentAuthorized {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Material gateway decline, separate from local invalid-order handling.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PaymentDeclined {
     pub order_id: String,
@@ -229,10 +170,6 @@ impl TypedPayload for PaymentDeclined {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Gateway authorization could not complete because the dependency was unavailable.
-///
-/// This is neither "paid" nor "declined"; it usually means retry, manual review,
-/// or some other operational compensation.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PaymentAuthorizationUnavailable {
     pub order_id: String,

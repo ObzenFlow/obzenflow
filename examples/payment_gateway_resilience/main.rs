@@ -2,14 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Payment Gateway Resilience: a durable-execution tutorial.
-//!
-//! The gateway call is modelled as a replay-suppressed effect, so a recorded run
-//! can be replayed with zero gateway calls and identical output. Bounded retry,
-//! a circuit breaker, and a per-attempt limiter on the same stage form the
-//! second, live-run layer of protection.
-//!
-//! Run it:
+//! Payment gateway resilience. Run from the repository root:
 //!
 //! ```text
 //! cargo run -p obzenflow --example payment_gateway_resilience
@@ -21,8 +14,6 @@
 //! cargo run -p obzenflow --example payment_gateway_resilience -- \
 //!     --replay-from target/payment-gateway-logs/flows/<flow_id>
 //! ```
-//!
-//! See `README.md` for the full walkthrough.
 
 mod console;
 mod deliveries;
@@ -36,10 +27,6 @@ use obzenflow::application::{
     Banner, FlowApplication, Footer, LogLevel, Presentation, RunMode, RunPresentationOutcome,
 };
 
-/// Startup copy branches on the resolved run mode (FLOWIP-120i): the live
-/// banner teaches the resilience behaviour, the replay banner says what a
-/// strict replay reconstructs and what it suppresses, so the transcript never
-/// implies the breaker or the gateway ran again.
 fn banner_for(mode: &RunMode) -> Banner {
     match mode {
         RunMode::Replay(ctx) => Banner::new("Payment Gateway Resilience Demo (strict replay)")
@@ -71,9 +58,6 @@ fn banner_for(mode: &RunMode) -> Banner {
     }
 }
 
-/// Completion copy branches the same way: live runs are pointed at replay and
-/// live metrics; replays are pointed at verification (FLOWIP-095j) and
-/// replay-of-replay, never at metrics the replay did not touch.
 fn footer_for(outcome: RunPresentationOutcome) -> Footer {
     let replayable = outcome.offers().replay;
     let next_step = match outcome.run_mode() {
@@ -97,14 +81,9 @@ fn footer_for(outcome: RunPresentationOutcome) -> Footer {
     }
 }
 
-/// Exit codes follow the FLOWIP-095j verification contract when `--verify`
-/// is passed: 0 certified match, 1 divergence, 2 uncertified remainder,
-/// 3 refused or skipped. Every other failure exits 1.
 fn main() -> std::process::ExitCode {
     let presentation = Presentation::for_mode(banner_for).with_footer(footer_for);
 
-    // FLOWIP-115e: backpressure is operator-owned config, resolved from this
-    // file rather than declared in the flow. See obzenflow.toml.
     let config_file = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/examples/payment_gateway_resilience/obzenflow.toml"
