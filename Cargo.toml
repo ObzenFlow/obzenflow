@@ -154,10 +154,6 @@ subtle = "2"
 	libc = "0.2"
 	clap = { version = "4.5", features = ["derive"] }
 
-# Until obzenflow-topology 0.8.0 is published.
-[patch.crates-io]
-obzenflow-topology = { path = "../obzenflow-topology" }
-
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
 

@@ -15,6 +15,7 @@ and replay. A dash means there is no dedicated tutorial or run guide yet.
 | [flash_sale_allocation](flash_sale_allocation/flow.rs) | Stateful stock reservation and cancellation | [Run guide](flash_sale_allocation/README.md) |
 | [aml_overnight_monitoring](aml_overnight_monitoring/flow.rs) | A recorded risk verdict per transaction, cases, and a resumed batch | [Run guide](aml_overnight_monitoring/README.md) |
 | [prometheus_demo](prometheus_demo/main.rs) | Metrics reporting, circuit breaking, and backpressure | [Run guide](prometheus_demo/README.md) |
+| [parcel_notifications](parcel_notifications/flow.rs) | Middleware settings refined by config and inspected in Studio | [Run guide](parcel_notifications/README.md) |
 | [product_catalog_enrichment](product_catalog_enrichment/flow.rs) | Multi-way inner, left, and strict joins | — |
 | [flight_delays_simple](flight_delays_simple/flow.rs) | Stream-table reference enrichment | — |
 | [csv_demo_support_sla](csv_demo_support_sla/flow.rs) | CSV input, typed joins, and CSV output | — |
