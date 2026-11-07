@@ -226,14 +226,8 @@ where
 {
 }
 
-/// Two-way model for declared type positions.
-///
-/// `Exact` carries a runtime fingerprint of the Rust type (`type_id`) plus a
-/// canonical display name for rendering. Identity is by `type_id`; the
-/// `display_name` is for error messages and topology rendering only. See
-/// FLOWIP-114c "Canonical type identity" for the rationale. An output contract
-/// with several members projects to the topology's `TypeHintInfo::Mixed`,
-/// which names each member.
+/// A declared type position, either unspecified or exact. An exact hint is identified by
+/// its `type_id`, and its `display_name` is for error messages and topology rendering only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeHint {
     Unspecified,
@@ -297,8 +291,7 @@ impl From<&TypeHint> for TypeHintInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StageTypingMetadata {
     pub input_type: TypeHint,
-    /// Legacy scalar output projection retained for the published
-    /// `obzenflow-topology` 0.4 render model and scalar handler trait anchors.
+    /// Legacy scalar output projection retained for scalar handler trait anchors.
     ///
     /// Runtime routing and edge validation must use `output_contract`, not this
     /// field. For `In -> { A, B, C }`, no member is semantically privileged.

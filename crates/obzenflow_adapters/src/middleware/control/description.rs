@@ -17,7 +17,6 @@ use obzenflow_runtime::runtime_config::{
 };
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 
-/// One consumed setting with the text shown for it. An automatic setting has no resolved value.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuiltinSettingRow<'a> {
@@ -34,7 +33,6 @@ pub enum BuiltinSettingRow<'a> {
     },
 }
 
-/// The rows of one built-in family and the summary shown beside its canvas icon.
 #[doc(hidden)]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BuiltinControlDescription<'a> {

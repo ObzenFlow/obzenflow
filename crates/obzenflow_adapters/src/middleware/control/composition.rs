@@ -112,8 +112,6 @@ impl BuiltinControlContribution {
         self.families()
             .any(|family| family == BuiltinControlFamily::Retry)
     }
-    /// The rows `family` writes for the settings it consumes at `view`, and its summary.
-    /// A family this contribution does not carry consumes nothing.
     pub fn describe<'a>(
         &self,
         family: BuiltinControlFamily,

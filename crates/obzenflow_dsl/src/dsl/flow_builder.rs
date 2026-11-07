@@ -1657,15 +1657,6 @@ where
             }
         }
 
-        // FLOWIP-114b: bake DSL-time annotations into the canonical Topology.
-        // Stage typing, join metadata, subgraph membership, and middleware
-        // configuration become annotation fields on the corresponding
-        // `StageInfo`. An edge out of a stage with several output types carries
-        // the types the feed plan routes across it; the rest of the edge typing
-        // is derived from the attached stage typings and join metadata. The
-        // resulting `Topology` is what the runtime carries through
-        // `FlowHandle::topology()` and what the `/api/topology` endpoint
-        // serialises.
         let topology = {
 
             let middleware_decoded = middleware_stacks.clone();

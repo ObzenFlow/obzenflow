@@ -40,11 +40,11 @@ advertise_url = "http://127.0.0.1:9095"
 #   [middleware.stages.<stage>.<family>]                      one stage
 #   [middleware.stages.<stage>.by_type."<effect>".<family>]   one effect of a stage
 #
-# Studio lists each setting with the source that won: dsl for flow.rs, file
+# Studio lists each setting with the source that won, dsl for flow.rs or file
 # for this file.
 
-# The carrier allows faster polling than flow.rs assumes. Only the rate changes;
-# the burst still comes from the code.
+# Raise the carrier's poll rate to 8 events a second. Only the rate changes, and
+# the burst comes from the code.
 [middleware.stages.carrier_updates.rate_limiter]
 events_per_second = 8.0
 
