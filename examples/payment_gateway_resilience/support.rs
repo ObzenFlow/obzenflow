@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Test-facing aggregator mirroring `product_catalog_enrichment/support.rs`:
-//! integration tests include this one file instead of each sibling module,
-//! keeping example items on a public path.
-
 #[path = "console.rs"]
 pub mod console;
 

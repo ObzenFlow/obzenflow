@@ -246,6 +246,42 @@ pub(in crate::middleware::control) fn resolve_breaker(
     resolved.validate()
 }
 
+pub(in crate::middleware::control) fn resolve_retry(
+    authored: &Retry,
+    view: &obzenflow_runtime::runtime_config::ExactConfigView<'_>,
+) -> Result<Retry, ControlConfigurationError> {
+    validate_retry(authored)?;
+    let mut value = match text_value(view, RETRY_KIND_KEY).unwrap_or("exponential") {
+        "fixed" => super::circuit_breaker::retry().fixed_delay(Duration::from_millis(
+            required_u64(view, RETRY_FIXED_DELAY_MS_KEY),
+        )),
+        "exponential" => super::circuit_breaker::retry(),
+        kind => {
+            return Err(ControlConfigurationError::UnknownRetryKind {
+                kind: kind.to_string(),
+            })
+        }
+    };
+    value = value.max_attempts(
+        u32::try_from(
+            u64_value(view, RETRY_MAX_ATTEMPTS_KEY).unwrap_or(authored.policy.max_attempts as u64),
+        )
+        .map_err(|_| ControlConfigurationError::ZeroRetryAttempts)?,
+    );
+    value = value.max_backoff(
+        u64_value(view, RETRY_MAX_BACKOFF_MS_KEY)
+            .map(Duration::from_millis)
+            .unwrap_or(authored.limits.max_single_delay),
+    );
+    value = value.attempt_start_window(
+        u64_value(view, RETRY_ATTEMPT_START_WINDOW_MS_KEY)
+            .map(Duration::from_millis)
+            .unwrap_or(authored.limits.max_attempt_start_window),
+    );
+    validate_retry(&value)?;
+    Ok(value)
+}
+
 impl EffectPlanFactory {
     pub(in crate::middleware::control) fn empty() -> Self {
         Self {
@@ -322,40 +358,10 @@ impl EffectPlanFactory {
         &self,
         view: &obzenflow_runtime::runtime_config::ExactConfigView<'_>,
     ) -> Result<Option<Retry>, ControlConfigurationError> {
-        let Some(authored) = &self.retry else {
-            return Ok(None);
-        };
-        validate_retry(authored)?;
-        let mut value = match text_value(view, RETRY_KIND_KEY).unwrap_or("exponential") {
-            "fixed" => super::circuit_breaker::retry().fixed_delay(Duration::from_millis(
-                required_u64(view, RETRY_FIXED_DELAY_MS_KEY),
-            )),
-            "exponential" => super::circuit_breaker::retry(),
-            kind => {
-                return Err(ControlConfigurationError::UnknownRetryKind {
-                    kind: kind.to_string(),
-                })
-            }
-        };
-        value = value.max_attempts(
-            u32::try_from(
-                u64_value(view, RETRY_MAX_ATTEMPTS_KEY)
-                    .unwrap_or(authored.policy.max_attempts as u64),
-            )
-            .map_err(|_| ControlConfigurationError::ZeroRetryAttempts)?,
-        );
-        value = value.max_backoff(
-            u64_value(view, RETRY_MAX_BACKOFF_MS_KEY)
-                .map(Duration::from_millis)
-                .unwrap_or(authored.limits.max_single_delay),
-        );
-        value = value.attempt_start_window(
-            u64_value(view, RETRY_ATTEMPT_START_WINDOW_MS_KEY)
-                .map(Duration::from_millis)
-                .unwrap_or(authored.limits.max_attempt_start_window),
-        );
-        validate_retry(&value)?;
-        Ok(Some(value))
+        self.retry
+            .as_ref()
+            .map(|authored| resolve_retry(authored, view))
+            .transpose()
     }
     fn resolved_limiter(
         &self,

@@ -73,7 +73,7 @@ obzenflow_infra = { version = "=0.4.0", path = "crates/obzenflow_infra" }
 obzenflow_benchmarks = { version = "=0.4.0", path = "crates/obzenflow_benchmarks" }
 
 # External ObzenFlow crates
-obzenflow-topology = "0.7.0"
+obzenflow-topology = "0.8.0"
 obzenflow-fsm = "0.4.0"
 
 	# Async/runtime + utilities
@@ -153,6 +153,10 @@ subtle = "2"
 	tempfile = "3.8"
 	libc = "0.2"
 	clap = { version = "4.5", features = ["derive"] }
+
+# Until obzenflow-topology 0.8.0 is published.
+[patch.crates-io]
+obzenflow-topology = { path = "../obzenflow-topology" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }

@@ -405,18 +405,35 @@ pub(super) fn validate_configuration(
     Ok(())
 }
 
+fn plain_text(value: &obzenflow_topology::SettingValueInfo) -> String {
+    use obzenflow_topology::SettingValueInfo;
+    match value {
+        SettingValueInfo::Bool(value) => value.to_string(),
+        SettingValueInfo::U64(value) => value.to_string(),
+        SettingValueInfo::F64(value) => value.to_string(),
+        SettingValueInfo::Text(value) => value.clone(),
+        SettingValueInfo::Redacted => "Redacted".to_owned(),
+    }
+}
+
 /// The topology is a projection of the frozen placement and effective settings.
 /// The internal effect execution owner does not replace its authored members.
 pub(super) fn topology(
     descriptor: &dyn super::stage_descriptor::StageDescriptor,
     config: &StageConfig,
 ) -> Result<obzenflow_topology::MiddlewareInfo, MiddlewarePlanError> {
-    use obzenflow_adapters::middleware::{BuiltinControlFamily, MiddlewareDeclaration};
-    use obzenflow_runtime::runtime_config::{knob, ConfigValue, Redaction};
+    use obzenflow_adapters::middleware::{
+        BuiltinControlFamily, BuiltinSettingRow, MiddlewareDeclaration,
+    };
+    use obzenflow_core::event::EffectType;
+    use obzenflow_core::StageKey;
+    use obzenflow_runtime::runtime_config::{
+        knob, ConfigValue, Redaction, ResolutionPoint, Resolved,
+    };
     use obzenflow_topology::{
         MiddlewareAttachmentInfo, MiddlewareAuthoredSite, MiddlewareDetailsInfo, MiddlewareFamily,
-        MiddlewareInfo, MiddlewareOperation, ResolvedSettingInfo, SettingProvenanceInfo,
-        SettingSubject, SettingValueInfo,
+        MiddlewareInfo, MiddlewareOperation, MiddlewareSettingInfo, MiddlewareSettingsInfo,
+        ResolvedSettingInfo, SettingProvenanceInfo, SettingSubject, SettingValueInfo,
     };
     let mut result = MiddlewareInfo::default();
     let effects = descriptor.effect_declarations();
@@ -427,8 +444,22 @@ pub(super) fn topology(
                        site: MiddlewareAttachmentSite|
      -> Result<(), MiddlewarePlanError> {
         let declaration = factory.declaration();
-        let contributions = factory.builtin_control();
-        let components = contributions
+        let contribution = factory.builtin_control();
+        let invalid = |message: String| {
+            MiddlewarePlanError::invalid(
+                &config.name,
+                effect.map(EffectDeclaration::effect_type),
+                message,
+            )
+        };
+        let view = config.effective_config.exact_view(match effect {
+            Some(effect) => ResolutionPoint::Effect {
+                stage: StageKey::from(config.name.as_str()),
+                effect_type: EffectType::from(effect.effect_type()),
+            },
+            None => ResolutionPoint::Stage(StageKey::from(config.name.as_str())),
+        });
+        let components = contribution
             .as_ref()
             .map(|contribution| {
                 contribution
@@ -504,72 +535,98 @@ pub(super) fn topology(
                         .to_string(),
                 },
             };
-            let mut settings = BTreeMap::new();
-            let prefix = component.map(|member| format!("middleware.{}.", member.label()));
-            for key in factory.consumed_config_keys() {
-                if prefix
-                    .as_ref()
-                    .is_some_and(|prefix| !key.starts_with(prefix))
-                {
-                    continue;
-                }
-                let resolved = match effect {
-                    Some(effect) => config.effective_config.effect_value(
-                        key,
-                        &config.name.as_str().into(),
-                        &effect.effect_type().into(),
-                    ),
-                    None => config.effective_config.get(
-                        key,
-                        &obzenflow_core::config::ConfigScope::stage(config.name.as_str()),
-                    ),
-                };
-                if let Some(resolved) = resolved {
-                    let spec = knob(key).ok_or_else(|| {
-                        MiddlewarePlanError::invalid(
-                            &config.name,
-                            effect.map(EffectDeclaration::effect_type),
-                            format!("middleware '{label}' consumes unregistered setting '{key}'"),
-                        )
-                    })?;
-                    let value = match (&spec.redaction, &resolved.value) {
-                        (Redaction::SecretValue, _) => SettingValueInfo::Redacted,
-                        (_, ConfigValue::Bool(value)) => SettingValueInfo::Bool(*value),
-                        (_, ConfigValue::U64(value)) => SettingValueInfo::U64(*value),
-                        (_, ConfigValue::F64(value)) => SettingValueInfo::F64(*value),
-                        (_, ConfigValue::Text(value)) => SettingValueInfo::Text(value.clone()),
-                    };
-                    let winner_subject = match &resolved.meta.subject {
-                        obzenflow_core::config::ConfigSubject::Unqualified => {
-                            SettingSubject::Unqualified
-                        }
-                        obzenflow_core::config::ConfigSubject::Effect { effect_type } => {
-                            SettingSubject::Effect {
-                                effect_type: effect_type.as_str().to_owned(),
-                            }
-                        }
-                    };
-                    settings.insert(
-                        key.to_string(),
-                        ResolvedSettingInfo {
-                            value,
-                            provenance: SettingProvenanceInfo {
-                                source: resolved.meta.source.to_string(),
-                                scope: resolved.meta.scope.to_string(),
-                                winner_subject,
-                            },
-                        },
-                    );
-                }
-            }
-            let details =
-                MiddlewareDetailsInfo::try_from_settings(family, settings).map_err(|error| {
-                    MiddlewarePlanError::invalid(
-                        &config.name,
-                        effect.map(EffectDeclaration::effect_type),
-                        format!("invalid topology information for middleware '{label}': {error}"),
-                    )
+            let resolved_setting = |key: &str, resolved: &Resolved<ConfigValue>| {
+                let spec = knob(key).ok_or_else(|| {
+                    invalid(format!(
+                        "middleware '{label}' consumes unregistered setting '{key}'"
+                    ))
                 })?;
+                let value = match (&spec.redaction, &resolved.value) {
+                    (Redaction::SecretValue, _) => SettingValueInfo::Redacted,
+                    (_, ConfigValue::Bool(value)) => SettingValueInfo::Bool(*value),
+                    (_, ConfigValue::U64(value)) => SettingValueInfo::U64(*value),
+                    (_, ConfigValue::F64(value)) => SettingValueInfo::F64(*value),
+                    (_, ConfigValue::Text(value)) => SettingValueInfo::Text(value.clone()),
+                };
+                let winner_subject = match &resolved.meta.subject {
+                    obzenflow_core::config::ConfigSubject::Unqualified => {
+                        SettingSubject::Unqualified
+                    }
+                    obzenflow_core::config::ConfigSubject::Effect { effect_type } => {
+                        SettingSubject::Effect {
+                            effect_type: effect_type.as_str().to_owned(),
+                        }
+                    }
+                };
+                Ok::<_, MiddlewarePlanError>(ResolvedSettingInfo {
+                    value,
+                    provenance: SettingProvenanceInfo {
+                        source: resolved.meta.source.to_string(),
+                        scope: resolved.meta.scope.to_string(),
+                        winner_subject,
+                    },
+                })
+            };
+            let invalid_record = |error: &dyn std::fmt::Display| {
+                invalid(format!(
+                    "invalid topology information for middleware '{label}': {error}"
+                ))
+            };
+            let mut rows = BTreeMap::new();
+            let summary = match component.zip(contribution.as_ref()) {
+                Some((member, contribution)) => {
+                    let description = contribution
+                        .describe(member, &view)
+                        .map_err(|error| invalid_record(&error))?;
+                    for (key, row) in description.settings {
+                        let row = match row {
+                            BuiltinSettingRow::Active { setting, display } => {
+                                MiddlewareSettingInfo::Active {
+                                    setting: resolved_setting(key, setting)?,
+                                    display,
+                                }
+                            }
+                            BuiltinSettingRow::Inactive { setting, display } => {
+                                MiddlewareSettingInfo::Inactive {
+                                    setting: resolved_setting(key, setting)?,
+                                    display,
+                                }
+                            }
+                            BuiltinSettingRow::Automatic { display } => {
+                                MiddlewareSettingInfo::Automatic { display }
+                            }
+                        };
+                        rows.insert(key.to_owned(), row);
+                    }
+                    let prefix = format!("middleware.{}.", member.label());
+                    if let Some(key) = factory.consumed_config_keys().into_iter().find(|key| {
+                        key.starts_with(&prefix)
+                            && view.get(key).is_some()
+                            && !rows.contains_key(*key)
+                    }) {
+                        return Err(invalid(format!(
+                            "middleware '{label}' writes no row for setting '{key}'"
+                        )));
+                    }
+                    description.summary
+                }
+                None => {
+                    for key in factory.consumed_config_keys() {
+                        if let Some(resolved) = view.get(key) {
+                            let setting = resolved_setting(key, resolved)?;
+                            let display = plain_text(&setting.value);
+                            rows.insert(
+                                key.to_owned(),
+                                MiddlewareSettingInfo::Active { setting, display },
+                            );
+                        }
+                    }
+                    None
+                }
+            };
+            let details = MiddlewareSettingsInfo::try_new(rows, summary)
+                .and_then(|settings| MiddlewareDetailsInfo::try_from_settings(family, settings))
+                .map_err(|error| invalid_record(&error))?;
             result.attachments.push(MiddlewareAttachmentInfo {
                 key: super::binder::attachment_key(
                     &member_declaration,

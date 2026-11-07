@@ -27,15 +27,16 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler,
 };
 use obzenflow_topology::{
-    CircuitBreakerInfo, CircuitBreakerMode, MiddlewareAttachmentInfo, MiddlewareAuthoredSite,
-    MiddlewareDetailsInfo, MiddlewareFamily, MiddlewareInfo, MiddlewareOperation,
-    ResolvedSettingInfo, SettingProvenanceInfo, SettingSubject,
+    MiddlewareAttachmentInfo, MiddlewareAuthoredSite, MiddlewareFamily, MiddlewareInfo,
+    MiddlewareOperation, MiddlewareSettingInfo, ResolvedSettingInfo, SettingProvenanceInfo,
+    SettingSubject, SettingValueInfo,
 };
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Item {
@@ -196,30 +197,55 @@ fn round_trip_middleware(
     decoded
 }
 
-fn assert_setting<T: std::fmt::Debug + PartialEq>(
-    actual: &ResolvedSettingInfo<T>,
-    value: T,
+fn resolved(
+    value: SettingValueInfo,
     source: &str,
     scope: &str,
     winner_subject: SettingSubject,
-) {
-    assert_eq!(
-        actual,
-        &ResolvedSettingInfo {
-            value,
-            provenance: SettingProvenanceInfo {
-                source: source.to_string(),
-                scope: scope.to_string(),
-                winner_subject,
-            },
-        }
-    );
+) -> ResolvedSettingInfo<SettingValueInfo> {
+    ResolvedSettingInfo {
+        value,
+        provenance: SettingProvenanceInfo {
+            source: source.to_string(),
+            scope: scope.to_string(),
+            winner_subject,
+        },
+    }
 }
 
-fn assert_effect_breaker<'a>(
-    attachment: &'a MiddlewareAttachmentInfo,
+fn active(setting: ResolvedSettingInfo<SettingValueInfo>, display: &str) -> MiddlewareSettingInfo {
+    MiddlewareSettingInfo::Active {
+        setting,
+        display: display.to_string(),
+    }
+}
+
+fn inactive(
+    setting: ResolvedSettingInfo<SettingValueInfo>,
+    display: &str,
+) -> MiddlewareSettingInfo {
+    MiddlewareSettingInfo::Inactive {
+        setting,
+        display: display.to_string(),
+    }
+}
+
+fn row<'a>(attachment: &'a MiddlewareAttachmentInfo, key: &str) -> &'a MiddlewareSettingInfo {
+    attachment
+        .details
+        .settings()
+        .settings()
+        .get(key)
+        .unwrap_or_else(|| panic!("{key} must have a row"))
+}
+
+type RowState = fn(ResolvedSettingInfo<SettingValueInfo>, &str) -> MiddlewareSettingInfo;
+
+fn assert_effect_breaker(
+    attachment: &MiddlewareAttachmentInfo,
     effect_type: &str,
-) -> &'a CircuitBreakerInfo {
+    rate_rows: RowState,
+) {
     assert_eq!(attachment.label, "circuit_breaker");
     assert_eq!(attachment.family(), MiddlewareFamily::CircuitBreaker);
     assert_eq!(
@@ -234,39 +260,48 @@ fn assert_effect_breaker<'a>(
             effect_type: effect_type.to_string(),
         }
     );
-    let MiddlewareDetailsInfo::CircuitBreaker(info) = &attachment.details else {
-        panic!("the effect must carry typed breaker information");
+    let dsl = |value| {
+        resolved(
+            value,
+            "dsl",
+            "stage:authorize_payment",
+            SettingSubject::Effect {
+                effect_type: effect_type.to_string(),
+            },
+        )
     };
-    let subject = SettingSubject::Effect {
-        effect_type: effect_type.to_string(),
-    };
-    let scope = "stage:authorize_payment";
-    assert_setting(info.open_for_ms(), 60_000, "dsl", scope, subject.clone());
-    assert_setting(info.probes(), 1, "dsl", scope, subject.clone());
-    assert_setting(
-        info.rate_limited_counts_as_failure(),
-        false,
-        "dsl",
-        scope,
-        subject.clone(),
-    );
-    assert_setting(
-        info.count_window().unwrap(),
-        10,
-        "dsl",
-        scope,
-        subject.clone(),
-    );
-    assert_setting(
-        info.failure_rate_threshold().unwrap(),
-        0.5,
-        "dsl",
-        scope,
-        subject,
-    );
-    assert!(info.slow_call_duration_ms().is_none());
-    assert!(info.slow_call_rate_threshold().is_none());
-    info
+    for (key, expected) in [
+        (
+            "middleware.circuit_breaker.open_for_ms",
+            active(dsl(SettingValueInfo::U64(60_000)), "60000 ms"),
+        ),
+        (
+            "middleware.circuit_breaker.probes",
+            active(dsl(SettingValueInfo::U64(1)), "1"),
+        ),
+        (
+            "middleware.circuit_breaker.rate_limited_counts_as_failure",
+            active(dsl(SettingValueInfo::Bool(false)), "false"),
+        ),
+        (
+            "middleware.circuit_breaker.count_window",
+            rate_rows(dsl(SettingValueInfo::U64(10)), "10 calls"),
+        ),
+        (
+            "middleware.circuit_breaker.failure_rate_threshold",
+            rate_rows(dsl(SettingValueInfo::F64(0.5)), "0.5 ratio"),
+        ),
+        (
+            "middleware.circuit_breaker.slow_call_duration_ms",
+            rate_rows(dsl(SettingValueInfo::U64(250)), "250 ms"),
+        ),
+        (
+            "middleware.circuit_breaker.slow_call_rate_threshold",
+            rate_rows(dsl(SettingValueInfo::F64(0.5)), "0.5 ratio"),
+        ),
+    ] {
+        assert_eq!(row(attachment, key), &expected, "{key}");
+    }
 }
 
 fn build_flow_future(
@@ -329,6 +364,8 @@ fn payment_resilience() -> obzenflow_adapters::middleware::CircuitBreaker {
         .count_window(10)
         .minimum_calls(5)
         .failure_rate_threshold(0.5)
+        .slow_call_duration(Duration::from_millis(250))
+        .slow_call_rate_threshold(0.5)
 }
 
 fn build_two_effect_flow_future(
@@ -568,35 +605,24 @@ async fn manifest_records_a_file_supplied_optional_key_for_a_surviving_factory()
         MiddlewareAuthoredSite::Implementation
     );
     assert_eq!(attachment.operation, MiddlewareOperation::SinkDelivery);
-    let MiddlewareDetailsInfo::RateLimiter(info) = &attachment.details else {
-        panic!("the sink must carry typed limiter information");
-    };
-    assert_setting(
-        info.events_per_second(),
-        10.0,
-        "dsl",
-        "stage:snk",
-        SettingSubject::Unqualified,
+    let snk =
+        |value, source: &str| resolved(value, source, "stage:snk", SettingSubject::Unqualified);
+    assert_eq!(
+        row(attachment, "middleware.rate_limiter.events_per_second"),
+        &active(snk(SettingValueInfo::F64(10.0), "dsl"), "10 events/s")
     );
-    assert_setting(
-        info.cost_per_attempt(),
-        1.0,
-        "dsl",
-        "stage:snk",
-        SettingSubject::Unqualified,
+    assert_eq!(
+        row(attachment, "middleware.rate_limiter.cost_per_attempt"),
+        &active(snk(SettingValueInfo::F64(1.0), "dsl"), "1 tokens")
     );
-    assert_setting(
-        info.burst_capacity()
-            .expect("explicit burst remains present"),
-        3.0,
-        "file",
-        "stage:snk",
-        SettingSubject::Unqualified,
+    assert_eq!(
+        row(attachment, "middleware.rate_limiter.burst_capacity"),
+        &active(snk(SettingValueInfo::F64(3.0), "file"), "3 tokens")
     );
 }
 
 #[tokio::test]
-async fn topology_keeps_automatic_burst_absent_without_fabricated_provenance() {
+async fn automatic_burst_row_omits_provenance() {
     let dir = tempfile::tempdir().expect("tempdir");
     let handle =
         build_rate_limited_flow_future(dir.path().to_path_buf(), FlowBuildContext::for_tests())
@@ -604,13 +630,15 @@ async fn topology_keeps_automatic_burst_absent_without_fabricated_provenance() {
             .expect("the limiter can calculate its own automatic capacity");
     let middleware = round_trip_middleware(&handle, "snk");
     assert_eq!(middleware.attachments.len(), 1);
-    let MiddlewareDetailsInfo::RateLimiter(info) = &middleware.attachments[0].details else {
-        panic!("the sink must carry typed limiter information");
-    };
-    assert!(
-        info.burst_capacity().is_none(),
+    let limiter = &middleware.attachments[0];
+    assert_eq!(
+        row(limiter, "middleware.rate_limiter.burst_capacity"),
+        &MiddlewareSettingInfo::Automatic {
+            display: "Automatic".to_string()
+        },
         "an automatically calculated capacity is not a resolved configuration winner"
     );
+    assert_eq!(limiter.details.settings().summary(), Some("10"));
     let manifest = manifest_for(&handle);
     assert!(manifest
         .effective_config
@@ -681,25 +709,38 @@ async fn manifest_retains_two_real_effect_rows_for_one_stage_broadcast() {
             panic!("each breaker must protect a declared effect");
         };
         effects.push(effect_type.as_str());
-        let info = assert_effect_breaker(attachment, effect_type);
-        assert_setting(
-            info.mode(),
-            CircuitBreakerMode::RateBased,
-            "dsl",
-            "stage:authorize_payment",
-            SettingSubject::Effect {
-                effect_type: effect_type.clone(),
-            },
+        assert_effect_breaker(attachment, effect_type, active);
+        assert_eq!(
+            row(attachment, "middleware.circuit_breaker.mode"),
+            &active(
+                resolved(
+                    SettingValueInfo::Text("rate_based".to_string()),
+                    "dsl",
+                    "stage:authorize_payment",
+                    SettingSubject::Effect {
+                        effect_type: effect_type.clone(),
+                    },
+                ),
+                "Rate based"
+            )
         );
-        assert_setting(
-            info.minimum_calls()
-                .expect("rate mode requires minimum calls"),
-            8,
-            "file",
-            "stage:authorize_payment",
-            SettingSubject::Unqualified,
+        assert_eq!(
+            row(attachment, "middleware.circuit_breaker.minimum_calls"),
+            &active(
+                resolved(
+                    SettingValueInfo::U64(8),
+                    "file",
+                    "stage:authorize_payment",
+                    SettingSubject::Unqualified,
+                ),
+                "8 calls"
+            )
         );
-        assert!(info.consecutive_failures().is_none());
+        let settings = attachment.details.settings();
+        assert!(!settings
+            .settings()
+            .contains_key("middleware.circuit_breaker.consecutive_failures"));
+        assert_eq!(settings.summary(), Some("50% failures; 50% slow calls"));
     }
     effects.sort();
     assert_eq!(
@@ -755,50 +796,86 @@ async fn topology_retains_effect_winners_and_inactive_settings_after_a_mode_over
         let MiddlewareOperation::Effect { effect_type } = &attachment.operation else {
             panic!("each breaker must protect a declared effect");
         };
-        // Count-window and failure-rate rows remain visible even when inactive.
-        let info = assert_effect_breaker(attachment, effect_type);
         let exact = effect_type == AUTHORIZE;
         assert!(exact || effect_type == REFUND);
         let effect_subject = SettingSubject::Effect {
             effect_type: effect_type.clone(),
         };
-        let minimum = info
-            .minimum_calls()
-            .expect("inactive settings remain evidence");
-        assert_setting(
-            minimum,
-            if exact { 6 } else { 8 },
-            "file",
-            "stage:authorize_payment",
-            if exact {
-                effect_subject.clone()
-            } else {
-                SettingSubject::Unqualified
-            },
-        );
-        assert_setting(
-            info.mode(),
-            if exact {
-                CircuitBreakerMode::Consecutive
-            } else {
-                CircuitBreakerMode::RateBased
-            },
-            if exact { "file" } else { "dsl" },
-            "stage:authorize_payment",
-            effect_subject.clone(),
-        );
+        let scope = "stage:authorize_payment";
+        let settings = attachment.details.settings();
         if exact {
-            assert_setting(
-                info.consecutive_failures()
-                    .expect("active consecutive setting"),
-                3,
-                "file",
-                "stage:authorize_payment",
-                effect_subject,
+            assert_effect_breaker(attachment, effect_type, inactive);
+            assert_eq!(
+                row(attachment, CIRCUIT_BREAKER_MINIMUM_CALLS_KEY),
+                &inactive(
+                    resolved(
+                        SettingValueInfo::U64(6),
+                        "file",
+                        scope,
+                        effect_subject.clone()
+                    ),
+                    "6 calls"
+                )
             );
+            assert_eq!(
+                row(attachment, CIRCUIT_BREAKER_MODE_KEY),
+                &active(
+                    resolved(
+                        SettingValueInfo::Text("consecutive".to_string()),
+                        "file",
+                        scope,
+                        effect_subject.clone()
+                    ),
+                    "Consecutive failures"
+                )
+            );
+            assert_eq!(
+                row(attachment, CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY),
+                &active(
+                    resolved(
+                        SettingValueInfo::U64(3),
+                        "file",
+                        scope,
+                        effect_subject.clone()
+                    ),
+                    "3"
+                )
+            );
+            assert_eq!(settings.summary(), Some("3 consecutive failures"));
         } else {
-            assert!(info.consecutive_failures().is_none());
+            assert_effect_breaker(attachment, effect_type, active);
+            assert_eq!(
+                row(attachment, CIRCUIT_BREAKER_MINIMUM_CALLS_KEY),
+                &active(
+                    resolved(
+                        SettingValueInfo::U64(8),
+                        "file",
+                        scope,
+                        SettingSubject::Unqualified
+                    ),
+                    "8 calls"
+                )
+            );
+            assert_eq!(
+                row(attachment, CIRCUIT_BREAKER_MODE_KEY),
+                &active(
+                    resolved(
+                        SettingValueInfo::Text("rate_based".to_string()),
+                        "dsl",
+                        scope,
+                        effect_subject.clone()
+                    ),
+                    "Rate based"
+                )
+            );
+            assert!(!settings
+                .settings()
+                .contains_key(CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY));
+            assert_eq!(settings.summary(), Some("50% failures; 50% slow calls"));
         }
+        let minimum = row(attachment, CIRCUIT_BREAKER_MINIMUM_CALLS_KEY)
+            .setting()
+            .expect("inactive settings remain evidence");
         let minimum_row = evidence
             .values
             .iter()
@@ -811,7 +888,7 @@ async fn topology_retains_effect_winners_and_inactive_settings_after_a_mode_over
                         })
             })
             .expect("the topology setting must have corresponding manifest evidence");
-        assert_eq!(minimum_row.value, json!(minimum.value));
+        assert_eq!(minimum_row.value, json!(if exact { 6 } else { 8 }));
         assert_eq!(minimum_row.source, minimum.provenance.source);
         assert_eq!(minimum_row.scope, minimum.provenance.scope);
         assert_eq!(

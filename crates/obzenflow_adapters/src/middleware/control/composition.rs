@@ -5,9 +5,13 @@
 //! Sealed built-in contributions and the bounded effect composition catalog.
 
 use super::circuit_breaker::{CircuitBreaker, Retry};
+use super::description::{
+    describe_breaker, describe_limiter, describe_retry, BuiltinControlDescription,
+};
 use super::rate_limiter::RateLimiter;
-use super::resilience::EffectPlanFactory;
+use super::resilience::{ControlConfigurationError, EffectPlanFactory};
 use crate::middleware::{MiddlewareAttachmentSite, MiddlewareFactory};
+use obzenflow_runtime::runtime_config::ExactConfigView;
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -32,6 +36,16 @@ enum Contribution {
     Limiter(RateLimiter),
     Breaker(CircuitBreaker),
     Retry(Retry),
+}
+
+impl Contribution {
+    fn family(&self) -> BuiltinControlFamily {
+        match self {
+            Self::Limiter(_) => BuiltinControlFamily::RateLimiter,
+            Self::Breaker(_) => BuiltinControlFamily::CircuitBreaker,
+            Self::Retry(_) => BuiltinControlFamily::Retry,
+        }
+    }
 }
 
 /// Only canonical built-in values can construct these authority-bearing facts.
@@ -92,15 +106,25 @@ impl BuiltinControlContribution {
         &self.sites
     }
     pub fn families(&self) -> impl ExactSizeIterator<Item = BuiltinControlFamily> + '_ {
-        self.values.iter().map(|value| match value {
-            Contribution::Limiter(_) => BuiltinControlFamily::RateLimiter,
-            Contribution::Breaker(_) => BuiltinControlFamily::CircuitBreaker,
-            Contribution::Retry(_) => BuiltinControlFamily::Retry,
-        })
+        self.values.iter().map(Contribution::family)
     }
     pub fn is_retry(&self) -> bool {
         self.families()
             .any(|family| family == BuiltinControlFamily::Retry)
+    }
+    /// The rows `family` writes for the settings it consumes at `view`, and its summary.
+    /// A family this contribution does not carry consumes nothing.
+    pub fn describe<'a>(
+        &self,
+        family: BuiltinControlFamily,
+        view: &ExactConfigView<'a>,
+    ) -> Result<BuiltinControlDescription<'a>, ControlConfigurationError> {
+        match self.values.iter().find(|value| value.family() == family) {
+            Some(Contribution::Limiter(value)) => describe_limiter(value, view),
+            Some(Contribution::Breaker(value)) => describe_breaker(value, view),
+            Some(Contribution::Retry(value)) => describe_retry(value, view),
+            None => Ok(BuiltinControlDescription::default()),
+        }
     }
 }
 
@@ -159,11 +183,7 @@ pub fn compose_effect_controls(
             plan.reject_affine_recovery_for_test |= contribution.reject_affine_recovery_for_test;
         }
         for value in contribution.values {
-            let family = match &value {
-                Contribution::Limiter(_) => BuiltinControlFamily::RateLimiter,
-                Contribution::Breaker(_) => BuiltinControlFamily::CircuitBreaker,
-                Contribution::Retry(_) => BuiltinControlFamily::Retry,
-            };
+            let family = value.family();
             let site = contribution
                 .sites
                 .iter()
