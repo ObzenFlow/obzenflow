@@ -13,7 +13,10 @@ mod tests {
     use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
     use obzenflow_runtime::effects::{Effects, StageCompletion};
-    use obzenflow_runtime::feed_plan::{FactVisibility, FeedRole};
+    use obzenflow_runtime::feed_plan::{
+        payload_key_from_type_hint, FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed,
+        PayloadTypeDescriptor, StageOutputContract,
+    };
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -40,7 +43,7 @@ mod tests {
     use crate::dsl::stage_descriptor::StageDescriptor;
     use crate::dsl::stage_descriptor::TransformDescriptor;
     use crate::dsl::typing::{
-        collect_stage_typing_info, derive_feed_plan, validate_edge_typing,
+        collect_stage_typing_info, derive_feed_plan, routed_edge_typing, validate_edge_typing,
         validate_order_observer_deterministic_input_order, validate_stage_typing_metadata,
         EdgeInputRole, TypeHint,
     };
@@ -992,7 +995,7 @@ mod tests {
 
         assert_eq!(
             stage_typing.get(&source_id).unwrap().output_type,
-            TypeHintInfo::Mixed
+            TypeHintInfo::mixed([type_name::<InputEvent>(), type_name::<AlternateEvent>()])
         );
     }
 
@@ -3534,6 +3537,125 @@ mod tests {
                 .visibility,
             FactVisibility::Routable
         );
+    }
+
+    #[test]
+    fn routed_edge_typing_fan_out_returns_reader_member() {
+        let source_id = StageId::new();
+        let input_sink_id = StageId::new();
+        let alternate_sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source".to_string(),
+            crate::source!(
+                name: "source",
+                { InputEvent, AlternateEvent } => MultiExactSource
+            ),
+        );
+        descriptors.insert(
+            "input_sink".to_string(),
+            crate::sink!(name: "input_sink", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "alternate_sink".to_string(),
+            crate::sink!(name: "alternate_sink", AlternateEvent => placeholder!()),
+        );
+        let name_to_id = HashMap::from([
+            ("source".to_string(), source_id),
+            ("input_sink".to_string(), input_sink_id),
+            ("alternate_sink".to_string(), alternate_sink_id),
+        ]);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_id.to_topology_id(),
+            Some("source".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        for (sink_id, name) in [
+            (input_sink_id, "input_sink"),
+            (alternate_sink_id, "alternate_sink"),
+        ] {
+            topology.add_stage_with_id(
+                sink_id.to_topology_id(),
+                Some(name.to_string()),
+                TopologyStageType::Sink,
+            );
+            topology.reset_current();
+            topology.add_edge(source_id.to_topology_id(), sink_id.to_topology_id());
+        }
+        let topology = topology.build_unchecked().unwrap();
+
+        let plan = derive_feed_plan(&topology, &descriptors, &name_to_id, &[]);
+        let payload = |sink_id| {
+            routed_edge_typing(&plan, source_id, sink_id).map(|typing| typing.payload_type)
+        };
+        assert_eq!(
+            payload(input_sink_id),
+            Some(TypeHintInfo::exact(type_name::<InputEvent>()))
+        );
+        assert_eq!(
+            payload(alternate_sink_id),
+            Some(TypeHintInfo::exact(type_name::<AlternateEvent>()))
+        );
+    }
+
+    fn feed_plan_routing(outputs: &[&str], routed: &[&str]) -> (StageId, StageId, FeedPlan) {
+        let upstream = StageId::new();
+        let reader = StageId::new();
+        let contract = StageOutputContract {
+            outputs: outputs
+                .iter()
+                .map(|name| {
+                    PayloadTypeDescriptor::from_type_hint(
+                        TypeHintInfo::exact(*name),
+                        FactVisibility::Unrouted,
+                    )
+                })
+                .collect(),
+        };
+        let feeds = routed
+            .iter()
+            .map(|name| {
+                let hint = TypeHintInfo::exact(*name);
+                LogicalFeed {
+                    key: FeedKey::new(
+                        upstream,
+                        reader,
+                        payload_key_from_type_hint(&hint),
+                        FeedRole::Input,
+                    ),
+                    selected_payload: PayloadTypeDescriptor::from_type_hint(
+                        hint,
+                        FactVisibility::Routable,
+                    ),
+                }
+            })
+            .collect();
+        let plan = FeedPlan::new(HashMap::from([(upstream, contract)]), feeds);
+        (upstream, reader, plan)
+    }
+
+    #[test]
+    fn routed_edge_typing_two_routed_returns_mixed() {
+        let (upstream, reader, plan) = feed_plan_routing(
+            &["crate::Partial", "crate::GroupEnded", "crate::ChunkFailed"],
+            &["crate::GroupEnded", "crate::Partial"],
+        );
+
+        assert_eq!(
+            routed_edge_typing(&plan, upstream, reader).map(|typing| typing.payload_type),
+            Some(TypeHintInfo::mixed(["crate::Partial", "crate::GroupEnded"]))
+        );
+    }
+
+    #[test]
+    fn routed_edge_typing_single_output_returns_none() {
+        let (upstream, reader, plan) = feed_plan_routing(&["crate::Partial"], &["crate::Partial"]);
+
+        assert_eq!(routed_edge_typing(&plan, upstream, reader), None);
     }
 
     /// FLOWIP-114c Acceptance #4 + #25, failing case: a join whose stream slot

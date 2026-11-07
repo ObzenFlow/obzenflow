@@ -251,7 +251,7 @@ impl FeedPlan {
 pub fn payload_key_from_type_hint(type_hint: &TypeHintInfo) -> String {
     match type_hint {
         TypeHintInfo::Exact { name } => format!("exact:{name}"),
-        TypeHintInfo::Mixed => "mixed".to_string(),
+        TypeHintInfo::Mixed { .. } => "mixed".to_string(),
         TypeHintInfo::Unspecified => "unspecified".to_string(),
     }
 }

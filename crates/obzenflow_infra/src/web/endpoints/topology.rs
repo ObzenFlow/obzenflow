@@ -410,7 +410,10 @@ mod tests {
             .map(|mut s| {
                 if s.id == typed_stage_id {
                     s.typing = Some(StageTypingInfo {
-                        input_type: TypeHintInfo::Mixed,
+                        input_type: TypeHintInfo::mixed([
+                            "product_catalog::domain::Order",
+                            "product_catalog::domain::Promotion",
+                        ]),
                         output_type: TypeHintInfo::exact("product_catalog::domain::EnrichedOrder"),
                         boundary_in_type: TypeHintInfo::Unspecified,
                         boundary_out_type: TypeHintInfo::Unspecified,
@@ -458,8 +461,11 @@ mod tests {
             .as_ref()
             .expect("typed stage should include typing");
 
-        assert!(matches!(typing.input_type, TypeHintInfo::Mixed));
-        assert_eq!(typing.input_type.display_name(), None);
+        assert!(matches!(typing.input_type, TypeHintInfo::Mixed { .. }));
+        assert_eq!(
+            typing.input_type.display_name().as_deref(),
+            Some("{ Order, Promotion }")
+        );
         assert!(matches!(typing.output_type, TypeHintInfo::Exact { .. }));
         match &typing.output_type {
             TypeHintInfo::Exact { name } => {

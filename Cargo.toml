@@ -289,6 +289,10 @@ name = "flash_sale_allocation"
 path = "examples/flash_sale_allocation/main.rs"
 
 [[example]]
+name = "parcel_notifications"
+path = "examples/parcel_notifications/main.rs"
+
+[[example]]
 name = "aml_overnight_monitoring"
 path = "examples/aml_overnight_monitoring/main.rs"
 

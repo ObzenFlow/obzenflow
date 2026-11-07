@@ -2142,6 +2142,122 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 }
 
 #[tokio::test]
+async fn transport_progress_unique_feed_matches_final() {
+    let upstream_stage = StageId::new();
+    let reader_stage = StageId::new();
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(JournalOwner::stage(upstream_stage)));
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(JournalOwner::stage(reader_stage)));
+    let writer_id = WriterId::Stage(upstream_stage);
+
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.selected",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 1}),
+            ),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
+        writer_seq,
+        writer_seq_by_event_type,
+        writer_seq_by_event_type_complete,
+        ..
+    }) = &mut eof_event.payload
+    {
+        *writer_seq = Some(SeqNo(1));
+        *writer_seq_by_event_type_complete = true;
+        writer_seq_by_event_type.insert(fact_descriptor("test.selected", 1), SeqNo(1));
+    }
+    upstream_journal
+        .append(eof_event, Default::default())
+        .await
+        .unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let selected_feeds = HashMap::from([(
+        upstream_stage,
+        vec![SelectedFeedMetadata::new(
+            fact_descriptor("test.selected", 1),
+            SelectedFeedRole::Input,
+        )],
+    )]);
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_selected_feeds(selected_feeds)
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(reader_stage),
+            contract_journal: contract_journal.clone(),
+            config: ContractConfig::default(),
+            reader_stage: Some(reader_stage),
+            control_plane: Arc::new(NoControlPlane),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        })
+        .transport_only();
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+
+    let first = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    assert!(matches!(
+        first,
+        PollResult::Event(ref record) if record.event_type() == "test.selected"
+    ));
+    let progress_status = subscription.check_contracts(&mut reader_progress).await;
+    drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
+    let final_status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(matches!(progress_status, ContractStatus::ProgressEmitted));
+    assert!(matches!(
+        final_status,
+        ContractStatus::ProgressEmitted | ContractStatus::Healthy
+    ));
+
+    let records = contract_journal.read_causally_ordered().await.unwrap();
+    let transport_results: Vec<_> = records
+        .iter()
+        .filter_map(|record| match &record.payload {
+            ChainPayload::Execution(ExecutionPayload::ContractResult {
+                contract_name,
+                phase,
+                selected_event_type,
+                feed_role,
+                ..
+            }) if contract_name.as_str() == TransportContract::NAME => Some((
+                *phase,
+                selected_event_type
+                    .as_ref()
+                    .map(|descriptor| descriptor.event_type.as_str()),
+                feed_role.as_ref().map(|role| role.as_str()),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        transport_results,
+        [
+            (
+                obzenflow_core::contracts::ContractPhase::Progress,
+                Some("test.selected"),
+                Some("input"),
+            ),
+            (
+                obzenflow_core::contracts::ContractPhase::Final,
+                Some("test.selected"),
+                Some("input"),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symmetrically() {
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;
     use obzenflow_core::event::provenance::replay_context::ReplayContext;
