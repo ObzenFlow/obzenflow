@@ -11,21 +11,30 @@ pub mod payment_domain;
 #[path = "test_support/payment_gateway_retry_fixture.rs"]
 mod retry_fixture;
 
-use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
+use obzenflow_core::config::{ConfigScope, ConfigSource, ConfigSubject, ResolvedForDoc};
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload, RecoveryFact,
+    BackpressureFact, CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload,
+    RecoveryFact, RetryStopReason,
 };
 use obzenflow_core::event::{ChainEvent, ChainPayload, EffectFailureCause, EffectOutcomePayload};
 use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_runtime::effects::EffectCursor;
+use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
-    CIRCUIT_BREAKER_COUNT_WINDOW_KEY, CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+    CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+    CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY, CIRCUIT_BREAKER_COUNT_WINDOW_KEY,
+    CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY, CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY,
     CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
-    CIRCUIT_BREAKER_PROBES_KEY, CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-    CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY, CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
-    RATE_LIMITER_COST_PER_ATTEMPT_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
-    RETRY_ATTEMPT_START_WINDOW_MS_KEY, RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY,
-    RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
+    CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY, CIRCUIT_BREAKER_PROBES_KEY,
+    CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY, CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
+    CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+    RATE_LIMITER_EVENTS_PER_SECOND_KEY, RETRY_ATTEMPT_START_WINDOW_MS_KEY,
+    RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY, RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
+    RETRY_MAX_OUTAGE_WAIT_MS_KEY, RETRY_ON_REFUSAL_KEY,
+};
+use obzenflow_topology::{
+    MiddlewareFamily, MiddlewareSettingInfo, ResolvedSettingInfo, SettingProvenanceInfo,
+    SettingSubject, SettingValueInfo,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
@@ -47,7 +56,17 @@ fn only_run(root: &Path) -> PathBuf {
     runs.into_iter().next().unwrap()
 }
 
-fn assert_release_manifest(run: &Path, policy: retry_fixture::ReleasePolicy) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Winner {
+    Dsl,
+    Default,
+    FlowFile,
+    StageFile,
+}
+
+type ReleaseConfig = BTreeMap<String, (serde_json::Value, Winner)>;
+
+fn release_manifest(run: &Path) -> ReleaseConfig {
     let raw = std::fs::read_to_string(run.join("run_manifest.json"))
         .expect("release witness run manifest should be readable");
     let manifest: RunManifest =
@@ -62,7 +81,7 @@ fn assert_release_manifest(run: &Path, policy: retry_fixture::ReleasePolicy) {
         stage: "authorize_payment".to_string(),
         effect_type: effect_type.clone(),
     };
-    let winner_subject = ConfigSubject::Effect {
+    let authored_subject = ConfigSubject::Effect {
         effect_type: effect_type.into(),
     };
     let mut actual = BTreeMap::new();
@@ -71,69 +90,115 @@ fn assert_release_manifest(run: &Path, policy: retry_fixture::ReleasePolicy) {
         .into_iter()
         .filter(|row| row.resolved_for.as_ref() == Some(&resolved_for))
     {
-        assert_eq!(row.scope, "stage:authorize_payment");
-        assert_eq!(row.source, "dsl");
-        assert_eq!(row.winner_subject, Some(winner_subject.clone()));
+        let winner = match (row.source.as_str(), row.scope.as_str(), &row.winner_subject) {
+            ("dsl", "stage:authorize_payment", Some(subject)) if *subject == authored_subject => {
+                Winner::Dsl
+            }
+            ("default", "global", Some(ConfigSubject::Unqualified)) => Winner::Default,
+            ("file", "flow", Some(ConfigSubject::Unqualified)) => Winner::FlowFile,
+            ("file", "stage:authorize_payment", Some(ConfigSubject::Unqualified)) => {
+                Winner::StageFile
+            }
+            (source, scope, subject) => panic!(
+                "{} resolved from {source} at {scope} for {subject:?}",
+                row.key_path
+            ),
+        };
         assert!(
-            actual.insert(row.key_path.clone(), row.value).is_none(),
+            actual
+                .insert(row.key_path.clone(), (row.value, winner))
+                .is_none(),
             "release effect configuration contains duplicate key {}",
             row.key_path
         );
     }
+    actual
+}
 
-    let mut expected: BTreeMap<String, serde_json::Value> = [
-        (CIRCUIT_BREAKER_MODE_KEY, json!("rate_based")),
-        (CIRCUIT_BREAKER_COUNT_WINDOW_KEY, json!(5)),
-        (CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, json!(5)),
-        (CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY, json!(0.6)),
-        (CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY, json!(250)),
-        (CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, json!(0.5)),
-        (CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, json!(5_000)),
-        (CIRCUIT_BREAKER_PROBES_KEY, json!(1)),
-        (
-            CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-            json!(false),
-        ),
-        (RATE_LIMITER_EVENTS_PER_SECOND_KEY, json!(1.0)),
-        (RATE_LIMITER_COST_PER_ATTEMPT_KEY, json!(1.0)),
-    ]
-    .into_iter()
-    .map(|(key, value)| (key.to_string(), value))
-    .collect();
-
-    if !policy.has_breaker() {
-        expected.retain(|key, _| !key.starts_with("middleware.circuit_breaker."));
-    }
-    if !policy.has_limiter() {
-        expected.retain(|key, _| !key.starts_with("middleware.rate_limiter."));
-    }
-    if policy.has_retry() {
-        expected.extend(
-            [
+fn expected_release_config(policy: retry_fixture::ReleasePolicy) -> ReleaseConfig {
+    let mut authored = Vec::new();
+    if policy == retry_fixture::ReleasePolicy::OutageRecovery {
+        authored.extend([
+            (CIRCUIT_BREAKER_MODE_KEY, json!("consecutive")),
+            (CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY, json!(1)),
+            (CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, json!(100)),
+            (CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY, json!(2.0)),
+            (CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY, json!(400)),
+            (CIRCUIT_BREAKER_PROBES_KEY, json!(1)),
+            (
+                CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+                json!(false),
+            ),
+            (RETRY_KIND_KEY, json!("fixed")),
+            (RETRY_FIXED_DELAY_MS_KEY, json!(10)),
+            (RETRY_MAX_ATTEMPTS_KEY, json!(3)),
+            (RETRY_MAX_BACKOFF_MS_KEY, json!(30_000)),
+            (RETRY_ATTEMPT_START_WINDOW_MS_KEY, json!(120_000)),
+            (RETRY_MAX_OUTAGE_WAIT_MS_KEY, json!(60_000)),
+        ]);
+    } else {
+        if policy.has_breaker() {
+            authored.extend([
+                (CIRCUIT_BREAKER_MODE_KEY, json!("rate_based")),
+                (CIRCUIT_BREAKER_COUNT_WINDOW_KEY, json!(5)),
+                (CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, json!(5)),
+                (CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY, json!(0.6)),
+                (CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY, json!(250)),
+                (CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, json!(0.5)),
+                (CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, json!(5_000)),
+                (CIRCUIT_BREAKER_PROBES_KEY, json!(1)),
+                (
+                    CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+                    json!(false),
+                ),
+            ]);
+        }
+        if policy.has_limiter() {
+            authored.extend([
+                (RATE_LIMITER_EVENTS_PER_SECOND_KEY, json!(1.0)),
+                (RATE_LIMITER_COST_PER_ATTEMPT_KEY, json!(1.0)),
+            ]);
+        }
+        if policy.has_retry() {
+            authored.extend([
                 (RETRY_KIND_KEY, json!("fixed")),
                 (RETRY_FIXED_DELAY_MS_KEY, json!(250)),
                 (RETRY_MAX_ATTEMPTS_KEY, json!(3)),
                 (RETRY_MAX_BACKOFF_MS_KEY, json!(30_000)),
                 (RETRY_ATTEMPT_START_WINDOW_MS_KEY, json!(30_000)),
-            ]
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value)),
-        );
+            ]);
+        }
     }
-
-    assert_eq!(
-        actual, expected,
-        "release evidence must exactly match its locked payment policy"
-    );
+    let mut expected: ReleaseConfig = authored
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), (value, Winner::Dsl)))
+        .collect();
+    if policy.has_breaker() && policy.has_retry() {
+        expected
+            .entry(RETRY_ON_REFUSAL_KEY.to_string())
+            .or_insert((json!("wait"), Winner::Default));
+        expected
+            .entry(RETRY_MAX_OUTAGE_WAIT_MS_KEY.to_string())
+            .or_insert((json!(120_000), Winner::Default));
+    }
+    expected
 }
 
-fn run_release_witness(
+fn with_stage_file(mut config: ReleaseConfig, rows: &[(&str, serde_json::Value)]) -> ReleaseConfig {
+    for (key, value) in rows {
+        config.insert(key.to_string(), (value.clone(), Winner::StageFile));
+    }
+    config
+}
+
+fn run_witness(
     policy: retry_fixture::ReleasePolicy,
     orders: Vec<retry_fixture::ValidatedOrder>,
     gateway: Arc<retry_fixture::ScriptedGateway>,
     journal_root: &Path,
+    config: Option<&str>,
     replay_from: Option<&Path>,
-) -> PathBuf {
+) -> Result<PathBuf, String> {
     let mut args = vec!["payment_gateway_retry_journal_test".to_string()];
     if let Some(archive) = replay_from {
         args.extend([
@@ -145,17 +210,38 @@ fn run_release_witness(
             "--verify".to_string(),
         ]);
     }
-    obzenflow_infra::application::FlowApplication::builder()
-        .with_cli_args(args)
+    let mut application =
+        obzenflow_infra::application::FlowApplication::builder().with_cli_args(args);
+    if let Some(config) = config {
+        let path = journal_root.join("obzenflow.toml");
+        std::fs::write(&path, config).expect("witness configuration should be writable");
+        application = application.with_config_file(path);
+    }
+    application
         .run_blocking(retry_fixture::build_flow(
             policy,
             orders,
             gateway,
             journal_root.to_path_buf(),
         ))
+        .map_err(|error| error.to_string())?;
+    Ok(only_run(journal_root))
+}
+
+fn run_release_witness(
+    policy: retry_fixture::ReleasePolicy,
+    orders: Vec<retry_fixture::ValidatedOrder>,
+    gateway: Arc<retry_fixture::ScriptedGateway>,
+    journal_root: &Path,
+    replay_from: Option<&Path>,
+) -> PathBuf {
+    let run = run_witness(policy, orders, gateway, journal_root, None, replay_from)
         .expect("configuration-faithful payment release witness should complete");
-    let run = only_run(journal_root);
-    assert_release_manifest(&run, policy);
+    assert_eq!(
+        release_manifest(&run),
+        expected_release_config(policy),
+        "release evidence must exactly match its locked payment policy"
+    );
     run
 }
 
@@ -328,6 +414,57 @@ fn retry_terminal_failure_count(jsonl: &str) -> usize {
             )
         })
         .count()
+}
+
+fn retry_exhaustions(jsonl: &str) -> Vec<(u32, RetryStopReason)> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::Recovery(RecoveryFact::RetryExhausted {
+                total_attempts,
+                reason,
+                ..
+            })) => Some((total_attempts, reason)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn opened_cooldowns(jsonl: &str) -> Vec<u64> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::Opened { cooldown_ms, .. },
+            )) => Some(cooldown_ms),
+            _ => None,
+        })
+        .collect()
+}
+
+fn payment_observations(jsonl: &str) -> Vec<&'static str> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+                if record.descriptor.effect_type.as_str() == "payment.authorize" =>
+            {
+                Some(record.observation.event_type())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn stall_writers(jsonl: &str) -> Vec<String> {
+    exported_chain_events(jsonl)
+        .filter(|event| {
+            matches!(
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::Backpressure(
+                    BackpressureFact::Stalled { .. }
+                ))
+            )
+        })
+        .map(|event| event.flow_context.stage_name.as_str().to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1056,8 +1193,341 @@ fn payment_gateway_half_open_release_witness_uses_the_real_cooldown() {
 }
 
 #[test]
+fn payment_outage_failed_probes_grow_cooldowns() {
+    use CircuitBreakerHealthClassification::{Success, TransientFailure};
+    let live_root = tempfile::tempdir().expect("outage journal root");
+    let live_gateway = Arc::new(retry_fixture::ScriptedGateway::fail_calls(&[1, 2, 3, 4, 6]));
+    let live_run = run_release_witness(
+        retry_fixture::ReleasePolicy::OutageRecovery,
+        retry_fixture::outage_orders(),
+        live_gateway.clone(),
+        live_root.path(),
+        None,
+    );
+    assert_eq!(live_gateway.calls(), 8);
+    let live = exported_run(&live_run, &live_root.path().join("outage.jsonl"));
+    assert_eq!(data_event_count(&live, "payment.authorized"), 3);
+    assert!(
+        payment_terminal_failures(&live).is_empty(),
+        "a call that waits out the outage records no rejection"
+    );
+    assert_eq!(
+        opened_cooldowns(&live),
+        [100, 200, 400, 400, 100],
+        "failed probes double the opening up to its cap, and the next outage starts over"
+    );
+    assert_eq!(breaker_transition_counts(&live), (5, 5, 2));
+    let attempts = attempt_settlements(&live);
+    assert_eq!(
+        attempts
+            .iter()
+            .map(|attempt| (attempt.attempt, attempt.health))
+            .collect::<Vec<_>>(),
+        [
+            (1, TransientFailure),
+            (2, TransientFailure),
+            (3, TransientFailure),
+            (4, TransientFailure),
+            (5, Success),
+            (1, TransientFailure),
+            (2, Success),
+            (1, Success),
+        ],
+        "attempt numbers keep counting across waits"
+    );
+    let (first, second) = (&attempts[0].cursor, &attempts[5].cursor);
+    assert_eq!(
+        retry_schedules(&live),
+        [(first, 2), (first, 3), (first, 4), (first, 5), (second, 2)].map(
+            |(cursor, next_attempt)| RetrySchedule {
+                cursor: cursor.clone(),
+                next_attempt,
+            }
+        ),
+        "each wait records one scheduled row"
+    );
+    assert_eq!(
+        retry_successes(&live),
+        [(first, 5), (second, 2)].map(|(cursor, total_attempts)| RetrySuccess {
+            cursor: cursor.clone(),
+            total_attempts,
+        })
+    );
+
+    let replay_root = tempfile::tempdir().expect("outage replay journal root");
+    let replay_gateway =
+        Arc::new(retry_fixture::ScriptedGateway::fail_calls(&[1, 2, 3, 4, 6]).panic_on_live_call());
+    let replay_run = run_release_witness(
+        retry_fixture::ReleasePolicy::OutageRecovery,
+        retry_fixture::outage_orders(),
+        replay_gateway.clone(),
+        replay_root.path(),
+        Some(&live_run),
+    );
+    assert_eq!(replay_gateway.calls(), 0);
+    let replay = exported_run(&replay_run, &replay_root.path().join("outage-replay.jsonl"));
+    assert_eq!(data_event_count(&replay, "payment.authorized"), 3);
+    assert_eq!(opened_cooldowns(&replay), opened_cooldowns(&live));
+    assert_eq!(retry_schedules(&replay), retry_schedules(&live));
+    assert_eq!(attempt_settlements(&replay), attempts);
+}
+
+#[test]
+fn outage_past_bound_records_outage_wait_limit() {
+    let policy = retry_fixture::ReleasePolicy::OutageRecovery;
+    let curve = "[middleware.stages.authorize_payment.circuit_breaker]\n\
+                 open_for_ms = 2000\nopen_for_multiplier = 8.0\nmax_open_for_ms = 16000\n\n";
+    let curved = with_stage_file(
+        expected_release_config(policy),
+        &[
+            (CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, json!(2_000)),
+            (CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY, json!(8.0)),
+            (CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY, json!(16_000)),
+        ],
+    );
+    let failed_then_refused = [
+        "effect.execution_failed",
+        "effect.execution_rejected",
+        "effect.execution_rejected",
+    ];
+
+    let control_root = tempfile::tempdir().expect("fail-fast journal root");
+    let control_gateway = Arc::new(retry_fixture::ScriptedGateway::always_fail());
+    let control_run = run_witness(
+        policy,
+        retry_fixture::outage_orders(),
+        control_gateway.clone(),
+        control_root.path(),
+        Some(&format!(
+            "{curve}[middleware.stages.authorize_payment.retry]\non_refusal = \"fail\"\n"
+        )),
+        None,
+    )
+    .expect("the fail-fast night completes");
+    assert_eq!(control_gateway.calls(), 1);
+    assert_eq!(
+        release_manifest(&control_run),
+        with_stage_file(curved.clone(), &[(RETRY_ON_REFUSAL_KEY, json!("fail"))])
+    );
+    let control = exported_run(&control_run, &control_root.path().join("fail-fast.jsonl"));
+    assert_eq!(payment_observations(&control), failed_then_refused);
+    assert_eq!(
+        retry_exhaustions(&control),
+        [(1, RetryStopReason::CircuitNoLongerClosed)]
+    );
+    assert!(retry_schedules(&control).is_empty());
+
+    let treatment_root = tempfile::tempdir().expect("bounded-wait journal root");
+    let treatment_gateway = Arc::new(retry_fixture::ScriptedGateway::always_fail());
+    let treatment_run = run_witness(
+        policy,
+        retry_fixture::outage_orders(),
+        treatment_gateway.clone(),
+        treatment_root.path(),
+        Some(&format!(
+            "{curve}[middleware.stages.authorize_payment.retry]\n\
+             on_refusal = \"wait\"\nmax_outage_wait_ms = 3000\n"
+        )),
+        None,
+    )
+    .expect("the bounded-wait night completes");
+    assert_eq!(
+        treatment_gateway.calls(),
+        2,
+        "the first order is sent once more when the breaker reopens, and the refused orders never"
+    );
+    assert_eq!(
+        release_manifest(&treatment_run),
+        with_stage_file(
+            curved,
+            &[
+                (RETRY_ON_REFUSAL_KEY, json!("wait")),
+                (RETRY_MAX_OUTAGE_WAIT_MS_KEY, json!(3_000)),
+            ]
+        )
+    );
+    let treatment = exported_run(
+        &treatment_run,
+        &treatment_root.path().join("bounded-wait.jsonl"),
+    );
+    assert_eq!(opened_cooldowns(&treatment), [2_000, 16_000]);
+    assert_eq!(
+        retry_schedules(&treatment)
+            .iter()
+            .map(|schedule| schedule.next_attempt)
+            .collect::<Vec<_>>(),
+        [2]
+    );
+    assert_eq!(payment_observations(&treatment), failed_then_refused);
+    assert_eq!(
+        retry_exhaustions(&treatment),
+        [
+            (2, RetryStopReason::OutageWaitLimit),
+            (0, RetryStopReason::OutageWaitLimit),
+            (0, RetryStopReason::OutageWaitLimit),
+        ],
+        "the call that gives up and every refusal after it name the outage bound"
+    );
+}
+
+#[test]
+fn enforced_edge_outage_completes_without_stall() {
+    let policy = retry_fixture::ReleasePolicy::OutageRecovery;
+    let config = "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 1\n\
+                  stall_timeout_ms = 2000\n\n\
+                  [middleware.stages.authorize_payment.circuit_breaker]\n\
+                  open_for_ms = 3000\nmax_open_for_ms = 6000\n";
+
+    let held_root = tempfile::tempdir().expect("held-handler journal root");
+    run_witness(
+        policy,
+        retry_fixture::outage_orders(),
+        Arc::new(
+            retry_fixture::ScriptedGateway::healthy()
+                .pause_before_invocation(1, Duration::from_millis(3_500)),
+        ),
+        held_root.path(),
+        Some(config),
+        None,
+    )
+    .expect_err("a handler held past the stall ceiling fails the night");
+    let held = exported_run(
+        &only_run(held_root.path()),
+        &held_root.path().join("held.jsonl"),
+    );
+    assert_eq!(stall_writers(&held), ["orders"]);
+
+    let waiting_root = tempfile::tempdir().expect("waiting journal root");
+    let waiting_gateway = Arc::new(retry_fixture::ScriptedGateway::fail_first(1));
+    let waiting_run = run_witness(
+        policy,
+        retry_fixture::outage_orders(),
+        waiting_gateway.clone(),
+        waiting_root.path(),
+        Some(config),
+        None,
+    )
+    .expect("a night that waits past the stall ceiling completes");
+    assert_eq!(waiting_gateway.calls(), 4);
+    assert_eq!(
+        release_manifest(&waiting_run),
+        with_stage_file(
+            expected_release_config(policy),
+            &[
+                (CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, json!(3_000)),
+                (CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY, json!(6_000)),
+            ]
+        )
+    );
+    let waiting = exported_run(&waiting_run, &waiting_root.path().join("waiting.jsonl"));
+    assert_eq!(opened_cooldowns(&waiting), [3_000]);
+    assert_eq!(data_event_count(&waiting, "payment.authorized"), 3);
+    assert!(
+        stall_writers(&waiting).is_empty(),
+        "renewed holds keep the edge alive while the call waits"
+    );
+}
+
+fn retry_rows(
+    handle: &obzenflow_runtime::prelude::FlowHandle,
+) -> BTreeMap<String, MiddlewareSettingInfo> {
+    let topology = handle
+        .topology()
+        .expect("a built flow carries its topology");
+    let attachment = topology
+        .stages()
+        .filter_map(|stage| stage.middleware.as_ref())
+        .flat_map(|middleware| &middleware.attachments)
+        .find(|attachment| attachment.family() == MiddlewareFamily::Retry)
+        .expect("the plan retries its effect");
+    attachment.details.settings().settings().clone()
+}
+
+fn unqualified(
+    value: SettingValueInfo,
+    source: &str,
+    scope: &str,
+) -> ResolvedSettingInfo<SettingValueInfo> {
+    ResolvedSettingInfo {
+        value,
+        provenance: SettingProvenanceInfo {
+            source: source.to_string(),
+            scope: scope.to_string(),
+            winner_subject: SettingSubject::Unqualified,
+        },
+    }
+}
+
+#[test]
 fn independent_retry_plans_preserve_terminal_groups_and_strict_replay() {
     use retry_fixture::ReleasePolicy;
+
+    let mut candidates = CandidateSet::default();
+    candidates
+        .admit(ScopedCandidate::unqualified(
+            RETRY_ON_REFUSAL_KEY,
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::Text("fail".to_string()),
+        ))
+        .expect("a flow-scope on_refusal admits");
+    let flow_scope = Arc::new(ResolvedRuntimeConfig::new(candidates));
+    let runtime = tokio::runtime::Runtime::new().expect("build runtime");
+    for policy in [
+        ReleasePolicy::BreakerRecovery,
+        ReleasePolicy::RetryOnly,
+        ReleasePolicy::RetryWithLimiter,
+        ReleasePolicy::RetryWithLimiterPermuted,
+        ReleasePolicy::RetryWithLimiterSplit,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let handle = runtime
+            .block_on(
+                retry_fixture::build_flow(
+                    policy,
+                    Vec::new(),
+                    Arc::new(retry_fixture::ScriptedGateway::healthy()),
+                    root.path().to_path_buf(),
+                )
+                .build(FlowBuildContext::new(flow_scope.clone())),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{policy:?} builds under a flow-scope on_refusal: {error}")
+            });
+        let rows = retry_rows(&handle);
+        let mut expected = expected_release_config(policy);
+        if policy.has_breaker() {
+            assert_eq!(
+                rows[RETRY_ON_REFUSAL_KEY],
+                MiddlewareSettingInfo::Active {
+                    setting: unqualified(SettingValueInfo::Text("fail".into()), "file", "flow"),
+                    display: "Fail".into(),
+                }
+            );
+            assert_eq!(
+                rows[RETRY_MAX_OUTAGE_WAIT_MS_KEY],
+                MiddlewareSettingInfo::Inactive {
+                    setting: unqualified(SettingValueInfo::U64(120_000), "default", "global"),
+                    display: "120000 ms".into(),
+                }
+            );
+            expected.insert(
+                RETRY_ON_REFUSAL_KEY.to_string(),
+                (json!("fail"), Winner::FlowFile),
+            );
+        } else {
+            assert!(
+                !rows.contains_key(RETRY_ON_REFUSAL_KEY)
+                    && !rows.contains_key(RETRY_MAX_OUTAGE_WAIT_MS_KEY),
+                "{policy:?} leaves the outage settings to protected retries: {rows:?}"
+            );
+        }
+        assert_eq!(
+            release_manifest(&only_run(root.path())),
+            expected,
+            "{policy:?}"
+        );
+    }
 
     for policy in [
         ReleasePolicy::RetryOnly,

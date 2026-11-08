@@ -828,6 +828,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             effect_declarations: ctx.effect_declarations.clone(),
             output_contract: StageOutputContract::empty(),
             backpressure_writer: BackpressureWriter::disabled(),
+            backpressure_readers: ctx.backpressure_readers.values().cloned().collect(),
             emit_enabled: false,
             effect_boundary: None,
             catch_up: None,

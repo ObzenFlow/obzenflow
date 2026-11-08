@@ -9,16 +9,19 @@ use super::domain::{
 use async_trait::async_trait;
 use obzenflow::effects::simulated::{CallLog, CallLogError};
 use obzenflow::effects::{
-    EffectContext, EffectError, Effects, IdempotencyKey, Keyed, Port, StageCompletion,
+    EffectContext, EffectError, EffectPortResolutionError, Effects, IdempotencyKey, Keyed, Port,
+    StageCompletion,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::schema::EffectOutcomeFacts;
 use obzenflow::stages::transforms::EffectfulTransformHandler;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+const SCRIPTED_OUTAGE_TIMEOUTS: u32 = 4;
 
 #[obzenflow::port]
 #[async_trait]
@@ -87,20 +90,20 @@ pub enum AuthorizePaymentOutcome {
 
 #[obzenflow::command]
 #[derive(Debug, Clone)]
-pub struct GatewayTransform {
+pub struct AuthorizePayment {
     #[port]
     payment_gateway_port: Port<dyn PaymentGatewayPort>,
     first_recovery_pause: Option<Duration>,
     recovery_pause_claimed: Arc<AtomicBool>,
 }
 
-type GatewayOutput = obzenflow::schema::stage_fact_set![
+type AuthorizePaymentOutput = obzenflow::schema::stage_fact_set![
     PaymentAuthorized,
     PaymentDeclined,
     PaymentAuthorizationUnavailable
 ];
 
-impl GatewayTransform {
+impl AuthorizePayment {
     pub fn new(payment_gateway_port: Port<dyn PaymentGatewayPort>) -> Self {
         Self {
             payment_gateway_port,
@@ -131,9 +134,9 @@ impl GatewayTransform {
 }
 
 #[async_trait]
-impl EffectfulTransformHandler for GatewayTransform {
+impl EffectfulTransformHandler for AuthorizePayment {
     type Input = ValidatedOrder;
-    type Output = GatewayOutput;
+    type Output = AuthorizePaymentOutput;
 
     async fn process(
         &self,
@@ -167,89 +170,115 @@ impl ValidatedOrder {
     }
 }
 
-pub struct ScriptedGateway {
-    calls: CallLog<GatewayResponse>,
+pub struct SimulatedProcessor {
+    calls: CallLog<ProcessorResponse>,
+    outage_timeouts_left: AtomicU32,
 }
 
-impl ScriptedGateway {
+impl SimulatedProcessor {
     pub fn open(path: &Path) -> Result<Self, CallLogError> {
         Ok(Self {
             calls: CallLog::open(path)?,
+            outage_timeouts_left: AtomicU32::new(SCRIPTED_OUTAGE_TIMEOUTS),
         })
+    }
+
+    fn outage_times_out(&self, request: &AuthorizeRequest) -> bool {
+        request.phase == TrafficPhase::Outage
+            && self
+                .outage_timeouts_left
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
     }
 }
 
-#[obzenflow::system("scripted-gateway")]
+#[obzenflow::system("simulated-processor")]
 #[async_trait]
-impl PaymentGatewayPort for ScriptedGateway {
+impl PaymentGatewayPort for SimulatedProcessor {
     async fn authorize(
         &self,
         request: &AuthorizeRequest,
         key: &IdempotencyKey,
         ctx: &EffectContext,
     ) -> Result<AuthorizePaymentOutcome, EffectError> {
-        let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
+        let latency_ms: u64 = ctx.rng("processor_latency").u64(50..=200);
         ctx.sleep(Duration::from_millis(latency_ms)).await;
-        if request.phase == TrafficPhase::Outage {
-            let hang_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
+        let times_out = self.outage_times_out(request);
+        if times_out {
+            let hang_ms: u64 = ctx.rng("processor_outage_hang").u64(2_000..=3_000);
             ctx.sleep(Duration::from_millis(hang_ms)).await;
         }
         let response = self
             .calls
-            .try_answer(key, ctx.flow_id(), |_| decide(request))
+            .try_answer(key, ctx.flow_id(), |_| {
+                if times_out {
+                    Err(ProcessorFailure::TimedOut)
+                } else {
+                    decide(request)
+                }
+            })
             .map_err(|error| {
-                EffectError::unavailable("payment_gateway", "ledger_write_failed", error)
+                EffectError::unavailable("payment_processor", "ledger_write_failed", error)
             })??;
         Ok(match response {
-            GatewayResponse::Charged { authorization_id } => {
+            ProcessorResponse::Charged { authorization_id } => {
                 AuthorizePaymentOutcome::Authorized(request.authorized(authorization_id))
             }
-            GatewayResponse::Declined { reason } => {
+            ProcessorResponse::Declined { reason } => {
                 AuthorizePaymentOutcome::Declined(request.declined(reason))
             }
         })
     }
 }
 
+pub fn simulated_processor(calls: &Path) -> Port<dyn PaymentGatewayPort> {
+    let calls = calls.to_path_buf();
+    Port::deferred(move || SimulatedProcessor::open(&calls).map_err(processor_unavailable))
+}
+
+fn processor_unavailable(error: CallLogError) -> EffectPortResolutionError {
+    tracing::error!(%error, "the simulated processor could not open its call log");
+    EffectPortResolutionError::ClientConstructionFailed
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "authorization", rename_all = "snake_case")]
-pub enum GatewayResponse {
+pub enum ProcessorResponse {
     Charged { authorization_id: String },
     Declined { reason: PaymentDeclineReason },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
-enum GatewayFailure {
+enum ProcessorFailure {
     TimedOut,
     InvalidPaymentMethod,
 }
 
-impl From<GatewayFailure> for EffectError {
-    fn from(failure: GatewayFailure) -> Self {
+impl From<ProcessorFailure> for EffectError {
+    fn from(failure: ProcessorFailure) -> Self {
         match failure {
-            GatewayFailure::TimedOut => Self::Timeout("gateway_timeout_simulated".to_string()),
-            GatewayFailure::InvalidPaymentMethod => {
-                Self::Validation("invalid_payment_method_reached_gateway".to_string())
+            ProcessorFailure::TimedOut => Self::Timeout("processor_timeout_simulated".to_string()),
+            ProcessorFailure::InvalidPaymentMethod => {
+                Self::Validation("invalid_payment_method_reached_processor".to_string())
             }
         }
     }
 }
 
-fn decide(request: &AuthorizeRequest) -> Result<GatewayResponse, GatewayFailure> {
-    if request.phase == TrafficPhase::Outage {
-        return Err(GatewayFailure::TimedOut);
-    }
+fn decide(request: &AuthorizeRequest) -> Result<ProcessorResponse, ProcessorFailure> {
     match request.payment_method_state {
-        PaymentMethodState::Valid => Ok(GatewayResponse::Charged {
+        PaymentMethodState::Valid => Ok(ProcessorResponse::Charged {
             authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_owned(),
         }),
-        PaymentMethodState::InsufficientFunds => Ok(GatewayResponse::Declined {
+        PaymentMethodState::InsufficientFunds => Ok(ProcessorResponse::Declined {
             reason: PaymentDeclineReason::InsufficientFunds,
         }),
-        PaymentMethodState::AddressMismatch => Ok(GatewayResponse::Declined {
+        PaymentMethodState::AddressMismatch => Ok(ProcessorResponse::Declined {
             reason: PaymentDeclineReason::AddressMismatch,
         }),
-        PaymentMethodState::InvalidNumber => Err(GatewayFailure::InvalidPaymentMethod),
+        PaymentMethodState::InvalidNumber => Err(ProcessorFailure::InvalidPaymentMethod),
     }
 }

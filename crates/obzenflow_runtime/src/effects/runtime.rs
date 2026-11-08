@@ -101,6 +101,7 @@ struct PreparedLiveEffect {
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
     binding_context: EffectContext,
+    committed_waits: u32,
 }
 
 fn split_invariant_control_events(
@@ -678,6 +679,7 @@ impl EffectsCore {
                         .iter()
                         .chain(history.attempt_events.values())
                         .chain(history.escape_control_batches.values().flatten())
+                        .chain(history.progress_batches.values().flatten())
                         .find(|archived| archived.id == event.id)
                 });
                 let (original_flow_id, original_stage_id) = match archived {
@@ -1173,6 +1175,11 @@ impl EffectsCore {
             .map(|history| history.cursor_history(&cursor))
             .unwrap_or_default();
         let current = self.current_run_history(&cursor).await?;
+        let committed_waits = u32::try_from(current.progress_batches.len()).map_err(|_| {
+            EffectError::EffectProvenanceMismatch(
+                "effect recovery wait history exceeds u32 range".to_string(),
+            )
+        })?;
         let selected = self.history_shape(merge_cursor_histories(&cursor, archived, current))?;
         let incorporated = self.incorporate_history(&selected.causal);
         self.history_shape(incorporated)?;
@@ -1341,6 +1348,7 @@ impl EffectsCore {
             descriptor_hash,
             descriptor,
             binding_context,
+            committed_waits,
         };
         if let Some(key) = &prepared.identity.idempotency_key {
             self.call_keys.insert(prepared.cursor.clone(), key.clone());
@@ -1367,6 +1375,7 @@ impl EffectsCore {
             descriptor_hash,
             descriptor,
             binding_context,
+            committed_waits,
         } = prepared;
 
         let Some(boundary) = self.ctx.effect_boundary.clone() else {
@@ -1414,6 +1423,7 @@ impl EffectsCore {
         let outcome_slot: ExecutedOutcomeSlot<E::Outcome> = Arc::new(Mutex::new(None));
         let failure_slot = Arc::new(Mutex::new(None::<(EffectError, EffectObservation)>));
         let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (input_holds, progress) = self.effect_recovery(&cursor, committed_waits);
         let operation = {
             let started = started.clone();
             let slot = outcome_slot.clone();
@@ -1422,6 +1432,7 @@ impl EffectsCore {
             let parent_event = self.ctx.parent.authored();
             let lineage = self.ctx.lineage;
             let base_context = binding_context;
+            let holds = input_holds.clone();
             RepeatableEffectOperation::new_with_lifecycle(move |lifecycle| {
                 let started = started.clone();
                 let effect = effect.clone();
@@ -1429,12 +1440,17 @@ impl EffectsCore {
                 let slot = slot.clone();
                 let failure = failure.clone();
                 let parent_event = parent_event.clone();
+                let holds = holds.clone();
                 async move {
                     *slot.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     started.store(true, std::sync::atomic::Ordering::Release);
                     *failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     lifecycle.mark_started();
-                    let output = match effect.execute(&mut effect_ctx).await {
+                    let executed = {
+                        let _in_flight = holds.physical_call();
+                        effect.execute(&mut effect_ctx).await
+                    };
+                    let output = match executed {
                         Ok(output) => {
                             lifecycle.mark_completed(PhysicalCallOutcome::Succeeded);
                             output
@@ -1461,11 +1477,16 @@ impl EffectsCore {
                     Ok(observation)
                 }
             })
+            .with_input_holds(input_holds)
+            .with_progress(progress.clone())
         };
 
         let report = boundary
             .around_repeatable_effect(&identity, &self.ctx.parent.authored(), operation)
             .await;
+        if let Some(error) = progress.failure() {
+            return Err(error);
+        }
         let control_events = report.control_events;
 
         let observed_failure = failure_slot
@@ -1592,6 +1613,7 @@ impl EffectsCore {
             descriptor_hash,
             descriptor,
             binding_context,
+            committed_waits,
         } = prepared;
         let highest_prior_attempt = u32::try_from(prior_attempts.len()).map_err(|_| {
             EffectError::EffectProvenanceMismatch(
@@ -1628,10 +1650,12 @@ impl EffectsCore {
         let outcome_slot: ExecutedOutcomeSlot<E::Outcome> = Arc::new(Mutex::new(None));
         let failure_slot = Arc::new(Mutex::new(None::<(EffectError, EffectObservation)>));
         let start_committed = Arc::new(AtomicBool::new(false));
+        let (input_holds, progress) = self.effect_recovery(&cursor, committed_waits);
         let operation = {
             let slot = outcome_slot.clone();
             let failure = failure_slot.clone();
             let start_committed = start_committed.clone();
+            let holds = input_holds.clone();
             let mut start = Some(AffineStart {
                 event: start_event,
                 data_journal: self.ctx.data_journal.clone(),
@@ -1655,6 +1679,7 @@ impl EffectsCore {
                 let failure = failure.clone();
                 let start_committed = start_committed.clone();
                 let parent_event = parent_event.clone();
+                let holds = holds.clone();
                 async move {
                     if let Some(start) = start {
                         start.commit().await?;
@@ -1664,7 +1689,11 @@ impl EffectsCore {
                     *slot.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     *failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     lifecycle.mark_started();
-                    let output = match effect.execute(&mut effect_ctx).await {
+                    let executed = {
+                        let _in_flight = holds.physical_call();
+                        effect.execute(&mut effect_ctx).await
+                    };
+                    let output = match executed {
                         Ok(output) => {
                             lifecycle.mark_completed(PhysicalCallOutcome::Succeeded);
                             output
@@ -1691,6 +1720,7 @@ impl EffectsCore {
                     Ok(observation)
                 }
             })
+            .with_recovery(input_holds, progress.clone())
         };
         let provenance = operation.provenance();
         let report = match self.ctx.effect_boundary.clone() {
@@ -1701,6 +1731,9 @@ impl EffectsCore {
             }
             None => operation.execute().await.into_report(Vec::new()),
         };
+        if let Some(error) = progress.failure() {
+            return Err(error);
+        }
         let (boundary_outcome, control_events) = report.into_parts(&provenance)?;
 
         match boundary_outcome {
@@ -2400,6 +2433,7 @@ impl EffectsCore {
             descriptor_hash,
             descriptor,
             binding_context: mut effect_ctx,
+            committed_waits: _,
         } = prepared;
         let output_ordinal = match E::OutcomeSemantics::KIND {
             EffectOutcomeKind::DomainFacts => Some(self.reserve_output_ordinal()?),
@@ -2836,6 +2870,34 @@ impl EffectsCore {
         Ok((metadata_context, binding_context))
     }
 
+    fn effect_recovery(
+        &self,
+        cursor: &EffectCursor,
+        committed_waits: u32,
+    ) -> (InputHolds, EffectProgress) {
+        let holds = InputHolds::new(
+            self.ctx.backpressure_readers.iter().cloned(),
+            self.ctx.heartbeat_state.clone(),
+        );
+        let progress = EffectProgress::journal(ProgressJournal {
+            cursor: cursor.clone(),
+            committed_waits: std::sync::atomic::AtomicU32::new(committed_waits),
+            data_journal: self.ctx.data_journal.clone(),
+            flow_context: self.ctx.flow_context.clone(),
+            instrumentation: self.ctx.instrumentation.clone(),
+            heartbeat_state: self.ctx.heartbeat_state.clone(),
+            backpressure_writer: self.ctx.backpressure_writer.clone(),
+            parent: self.ctx.parent.clone(),
+            causal: self.causal.clone(),
+            coordinator: self
+                .ctx
+                .runtime_execution
+                .effect_cursor_coordinator()
+                .clone(),
+        });
+        (holds, progress)
+    }
+
     async fn append_record(
         &self,
         record: EffectRecord,
@@ -3162,6 +3224,56 @@ impl EffectsCore {
         Ok(())
     }
 
+    async fn commit_replayed_progress_group(
+        &mut self,
+        cursor: &EffectCursor,
+        wait: u32,
+        rows: Vec<ChainEvent>,
+        history: &EffectCursorHistory,
+    ) -> Result<(), EffectError> {
+        if rows.iter().any(ChainEvent::consumes_data_credit) {
+            return Err(self.refuse(ReconstructionRefusal::HistoryShape(
+                EffectError::EffectProvenanceMismatch(format!(
+                    "recovery progress for cursor {cursor:?} contains Data"
+                )),
+            )));
+        }
+        let entries = rows
+            .into_iter()
+            .map(|mut event| {
+                self.mark_lineage(&mut event, RowLineage::Reproduced(Some(history)));
+                AtomicCommitEntry {
+                    event,
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::FrameworkObservability,
+                }
+            })
+            .collect();
+        let group_id = effect_recovery_progress_group_id(cursor, wait);
+        let committer = OutputCommitter {
+            data_journal: &self.ctx.data_journal,
+            flow_context: self.ctx.flow_context.as_ref(),
+            instrumentation: self.ctx.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+            output_contract: None,
+            backpressure_writer: Some(&self.ctx.backpressure_writer),
+            observer_scope: MiddlewareExecutionScope::StrictReplayHandler,
+        };
+        if let Err(error) = crate::supervised_base::publication::with_snapshot(
+            self.causal.clone(),
+            committer.commit_atomic_group(group_id.as_str(), entries, Some(&self.ctx.parent)),
+        )
+        .await
+        {
+            self.ctx
+                .runtime_execution
+                .effect_cursor_coordinator()
+                .poison(cursor.clone());
+            return Err(EffectError::Journal(error.to_string()));
+        }
+        Ok(())
+    }
+
     async fn append_replayed_prefix(
         &mut self,
         cursor: &EffectCursor,
@@ -3216,6 +3328,10 @@ impl EffectsCore {
     ) -> Result<(), EffectError> {
         self.append_replayed_prefix(&cursor, history, descriptor.clone())
             .await?;
+        for (wait, rows) in &history.progress_batches {
+            self.commit_replayed_progress_group(&cursor, *wait, rows.clone(), history)
+                .await?;
+        }
 
         let mut terminal_control_events = Vec::new();
         for event in &history.terminal_group_events {

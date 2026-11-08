@@ -422,6 +422,20 @@ fn assert_topology_records_resolved_retry(topology: &obzenflow_topology::Topolog
         active("middleware.retry.fixed_delay_ms"),
         (obzenflow_topology::SettingValueInfo::U64(1), "1 ms")
     );
+    assert_eq!(
+        active("middleware.retry.on_refusal"),
+        (
+            obzenflow_topology::SettingValueInfo::Text("wait".into()),
+            "Wait"
+        )
+    );
+    assert_eq!(
+        active("middleware.retry.max_outage_wait_ms"),
+        (
+            obzenflow_topology::SettingValueInfo::U64(120_000),
+            "120000 ms"
+        )
+    );
     assert_eq!(settings.summary(), None);
 }
 

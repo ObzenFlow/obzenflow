@@ -783,6 +783,9 @@ pub(crate) struct RawCircuitBreakerFields {
     pub(crate) slow_call_duration_ms: Option<i64>,
     pub(crate) slow_call_rate_threshold: Option<f64>,
     pub(crate) open_for_ms: Option<i64>,
+    pub(crate) open_for_mode: Option<String>,
+    pub(crate) open_for_multiplier: Option<f64>,
+    pub(crate) max_open_for_ms: Option<i64>,
     pub(crate) probes: Option<i64>,
     pub(crate) rate_limited_counts_as_failure: Option<bool>,
 }
@@ -795,6 +798,8 @@ pub(crate) struct RawRetryFields {
     pub(crate) max_attempts: Option<i64>,
     pub(crate) max_backoff_ms: Option<i64>,
     pub(crate) attempt_start_window_ms: Option<i64>,
+    pub(crate) on_refusal: Option<String>,
+    pub(crate) max_outage_wait_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

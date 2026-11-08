@@ -13,14 +13,22 @@ pub(super) use crate::middleware::control::resilience::FinalAdmissionTestGate;
 pub(super) use crate::middleware::control::ControlMiddlewareAggregator;
 pub(super) use crate::middleware::{MiddlewareAbortCause, MiddlewareContext};
 pub(super) use async_trait::async_trait;
+pub(super) use obzenflow_core::config::{ConfigAddress, ConfigSource};
+pub(super) use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, ExecutionPayload, RecoveryFact, RetryStopReason,
+};
+pub(super) use obzenflow_core::event::ChainPayload;
 pub(super) use obzenflow_core::event::{
     ChainEventFactory, EffectFailureCode, EffectFailureSource, RetryDisposition,
 };
 pub(super) use obzenflow_core::{ChainEvent, StageId, StageKey, WriterId};
 pub(super) use obzenflow_runtime::control_plane::ControlPlaneProvider;
 pub(super) use obzenflow_runtime::effects::{
-    EffectBoundary, EffectBoundaryOutcome, EffectCursor, EffectError, EffectIdentity, EffectSafety,
-    RepeatableEffectOperation,
+    EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectCursor, EffectError,
+    EffectIdentity, EffectSafety, RepeatableEffectOperation,
+};
+pub(super) use obzenflow_runtime::runtime_config::{
+    CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
 };
 pub(super) use std::collections::HashMap;
 pub(super) use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,7 +46,7 @@ use obzenflow_core::event::EffectType;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::runtime_config::{
     materialize_flow_config, ConfigResolveError, DslCandidates, FlowEffectiveConfig,
-    FlowResolutionContext, ResolvedRuntimeConfig,
+    FlowResolutionContext,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -169,6 +177,179 @@ pub(super) fn boundary_with_chain(chain: Vec<EffectPolicyAttachment>) -> PerEffe
     let mut chains = HashMap::new();
     chains.insert("effect.retry", Arc::new(chain));
     PerEffectPolicyBoundary::new(chains)
+}
+
+pub(super) fn scripted_operation(
+    calls: Arc<AtomicUsize>,
+    result_for_call: impl Fn(usize) -> Result<Vec<ChainEvent>, EffectError> + Send + Sync + 'static,
+) -> RepeatableEffectOperation {
+    let result_for_call = Arc::new(result_for_call);
+    RepeatableEffectOperation::new(move || {
+        let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let result_for_call = result_for_call.clone();
+        async move { result_for_call(call) }
+    })
+}
+
+pub(super) fn materialized_resilience(
+    factory: Box<dyn MiddlewareFactory>,
+) -> (
+    EffectPolicyAttachment,
+    Arc<ControlMiddlewareAggregator>,
+    StageId,
+) {
+    materialized_resilience_with_snapshot(factory, &ResolvedRuntimeConfig::builtin_defaults())
+}
+
+pub(super) fn materialized_resilience_with_snapshot(
+    factory: Box<dyn MiddlewareFactory>,
+    snapshot: &ResolvedRuntimeConfig,
+) -> (
+    EffectPolicyAttachment,
+    Arc<ControlMiddlewareAggregator>,
+    StageId,
+) {
+    let config = test_stage_config_for_factories_with_snapshot(&[factory.as_ref()], snapshot);
+    let stage_id = config.stage_id;
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+    let attachment = materialize_effect_attachment(
+        factory.as_ref(),
+        &config,
+        &control,
+        EffectSafety::Idempotent,
+    )
+    .expect("resilience aggregate should materialize for an idempotent effect");
+    (attachment, control, stage_id)
+}
+
+pub(super) fn file_effect_snapshot(entries: &[(&str, ConfigValue)]) -> ResolvedRuntimeConfig {
+    let mut candidates = CandidateSet::default();
+    for (key_path, value) in entries {
+        candidates
+            .admit(ScopedCandidate {
+                key_path: (*key_path).to_string(),
+                address: ConfigAddress::effect("retrying_breaker_test", "effect.retry"),
+                source: ConfigSource::File,
+                value: value.clone(),
+            })
+            .expect("test file candidate should be valid");
+    }
+    ResolvedRuntimeConfig::new(candidates)
+}
+
+pub(super) fn identity_at(input_seq: u64) -> EffectIdentity {
+    let mut identity = identity_for("effect.retry");
+    identity.cursor = EffectCursor::new("test_flow", "test_stage", input_seq, 0);
+    identity
+}
+
+pub(super) fn retry_delays(report: &EffectBoundaryReport) -> Vec<u64> {
+    recovery_facts(report, |fact| match fact {
+        RecoveryFact::RetryScheduled { delay_ms, .. } => Some(*delay_ms),
+        _ => None,
+    })
+}
+
+pub(super) fn scheduled_attempts(report: &EffectBoundaryReport) -> Vec<u32> {
+    recovery_facts(report, |fact| match fact {
+        RecoveryFact::RetryScheduled { next_attempt, .. } => Some(*next_attempt),
+        _ => None,
+    })
+}
+
+pub(super) fn retry_exhaustions(report: &EffectBoundaryReport) -> Vec<(u32, RetryStopReason)> {
+    recovery_facts(report, |fact| match fact {
+        RecoveryFact::RetryExhausted {
+            total_attempts,
+            reason,
+            ..
+        } => Some((*total_attempts, *reason)),
+        _ => None,
+    })
+}
+
+fn recovery_facts<T>(
+    report: &EffectBoundaryReport,
+    select: impl Fn(&RecoveryFact) -> Option<T>,
+) -> Vec<T> {
+    report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(ExecutionPayload::Recovery(fact)) => select(fact),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(super) fn settled_attempts(report: &EffectBoundaryReport) -> Vec<u32> {
+    report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::AttemptSettled { attempt, .. },
+            ))
+            | ChainPayload::Execution(ExecutionPayload::Recovery(
+                RecoveryFact::AttemptCompleted { attempt, .. },
+            )) => Some(*attempt),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(super) fn breaker_transitions(
+    report: &EffectBoundaryReport,
+) -> Vec<(WriterId, &'static str, String)> {
+    report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(fact)) => {
+                let transition = match fact {
+                    CircuitBreakerFact::Opened { .. } => "opened",
+                    CircuitBreakerFact::HalfOpen { .. } => "half_open",
+                    CircuitBreakerFact::Closed { .. } => "closed",
+                    CircuitBreakerFact::StateChanged { .. } => "state_changed",
+                    CircuitBreakerFact::Rejected { .. }
+                    | CircuitBreakerFact::AttemptSettled { .. } => return None,
+                };
+                Some((event.writer_id, transition, fact.unit().as_str().to_owned()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(super) fn composite_members(
+    factory: &dyn MiddlewareFactory,
+) -> (
+    Arc<ControlMiddlewareAggregator>,
+    StageId,
+    Arc<PerEffectPolicyBoundary>,
+    StageId,
+    Arc<PerEffectPolicyBoundary>,
+) {
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+    let owner = ProtectedUnitOwner::Composite(StageKey::from("digest"));
+    let member = || {
+        let config = test_stage_config(factory);
+        let attachment = materialize_owned_effect_attachment(
+            factory,
+            &config,
+            &control,
+            EffectSafety::Idempotent,
+            owner.clone(),
+        )
+        .expect("a composite member materializes its share of the unit");
+        (
+            config.stage_id,
+            Arc::new(boundary_with_chain(vec![attachment])),
+        )
+    };
+    let (map, map_boundary) = member();
+    let (reduce, reduce_boundary) = member();
+    (control, map, map_boundary, reduce, reduce_boundary)
 }
 
 pub(super) fn effect_limiter_events(

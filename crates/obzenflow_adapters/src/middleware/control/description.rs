@@ -2,18 +2,23 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::circuit_breaker::{CircuitBreaker, CircuitBreakerFailureMode, Retry};
+use super::circuit_breaker::{
+    CircuitBreaker, CircuitBreakerFailureMode, OnRefusal, OpenForCurve, Retry,
+};
 use super::rate_limiter::RateLimiter;
 use super::resilience::{resolve_breaker, resolve_retry, ControlConfigurationError};
 use obzenflow_runtime::runtime_config::{
     ConfigValue, ExactConfigView, Resolved, CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
     CIRCUIT_BREAKER_COUNT_WINDOW_KEY, CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
-    CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
-    CIRCUIT_BREAKER_PROBES_KEY, CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-    CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY, CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
-    RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_COST_PER_ATTEMPT_KEY,
-    RATE_LIMITER_EVENTS_PER_SECOND_KEY, RETRY_ATTEMPT_START_WINDOW_MS_KEY,
-    RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY, RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
+    CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY, CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
+    CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
+    CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY, CIRCUIT_BREAKER_PROBES_KEY,
+    CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY, CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
+    CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
+    RATE_LIMITER_COST_PER_ATTEMPT_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+    RETRY_ATTEMPT_START_WINDOW_MS_KEY, RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY,
+    RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY, RETRY_MAX_OUTAGE_WAIT_MS_KEY,
+    RETRY_ON_REFUSAL_KEY,
 };
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 
@@ -124,6 +129,10 @@ pub(in crate::middleware::control) fn describe_breaker<'a>(
     view: &ExactConfigView<'a>,
 ) -> Result<BuiltinControlDescription<'a>, ControlConfigurationError> {
     let resolved = resolve_breaker(value, view)?;
+    let (open_for_mode, growth) = match resolved.config.open_for_curve {
+        OpenForCurve::Fixed => ("Fixed", Activity::Inactive),
+        OpenForCurve::Exponential { .. } => ("Exponential", Activity::Active),
+    };
     let (mode, consecutive, rate_based, summary) = match &resolved.config.failure_mode {
         CircuitBreakerFailureMode::Consecutive { max_failures } => (
             "Consecutive failures",
@@ -162,6 +171,16 @@ pub(in crate::middleware::control) fn describe_breaker<'a>(
             Activity::Active,
             " ms",
         ),
+        Some(
+            labelled(view, CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY, open_for_mode).unwrap_or((
+                CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY,
+                BuiltinSettingRow::Automatic {
+                    display: open_for_mode.to_owned(),
+                },
+            )),
+        ),
+        row(view, CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY, growth, "x"),
+        row(view, CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY, growth, " ms"),
         row(view, CIRCUIT_BREAKER_PROBES_KEY, Activity::Active, ""),
         row(
             view,
@@ -216,6 +235,10 @@ pub(in crate::middleware::control) fn describe_retry<'a>(
         BackoffStrategy::Fixed { .. } => ("Fixed", Activity::Active),
         BackoffStrategy::Exponential { .. } => ("Exponential", Activity::Inactive),
     };
+    let (on_refusal, outage_wait) = match resolved.policy.on_refusal.unwrap_or(OnRefusal::Wait) {
+        OnRefusal::Wait => ("Wait", Activity::Active),
+        OnRefusal::Fail => ("Fail", Activity::Inactive),
+    };
     let settings = [
         labelled(view, RETRY_KIND_KEY, kind),
         row(view, RETRY_MAX_ATTEMPTS_KEY, Activity::Active, ""),
@@ -227,6 +250,8 @@ pub(in crate::middleware::control) fn describe_retry<'a>(
             " ms",
         ),
         row(view, RETRY_FIXED_DELAY_MS_KEY, fixed, " ms"),
+        labelled(view, RETRY_ON_REFUSAL_KEY, on_refusal),
+        row(view, RETRY_MAX_OUTAGE_WAIT_MS_KEY, outage_wait, " ms"),
     ];
     Ok(BuiltinControlDescription {
         settings: settings.into_iter().flatten().collect(),

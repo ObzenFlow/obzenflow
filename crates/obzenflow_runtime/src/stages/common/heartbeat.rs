@@ -18,6 +18,7 @@ use tokio::time::Instant;
 const HANDLER_ACTIVITY_POLLING: u8 = 0;
 const HANDLER_ACTIVITY_PROCESSING: u8 = 1;
 const HANDLER_ACTIVITY_WAITING_QUIET: u8 = 2;
+const HANDLER_ACTIVITY_WAITING_TO_RETRY: u8 = 3;
 
 const STAGE_MODE_RUNNING: u8 = 0;
 const STAGE_MODE_DRAINING: u8 = 1;
@@ -83,10 +84,18 @@ pub struct HeartbeatState {
     processing_event_id: Mutex<Option<EventId>>,
     processing_upstream: Mutex<Option<StageId>>,
     waiting_on_quiet_upstream: Mutex<Option<StageId>>,
+    retry_waits: Mutex<RetryWaits>,
     last_consumed_event_id: Mutex<Option<EventId>>,
     last_output_event_id: Mutex<Option<EventId>>,
     edges: Vec<EdgeProgress>,
     edge_index: HashMap<StageId, usize>,
+}
+
+#[derive(Debug, Default)]
+struct RetryWaits {
+    open: usize,
+    started_at: Option<Instant>,
+    prior_activity: u8,
 }
 
 impl HeartbeatState {
@@ -107,6 +116,7 @@ impl HeartbeatState {
             processing_event_id: Mutex::new(None),
             processing_upstream: Mutex::new(None),
             waiting_on_quiet_upstream: Mutex::new(None),
+            retry_waits: Mutex::new(RetryWaits::default()),
             last_consumed_event_id: Mutex::new(None),
             last_output_event_id: Mutex::new(None),
             edges,
@@ -161,6 +171,51 @@ impl HeartbeatState {
             .waiting_on_quiet_upstream
             .lock()
             .expect("waiting_on_quiet_upstream lock") = upstream;
+    }
+
+    fn begin_retry_wait(&self) {
+        let mut waits = self
+            .retry_waits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        waits.open = waits.open.saturating_add(1);
+        if waits.open == 1 {
+            waits.started_at = Some(Instant::now());
+            waits.prior_activity = self
+                .handler_activity
+                .swap(HANDLER_ACTIVITY_WAITING_TO_RETRY, Ordering::AcqRel);
+        }
+    }
+
+    fn end_retry_wait(&self) {
+        let mut waits = self
+            .retry_waits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        waits.open = waits.open.saturating_sub(1);
+        if waits.open > 0 {
+            return;
+        }
+        let started_at = waits.started_at.take();
+        let restored = self
+            .handler_activity
+            .compare_exchange(
+                HANDLER_ACTIVITY_WAITING_TO_RETRY,
+                waits.prior_activity,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok();
+        if !restored || waits.prior_activity != HANDLER_ACTIVITY_PROCESSING {
+            return;
+        }
+        let mut entered_at = self
+            .handler_entered_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let (Some(entered_at), Some(started_at)) = (entered_at.as_mut(), started_at) {
+            *entered_at += started_at.elapsed();
+        }
     }
 
     pub fn mark_draining(&self) {
@@ -262,6 +317,7 @@ impl HeartbeatState {
                     }
                 }
             }
+            HANDLER_ACTIVITY_WAITING_TO_RETRY => StageActivity::WaitingToRetry,
             _ => StageActivity::Polling,
         }
     }
@@ -306,6 +362,23 @@ impl HeartbeatProcessingGuard {
 impl Drop for HeartbeatProcessingGuard {
     fn drop(&mut self) {
         self.state.mark_polling();
+    }
+}
+
+pub(crate) struct RetryWaitGuard {
+    state: Arc<HeartbeatState>,
+}
+
+impl RetryWaitGuard {
+    pub(crate) fn new(state: Arc<HeartbeatState>) -> Self {
+        state.begin_retry_wait();
+        Self { state }
+    }
+}
+
+impl Drop for RetryWaitGuard {
+    fn drop(&mut self) {
+        self.state.end_retry_wait();
     }
 }
 
@@ -941,5 +1014,78 @@ mod tests {
             state.current_activity(),
             StageActivity::Processing { .. }
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn waiting_stage_reports_waiting_to_retry() {
+        let upstream = StageId::new();
+        let state = HeartbeatState::new(vec![upstream]);
+        let _processing =
+            HeartbeatProcessingGuard::new(state.clone(), Some(upstream), EventId::new());
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let holds = crate::effects::InputHolds::new(Vec::new(), Some(state.clone()));
+        let wait = tokio::spawn(async move { holds.wait_to_retry(Duration::from_secs(60)).await });
+        tokio::task::yield_now().await;
+
+        assert!(matches!(
+            state.current_activity(),
+            StageActivity::WaitingToRetry
+        ));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(state.handler_blocked_ms(), None);
+
+        tokio::time::advance(Duration::from_secs(30)).await;
+        wait.await.expect("the wait ends");
+        assert!(matches!(
+            state.current_activity(),
+            StageActivity::Processing {
+                elapsed_ms: DurationMs(5_000),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn waiting_input_edge_reports_idle() {
+        let upstream = StageId::new();
+        let stage_id = StageId::new();
+        let state = HeartbeatState::new(vec![upstream]);
+        let snapshots = new_liveness_snapshots();
+        let handle = spawn_heartbeat(
+            stage_id,
+            "waiting_stage".to_string(),
+            Arc::new(StageInstrumentation::new()),
+            snapshots.clone(),
+            state.clone(),
+            HeartbeatConfig {
+                interval: Duration::from_secs(1),
+                handler_warn_threshold: Duration::from_secs(30),
+                handler_stall_threshold: Duration::from_secs(120),
+                idle_threshold: Duration::from_secs(6),
+                enabled: true,
+            },
+            live_execution(),
+        );
+        tokio::task::yield_now().await;
+        let event_id = EventId::new();
+        state.record_data_read(upstream, event_id);
+        let _processing = HeartbeatProcessingGuard::new(state.clone(), Some(upstream), event_id);
+        let holds = crate::effects::InputHolds::new(Vec::new(), Some(state.clone()));
+        let wait = tokio::spawn(async move { holds.wait_to_retry(Duration::from_secs(150)).await });
+
+        for _ in 0..140 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+
+        let snapshot = snapshots.get(stage_id).expect("liveness snapshot");
+        assert!(matches!(snapshot.activity, StageActivity::WaitingToRetry));
+        assert_eq!(snapshot.handler_blocked_ms, None);
+        assert!(snapshot
+            .edges
+            .iter()
+            .all(|edge| edge.state == EdgeLivenessState::Idle));
+        wait.abort();
+        handle.cancel();
     }
 }

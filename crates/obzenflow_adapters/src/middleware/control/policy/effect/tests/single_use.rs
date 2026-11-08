@@ -293,6 +293,7 @@ async fn effect_context(
         effect_declarations: vec![authored_declaration.runtime_projection()],
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
+        backpressure_readers: Vec::new(),
         emit_enabled: false,
         effect_boundary: None,
         catch_up: None,

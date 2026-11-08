@@ -22,9 +22,13 @@ pub const DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS: u64 = 250;
 
 pub const CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY: &str =
     "middleware.circuit_breaker.failure_rate_threshold";
+pub const CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY: &str = "middleware.circuit_breaker.max_open_for_ms";
 pub const CIRCUIT_BREAKER_MINIMUM_CALLS_KEY: &str = "middleware.circuit_breaker.minimum_calls";
 pub const CIRCUIT_BREAKER_MODE_KEY: &str = "middleware.circuit_breaker.mode";
+pub const CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY: &str = "middleware.circuit_breaker.open_for_mode";
 pub const CIRCUIT_BREAKER_OPEN_FOR_MS_KEY: &str = "middleware.circuit_breaker.open_for_ms";
+pub const CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY: &str =
+    "middleware.circuit_breaker.open_for_multiplier";
 pub const CIRCUIT_BREAKER_PROBES_KEY: &str = "middleware.circuit_breaker.probes";
 /// Where a durable run records its location.
 pub const JOURNAL_ROOT_KEY: &str = "journal.root";
@@ -42,6 +46,10 @@ pub const RETRY_FIXED_DELAY_MS_KEY: &str = "middleware.retry.fixed_delay_ms";
 pub const RETRY_KIND_KEY: &str = "middleware.retry.kind";
 pub const RETRY_MAX_ATTEMPTS_KEY: &str = "middleware.retry.max_attempts";
 pub const RETRY_MAX_BACKOFF_MS_KEY: &str = "middleware.retry.max_backoff_ms";
+pub const RETRY_MAX_OUTAGE_WAIT_MS_KEY: &str = "middleware.retry.max_outage_wait_ms";
+pub const RETRY_ON_REFUSAL_KEY: &str = "middleware.retry.on_refusal";
+/// How far into a circuit breaker's outage a retry keeps waiting unless set.
+pub const DEFAULT_RETRY_MAX_OUTAGE_WAIT_MS: u64 = 120_000;
 
 /// The most specific scope a knob admits. The stage rung of an edge-target
 /// knob binds to one endpoint (§4c; backpressure binds upstream, matching
@@ -293,9 +301,12 @@ fn middleware_file_component(key_path: &str) -> Option<&'static str> {
         CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY
         | CIRCUIT_BREAKER_COUNT_WINDOW_KEY
         | CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY
+        | CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY
         | CIRCUIT_BREAKER_MINIMUM_CALLS_KEY
         | CIRCUIT_BREAKER_MODE_KEY
+        | CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY
         | CIRCUIT_BREAKER_OPEN_FOR_MS_KEY
+        | CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY
         | CIRCUIT_BREAKER_PROBES_KEY
         | CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY
         | CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY
@@ -307,7 +318,9 @@ fn middleware_file_component(key_path: &str) -> Option<&'static str> {
         | RETRY_FIXED_DELAY_MS_KEY
         | RETRY_KIND_KEY
         | RETRY_MAX_ATTEMPTS_KEY
-        | RETRY_MAX_BACKOFF_MS_KEY => Some("retry"),
+        | RETRY_MAX_BACKOFF_MS_KEY
+        | RETRY_MAX_OUTAGE_WAIT_MS_KEY
+        | RETRY_ON_REFUSAL_KEY => Some("retry"),
         _ => None,
     }
 }
@@ -322,7 +335,9 @@ pub fn canonical_env_name(key_path: &str) -> String {
 
 const TOKENS_STRICT_MODE: &[&str] = &["abort", "warn"];
 const TOKENS_CIRCUIT_BREAKER_MODE: &[&str] = &["consecutive", "rate_based"];
+const TOKENS_CIRCUIT_BREAKER_OPEN_FOR_MODE: &[&str] = &["fixed", "exponential"];
 const TOKENS_RETRY_KIND: &[&str] = &["fixed", "exponential"];
+const TOKENS_RETRY_ON_REFUSAL: &[&str] = &["wait", "fail"];
 
 /// The first-pass registry: consumers-only namespaces (FLOWIP-010
 /// implementation shape). Sorted by key path; a unit test enforces it.
@@ -473,6 +488,20 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 env: EnvBinding::Canonical,
             },
             KnobSpec {
+                key_path: CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::StageOrEffect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
                 key_path: CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
                 file_path: None,
                 value_type: KnobType::U64 {
@@ -500,12 +529,36 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 env: EnvBinding::Canonical,
             },
             KnobSpec {
+                key_path: CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY,
+                file_path: None,
+                value_type: KnobType::Token {
+                    allowed: TOKENS_CIRCUIT_BREAKER_OPEN_FOR_MODE,
+                },
+                target: KnobTarget::StageOrEffect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
                 key_path: CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
                 file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
                 },
+                target: KnobTarget::StageOrEffect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY,
+                file_path: None,
+                value_type: KnobType::F64 { min_exclusive: 1.0 },
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
@@ -663,6 +716,33 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 },
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RETRY_MAX_OUTAGE_WAIT_MS_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::Value(ConfigValue::U64(DEFAULT_RETRY_MAX_OUTAGE_WAIT_MS)),
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RETRY_ON_REFUSAL_KEY,
+                file_path: None,
+                value_type: KnobType::Token {
+                    allowed: TOKENS_RETRY_ON_REFUSAL,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::Value(ConfigValue::Text("wait".to_string())),
                 mutability: Mutability::Restartful,
                 role: KnobRole::Configuration,
                 redaction: Redaction::Plain,

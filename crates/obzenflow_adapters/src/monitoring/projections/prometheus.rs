@@ -36,6 +36,7 @@ fn stage_activity_gauge_value(
         StageActivity::Draining => 2,
         StageActivity::Completed => 3,
         StageActivity::WaitingOnQuietInput { .. } => 4,
+        StageActivity::WaitingToRetry => 5,
     }
 }
 
@@ -2608,7 +2609,7 @@ impl PrometheusProjection {
         if !snapshot.liveness_metrics.stage_activity.is_empty() {
             writeln!(
                 output,
-                "# HELP obzenflow_stage_activity_state Stage activity state code (0=polling,1=processing,2=draining,3=completed)"
+                "# HELP obzenflow_stage_activity_state Stage activity state code (0=polling,1=processing,2=draining,3=completed,4=waiting_on_quiet_input,5=waiting_to_retry)"
             )?;
             writeln!(output, "# TYPE obzenflow_stage_activity_state gauge")?;
             for (stage_id, activity) in &snapshot.liveness_metrics.stage_activity {
@@ -3180,6 +3181,7 @@ mod tests {
                 },
                 "4",
             ),
+            (StageActivity::WaitingToRetry, "5"),
         ] {
             let mut snapshot = InfraMetricsSnapshot::default();
             snapshot

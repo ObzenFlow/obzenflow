@@ -239,6 +239,9 @@ pub struct EffectInvocationContext {
     pub effect_declarations: Vec<EffectDeclaration>,
     pub output_contract: StageOutputContract,
     pub backpressure_writer: BackpressureWriter,
+    /// The stage's input edges, whose holds an effect call renews while it
+    /// waits between attempts.
+    pub backpressure_readers: Vec<crate::backpressure::BackpressureReader>,
     pub emit_enabled: bool,
     pub effect_boundary: Option<Arc<dyn EffectBoundary>>,
     /// FLOWIP-010 §7: build-resolved lineage policy from stage resources,

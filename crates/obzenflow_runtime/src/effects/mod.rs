@@ -6,13 +6,14 @@
 
 use async_trait::async_trait;
 pub use obzenflow_core::event::payloads::effect_payload::{
-    effect_escape_controls_group_id, effect_outcome_group_id, is_framework_effect_event_type,
-    CanonicalInputHash, EffectAttemptOrdinal, EffectAttemptStarted, EffectCursor, EffectDescriptor,
-    EffectDescriptorHash, EffectFactOrigin, EffectFactOwner, EffectFailureCause, EffectFailureCode,
-    EffectFailureDetail, EffectFailureKind, EffectFailureSource, EffectInputPosition, EffectLabel,
-    EffectObservation, EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload, EffectPortReturn,
-    EffectProvenance, EffectRecord, EffectRecoveryAbandoned, EffectSchemaVersion, EffectStageKey,
-    EffectType, EffectUnresolvedReason, ExternalCompletion, OutcomeFactCount, OutcomeFactOrdinal,
+    effect_escape_controls_group_id, effect_outcome_group_id, effect_recovery_progress_group_id,
+    is_framework_effect_event_type, CanonicalInputHash, EffectAttemptOrdinal, EffectAttemptStarted,
+    EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin, EffectFactOwner,
+    EffectFailureCause, EffectFailureCode, EffectFailureDetail, EffectFailureKind,
+    EffectFailureSource, EffectInputPosition, EffectLabel, EffectObservation, EffectOrdinal,
+    EffectOutcomeGroupId, EffectOutcomePayload, EffectPortReturn, EffectProvenance, EffectRecord,
+    EffectRecoveryAbandoned, EffectSchemaVersion, EffectStageKey, EffectType,
+    EffectUnresolvedReason, ExternalCompletion, OutcomeFactCount, OutcomeFactOrdinal,
     RecordedFlowId, RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE,
     EFFECT_ATTEMPT_STARTED_EVENT_TYPE, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
     EFFECT_RECOVERY_ABANDONED_EVENT_TYPE,
@@ -62,6 +63,7 @@ mod history;
 mod identity;
 mod perform;
 mod ports;
+mod recovery;
 mod replay;
 mod runtime;
 mod typed;
@@ -148,6 +150,8 @@ pub use ports::{
 };
 #[doc(hidden)]
 pub use ports::{EffectPortResolverWithMetadata, EffectRegistrationBuilder, ResolvedEffectPort};
+pub(crate) use recovery::ProgressJournal;
+pub use recovery::{EffectProgress, InputHolds};
 pub(crate) use runtime::EffectsCore;
 // FLOWIP-120z/B9: the proof facades are doc-hidden public bounds so rustc can
 // report failures in handler vocabulary without weakening the underlying set

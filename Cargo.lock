@@ -1685,6 +1685,7 @@ dependencies = [
  "chrono",
  "csv",
  "http",
+ "obzenflow-topology",
  "obzenflow_core",
  "obzenflow_runtime",
  "ring",

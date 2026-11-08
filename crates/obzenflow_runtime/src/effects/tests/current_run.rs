@@ -154,6 +154,7 @@ impl Window {
             ],
             output_contract: StageOutputContract::empty(),
             backpressure_writer: BackpressureWriter::disabled(),
+            backpressure_readers: Vec::new(),
             emit_enabled: false,
             effect_boundary: Some(Arc::new(WindowBoundary {
                 invariant: InvariantEvidenceBoundary {

@@ -6,7 +6,8 @@
 
 use super::circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfigError, CircuitBreakerFactory, CircuitBreakerMiddleware,
-    EffectAdmissionEpoch, EffectAdmissionFence, FailureClassification, Retry,
+    EffectAdmissionEpoch, EffectAdmissionFence, EffectOutage, FailureClassification, OnRefusal,
+    OpenForMode, OutageAdmission, Retry, DEFAULT_MAX_OUTAGE_WAIT,
 };
 use super::rate_limiter::{
     RateLimitReservation, RateLimiter, RateLimiterConfigError, RateLimiterMiddleware,
@@ -34,19 +35,22 @@ use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::effects::EffectCursor;
 use obzenflow_runtime::effects::{
     AffineEffectBoundaryReport, AffineEffectExecution, AffineEffectOperation, EffectAbortReason,
-    EffectBoundaryOutcome, EffectBoundaryReport, EffectError, EffectIdentity,
-    PhysicalCallObservation, PhysicalCallOutcome, PhysicalCallReceipt, RepeatableEffectOperation,
-    SingleUseEffectBoundaryReport, SingleUseEffectOperation,
+    EffectBoundaryOutcome, EffectBoundaryReport, EffectError, EffectIdentity, EffectProgress,
+    InputHolds, PhysicalCallObservation, PhysicalCallOutcome, PhysicalCallReceipt,
+    RepeatableEffectOperation, SingleUseEffectBoundaryReport, SingleUseEffectOperation,
 };
 use obzenflow_runtime::runtime_config::{
     ConfigValue, DslConfigDefault, CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
     CIRCUIT_BREAKER_COUNT_WINDOW_KEY, CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
-    CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
-    CIRCUIT_BREAKER_PROBES_KEY, CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-    CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY, CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
-    RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_COST_PER_ATTEMPT_KEY,
-    RATE_LIMITER_EVENTS_PER_SECOND_KEY, RETRY_ATTEMPT_START_WINDOW_MS_KEY,
-    RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY, RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
+    CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY, CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
+    CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
+    CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY, CIRCUIT_BREAKER_PROBES_KEY,
+    CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY, CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
+    CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
+    RATE_LIMITER_COST_PER_ATTEMPT_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+    RETRY_ATTEMPT_START_WINDOW_MS_KEY, RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY,
+    RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY, RETRY_MAX_OUTAGE_WAIT_MS_KEY,
+    RETRY_ON_REFUSAL_KEY,
 };
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use std::ops::ControlFlow;
@@ -73,6 +77,14 @@ pub enum ControlConfigurationError {
     ZeroFixedDelay,
     #[error("retry kind must be 'fixed' or 'exponential', got '{kind}'")]
     UnknownRetryKind { kind: String },
+    #[error("retry max_outage_wait must be greater than zero")]
+    ZeroMaxOutageWait,
+    #[error("middleware.retry.on_refusal must be 'wait' or 'fail', got '{value}'")]
+    UnknownOnRefusal { value: String },
+    #[error(
+        "retry sets {setting}, but no circuit breaker protects this effect; attach a circuit breaker or remove {setting}"
+    )]
+    RetrySettingWithoutBreaker { setting: &'static str },
 }
 
 pub(in crate::middleware::control) fn validate_retry(
@@ -86,6 +98,13 @@ pub(in crate::middleware::control) fn validate_retry(
     }
     if retry.limits.max_attempt_start_window.is_zero() {
         return Err(ControlConfigurationError::ZeroAttemptStartWindow);
+    }
+    if retry
+        .limits
+        .max_outage_wait
+        .is_some_and(|wait| wait.is_zero())
+    {
+        return Err(ControlConfigurationError::ZeroMaxOutageWait);
     }
     if matches!(retry.policy.backoff, BackoffStrategy::Fixed { delay } if delay.is_zero()) {
         return Err(ControlConfigurationError::ZeroFixedDelay);
@@ -116,6 +135,9 @@ pub(in crate::middleware::control) fn breaker_config_keys() -> Vec<&'static str>
         CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
         CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
         CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
+        CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY,
+        CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY,
+        CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY,
         CIRCUIT_BREAKER_PROBES_KEY,
         CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
     ]
@@ -140,6 +162,18 @@ pub(in crate::middleware::control) fn breaker_defaults(
             value: ConfigValue::Bool(value.rate_limited_counts_as_failure),
         },
     ];
+    if let Some(multiplier) = value.open_for_multiplier {
+        defaults.push(default_f64(
+            CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY,
+            multiplier,
+        ));
+    }
+    if let Some(max_open_for) = value.max_open_for {
+        defaults.push(default_u64(
+            CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY,
+            duration_ms(max_open_for),
+        ));
+    }
     for (key, v) in [
         (
             CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
@@ -238,6 +272,15 @@ pub(in crate::middleware::control) fn resolve_breaker(
     resolved.open_for = u64_value(view, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY)
         .map(Duration::from_millis)
         .unwrap_or(value.open_for);
+    resolved.open_for_mode = Some(match text_value(view, CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY) {
+        Some(mode) => OpenForMode::parse(mode)?,
+        None => value.resolved_open_for_mode(),
+    });
+    resolved.open_for_multiplier =
+        f64_value(view, CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY).or(value.open_for_multiplier);
+    resolved.max_open_for = u64_value(view, CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY)
+        .map(Duration::from_millis)
+        .or(value.max_open_for);
     resolved.probes =
         checked_count(CIRCUIT_BREAKER_PROBES_KEY, Some(value.probes))?.unwrap_or(value.probes);
     resolved.rate_limited_counts_as_failure =
@@ -278,6 +321,19 @@ pub(in crate::middleware::control) fn resolve_retry(
             .map(Duration::from_millis)
             .unwrap_or(authored.limits.max_attempt_start_window),
     );
+    value.policy.on_refusal = match text_value(view, RETRY_ON_REFUSAL_KEY) {
+        Some("wait") => Some(OnRefusal::Wait),
+        Some("fail") => Some(OnRefusal::Fail),
+        Some(other) => {
+            return Err(ControlConfigurationError::UnknownOnRefusal {
+                value: other.to_string(),
+            })
+        }
+        None => authored.policy.on_refusal,
+    };
+    value.limits.max_outage_wait = u64_value(view, RETRY_MAX_OUTAGE_WAIT_MS_KEY)
+        .map(Duration::from_millis)
+        .or(authored.limits.max_outage_wait);
     validate_retry(&value)?;
     Ok(value)
 }
@@ -352,6 +408,14 @@ impl EffectPlanFactory {
                 duration_ms(retry.limits.max_attempt_start_window),
             ),
         ]);
+        if self.breaker.is_some() {
+            if let Some(on_refusal) = retry.policy.on_refusal {
+                defaults.push(default_text(RETRY_ON_REFUSAL_KEY, on_refusal.as_str()));
+            }
+            if let Some(wait) = retry.limits.max_outage_wait {
+                defaults.push(default_u64(RETRY_MAX_OUTAGE_WAIT_MS_KEY, duration_ms(wait)));
+            }
+        }
         defaults
     }
     fn resolved_retry(
@@ -412,6 +476,22 @@ impl EffectPlanFactory {
                     effect.safety
                 )),
             ));
+        }
+        if let (Some(retry), None) = (&self.retry, &self.breaker) {
+            let setting = if retry.policy.on_refusal.is_some() {
+                Some("on_refusal")
+            } else if retry.limits.max_outage_wait.is_some() {
+                Some("max_outage_wait")
+            } else {
+                None
+            };
+            if let Some(setting) = setting {
+                return Err(MiddlewareFactoryError::invalid_configuration(
+                    "retry",
+                    &context.config.name,
+                    ControlConfigurationError::RetrySettingWithoutBreaker { setting },
+                ));
+            }
         }
         let view = context.config_view();
         if let Some(breaker) = &self.breaker {
@@ -477,6 +557,9 @@ impl MiddlewareFactory for EffectPlanFactory {
                 RETRY_MAX_BACKOFF_MS_KEY,
                 RETRY_ATTEMPT_START_WINDOW_MS_KEY,
             ]);
+            if self.breaker.is_some() {
+                keys.extend([RETRY_ON_REFUSAL_KEY, RETRY_MAX_OUTAGE_WAIT_MS_KEY]);
+            }
         }
         keys
     }
@@ -668,9 +751,10 @@ struct RecoveryCompletion {
 
 /// Invocation-local authority for effect recovery.
 ///
-/// In particular, the initial breaker epoch is write-once and the limiter
-/// reservation lives here until it is transferred to the physical-call
-/// settlement guard or cancelled by a terminal path.
+/// In particular, the initial breaker epoch is write-once until the call waits
+/// on an open breaker, after which the retry starts over with a fresh epoch,
+/// and the limiter reservation lives here until it is transferred to the
+/// physical-call settlement guard or cancelled by a terminal path.
 struct EffectRecoveryController {
     session_started: Instant,
     first_physical_call_started: Option<Instant>,
@@ -681,6 +765,7 @@ struct EffectRecoveryController {
     current_reservation: Option<RateLimitReservation>,
     cancellation_state: RecoveryCancellationState,
     physical_calls: u32,
+    calls_since_wait: u32,
     terminal_decision: Option<RecoveryTerminalDecision>,
     completion: Option<RecoveryCompletion>,
 }
@@ -697,9 +782,23 @@ impl EffectRecoveryController {
             current_reservation: None,
             cancellation_state: RecoveryCancellationState::Idle,
             physical_calls: 0,
+            calls_since_wait: 0,
             terminal_decision: None,
             completion: None,
         }
+    }
+
+    fn start_over_after_wait(&mut self) {
+        debug_assert_eq!(self.cancellation_state, RecoveryCancellationState::Idle);
+        self.first_physical_call_started = None;
+        self.attempt_start_deadline = None;
+        self.initial_breaker_epoch = None;
+        self.reservation_epoch = None;
+        self.calls_since_wait = 0;
+    }
+
+    fn calls_since_wait(&self) -> u32 {
+        self.calls_since_wait
     }
 
     fn initial_epoch(&self) -> Option<EffectAdmissionEpoch> {
@@ -745,14 +844,14 @@ impl EffectRecoveryController {
     }
 
     fn later_attempt_may_start(&self) -> bool {
-        self.physical_calls == 0
+        self.calls_since_wait == 0
             || self
                 .attempt_start_deadline
                 .is_some_and(|deadline| Instant::now() < deadline)
     }
 
     fn backoff_fits_attempt_window(&self, delay: Duration) -> bool {
-        debug_assert!(self.physical_calls > 0);
+        debug_assert!(self.calls_since_wait > 0);
         self.attempt_start_deadline.is_some_and(|deadline| {
             Instant::now()
                 .checked_add(delay)
@@ -785,6 +884,7 @@ impl EffectRecoveryController {
                 attempt_start_window.and_then(|window| now.checked_add(window));
         }
         self.physical_calls = self.physical_calls.saturating_add(1);
+        self.calls_since_wait = self.calls_since_wait.saturating_add(1);
         self.cancellation_state = RecoveryCancellationState::InFlight;
         self.physical_calls
     }
@@ -1018,14 +1118,17 @@ impl EffectResilienceMiddleware {
             MiddlewareExecutionScope::LiveEffectBoundary
         );
         let mut recovery = EffectRecoveryController::new();
+        let scope = RecoveryScope {
+            identity,
+            event,
+            holds: operation.input_holds(),
+            progress: operation.progress(),
+        };
         let mut calls = RepeatableCalls {
             operation,
             latest: None,
         };
-        match self
-            .recover(identity, event, ctx, &mut recovery, &mut calls)
-            .await
-        {
+        match self.recover(&scope, ctx, &mut recovery, &mut calls).await {
             RecoveryTerminalDecision::BoundaryRejected(cause) => {
                 report_from_admission(PolicyAdmission::Reject(cause), ctx)
             }
@@ -1042,12 +1145,12 @@ impl EffectResilienceMiddleware {
 
     async fn recover<C: RecoveryCalls + Send>(
         &self,
-        identity: &EffectIdentity,
-        event: &ChainEvent,
+        scope: &RecoveryScope<'_>,
         ctx: &mut crate::middleware::MiddlewareContext,
         recovery: &mut EffectRecoveryController,
         calls: &mut C,
     ) -> RecoveryTerminalDecision {
+        let (identity, event) = (scope.identity, scope.event);
         let attempt_start_window = self
             .retry
             .as_ref()
@@ -1067,7 +1170,13 @@ impl EffectResilienceMiddleware {
                 match breaker.effect_precheck(ctx, recovery.initial_epoch()) {
                     Ok(reservation_epoch) => recovery.observe_precheck(reservation_epoch),
                     Err(cause) => {
-                        return self.admission_rejected(recovery, identity, cause, event, ctx)
+                        match self
+                            .breaker_exit(scope, ctx, recovery, BreakerExit::Refused(cause))
+                            .await
+                        {
+                            ControlFlow::Continue(()) => continue,
+                            ControlFlow::Break(decision) => return decision,
+                        }
                     }
                 }
             }
@@ -1099,7 +1208,13 @@ impl EffectResilienceMiddleware {
                 .as_ref()
                 .map(|breaker| breaker.effect_admit(ctx, recovery.admission_fence()))
             {
-                return self.admission_rejected(recovery, identity, cause, event, ctx);
+                match self
+                    .breaker_exit(scope, ctx, recovery, BreakerExit::Refused(cause))
+                    .await
+                {
+                    ControlFlow::Continue(()) => continue,
+                    ControlFlow::Break(decision) => return decision,
+                }
             }
 
             if !recovery.later_attempt_may_start() {
@@ -1129,7 +1244,7 @@ impl EffectResilienceMiddleware {
                 }
                 return self.physical_terminal(recovery, identity, event, ctx);
             };
-            let delay = match self.after_call(
+            let (delay, breaker) = match self.after_call(
                 identity,
                 event,
                 ctx,
@@ -1142,12 +1257,30 @@ impl EffectResilienceMiddleware {
                     admission_wait,
                 },
             ) {
-                ControlFlow::Continue(delay) => delay,
-                ControlFlow::Break(decision) => return decision,
+                AfterCall::Terminal(decision) => return decision,
+                AfterCall::BreakerExit => {
+                    match self
+                        .breaker_exit(scope, ctx, recovery, BreakerExit::AfterAttempt)
+                        .await
+                    {
+                        ControlFlow::Continue(()) => continue,
+                        ControlFlow::Break(decision) => return decision,
+                    }
+                }
+                AfterCall::Backoff { delay, breaker } => (delay, breaker),
             };
 
+            if breaker == BreakerDuringBackoff::HalfOpen
+                && scope
+                    .progress
+                    .commit(ctx.take_control_events())
+                    .await
+                    .is_err()
+            {
+                return progress_failed(recovery, None);
+            }
             let backoff_started = Instant::now();
-            tokio::time::sleep(delay).await;
+            scope.holds.wait_to_retry(delay).await;
             recovery.record_backoff(backoff_started.elapsed());
             if !recovery.later_attempt_may_start() {
                 return self.retry_exhausted(
@@ -1158,22 +1291,129 @@ impl EffectResilienceMiddleware {
                     ctx,
                 );
             }
-            if self.breaker.as_ref().is_some_and(|breaker| {
-                !breaker.effect_recovery_epoch_is_current(
-                    recovery
-                        .initial_epoch()
-                        .expect("a breaker attempt captures its epoch"),
-                )
-            }) {
-                return self.retry_exhausted(
+            if breaker == BreakerDuringBackoff::ClosedOrAbsent
+                && self.breaker.as_ref().is_some_and(|breaker| {
+                    !breaker.effect_recovery_epoch_is_current(
+                        recovery
+                            .initial_epoch()
+                            .expect("a breaker attempt captures its epoch"),
+                    )
+                })
+            {
+                match self
+                    .breaker_exit(scope, ctx, recovery, BreakerExit::AfterBackoff)
+                    .await
+                {
+                    ControlFlow::Continue(()) => continue,
+                    ControlFlow::Break(decision) => return decision,
+                }
+            }
+        }
+    }
+
+    fn max_outage_wait(&self) -> Option<Duration> {
+        let retry = self.retry.as_ref()?;
+        self.breaker.as_ref()?;
+        (retry.policy.on_refusal.unwrap_or(OnRefusal::Wait) == OnRefusal::Wait).then(|| {
+            retry
+                .limits
+                .max_outage_wait
+                .unwrap_or(DEFAULT_MAX_OUTAGE_WAIT)
+        })
+    }
+
+    async fn breaker_exit(
+        &self,
+        scope: &RecoveryScope<'_>,
+        ctx: &mut crate::middleware::MiddlewareContext,
+        recovery: &mut EffectRecoveryController,
+        exit: BreakerExit,
+    ) -> ControlFlow<RecoveryTerminalDecision> {
+        let (identity, event) = (scope.identity, scope.event);
+        let (Some(breaker), Some(max_outage_wait)) = (&self.breaker, self.max_outage_wait()) else {
+            return ControlFlow::Break(match exit {
+                BreakerExit::Refused(cause) => {
+                    self.admission_rejected(recovery, identity, cause, event, ctx)
+                }
+                BreakerExit::AfterAttempt | BreakerExit::AfterBackoff => self.retry_exhausted(
                     recovery,
                     identity,
                     RetryStopReason::CircuitNoLongerClosed,
                     event,
                     ctx,
-                );
+                ),
+            });
+        };
+        recovery.cancel_reservation();
+        let changes = breaker.changes();
+        let changed = changes.notified();
+        let EffectOutage {
+            admission,
+            started_at,
+        } = breaker.effect_outage();
+        let now = Instant::now();
+        let deadline = started_at.unwrap_or(now).checked_add(max_outage_wait);
+        let wake = match admission {
+            OutageAdmission::Closed => {
+                recovery.start_over_after_wait();
+                return ControlFlow::Continue(());
             }
+            OutageAdmission::ReopensAt(reopens_at) => deadline
+                .is_none_or(|deadline| reopens_at < deadline)
+                .then_some(reopens_at),
+            OutageAdmission::ProbeBusy => match deadline {
+                Some(deadline) => (now < deadline).then_some(deadline),
+                None => Some(now.checked_add(max_outage_wait).unwrap_or(now)),
+            },
+        };
+        let Some(wake) = wake else {
+            write_exhausted(
+                self.writer_id,
+                identity,
+                recovery.physical_calls(),
+                RetryStopReason::OutageWaitLimit,
+                event,
+                ctx,
+            );
+            let decision = match exit {
+                BreakerExit::Refused(cause) => recovery.finish_from_admission(cause),
+                BreakerExit::AfterAttempt | BreakerExit::AfterBackoff => {
+                    recovery.finish_with_last_physical_error()
+                }
+            };
+            write_recovery_completed(recovery, self.writer_id, identity, event, ctx);
+            return ControlFlow::Break(decision);
+        };
+        let delay = wake.saturating_duration_since(now);
+        if !delay.is_zero() {
+            ctx.write_control_event(ChainEventFactory::retry_scheduled(
+                self.writer_id,
+                identity.cursor.clone(),
+                recovery.next_attempt(),
+                duration_ms(delay),
+                CausalInput::of(event),
+            ));
+            if scope
+                .progress
+                .commit(ctx.take_control_events())
+                .await
+                .is_err()
+            {
+                let cause = match exit {
+                    BreakerExit::Refused(cause) => Some(cause),
+                    BreakerExit::AfterAttempt | BreakerExit::AfterBackoff => None,
+                };
+                return ControlFlow::Break(progress_failed(recovery, cause));
+            }
+            let waited = Instant::now();
+            tokio::select! {
+                () = scope.holds.wait_to_retry(delay) => {}
+                () = changed => {}
+            }
+            recovery.record_backoff(waited.elapsed());
         }
+        recovery.start_over_after_wait();
+        ControlFlow::Continue(())
     }
 
     fn after_call<C: RecoveryCalls>(
@@ -1184,7 +1424,7 @@ impl EffectResilienceMiddleware {
         recovery: &mut EffectRecoveryController,
         calls: &C,
         call: CompletedCall,
-    ) -> ControlFlow<RecoveryTerminalDecision, Duration> {
+    ) -> AfterCall {
         let result = calls.latest();
         ctx.insert::<EffectCallDurationNanos>(
             call.dependency_elapsed.as_nanos().min(u64::MAX as u128) as u64,
@@ -1230,7 +1470,7 @@ impl EffectResilienceMiddleware {
         }
 
         let Some(retry) = &self.retry else {
-            return ControlFlow::Break(self.physical_terminal(recovery, identity, event, ctx));
+            return AfterCall::Terminal(self.physical_terminal(recovery, identity, event, ctx));
         };
         let Err(error) = result else {
             if recovery.physical_calls() > 1 {
@@ -1241,7 +1481,7 @@ impl EffectResilienceMiddleware {
                     CausalInput::of(event),
                 ));
             }
-            return ControlFlow::Break(self.physical_terminal(recovery, identity, event, ctx));
+            return AfterCall::Terminal(self.physical_terminal(recovery, identity, event, ctx));
         };
         if call.outcome != PhysicalCallOutcome::Failed || !calls.repeats(error) {
             if recovery.physical_calls() > 1 {
@@ -1252,9 +1492,9 @@ impl EffectResilienceMiddleware {
                     CausalInput::of(event),
                 ));
             }
-            return ControlFlow::Break(self.physical_terminal(recovery, identity, event, ctx));
+            return AfterCall::Terminal(self.physical_terminal(recovery, identity, event, ctx));
         }
-        if recovery.physical_calls() >= retry.policy.max_attempts {
+        if recovery.calls_since_wait() >= retry.policy.max_attempts {
             write_exhausted(
                 self.writer_id,
                 identity,
@@ -1263,28 +1503,28 @@ impl EffectResilienceMiddleware {
                 event,
                 ctx,
             );
-            return ControlFlow::Break(self.physical_terminal(recovery, identity, event, ctx));
+            return AfterCall::Terminal(self.physical_terminal(recovery, identity, event, ctx));
         }
-        if self.breaker.as_ref().is_some_and(|breaker| {
-            breaker.is_effect_probe(ctx)
-                || !breaker.effect_recovery_epoch_is_current(
-                    recovery
-                        .initial_epoch()
-                        .expect("a breaker attempt captures its epoch"),
-                )
-        }) {
-            return ControlFlow::Break(self.retry_exhausted(
-                recovery,
-                identity,
-                RetryStopReason::CircuitNoLongerClosed,
-                event,
-                ctx,
-            ));
+        let mut breaker_during_backoff = BreakerDuringBackoff::ClosedOrAbsent;
+        if let Some(breaker) = &self.breaker {
+            let admitted = recovery
+                .initial_epoch()
+                .expect("a breaker attempt captures its epoch");
+            if breaker.is_effect_probe(ctx) {
+                if self.max_outage_wait().is_none()
+                    || !breaker.effect_probe_left_half_open(admitted)
+                {
+                    return AfterCall::BreakerExit;
+                }
+                breaker_during_backoff = BreakerDuringBackoff::HalfOpen;
+            } else if !breaker.effect_recovery_epoch_is_current(admitted) {
+                return AfterCall::BreakerExit;
+            }
         }
 
-        let delay = retry_delay(retry, recovery.physical_calls(), error);
+        let delay = retry_delay(retry, recovery.calls_since_wait(), error);
         if !recovery.backoff_fits_attempt_window(delay) {
-            return ControlFlow::Break(self.retry_exhausted(
+            return AfterCall::Terminal(self.retry_exhausted(
                 recovery,
                 identity,
                 RetryStopReason::AttemptStartWindow,
@@ -1299,7 +1539,10 @@ impl EffectResilienceMiddleware {
             duration_ms(delay),
             CausalInput::of(event),
         ));
-        ControlFlow::Continue(delay)
+        AfterCall::Backoff {
+            delay,
+            breaker: breaker_during_backoff,
+        }
     }
 
     fn admission_rejected(
@@ -1515,11 +1758,53 @@ impl EffectResilienceMiddleware {
             return affine_report(decision, AffineCalls::Ready(operation), ctx);
         }
 
+        let scope = RecoveryScope {
+            identity,
+            event,
+            holds: operation.input_holds(),
+            progress: operation.progress(),
+        };
         let mut calls = AffineCalls::Ready(operation);
-        let decision = self
-            .recover(identity, event, ctx, &mut recovery, &mut calls)
-            .await;
+        let decision = self.recover(&scope, ctx, &mut recovery, &mut calls).await;
         affine_report(decision, calls, ctx)
+    }
+}
+
+struct RecoveryScope<'a> {
+    identity: &'a EffectIdentity,
+    event: &'a ChainEvent,
+    holds: InputHolds,
+    progress: EffectProgress,
+}
+
+enum BreakerExit {
+    Refused(Box<crate::middleware::MiddlewareAbortCause>),
+    AfterAttempt,
+    AfterBackoff,
+}
+
+enum AfterCall {
+    Terminal(RecoveryTerminalDecision),
+    BreakerExit,
+    Backoff {
+        delay: Duration,
+        breaker: BreakerDuringBackoff,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BreakerDuringBackoff {
+    ClosedOrAbsent,
+    HalfOpen,
+}
+
+fn progress_failed(
+    recovery: &mut EffectRecoveryController,
+    cause: Option<Box<crate::middleware::MiddlewareAbortCause>>,
+) -> RecoveryTerminalDecision {
+    match cause {
+        Some(cause) => recovery.finish_from_admission(cause),
+        None => recovery.finish_with_last_physical_error(),
     }
 }
 

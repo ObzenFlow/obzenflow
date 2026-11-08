@@ -280,5 +280,14 @@ mod tests {
             .consumed_config_keys()
             .iter()
             .all(|key| key.starts_with("middleware.retry.")));
+        for outage_key in [
+            obzenflow_runtime::runtime_config::RETRY_ON_REFUSAL_KEY,
+            obzenflow_runtime::runtime_config::RETRY_MAX_OUTAGE_WAIT_MS_KEY,
+        ] {
+            assert!(
+                !plan.consumed_config_keys().contains(&outage_key),
+                "a retry with no breaker leaves {outage_key} to broader scopes"
+            );
+        }
     }
 }

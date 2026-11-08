@@ -12,7 +12,8 @@ mod resilience;
 
 // Re-export key types for convenience
 pub use circuit_breaker::{
-    circuit_breaker, retry, CircuitBreaker, CircuitBreakerConfigError, FailureHealth, Retry,
+    circuit_breaker, retry, CircuitBreaker, CircuitBreakerConfigError, FailureHealth, OnRefusal,
+    Retry,
 };
 pub use composition::{
     compose_effect_controls, BuiltinControlContribution, BuiltinControlFamily,

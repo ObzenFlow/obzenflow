@@ -160,6 +160,8 @@ impl PreparedRepeatableEffectCall<'_> {
 /// outside this callable and happens only after the boundary returns.
 pub struct RepeatableEffectOperation {
     call: Box<dyn FnMut(PhysicalCallLifecycle) -> EffectCall + Send>,
+    input_holds: InputHolds,
+    progress: EffectProgress,
 }
 
 impl RepeatableEffectOperation {
@@ -195,7 +197,30 @@ impl RepeatableEffectOperation {
     {
         Self {
             call: Box::new(move |lifecycle| Box::pin(call(lifecycle))),
+            input_holds: InputHolds::default(),
+            progress: EffectProgress::detached(),
         }
+    }
+
+    /// Renew `holds` while this call waits between attempts.
+    pub fn with_input_holds(mut self, holds: InputHolds) -> Self {
+        self.input_holds = holds;
+        self
+    }
+
+    pub(crate) fn with_progress(mut self, progress: EffectProgress) -> Self {
+        self.progress = progress;
+        self
+    }
+
+    /// The holds every wait between attempts renews.
+    pub fn input_holds(&self) -> InputHolds {
+        self.input_holds.clone()
+    }
+
+    /// Commits the rows written before each wait between attempts.
+    pub fn progress(&self) -> EffectProgress {
+        self.progress.clone()
     }
 
     /// Prepare one physical call without polling it.
@@ -495,6 +520,22 @@ pub struct AffineEffectOperation {
     call: AffineCall,
     provenance: SingleUseEffectProvenance,
     highest_prior_attempt: u32,
+    recovery: AffineRecovery,
+}
+
+#[derive(Clone)]
+struct AffineRecovery {
+    input_holds: InputHolds,
+    progress: EffectProgress,
+}
+
+impl AffineRecovery {
+    fn detached() -> Self {
+        Self {
+            input_holds: InputHolds::default(),
+            progress: EffectProgress::detached(),
+        }
+    }
 }
 
 pub struct PreparedAffineEffectCall {
@@ -503,6 +544,7 @@ pub struct PreparedAffineEffectCall {
     provenance: SingleUseEffectProvenance,
     receipt: PhysicalCallReceipt,
     highest_prior_attempt: u32,
+    recovery: AffineRecovery,
 }
 
 impl PreparedAffineEffectCall {
@@ -516,6 +558,7 @@ impl PreparedAffineEffectCall {
             call,
             provenance,
             highest_prior_attempt,
+            recovery,
             ..
         } = self;
         AffineEffectExecution {
@@ -523,6 +566,7 @@ impl PreparedAffineEffectCall {
             call,
             provenance,
             highest_prior_attempt,
+            recovery,
         }
     }
 }
@@ -537,7 +581,20 @@ impl AffineEffectOperation {
             call: Box::new(move |lifecycle| Box::pin(call(lifecycle))),
             provenance: SingleUseEffectProvenance::new(),
             highest_prior_attempt,
+            recovery: AffineRecovery::detached(),
         }
+    }
+
+    pub(super) fn with_recovery(
+        mut self,
+        input_holds: InputHolds,
+        progress: EffectProgress,
+    ) -> Self {
+        self.recovery = AffineRecovery {
+            input_holds,
+            progress,
+        };
+        self
     }
 
     /// Highest durable Start already present before this invocation.
@@ -547,6 +604,16 @@ impl AffineEffectOperation {
 
     pub fn next_attempt(&self) -> u32 {
         self.highest_prior_attempt.saturating_add(1)
+    }
+
+    /// The holds every wait between attempts renews.
+    pub fn input_holds(&self) -> InputHolds {
+        self.recovery.input_holds.clone()
+    }
+
+    /// Commits the rows written before each wait between attempts.
+    pub fn progress(&self) -> EffectProgress {
+        self.recovery.progress.clone()
     }
 
     pub(super) fn provenance(&self) -> SingleUseEffectProvenance {
@@ -564,6 +631,7 @@ impl AffineEffectOperation {
             provenance: self.provenance,
             receipt,
             highest_prior_attempt: self.highest_prior_attempt,
+            recovery: self.recovery,
         }
     }
 
@@ -597,6 +665,7 @@ pub struct AffineEffectExecution {
     call: AffineCall,
     provenance: SingleUseEffectProvenance,
     highest_prior_attempt: u32,
+    recovery: AffineRecovery,
 }
 
 impl AffineEffectExecution {
@@ -618,6 +687,7 @@ impl AffineEffectExecution {
                 call: self.call,
                 provenance: self.provenance,
                 highest_prior_attempt: self.highest_prior_attempt,
+                recovery: self.recovery,
             }),
             _ => Err(Box::new(self)),
         }

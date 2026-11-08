@@ -18,8 +18,9 @@ use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
-    CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY, CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
-    CIRCUIT_BREAKER_MODE_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
+    CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY, CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY,
+    CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY,
+    CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -366,6 +367,8 @@ fn payment_resilience() -> obzenflow_adapters::middleware::CircuitBreaker {
         .failure_rate_threshold(0.5)
         .slow_call_duration(Duration::from_millis(250))
         .slow_call_rate_threshold(0.5)
+        .open_for_multiplier(2.0)
+        .max_open_for(Duration::from_secs(240))
 }
 
 fn build_two_effect_flow_future(
@@ -772,6 +775,10 @@ async fn topology_retains_effect_winners_and_inactive_settings_after_a_mode_over
             CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
             ConfigValue::U64(3),
         ),
+        (
+            CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY,
+            ConfigValue::Text("fixed".to_string()),
+        ),
     ] {
         candidates
             .admit(ScopedCandidate {
@@ -803,6 +810,40 @@ async fn topology_retains_effect_winners_and_inactive_settings_after_a_mode_over
         };
         let scope = "stage:authorize_payment";
         let settings = attachment.details.settings();
+        let authored = |value| resolved(value, "dsl", scope, effect_subject.clone());
+        let (growth, open_for_mode): (RowState, _) = if exact {
+            (
+                inactive,
+                active(
+                    resolved(
+                        SettingValueInfo::Text("fixed".to_string()),
+                        "file",
+                        scope,
+                        effect_subject.clone(),
+                    ),
+                    "Fixed",
+                ),
+            )
+        } else {
+            (
+                active,
+                MiddlewareSettingInfo::Automatic {
+                    display: "Exponential".to_string(),
+                },
+            )
+        };
+        assert_eq!(
+            row(attachment, CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY),
+            &open_for_mode
+        );
+        assert_eq!(
+            row(attachment, CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY),
+            &growth(authored(SettingValueInfo::F64(2.0)), "2x")
+        );
+        assert_eq!(
+            row(attachment, CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY),
+            &growth(authored(SettingValueInfo::U64(240_000)), "240000 ms")
+        );
         if exact {
             assert_effect_breaker(attachment, effect_type, inactive);
             assert_eq!(
