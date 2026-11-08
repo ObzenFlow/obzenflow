@@ -478,7 +478,7 @@ async fn a_stop_during_the_batch_drains_without_reading_live_rows() -> Result<()
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_hold_longer_than_the_stall_ceiling_completes_under_enforce() -> Result<()> {
     let _guard = THEN_LIVE_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir()?;
@@ -787,7 +787,7 @@ async fn assert_no_stage_stalled(run: &Path, stages: &[&str]) {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_join_with_no_live_phase_releases_its_live_catalog_under_enforce() -> Result<()> {
     let _guard = THEN_LIVE_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir()?;
@@ -875,7 +875,7 @@ async fn a_join_with_no_live_phase_releases_its_live_catalog_under_enforce() -> 
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_live_join_releases_its_catalog_when_its_stream_ends_under_enforce() -> Result<()> {
     let _guard = THEN_LIVE_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir()?;
