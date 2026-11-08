@@ -305,6 +305,26 @@ fn payment_committed_terminal_group_count(jsonl: &str) -> usize {
         .count()
 }
 
+fn payment_outcome_group_members(jsonl: &str) -> Vec<(u64, u64)> {
+    exported_events(jsonl)
+        .filter(|row| {
+            row.pointer("/envelope/provenance/event/event_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("payment.authorized")
+        })
+        .map(|row| {
+            let member = |field: &str| {
+                row.pointer(&format!(
+                    "/envelope/provenance/journal/journal_group_member/{field}"
+                ))
+                .and_then(serde_json::Value::as_u64)
+                .expect("a payment outcome is a member of its atomic group")
+            };
+            (member("index"), member("size"))
+        })
+        .collect()
+}
+
 fn exported_chain_events(jsonl: &str) -> impl Iterator<Item = ChainEvent> + '_ {
     exported_jsonl::chain_events(jsonl).into_iter()
 }
@@ -1253,6 +1273,14 @@ fn payment_outage_failed_probes_grow_cooldowns() {
             total_attempts,
         })
     );
+    let outcome_members = payment_outcome_group_members(&live);
+    assert_eq!(outcome_members.len(), 3);
+    assert!(
+        outcome_members
+            .iter()
+            .all(|&(index, size)| size > 1 && index + 1 == size),
+        "each outcome closes its group, after its breaker and retry rows: {outcome_members:?}"
+    );
 
     let replay_root = tempfile::tempdir().expect("outage replay journal root");
     let replay_gateway =
@@ -1270,6 +1298,7 @@ fn payment_outage_failed_probes_grow_cooldowns() {
     assert_eq!(opened_cooldowns(&replay), opened_cooldowns(&live));
     assert_eq!(retry_schedules(&replay), retry_schedules(&live));
     assert_eq!(attempt_settlements(&replay), attempts);
+    assert_eq!(payment_outcome_group_members(&replay), outcome_members);
 }
 
 #[test]

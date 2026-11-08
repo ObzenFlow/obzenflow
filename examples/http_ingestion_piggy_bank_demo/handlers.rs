@@ -3,52 +3,52 @@
 // https://obzenflow.dev
 
 use super::domain::*;
+use super::money::{Balance, UsdCents};
 use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
 pub struct AccountLedger {
     owner: String,
-    current_balance_cents: i64,
-    total_credits_cents: i64,
-    total_debits_cents: i64,
+    current_balance: Balance,
+    total_credits: UsdCents,
+    total_debits: UsdCents,
     transactions: Vec<CheckbookEntry>,
 }
 
 impl AccountLedger {
     pub fn record(&mut self, entry: &BalanceMoved) {
         if self.transactions.is_empty() {
-            self.current_balance_cents = entry.balance_before_cents;
+            self.current_balance = entry.balance_before;
         }
         self.owner = entry.owner.clone();
-        let amount = entry.amount_cents as i64;
         match entry.kind {
             EntryKind::Credit => {
-                self.total_credits_cents = self.total_credits_cents.saturating_add(amount);
-                self.current_balance_cents = self.current_balance_cents.saturating_add(amount);
+                self.total_credits = self.total_credits.plus(entry.amount);
+                self.current_balance = self.current_balance.credited(entry.amount);
             }
             EntryKind::Debit => {
-                self.total_debits_cents = self.total_debits_cents.saturating_add(amount);
-                self.current_balance_cents = self.current_balance_cents.saturating_sub(amount);
+                self.total_debits = self.total_debits.plus(entry.amount);
+                self.current_balance = self.current_balance.debited(entry.amount);
             }
         }
         self.transactions.push(CheckbookEntry {
             index: self.transactions.len() as u64 + 1,
             kind: entry.kind,
-            amount_cents: entry.amount_cents,
-            balance_cents: self.current_balance_cents,
+            amount: entry.amount,
+            balance: self.current_balance,
             note: entry.note.clone(),
         });
     }
 
-    pub fn snapshot(&self, account_id: &str) -> CheckbookSnapshot {
+    pub fn snapshot(&self, account: &AccountId) -> CheckbookSnapshot {
         CheckbookSnapshot {
-            account_id: account_id.to_string(),
+            account: account.clone(),
             owner: self.owner.clone(),
-            current_balance_cents: self.current_balance_cents,
-            available_balance_cents: self.current_balance_cents,
-            total_credits_cents: self.total_credits_cents,
-            total_debits_cents: self.total_debits_cents,
+            current_balance: self.current_balance,
+            available_balance: self.current_balance,
+            total_credits: self.total_credits,
+            total_debits: self.total_debits,
             transactions: self.transactions.clone(),
         }
     }
@@ -65,51 +65,42 @@ impl Assess {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Payment {
-    account_id: String,
-    company_name: String,
-    company_id: String,
-    amount_cents: u64,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct Assessment {
-    balances: BTreeMap<String, i64>,
-    unpaid: BTreeMap<Payment, u32>,
-    pending: Vec<Assessed>,
+    balances: BTreeMap<AccountId, Balance>,
+    unpaid: BTreeMap<PaymentKey, Attempt>,
+    decided: Vec<Assessed>,
 }
 
 impl Assessment {
-    fn balance(&mut self, entry: &PostedEntry) -> &mut i64 {
-        self.balances
-            .entry(entry.account_id.clone())
-            .or_insert(entry.initial_balance_cents)
+    fn balance(&mut self, entry: &PostedEntry) -> Balance {
+        *self
+            .balances
+            .entry(entry.account.clone())
+            .or_insert(entry.opening_balance)
     }
 
     fn post(
         &mut self,
         entry: &PostedEntry,
         kind: EntryKind,
-        amount_cents: u64,
+        amount: UsdCents,
         note: Option<String>,
     ) {
-        let balance = self.balance(entry);
-        let balance_before_cents = *balance;
-        let amount = amount_cents as i64;
-        *balance = match kind {
-            EntryKind::Credit => balance_before_cents.saturating_add(amount),
-            EntryKind::Debit => balance_before_cents.saturating_sub(amount),
+        let balance_before = self.balance(entry);
+        let balance = match kind {
+            EntryKind::Credit => balance_before.credited(amount),
+            EntryKind::Debit => balance_before.debited(amount),
         };
-        let balance_cents = *balance;
-        self.pending.push(Assessed::Moved(BalanceMoved {
-            account_id: entry.account_id.clone(),
+        self.balances.insert(entry.account.clone(), balance);
+        self.decided.push(Assessed::Moved(BalanceMoved {
+            account: entry.account.clone(),
             owner: entry.owner.clone(),
             kind,
-            amount_cents,
+            amount,
             note,
-            balance_before_cents,
-            balance_cents,
+            balance_before,
+            balance,
         }));
     }
 }
@@ -124,67 +115,65 @@ impl TypedStatefulHandler for Assess {
     }
 
     fn accumulate(&self, state: &mut Self::State, entry: PostedEntry) {
-        let Some(presented) = &entry.presentment else {
-            state.post(&entry, entry.kind, entry.amount_cents, entry.note.clone());
+        let Some(originator) = &entry.originator else {
+            state.post(&entry, entry.kind, entry.amount, entry.note.clone());
             return;
         };
-        let payment = Payment {
-            account_id: entry.account_id.clone(),
-            company_name: presented.company_name.clone(),
-            company_id: presented.company_id.clone(),
-            amount_cents: entry.amount_cents,
+        let payment = PaymentKey {
+            account: entry.account.clone(),
+            company_id: originator.company_id.clone(),
+            amount: entry.amount,
         };
-        let presentment = match state.unpaid.get(&payment) {
-            Some(earlier) if presented.is_retry() => earlier + 1,
-            _ => 1,
+        let attempt = match state.unpaid.get(&payment) {
+            Some(earlier) if originator.is_retry() => earlier.next(),
+            _ => Attempt::FIRST,
         };
-        let balance_cents = *state.balance(&entry);
-        if balance_cents >= entry.amount_cents as i64 {
+        let balance = state.balance(&entry);
+        if balance.covers(entry.amount) {
             state.unpaid.remove(&payment);
-            let note = Some(payment.company_name);
-            state.post(&entry, EntryKind::Debit, entry.amount_cents, note);
+            let note = Some(originator.company_name.clone());
+            state.post(&entry, EntryKind::Debit, entry.amount, note);
             return;
         }
-        let fee_rule = self.fee_rule.to_string();
-        match self.fee_rule.fee_cents(presentment) {
-            Some(fee_cents) => {
-                state.pending.push(Assessed::FeeCharged(FeeCharged {
-                    account_id: payment.account_id.clone(),
-                    company_name: payment.company_name.clone(),
-                    company_id: payment.company_id.clone(),
-                    amount_cents: payment.amount_cents,
-                    presentment,
-                    balance_cents,
-                    fee_cents,
-                    fee_rule,
+        match self.fee_rule.fee(attempt) {
+            Some(fee) => {
+                state.decided.push(Assessed::FeeCharged(FeeCharged {
+                    account: entry.account.clone(),
+                    company_id: originator.company_id.clone(),
+                    company_name: originator.company_name.clone(),
+                    amount: entry.amount,
+                    attempt,
+                    balance,
+                    fee,
+                    fee_rule: self.fee_rule,
                 }));
-                let note = Some(format!("NSF fee: {}", payment.company_name));
-                state.post(&entry, EntryKind::Debit, fee_cents, note);
+                let note = Some(format!("NSF fee: {}", originator.company_name));
+                state.post(&entry, EntryKind::Debit, fee, note);
             }
-            None => state.pending.push(Assessed::RetryReturned(RetryReturned {
-                account_id: payment.account_id.clone(),
-                company_name: payment.company_name.clone(),
-                company_id: payment.company_id.clone(),
-                amount_cents: payment.amount_cents,
-                presentment,
-                balance_cents,
-                fee_rule,
+            None => state.decided.push(Assessed::RetryReturned(RetryReturned {
+                account: entry.account.clone(),
+                company_id: originator.company_id.clone(),
+                company_name: originator.company_name.clone(),
+                amount: entry.amount,
+                attempt,
+                balance,
+                fee_rule: self.fee_rule,
             })),
         }
-        state.unpaid.insert(payment, presentment);
+        state.unpaid.insert(payment, attempt);
     }
 
     fn should_emit(&self, state: &Self::State) -> bool {
-        !state.pending.is_empty()
+        !state.decided.is_empty()
     }
 
     fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
         StatefulEmission::ResetEpoch {
-            outputs: state.pending.clone(),
+            outputs: state.decided.clone(),
         }
     }
 
     fn post_emit(&self, state: &mut Self::State) {
-        state.pending.clear();
+        state.decided.clear();
     }
 }

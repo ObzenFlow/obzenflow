@@ -3129,16 +3129,20 @@ impl EffectsCore {
     async fn commit_terminal_group(
         &self,
         cursor: &EffectCursor,
-        mut outcome_entries: Vec<AtomicCommitEntry>,
+        outcome_entries: Vec<AtomicCommitEntry>,
         control_events: Vec<ChainEvent>,
         lineage: RowLineage<'_>,
     ) -> Result<(), EffectError> {
-        outcome_entries.extend(control_events.into_iter().map(|event| AtomicCommitEntry {
-            event,
-            options: CommitOptions::default(),
-            intent: StageAppendIntent::FrameworkObservability,
-        }));
-        for entry in &mut outcome_entries {
+        let mut entries: Vec<AtomicCommitEntry> = control_events
+            .into_iter()
+            .map(|event| AtomicCommitEntry {
+                event,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::FrameworkObservability,
+            })
+            .collect();
+        entries.extend(outcome_entries);
+        for entry in &mut entries {
             self.mark_lineage(&mut entry.event, lineage);
         }
         let group_id = effect_outcome_group_id(cursor);
@@ -3154,11 +3158,7 @@ impl EffectsCore {
         };
         if let Err(error) = crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
-            committer.commit_atomic_group(
-                group_id.as_str(),
-                outcome_entries,
-                Some(&self.ctx.parent),
-            ),
+            committer.commit_atomic_group(group_id.as_str(), entries, Some(&self.ctx.parent)),
         )
         .await
         {

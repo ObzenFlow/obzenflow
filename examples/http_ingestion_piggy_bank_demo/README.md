@@ -24,11 +24,11 @@ curl -XPOST http://127.0.0.1:9090/api/bank/ach/events \
   -H 'content-type: application/json' \
   -H 'Idempotency-Key: "ach-20260306-000412"' \
   -d '{"event_type":"bank.ach_debit","data":{
-        "account_id":"chk-58213",
+        "account":"chk-58213",
         "company_name":"NORTHSIDE FIT",
         "company_id":"1834577921",
         "entry_description":"RETRY PYMT",
-        "amount_cents":4999}}'
+        "amount":"49.99"}}'
 ```
 
 ## Show a fee
@@ -48,7 +48,7 @@ cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prome
   --replay-from <archive> --verify
 ```
 
-The replay decides every presentment again under `one_fee_per_payment`. It
+The replay decides every attempt again under `one_fee_per_payment`. It
 prints each fee it still charges and each retry it now returns with no fee.
 `--verify` lists where they differ and exits with an error, because the
 decisions changed.

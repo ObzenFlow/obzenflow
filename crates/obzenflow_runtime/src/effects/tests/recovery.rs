@@ -241,10 +241,10 @@ async fn waited_call_outcome_group_holds_completion() {
         ["runtime.retry.scheduled"]
     );
     let outcome = group_rows(&journal, effect_outcome_group_id(&cursor).as_str());
-    assert!(outcome.contains(&"test.counting_output".to_string()));
+    assert!(outcome.contains(&"runtime.resilience.attempts_reported".to_string()));
     assert_eq!(
         outcome.last().map(String::as_str),
-        Some("runtime.resilience.attempts_reported")
+        Some("test.counting_output")
     );
 }
 

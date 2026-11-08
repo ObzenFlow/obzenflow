@@ -4,6 +4,7 @@
 
 use super::domain::*;
 use super::handlers::{AccountLedger, Assess};
+use super::money::UsdCents;
 use obzenflow::flow::{
     async_infinite_source, flow, join, merge, sink, source, stateful, transform, FlowBuildError,
     FlowDefinition,
@@ -43,8 +44,8 @@ impl YamlDecoder for AccountYaml {
 
     fn decode(&self, record: YamlRecord<'_>) -> Result<AccountOpened, YamlDecodeError> {
         let account: AccountOpened = record.deserialize()?;
-        if account.initial_balance_cents < 0 {
-            return Err(YamlDecodeError::invalid_value("initial_balance_cents"));
+        if account.opening_balance.is_negative() {
+            return Err(YamlDecodeError::invalid_value("opening_balance"));
         }
         Ok(account)
     }
@@ -53,9 +54,9 @@ impl YamlDecoder for AccountYaml {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LedgerRow {
-    account_id: String,
+    account: AccountId,
     kind: EntryKind,
-    amount_cents: u64,
+    amount: UsdCents,
     #[serde(default)]
     note: Option<String>,
 }
@@ -63,11 +64,11 @@ struct LedgerRow {
 impl LedgerRow {
     fn into_entry(self) -> LedgerEntry {
         LedgerEntry {
-            account_id: self.account_id,
+            account: self.account,
             kind: self.kind,
-            amount_cents: self.amount_cents,
+            amount: self.amount,
             note: self.note,
-            presentment: None,
+            originator: None,
         }
     }
 }
@@ -80,8 +81,8 @@ impl CsvDecoder for LedgerCsv {
 
     fn decode(&self, record: CsvRecord<'_>) -> Result<LedgerEntry, CsvDecodeError> {
         let row: LedgerRow = record.deserialize()?;
-        if row.amount_cents == 0 {
-            return Err(CsvDecodeError::invalid_value("amount_cents"));
+        if row.amount.is_zero() {
+            return Err(CsvDecodeError::invalid_value("amount"));
         }
         Ok(row.into_entry())
     }
@@ -95,8 +96,8 @@ impl CsvDecoder for AchDebitCsv {
 
     fn decode(&self, record: CsvRecord<'_>) -> Result<AchDebit, CsvDecodeError> {
         let debit: AchDebit = record.deserialize()?;
-        if debit.amount_cents == 0 {
-            return Err(CsvDecodeError::invalid_value("amount_cents"));
+        if debit.amount.is_zero() {
+            return Err(CsvDecodeError::invalid_value("amount"));
         }
         Ok(debit)
     }
@@ -110,8 +111,8 @@ impl IngressDecoder for AccountIngress {
 
     fn decode(&self, record: IngressRecord<'_>) -> Result<AccountOpened, IngressDecodeError> {
         let account: AccountOpened = record.deserialize()?;
-        if account.initial_balance_cents < 0 {
-            return Err(IngressDecodeError::invalid_value("initial_balance_cents"));
+        if account.opening_balance.is_negative() {
+            return Err(IngressDecodeError::invalid_value("opening_balance"));
         }
         Ok(account)
     }
@@ -126,8 +127,8 @@ impl IngressDecoder for LedgerIngress {
 
     fn decode(&self, record: IngressRecord<'_>) -> Result<LedgerEntry, IngressDecodeError> {
         let row: LedgerRow = record.deserialize()?;
-        if row.amount_cents == 0 {
-            return Err(IngressDecodeError::invalid_value("amount_cents"));
+        if row.amount.is_zero() {
+            return Err(IngressDecodeError::invalid_value("amount"));
         }
         Ok(row.into_entry())
     }
@@ -141,8 +142,8 @@ impl IngressDecoder for AchIngress {
 
     fn decode(&self, record: IngressRecord<'_>) -> Result<AchDebit, IngressDecodeError> {
         let debit: AchDebit = record.deserialize()?;
-        if debit.amount_cents == 0 {
-            return Err(IngressDecodeError::invalid_value("amount_cents"));
+        if debit.amount.is_zero() {
+            return Err(IngressDecodeError::invalid_value("amount"));
         }
         Ok(debit)
     }
@@ -150,11 +151,11 @@ impl IngressDecoder for AchIngress {
 
 fn present(debit: AchDebit) -> LedgerEntry {
     LedgerEntry {
-        account_id: debit.account_id,
+        account: debit.account,
         kind: EntryKind::Debit,
-        amount_cents: debit.amount_cents,
+        amount: debit.amount,
         note: None,
-        presentment: Some(Presentment {
+        originator: Some(Originator {
             company_name: debit.company_name,
             company_id: debit.company_id,
             entry_description: debit.entry_description,
@@ -164,49 +165,49 @@ fn present(debit: AchDebit) -> LedgerEntry {
 
 fn post(account: AccountOpened, entry: LedgerEntry) -> PostedEntry {
     PostedEntry {
-        account_id: entry.account_id,
+        account: entry.account,
         owner: account.owner,
         kind: entry.kind,
-        amount_cents: entry.amount_cents,
-        initial_balance_cents: account.initial_balance_cents,
+        amount: entry.amount,
+        opening_balance: account.opening_balance,
         note: entry.note,
-        presentment: entry.presentment,
+        originator: entry.originator,
     }
 }
 
 fn return_line(
-    account_id: &str,
+    account: &AccountId,
     company_name: &str,
-    amount_cents: u64,
-    presentment: u32,
+    amount: UsdCents,
+    attempt: Attempt,
     fee: &str,
-    fee_rule: &str,
+    fee_rule: FeeRule,
 ) -> String {
     format!(
-        "{account_id:<9}  {company_name:<16}  {:>8}  presentment {presentment}  returned, {fee} ({fee_rule})",
-        format_unsigned_cents(amount_cents),
+        "{account:<9}  {company_name:<16}  {:>8}  attempt {attempt}  returned, {fee} ({fee_rule})",
+        amount.dollars(),
     )
 }
 
 fn fee_charged_line(charged: &FeeCharged) -> String {
     return_line(
-        &charged.account_id,
+        &charged.account,
         &charged.company_name,
-        charged.amount_cents,
-        charged.presentment,
-        &format!("fee {}", format_unsigned_cents(charged.fee_cents)),
-        &charged.fee_rule,
+        charged.amount,
+        charged.attempt,
+        &format!("fee {}", charged.fee.dollars()),
+        charged.fee_rule,
     )
 }
 
 fn retry_returned_line(returned: &RetryReturned) -> String {
     return_line(
-        &returned.account_id,
+        &returned.account,
         &returned.company_name,
-        returned.amount_cents,
-        returned.presentment,
+        returned.amount,
+        returned.attempt,
         "no fee",
-        &returned.fee_rule,
+        returned.fee_rule,
     )
 }
 
@@ -249,14 +250,14 @@ pub fn assemble_flow(
         let live_presentments = transforms::map(present);
         let assess_handler = Assess::new(settings.fee_rule);
         let post_entry = joins::inner_then_live(
-            |account: &AccountOpened| account.account_id.clone(),
-            |entry: &LedgerEntry| entry.account_id.clone(),
+            |account: &AccountOpened| account.account.clone(),
+            |entry: &LedgerEntry| entry.account.clone(),
             post,
         );
         let checkbook_handler = stateful::group_by(
-            |entry: &BalanceMoved| entry.account_id.clone(),
+            |entry: &BalanceMoved| entry.account.clone(),
             AccountLedger::record,
-            |account_id: &String, ledger: &AccountLedger| ledger.snapshot(account_id),
+            |account: &AccountId, ledger: &AccountLedger| ledger.snapshot(account),
         )
         .emit(emit::always)
         .updated_groups();
@@ -268,7 +269,7 @@ pub fn assemble_flow(
                         .transactions
                         .iter()
                         .map(|entry| {
-                            let amount = format_unsigned_cents(entry.amount_cents);
+                            let amount = entry.amount.dollars();
                             let (credit, debit) = match entry.kind {
                                 EntryKind::Credit => (amount.clone(), String::new()),
                                 EntryKind::Debit => (String::new(), amount.clone()),
@@ -285,7 +286,7 @@ pub fn assemble_flow(
                                 amount,
                                 credit,
                                 debit,
-                                format_cents(entry.balance_cents),
+                                entry.balance.dollars(),
                                 entry.note.as_deref().unwrap_or("").to_string(),
                             ]
                         })
@@ -294,19 +295,19 @@ pub fn assemble_flow(
             )
             .with_header(|snapshot: &CheckbookSnapshot| {
                 vec![
-                    format!("Account: {} ({})", snapshot.account_id, snapshot.owner,),
+                    format!("Account: {} ({})", snapshot.account, snapshot.owner),
                     format!(
                         "Current: {} | Available: {}",
-                        format_cents(snapshot.current_balance_cents),
-                        format_cents(snapshot.available_balance_cents),
+                        snapshot.current_balance.dollars(),
+                        snapshot.available_balance.dollars(),
                     ),
                 ]
             })
             .with_footer(|snapshot: &CheckbookSnapshot| {
                 vec![format!(
                     "Credits: {} | Debits: {} | Tx: {}",
-                    format_cents(snapshot.total_credits_cents),
-                    format_cents(snapshot.total_debits_cents),
+                    snapshot.total_credits.dollars(),
+                    snapshot.total_debits.dollars(),
                     snapshot.transactions.len(),
                 )]
             }),
@@ -382,9 +383,9 @@ mod tests {
     #[test]
     fn only_the_ach_path_takes_nacha_fields_and_it_takes_them_all() {
         let credit_with_retry_fields = serde_json::json!({
-            "account_id": "chk-58213",
+            "account": "chk-58213",
             "kind": "Credit",
-            "amount_cents": 4999,
+            "amount": "49.99",
             "company_name": "NORTHSIDE FIT",
             "company_id": "1834577921",
             "entry_description": "RETRY PYMT"
@@ -394,20 +395,20 @@ mod tests {
             .is_err());
 
         let partial_debit = serde_json::json!({
-            "account_id": "chk-58213",
+            "account": "chk-58213",
             "company_name": "NORTHSIDE FIT",
-            "amount_cents": 4999
+            "amount": "49.99"
         });
         assert!(AchIngress
             .decode(IngressRecord::new(&partial_debit))
             .is_err());
 
         let retry = serde_json::json!({
-            "account_id": "chk-58213",
+            "account": "chk-58213",
             "company_name": "NORTHSIDE FIT",
             "company_id": "1834577921",
             "entry_description": "RETRY PYMT",
-            "amount_cents": 4999
+            "amount": "49.99"
         });
         let entry = present(
             AchIngress
@@ -416,8 +417,29 @@ mod tests {
         );
         assert_eq!(entry.kind, EntryKind::Debit);
         assert!(entry
-            .presentment
-            .is_some_and(|presentment| presentment.is_retry()));
+            .originator
+            .is_some_and(|originator| originator.is_retry()));
+    }
+
+    #[test]
+    fn amount_float_text_refused() {
+        let float_amount = serde_json::json!({
+            "account": "acct-1",
+            "kind": "Credit",
+            "amount": 2.5,
+            "note": "paycheck"
+        });
+        assert!(LedgerIngress
+            .decode(IngressRecord::new(&float_amount))
+            .is_err());
+        let zero_amount = serde_json::json!({
+            "account": "acct-1",
+            "kind": "Credit",
+            "amount": "0.00"
+        });
+        assert!(LedgerIngress
+            .decode(IngressRecord::new(&zero_amount))
+            .is_err());
     }
 
     fn shipped_app(file: &str) -> toml::Table {
