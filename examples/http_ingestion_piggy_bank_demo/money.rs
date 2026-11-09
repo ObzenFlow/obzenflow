@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn balance_covers_amount_up_to_itself() {
+    fn balance_covers_equal_amount() {
         let balance = Balance::parse("31.20").expect("a balance");
         assert!(balance.covers(UsdCents::parse("31.20").expect("an amount")));
         assert!(!balance.covers(UsdCents::parse("31.21").expect("an amount")));

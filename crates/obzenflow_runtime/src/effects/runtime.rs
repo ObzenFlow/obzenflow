@@ -1432,7 +1432,6 @@ impl EffectsCore {
             let parent_event = self.ctx.parent.authored();
             let lineage = self.ctx.lineage;
             let base_context = binding_context;
-            let holds = input_holds.clone();
             RepeatableEffectOperation::new_with_lifecycle(move |lifecycle| {
                 let started = started.clone();
                 let effect = effect.clone();
@@ -1440,17 +1439,12 @@ impl EffectsCore {
                 let slot = slot.clone();
                 let failure = failure.clone();
                 let parent_event = parent_event.clone();
-                let holds = holds.clone();
                 async move {
                     *slot.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     started.store(true, std::sync::atomic::Ordering::Release);
                     *failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     lifecycle.mark_started();
-                    let executed = {
-                        let _in_flight = holds.physical_call();
-                        effect.execute(&mut effect_ctx).await
-                    };
-                    let output = match executed {
+                    let output = match effect.execute(&mut effect_ctx).await {
                         Ok(output) => {
                             lifecycle.mark_completed(PhysicalCallOutcome::Succeeded);
                             output
@@ -1655,7 +1649,6 @@ impl EffectsCore {
             let slot = outcome_slot.clone();
             let failure = failure_slot.clone();
             let start_committed = start_committed.clone();
-            let holds = input_holds.clone();
             let mut start = Some(AffineStart {
                 event: start_event,
                 data_journal: self.ctx.data_journal.clone(),
@@ -1679,7 +1672,6 @@ impl EffectsCore {
                 let failure = failure.clone();
                 let start_committed = start_committed.clone();
                 let parent_event = parent_event.clone();
-                let holds = holds.clone();
                 async move {
                     if let Some(start) = start {
                         start.commit().await?;
@@ -1689,11 +1681,7 @@ impl EffectsCore {
                     *slot.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     *failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     lifecycle.mark_started();
-                    let executed = {
-                        let _in_flight = holds.physical_call();
-                        effect.execute(&mut effect_ctx).await
-                    };
-                    let output = match executed {
+                    let output = match effect.execute(&mut effect_ctx).await {
                         Ok(output) => {
                             lifecycle.mark_completed(PhysicalCallOutcome::Succeeded);
                             output

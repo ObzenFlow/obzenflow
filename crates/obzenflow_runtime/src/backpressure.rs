@@ -1908,30 +1908,6 @@ mod stall_clock_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn hung_physical_call_stalls_edge() {
-        let w = writer(&[(1, 30)]);
-        fill(&w.writer, 1);
-        let downstream = w.readers[0].edge_ids().expect("enforced edge").1;
-        let holds = crate::effects::InputHolds::new(w.readers.clone(), None);
-        let in_flight = holds.physical_call();
-        let wait = tokio::spawn(async move { holds.wait_to_retry(Duration::from_secs(90)).await });
-        let mut episode = StallEpisode::default();
-
-        let mut stalled = None;
-        for _ in 0..=30 {
-            stalled = stalled_on(w.writer.look(&mut episode, 1, tokio::time::Instant::now()));
-            if stalled.is_some() {
-                break;
-            }
-            tokio::time::advance(Duration::from_secs(1)).await;
-        }
-        assert_eq!(stalled, Some((downstream, Duration::from_secs(30))));
-        assert_eq!(renewals(&w.readers[0]), 0);
-        drop(in_flight);
-        wait.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn ended_wait_stops_renewals() {
         let w = writer(&[(1, 30)]);
         let holds = crate::effects::InputHolds::new(w.readers.clone(), None);

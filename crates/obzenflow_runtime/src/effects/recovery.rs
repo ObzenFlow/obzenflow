@@ -8,7 +8,7 @@ use crate::stages::common::heartbeat::RetryWaitGuard;
 use crate::stages::common::supervision::backpressure_drain::CONTROL_RESPONSIVENESS_CAP;
 use obzenflow_core::event::CausalFrontier;
 use obzenflow_core::MiddlewareExecutionScope;
-use std::sync::atomic::{AtomicU32, AtomicUsize};
+use std::sync::atomic::AtomicU32;
 use tokio::time::Instant;
 
 /// The holds an effect call renews on its stage's input edges while it waits
@@ -17,7 +17,6 @@ use tokio::time::Instant;
 pub struct InputHolds {
     readers: Arc<[BackpressureReader]>,
     heartbeat: Option<Arc<HeartbeatState>>,
-    calls_in_flight: Arc<AtomicUsize>,
 }
 
 impl InputHolds {
@@ -30,13 +29,11 @@ impl InputHolds {
         Self {
             readers: readers.into_iter().collect(),
             heartbeat,
-            calls_in_flight: Arc::default(),
         }
     }
 
-    /// Wait for `delay`, renewing every hold at the control cadence while no
-    /// physical call of the stage is in flight. Renewals stop when the wait
-    /// ends or is dropped.
+    /// Wait for `delay`, renewing every hold at the control cadence. Renewals
+    /// stop when the wait ends or is dropped.
     pub async fn wait_to_retry(&self, delay: Duration) {
         let _waiting = self.heartbeat.clone().map(RetryWaitGuard::new);
         let deadline = Instant::now().checked_add(delay);
@@ -58,29 +55,9 @@ impl InputHolds {
     }
 
     fn renew(&self) {
-        if self.calls_in_flight.load(Ordering::Acquire) > 0 {
-            return;
-        }
         for reader in self.readers.iter() {
             reader.renew_hold();
         }
-    }
-
-    pub(crate) fn physical_call(&self) -> PhysicalCallInFlight {
-        self.calls_in_flight.fetch_add(1, Ordering::AcqRel);
-        PhysicalCallInFlight {
-            calls_in_flight: self.calls_in_flight.clone(),
-        }
-    }
-}
-
-pub(crate) struct PhysicalCallInFlight {
-    calls_in_flight: Arc<AtomicUsize>,
-}
-
-impl Drop for PhysicalCallInFlight {
-    fn drop(&mut self) {
-        self.calls_in_flight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
