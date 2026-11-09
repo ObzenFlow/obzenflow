@@ -84,6 +84,8 @@ pub struct Originator {
 }
 
 impl Originator {
+    /// Nacha requires a debit presented again after a return for insufficient
+    /// funds to carry "RETRY PYMT" as its company entry description.
     pub fn is_retry(&self) -> bool {
         self.entry_description == RETRY_DESCRIPTION
     }
