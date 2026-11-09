@@ -204,6 +204,10 @@ pub enum StageActivity {
     /// delivers nothing while any non-exhausted input has no head. `upstream`
     /// names an input being waited on so operators can debug rate coupling.
     WaitingOnQuietInput { upstream: Option<StageId> },
+    /// An effect call is waiting before its next attempt, on an open circuit
+    /// breaker or a retry backoff. The wait is deliberate and adds no blocked
+    /// time.
+    WaitingToRetry,
     /// Stage is draining.
     Draining,
     /// Stage has completed.

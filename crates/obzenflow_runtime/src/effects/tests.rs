@@ -32,6 +32,7 @@ use std::sync::Mutex;
 
 mod call;
 mod current_run;
+mod recovery;
 
 #[derive(Debug)]
 struct TestAllowAllEffectBoundary;
@@ -1898,6 +1899,7 @@ fn invocation_context_with_mode(
         effect_declarations: fixture_declarations(),
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
+        backpressure_readers: Vec::new(),
         emit_enabled: false,
         effect_boundary: None,
         catch_up: Some(catch_up),
@@ -8837,6 +8839,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
             ],
             output_contract: StageOutputContract::empty(),
             backpressure_writer: BackpressureWriter::disabled(),
+            backpressure_readers: Vec::new(),
             emit_enabled: false,
             effect_boundary: boundary,
             catch_up: None,

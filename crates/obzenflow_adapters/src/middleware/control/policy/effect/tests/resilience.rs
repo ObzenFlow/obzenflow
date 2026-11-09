@@ -9,7 +9,7 @@ use super::support::*;
 use crate::middleware::control::resilience::EffectPlanFactory;
 use obzenflow_core::event::payloads::execution_payload::RecoveryFact;
 
-use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
+use obzenflow_core::config::{ConfigScope, ConfigSource};
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, ExecutionPayload, RetryStopReason,
 };
@@ -17,27 +17,17 @@ use obzenflow_core::event::ChainPayload;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
     CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY, CIRCUIT_BREAKER_COUNT_WINDOW_KEY,
-    CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY, CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
-    CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, CIRCUIT_BREAKER_PROBES_KEY,
-    CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY, CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
-    CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
-    RATE_LIMITER_COST_PER_ATTEMPT_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
-    RETRY_ATTEMPT_START_WINDOW_MS_KEY, RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY,
-    RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
+    CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY, CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY,
+    CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY,
+    CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY,
+    CIRCUIT_BREAKER_PROBES_KEY, CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+    CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY, CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+    RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+    RATE_LIMITER_EVENTS_PER_SECOND_KEY, RETRY_ATTEMPT_START_WINDOW_MS_KEY,
+    RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY, RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
+    RETRY_MAX_OUTAGE_WAIT_MS_KEY, RETRY_ON_REFUSAL_KEY,
 };
 use std::collections::BTreeSet;
-
-fn scripted_operation(
-    calls: Arc<AtomicUsize>,
-    result_for_call: impl Fn(usize) -> Result<Vec<ChainEvent>, EffectError> + Send + Sync + 'static,
-) -> RepeatableEffectOperation {
-    let result_for_call = Arc::new(result_for_call);
-    RepeatableEffectOperation::new(move || {
-        let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
-        let result_for_call = result_for_call.clone();
-        async move { result_for_call(call) }
-    })
-}
 
 #[tokio::test(start_paused = true)]
 async fn breaker_free_retry_has_independent_budget_admission_and_evidence() {
@@ -264,52 +254,6 @@ async fn cancellation_after_limiter_reservation_refunds_before_any_physical_call
     }
 }
 
-fn materialized_resilience(
-    factory: Box<dyn crate::middleware::MiddlewareFactory>,
-) -> (
-    EffectPolicyAttachment,
-    Arc<ControlMiddlewareAggregator>,
-    StageId,
-) {
-    materialized_resilience_with_snapshot(factory, &ResolvedRuntimeConfig::builtin_defaults())
-}
-
-fn materialized_resilience_with_snapshot(
-    factory: Box<dyn crate::middleware::MiddlewareFactory>,
-    snapshot: &ResolvedRuntimeConfig,
-) -> (
-    EffectPolicyAttachment,
-    Arc<ControlMiddlewareAggregator>,
-    StageId,
-) {
-    let config = test_stage_config_for_factories_with_snapshot(&[factory.as_ref()], snapshot);
-    let stage_id = config.stage_id;
-    let control = Arc::new(ControlMiddlewareAggregator::new());
-    let attachment = materialize_effect_attachment(
-        factory.as_ref(),
-        &config,
-        &control,
-        EffectSafety::Idempotent,
-    )
-    .expect("resilience aggregate should materialize for an idempotent effect");
-    (attachment, control, stage_id)
-}
-
-fn file_effect_snapshot(entries: &[(&str, ConfigValue)]) -> ResolvedRuntimeConfig {
-    let mut candidates = CandidateSet::default();
-    for (key_path, value) in entries {
-        candidates
-            .admit(ScopedCandidate {
-                key_path: (*key_path).to_string(),
-                address: ConfigAddress::effect("retrying_breaker_test", "effect.retry"),
-                source: ConfigSource::File,
-                value: value.clone(),
-            })
-            .expect("test file candidate should be valid");
-    }
-    ResolvedRuntimeConfig::new(candidates)
-}
-
 fn file_stage_snapshot(entries: &[(&str, ConfigValue)]) -> ResolvedRuntimeConfig {
     let mut candidates = CandidateSet::default();
     for (key_path, value) in entries {
@@ -355,10 +299,22 @@ fn consumed_keys_cover_optional_and_mode_dependent_fields_without_creating_compo
         CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
         CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
         CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
+        CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY,
+        CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY,
+        CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY,
         CIRCUIT_BREAKER_PROBES_KEY,
         CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
     ]);
     assert_eq!(breaker_keys, expected_breaker_keys);
+    let defaults = breaker_only
+        .dsl_config_defaults()
+        .into_iter()
+        .map(|default| default.key_path)
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !defaults.contains(CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY),
+        "an inferred open_for_mode leaves every configuration scope free to set it"
+    );
 
     let complete = EffectPlanFactory::with_breaker(
         crate::middleware::control::circuit_breaker().consecutive_failures(2),
@@ -377,6 +333,8 @@ fn consumed_keys_cover_optional_and_mode_dependent_fields_without_creating_compo
             RETRY_MAX_ATTEMPTS_KEY,
             RETRY_MAX_BACKOFF_MS_KEY,
             RETRY_ATTEMPT_START_WINDOW_MS_KEY,
+            RETRY_ON_REFUSAL_KEY,
+            RETRY_MAX_OUTAGE_WAIT_MS_KEY,
             RATE_LIMITER_EVENTS_PER_SECOND_KEY,
             RATE_LIMITER_BURST_CAPACITY_KEY,
             RATE_LIMITER_COST_PER_ATTEMPT_KEY,
@@ -822,20 +780,6 @@ async fn stage_broadcast_configuration_supplies_resilience_limiter_implicit_burs
     assert_resilience_limiter_uses_supplied_implicit_burst(&snapshot).await;
 }
 
-fn retry_delays(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Vec<u64> {
-    report
-        .control_events
-        .iter()
-        .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(ExecutionPayload::Recovery(RecoveryFact::RetryScheduled {
-                delay_ms,
-                ..
-            })) => Some(*delay_ms),
-            _ => None,
-        })
-        .collect()
-}
-
 fn recovery_completions(
     report: &obzenflow_runtime::effects::EffectBoundaryReport,
 ) -> Vec<(u32, u64, u64)> {
@@ -866,59 +810,6 @@ fn recovery_completion_cursors(
             ChainPayload::Execution(ExecutionPayload::Recovery(
                 RecoveryFact::RecoveryCompleted { cursor, .. },
             )) => Some(cursor.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn identity_at(input_seq: u64) -> EffectIdentity {
-    let mut identity = identity_for("effect.retry");
-    identity.cursor = EffectCursor::new("test_flow", "test_stage", input_seq, 0);
-    identity
-}
-
-fn settled_attempts(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Vec<u32> {
-    report
-        .control_events
-        .iter()
-        .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                CircuitBreakerFact::AttemptSettled { attempt, .. },
-            ))
-            | ChainPayload::Execution(ExecutionPayload::Recovery(
-                RecoveryFact::AttemptCompleted { attempt, .. },
-            )) => Some(*attempt),
-            _ => None,
-        })
-        .collect()
-}
-
-fn scheduled_attempts(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Vec<u32> {
-    report
-        .control_events
-        .iter()
-        .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(ExecutionPayload::Recovery(RecoveryFact::RetryScheduled {
-                next_attempt,
-                ..
-            })) => Some(*next_attempt),
-            _ => None,
-        })
-        .collect()
-}
-
-fn retry_exhaustions(
-    report: &obzenflow_runtime::effects::EffectBoundaryReport,
-) -> Vec<(u32, RetryStopReason)> {
-    report
-        .control_events
-        .iter()
-        .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(ExecutionPayload::Recovery(RecoveryFact::RetryExhausted {
-                total_attempts,
-                reason,
-                ..
-            })) => Some((*total_attempts, *reason)),
             _ => None,
         })
         .collect()
@@ -1202,7 +1093,8 @@ async fn another_invocation_opening_the_circuit_stops_a_pending_continuation() {
         crate::middleware::control::retry()
             .fixed_delay(Duration::from_millis(10))
             .max_attempts(2)
-            .attempt_start_window(Duration::from_secs(1)),
+            .attempt_start_window(Duration::from_secs(1))
+            .on_refusal(crate::middleware::control::OnRefusal::Fail),
     )
     .build()
     .expect("retrying resilience aggregate");
@@ -1380,7 +1272,8 @@ async fn stale_retry_reservation_preserves_last_physical_error_after_recovery_cy
         crate::middleware::control::retry()
             .fixed_delay(Duration::from_millis(1))
             .max_attempts(2)
-            .attempt_start_window(Duration::from_secs(10)),
+            .attempt_start_window(Duration::from_secs(10))
+            .on_refusal(crate::middleware::control::OnRefusal::Fail),
     )
     .rate_limit_each_attempt(crate::middleware::control::rate_limit(1.0).burst_capacity(1.0))
     .build()
@@ -1678,60 +1571,6 @@ async fn probe_busy_rejection_has_no_attempt_or_committed_permit() {
     assert_eq!(metrics.failures_total, 1);
     assert_eq!(metrics.successes_total, 1);
     assert_eq!(metrics.rejections_total, 1);
-}
-
-fn breaker_transitions(
-    report: &obzenflow_runtime::effects::EffectBoundaryReport,
-) -> Vec<(WriterId, &'static str, String)> {
-    report
-        .control_events
-        .iter()
-        .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(fact)) => {
-                let transition = match fact {
-                    CircuitBreakerFact::Opened { .. } => "opened",
-                    CircuitBreakerFact::HalfOpen { .. } => "half_open",
-                    CircuitBreakerFact::Closed { .. } => "closed",
-                    CircuitBreakerFact::StateChanged { .. } => "state_changed",
-                    CircuitBreakerFact::Rejected { .. }
-                    | CircuitBreakerFact::AttemptSettled { .. } => return None,
-                };
-                Some((event.writer_id, transition, fact.unit().as_str().to_owned()))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn composite_members(
-    factory: &dyn crate::middleware::MiddlewareFactory,
-) -> (
-    Arc<ControlMiddlewareAggregator>,
-    StageId,
-    Arc<PerEffectPolicyBoundary>,
-    StageId,
-    Arc<PerEffectPolicyBoundary>,
-) {
-    let control = Arc::new(ControlMiddlewareAggregator::new());
-    let owner = ProtectedUnitOwner::Composite(StageKey::from("digest"));
-    let member = || {
-        let config = test_stage_config(factory);
-        let attachment = materialize_owned_effect_attachment(
-            factory,
-            &config,
-            &control,
-            EffectSafety::Idempotent,
-            owner.clone(),
-        )
-        .expect("a composite member materializes its share of the unit");
-        (
-            config.stage_id,
-            Arc::new(boundary_with_chain(vec![attachment])),
-        )
-    };
-    let (map, map_boundary) = member();
-    let (reduce, reduce_boundary) = member();
-    (control, map, map_boundary, reduce, reduce_boundary)
 }
 
 #[tokio::test(start_paused = true)]

@@ -7,6 +7,7 @@ use super::history::{
     validate_cursor_history,
 };
 use super::*;
+use obzenflow_core::event::payloads::effect_payload::EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX;
 use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::{CausalError, CausalFrontier, JournalRecord};
 use obzenflow_core::journal::JournalReader;
@@ -138,6 +139,7 @@ struct CursorFold {
     abandonments: Vec<(ChainEvent, EffectRecoveryAbandoned)>,
     terminal: Option<FoldedGroup>,
     escape_controls: BTreeMap<EffectAttemptOrdinal, FoldedGroup>,
+    progress: BTreeMap<u32, FoldedGroup>,
 }
 
 #[derive(Default)]
@@ -155,6 +157,7 @@ struct FoldedGroup {
 enum GroupCursor {
     Outcome(EffectCursor),
     EscapeControls(EffectCursor, EffectAttemptOrdinal),
+    Progress(EffectCursor, u32),
 }
 
 enum Claim {
@@ -380,7 +383,8 @@ impl Folded {
         group: PendingGroup,
     ) -> Result<(), CurrentRunFailure> {
         let effect_group = group_id.starts_with(OUTCOME_GROUP_PREFIX)
-            || group_id.starts_with(ESCAPE_CONTROLS_GROUP_PREFIX);
+            || group_id.starts_with(ESCAPE_CONTROLS_GROUP_PREFIX)
+            || group_id.starts_with(EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX);
         if effect_group {
             validate_atomic_group_members(group_id, &group.members)
                 .map_err(CurrentRunFailure::History)?;
@@ -415,11 +419,46 @@ impl Folded {
             Some(GroupCursor::EscapeControls(cursor, attempt)) => {
                 self.fold_escape_controls(group_id, cursor, attempt, folded)
             }
+            Some(GroupCursor::Progress(cursor, wait)) => {
+                self.fold_progress(group_id, cursor, wait, folded)
+            }
             None if group_id.starts_with(ESCAPE_CONTROLS_GROUP_PREFIX) => Err(history_failure(
                 format!("escape-control batch '{group_id}' has no matching effect Start"),
             )),
+            None if group_id.starts_with(EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX) => Err(
+                history_failure(format!("recovery progress '{group_id}' names no cursor")),
+            ),
             None => Ok(()),
         }
+    }
+
+    fn fold_progress(
+        &mut self,
+        group_id: &str,
+        cursor: EffectCursor,
+        wait: u32,
+        group: FoldedGroup,
+    ) -> Result<(), CurrentRunFailure> {
+        if let Claim::Ignore = self.claim(&cursor, true)? {
+            return Ok(());
+        }
+        if group.events.iter().any(ChainEvent::consumes_data_credit) {
+            return Err(history_failure(format!(
+                "recovery progress '{group_id}' contains Data"
+            )));
+        }
+        let fold = self.cursors.entry(cursor).or_default();
+        if fold.terminal.is_some() {
+            return Err(history_failure(format!(
+                "recovery progress '{group_id}' appears after settlement"
+            )));
+        }
+        if fold.progress.insert(wait, group).is_some() {
+            return Err(history_failure(format!(
+                "atomic effect group '{group_id}' has non-contiguous, missing, or duplicate frame membership"
+            )));
+        }
+        Ok(())
     }
 
     fn fold_outcome_group(
@@ -552,27 +591,49 @@ impl Folded {
                 .merge(&batch.causal)
                 .map_err(journal_failure)?;
         }
+        for (wait, batch) in &fold.progress {
+            history.progress_batches.insert(*wait, batch.events.clone());
+            history
+                .causal
+                .merge(&batch.causal)
+                .map_err(journal_failure)?;
+        }
         validate_cursor_history(cursor, &history).map_err(CurrentRunFailure::History)?;
         Ok(history)
     }
 }
 
+#[derive(Clone, Copy)]
+enum GroupKind {
+    Outcome,
+    EscapeControls,
+    Progress,
+}
+
 fn group_cursor(group_id: &str) -> Option<GroupCursor> {
-    let (fields, outcome) = match group_id.strip_prefix(OUTCOME_GROUP_PREFIX) {
-        Some(fields) => (fields, true),
-        None => (group_id.strip_prefix(ESCAPE_CONTROLS_GROUP_PREFIX)?, false),
-    };
+    let (fields, kind) = [
+        (OUTCOME_GROUP_PREFIX, GroupKind::Outcome),
+        (ESCAPE_CONTROLS_GROUP_PREFIX, GroupKind::EscapeControls),
+        (EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX, GroupKind::Progress),
+    ]
+    .into_iter()
+    .find_map(|(prefix, kind)| group_id.strip_prefix(prefix).map(|fields| (fields, kind)))?;
     let (namespace, fields) = length_prefixed(fields)?;
     let (stage, fields) = length_prefixed(fields)?;
     let mut fields = fields.split(':');
     let input = fields.next()?.parse::<u64>().ok()?;
     let ordinal = EffectOrdinal::new(fields.next()?.parse::<u32>().ok()?);
     let cursor = EffectCursor::new(namespace, stage, input, ordinal);
-    let parsed = if outcome {
-        GroupCursor::Outcome(cursor)
-    } else {
-        let attempt = EffectAttemptOrdinal::new(fields.next()?.parse::<u32>().ok()?);
-        GroupCursor::EscapeControls(cursor, attempt)
+    let parsed = match kind {
+        GroupKind::Outcome => GroupCursor::Outcome(cursor),
+        GroupKind::EscapeControls => {
+            let attempt = EffectAttemptOrdinal::new(fields.next()?.parse::<u32>().ok()?);
+            GroupCursor::EscapeControls(cursor, attempt)
+        }
+        GroupKind::Progress => {
+            let wait = fields.next()?.parse::<u32>().ok()?;
+            GroupCursor::Progress(cursor, wait)
+        }
     };
     if fields.next().is_some() {
         return None;
@@ -582,6 +643,7 @@ fn group_cursor(group_id: &str) -> Option<GroupCursor> {
         GroupCursor::EscapeControls(cursor, attempt) => {
             effect_escape_controls_group_id(cursor, *attempt)
         }
+        GroupCursor::Progress(cursor, wait) => effect_recovery_progress_group_id(cursor, *wait),
     };
     (canonical.as_str() == group_id).then_some(parsed)
 }

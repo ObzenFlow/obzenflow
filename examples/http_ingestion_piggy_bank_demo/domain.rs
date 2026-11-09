@@ -2,18 +2,66 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::money::{Balance, UsdCents};
 use obzenflow::schema::{StageOutputFacts, TypedPayload};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::num::NonZeroU32;
 
-pub const RETURNED_PAYMENT_FEE_CENTS: u64 = 3500;
+pub const RETURNED_PAYMENT_FEE: UsdCents = UsdCents::whole_dollars(35);
 pub const RETRY_DESCRIPTION: &str = "RETRY PYMT";
+
+/// An account number, "chk-58213".
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AccountId(pub String);
+
+impl fmt::Display for AccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
+    }
+}
+
+/// A merchant's Nacha company identification, "1834577921".
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CompanyId(pub String);
+
+impl fmt::Display for CompanyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
+    }
+}
+
+/// Which time a payment has been presented. A retry of a payment still unpaid
+/// is the next attempt; a payment that cleared starts over at the first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Attempt(NonZeroU32);
+
+impl Attempt {
+    pub const FIRST: Self = Self(NonZeroU32::MIN);
+
+    pub fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+
+    pub fn is_first(self) -> bool {
+        self == Self::FIRST
+    }
+}
+
+impl fmt::Display for Attempt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountOpened {
-    pub account_id: String,
+    pub account: AccountId,
     pub owner: String,
-    pub initial_balance_cents: i64,
+    pub opening_balance: Balance,
 }
 
 impl TypedPayload for AccountOpened {
@@ -26,15 +74,32 @@ pub enum EntryKind {
     Debit,
 }
 
+/// The merchant behind an ACH debit, in the fields Nacha requires a retry to
+/// repeat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Originator {
+    pub company_name: String,
+    pub company_id: CompanyId,
+    pub entry_description: String,
+}
+
+impl Originator {
+    /// Nacha requires a debit presented again after a return for insufficient
+    /// funds to carry "RETRY PYMT" as its company entry description.
+    pub fn is_retry(&self) -> bool {
+        self.entry_description == RETRY_DESCRIPTION
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerEntry {
-    pub account_id: String,
+    pub account: AccountId,
     pub kind: EntryKind,
-    pub amount_cents: u64,
+    pub amount: UsdCents,
     #[serde(default)]
     pub note: Option<String>,
     #[serde(default)]
-    pub presentment: Option<Presentment>,
+    pub originator: Option<Originator>,
 }
 
 impl TypedPayload for LedgerEntry {
@@ -43,45 +108,40 @@ impl TypedPayload for LedgerEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AchDebit {
-    pub account_id: String,
+    pub account: AccountId,
     pub company_name: String,
-    pub company_id: String,
+    pub company_id: CompanyId,
     pub entry_description: String,
-    pub amount_cents: u64,
+    pub amount: UsdCents,
 }
 
 impl TypedPayload for AchDebit {
     const EVENT_TYPE: &'static str = "bank.ach_debit";
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Presentment {
-    pub company_name: String,
-    pub company_id: String,
-    pub entry_description: String,
-}
-
-impl Presentment {
-    pub fn is_retry(&self) -> bool {
-        self.entry_description == RETRY_DESCRIPTION
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostedEntry {
-    pub account_id: String,
+    pub account: AccountId,
     pub owner: String,
     pub kind: EntryKind,
-    pub amount_cents: u64,
-    pub initial_balance_cents: i64,
+    pub amount: UsdCents,
+    pub opening_balance: Balance,
     #[serde(default)]
     pub note: Option<String>,
     #[serde(default)]
-    pub presentment: Option<Presentment>,
+    pub originator: Option<Originator>,
 }
 
 impl TypedPayload for PostedEntry {
     const EVENT_TYPE: &'static str = "bank.posted_entry";
+}
+
+/// The same merchant asking the same account for the same amount.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PaymentKey {
+    pub account: AccountId,
+    pub company_id: CompanyId,
+    pub amount: UsdCents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -93,10 +153,10 @@ pub enum FeeRule {
 }
 
 impl FeeRule {
-    pub fn fee_cents(self, presentment: u32) -> Option<u64> {
+    pub fn fee(self, attempt: Attempt) -> Option<UsdCents> {
         match self {
-            Self::OneFeePerPayment if presentment > 1 => None,
-            Self::FeePerReturn | Self::OneFeePerPayment => Some(RETURNED_PAYMENT_FEE_CENTS),
+            Self::OneFeePerPayment if !attempt.is_first() => None,
+            Self::FeePerReturn | Self::OneFeePerPayment => Some(RETURNED_PAYMENT_FEE),
         }
     }
 }
@@ -104,22 +164,22 @@ impl FeeRule {
 impl fmt::Display for FeeRule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::FeePerReturn => "fee_per_return v1",
-            Self::OneFeePerPayment => "one_fee_per_payment v2",
+            Self::FeePerReturn => "fee_per_return",
+            Self::OneFeePerPayment => "one_fee_per_payment",
         })
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceMoved {
-    pub account_id: String,
+    pub account: AccountId,
     pub owner: String,
     pub kind: EntryKind,
-    pub amount_cents: u64,
+    pub amount: UsdCents,
     #[serde(default)]
     pub note: Option<String>,
-    pub balance_before_cents: i64,
-    pub balance_cents: i64,
+    pub balance_before: Balance,
+    pub balance: Balance,
 }
 
 impl TypedPayload for BalanceMoved {
@@ -128,14 +188,14 @@ impl TypedPayload for BalanceMoved {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeeCharged {
-    pub account_id: String,
+    pub account: AccountId,
+    pub company_id: CompanyId,
     pub company_name: String,
-    pub company_id: String,
-    pub amount_cents: u64,
-    pub presentment: u32,
-    pub balance_cents: i64,
-    pub fee_cents: u64,
-    pub fee_rule: String,
+    pub amount: UsdCents,
+    pub attempt: Attempt,
+    pub balance: Balance,
+    pub fee: UsdCents,
+    pub fee_rule: FeeRule,
 }
 
 impl TypedPayload for FeeCharged {
@@ -144,13 +204,13 @@ impl TypedPayload for FeeCharged {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryReturned {
-    pub account_id: String,
+    pub account: AccountId,
+    pub company_id: CompanyId,
     pub company_name: String,
-    pub company_id: String,
-    pub amount_cents: u64,
-    pub presentment: u32,
-    pub balance_cents: i64,
-    pub fee_rule: String,
+    pub amount: UsdCents,
+    pub attempt: Attempt,
+    pub balance: Balance,
+    pub fee_rule: FeeRule,
 }
 
 impl TypedPayload for RetryReturned {
@@ -168,33 +228,23 @@ pub enum Assessed {
 pub struct CheckbookEntry {
     pub index: u64,
     pub kind: EntryKind,
-    pub amount_cents: u64,
-    pub balance_cents: i64,
+    pub amount: UsdCents,
+    pub balance: Balance,
     #[serde(default)]
     pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckbookSnapshot {
-    pub account_id: String,
+    pub account: AccountId,
     pub owner: String,
-    pub current_balance_cents: i64,
-    pub available_balance_cents: i64,
-    pub total_credits_cents: i64,
-    pub total_debits_cents: i64,
+    pub current_balance: Balance,
+    pub available_balance: Balance,
+    pub total_credits: UsdCents,
+    pub total_debits: UsdCents,
     pub transactions: Vec<CheckbookEntry>,
 }
 
 impl TypedPayload for CheckbookSnapshot {
     const EVENT_TYPE: &'static str = "bank.checkbook";
-}
-
-pub fn format_cents(cents: i64) -> String {
-    let sign = if cents < 0 { "-" } else { "" };
-    let abs = cents.abs();
-    format!("{sign}${}.{:02}", abs / 100, abs % 100)
-}
-
-pub fn format_unsigned_cents(cents: u64) -> String {
-    format!("${}.{:02}", cents / 100, cents % 100)
 }

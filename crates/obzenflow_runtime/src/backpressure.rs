@@ -1880,6 +1880,66 @@ mod stall_clock_tests {
         }
     }
 
+    fn renewals(reader: &BackpressureReader) -> u64 {
+        reader
+            .state
+            .as_ref()
+            .expect("enforced edge")
+            .hold_renewals
+            .load(Ordering::Acquire)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_stage_outlasts_stall_ceiling() {
+        let w = writer(&[(1, 30)]);
+        fill(&w.writer, 1);
+        let holds = crate::effects::InputHolds::new(w.readers.clone(), None);
+        let wait = tokio::spawn(async move { holds.wait_to_retry(Duration::from_secs(90)).await });
+        let mut episode = StallEpisode::default();
+
+        for _ in 0..90 {
+            assert_eq!(
+                stalled_on(w.writer.look(&mut episode, 1, tokio::time::Instant::now())),
+                None
+            );
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        wait.await.expect("the wait ends");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ended_wait_stops_renewals() {
+        let w = writer(&[(1, 30)]);
+        let holds = crate::effects::InputHolds::new(w.readers.clone(), None);
+        holds.wait_to_retry(Duration::from_secs(5)).await;
+        let after_wait = renewals(&w.readers[0]);
+        assert!(after_wait >= 20, "a wait renews at the control cadence");
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!(renewals(&w.readers[0]), after_wait);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn renewal_relays_through_blocked_upstream() {
+        let w = writer(&[(1, 30)]);
+        fill(&w.writer, 1);
+        let holds = crate::effects::InputHolds::new(w.readers.clone(), None);
+        let mut episode = StallEpisode::default();
+        assert!(matches!(
+            w.writer.look(&mut episode, 1, tokio::time::Instant::now()),
+            Some(StallVerdict::Wait { relay: false, .. })
+        ));
+        let wait = tokio::spawn(async move { holds.wait_to_retry(Duration::from_secs(10)).await });
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        assert!(matches!(
+            w.writer.look(&mut episode, 1, tokio::time::Instant::now()),
+            Some(StallVerdict::Wait { relay: true, .. })
+        ));
+        assert_eq!(w.input.hold_renewals.load(Ordering::Acquire), 1);
+        wait.await.expect("the wait ends");
+    }
+
     #[test]
     fn stall_clock_starts_at_the_first_credit_miss_not_the_last_consumption() {
         let w = writer(&[(2, 30)]);

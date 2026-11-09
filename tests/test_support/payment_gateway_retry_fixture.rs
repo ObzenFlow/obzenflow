@@ -37,15 +37,19 @@ pub enum ReleasePolicy {
     RetryWithLimiter,
     RetryWithLimiterPermuted,
     RetryWithLimiterSplit,
+    OutageRecovery,
 }
 
 impl ReleasePolicy {
     pub fn has_breaker(self) -> bool {
-        matches!(self, Self::BreakerOnly | Self::BreakerRecovery)
+        matches!(
+            self,
+            Self::BreakerOnly | Self::BreakerRecovery | Self::OutageRecovery
+        )
     }
 
     pub fn has_limiter(self) -> bool {
-        self != Self::RetryOnly
+        !matches!(self, Self::RetryOnly | Self::OutageRecovery)
     }
 
     pub fn has_retry(self) -> bool {
@@ -56,6 +60,7 @@ impl ReleasePolicy {
 #[derive(Debug, Clone, Copy)]
 enum GatewayBehaviour {
     FailFirst(usize),
+    FailCalls(&'static [usize]),
     Healthy,
     AlwaysFail,
 }
@@ -80,6 +85,10 @@ pub struct ScriptedGateway {
 impl ScriptedGateway {
     pub fn fail_first(count: usize) -> Self {
         Self::with_behaviour(GatewayBehaviour::FailFirst(count))
+    }
+
+    pub fn fail_calls(calls: &'static [usize]) -> Self {
+        Self::with_behaviour(GatewayBehaviour::FailCalls(calls))
     }
 
     pub fn healthy() -> Self {
@@ -216,6 +225,7 @@ impl GatewayPort {
     fn should_timeout(&self, call: usize) -> bool {
         match self.behaviour {
             GatewayBehaviour::FailFirst(count) => call <= count,
+            GatewayBehaviour::FailCalls(calls) => calls.contains(&call),
             GatewayBehaviour::Healthy => false,
             GatewayBehaviour::AlwaysFail => true,
         }
@@ -349,6 +359,16 @@ pub fn build_flow(
             .open_for(Duration::from_secs(5))
             .probes(1);
         let gateway_limiter = rate_limit(1.0);
+        let outage_breaker = circuit_breaker()
+            .consecutive_failures(1)
+            .open_for(Duration::from_millis(100))
+            .open_for_multiplier(2.0)
+            .max_open_for(Duration::from_millis(400))
+            .probes(1);
+        let outage_recovery = retry()
+            .fixed_delay(Duration::from_millis(10))
+            .max_attempts(3)
+            .max_outage_wait(Duration::from_secs(60));
 
         let order_feed = sources::ValuesSource::new(orders);
         let authorize_payment_handler = ScriptedGatewayTransform::new(&gateway);
@@ -386,6 +406,11 @@ pub fn build_flow(
                     => authorize_payment_handler
                 )
             }
+            ReleasePolicy::OutageRecovery => effectful_transform!(
+                ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
+                with { outage_breaker, outage_recovery }
+                => authorize_payment_handler
+            ),
         };
         let record_authorized = Discard::<PaymentAuthorized> {
             input: std::marker::PhantomData,
@@ -444,6 +469,10 @@ pub fn open_rejection_orders() -> Vec<ValidatedOrder> {
 
 pub fn half_open_recovery_orders() -> Vec<ValidatedOrder> {
     orders("half-open-witness", 7)
+}
+
+pub fn outage_orders() -> Vec<ValidatedOrder> {
+    orders("outage-witness", 3)
 }
 
 impl<T: obzenflow_core::TypedPayload + Clone + Send + Sync + 'static> std::fmt::Debug

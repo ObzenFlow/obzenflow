@@ -44,10 +44,12 @@ pub(in crate::middleware::control) use classifier::FailureClassification;
 pub use classifier::FailureHealth;
 pub use config::CircuitBreakerConfigError;
 use config::HalfOpenPolicy;
+pub(in crate::middleware::control) use config::{OpenForCurve, OpenForMode};
 pub(in crate::middleware::control) use factory::CircuitBreakerFactory;
 pub(in crate::middleware::control) use factory::ValidatedCircuitBreaker;
 pub use factory::{circuit_breaker, CircuitBreaker};
-pub use retry::{retry, Retry};
+pub(in crate::middleware::control) use retry::DEFAULT_MAX_OUTAGE_WAIT;
+pub use retry::{retry, OnRefusal, Retry};
 
 use classifier::FailureClassificationClassifier;
 pub(in crate::middleware::control) use config::CircuitBreakerFailureMode;
@@ -182,6 +184,19 @@ impl EffectAdmissionFence {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::middleware::control) enum OutageAdmission {
+    Closed,
+    ReopensAt(Instant),
+    ProbeBusy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::middleware::control) struct EffectOutage {
+    pub(in crate::middleware::control) admission: OutageAdmission,
+    pub(in crate::middleware::control) started_at: Option<Instant>,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CircuitBreakerAbortCode {
     CircuitOpen,
@@ -238,10 +253,14 @@ pub(crate) struct CircuitBreakerMiddleware {
     failure_mode: CircuitBreakerFailureMode,
     /// Sliding window state for rate-based failure detection (when enabled).
     rate_window: Option<Arc<Mutex<FailureWindowState>>>,
-    /// Duration to wait before attempting half-open
+    /// Duration of the first opening of an outage
     cooldown: Duration,
+    open_for_curve: OpenForCurve,
+    open_period: Arc<Mutex<Duration>>,
     /// When the circuit was opened
     opened_at: Arc<Mutex<Option<Instant>>>,
+    outage_started_at: Arc<Mutex<Option<Instant>>>,
+    changes: Arc<tokio::sync::Notify>,
     /// Number of probe requests in flight (for half-open state)
     probe_in_flight: Arc<AtomicU32>,
     /// Serialises half-open epoch changes with probe admission.
@@ -334,7 +353,11 @@ impl CircuitBreakerMiddleware {
             failure_mode: self.failure_mode.clone(),
             rate_window: self.rate_window.clone(),
             cooldown: self.cooldown,
+            open_for_curve: self.open_for_curve,
+            open_period: self.open_period.clone(),
             opened_at: self.opened_at.clone(),
+            outage_started_at: self.outage_started_at.clone(),
+            changes: self.changes.clone(),
             probe_in_flight: self.probe_in_flight.clone(),
             probe_gate: self.probe_gate.clone(),
             probe_generation: self.probe_generation.clone(),
@@ -381,7 +404,11 @@ impl CircuitBreakerMiddleware {
             failure_mode,
             rate_window: None,
             cooldown,
+            open_for_curve: OpenForCurve::Fixed,
+            open_period: Arc::new(Mutex::new(cooldown)),
             opened_at: Arc::new(Mutex::new(None)),
+            outage_started_at: Arc::new(Mutex::new(None)),
+            changes: Arc::new(tokio::sync::Notify::new()),
             probe_in_flight: Arc::new(AtomicU32::new(0)),
             probe_gate: Arc::new(Mutex::new(())),
             probe_generation: Arc::new(AtomicU64::new(0)),
@@ -430,6 +457,19 @@ impl CircuitBreakerMiddleware {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         matches!(self.current_state(), CircuitState::Closed)
+            && EffectAdmissionEpoch(self.effect_recovery_open_epoch.load(Ordering::SeqCst))
+                == admitted_epoch
+    }
+
+    pub(in crate::middleware::control) fn effect_probe_left_half_open(
+        &self,
+        admitted_epoch: EffectAdmissionEpoch,
+    ) -> bool {
+        let _state_gate = self
+            .effect_recovery_state_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        matches!(self.current_state(), CircuitState::HalfOpen)
             && EffectAdmissionEpoch(self.effect_recovery_open_epoch.load(Ordering::SeqCst))
                 == admitted_epoch
     }
@@ -813,15 +853,45 @@ impl CircuitBreakerMiddleware {
             }
         }
 
-        // Track when we open the circuit
-        if new_state == CircuitState::Open {
-            self.effect_recovery_open_epoch
-                .fetch_add(1, Ordering::SeqCst);
-            self.opened_total.fetch_add(1, Ordering::Relaxed);
-            if let Ok(mut opened_at) = self.opened_at.lock() {
-                *opened_at = Some(now);
+        let mut open_period = self.cooldown;
+        match new_state {
+            CircuitState::Open => {
+                self.effect_recovery_open_epoch
+                    .fetch_add(1, Ordering::SeqCst);
+                self.opened_total.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut opened_at) = self.opened_at.lock() {
+                    *opened_at = Some(now);
+                }
+                let mut period = self
+                    .open_period
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if old_state == CircuitState::HalfOpen {
+                    *period = self
+                        .open_for_curve
+                        .after_failed_probe(self.cooldown, *period);
+                } else {
+                    *period = self.cooldown;
+                    *self
+                        .outage_started_at
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
+                }
+                open_period = *period;
             }
+            CircuitState::Closed => {
+                *self
+                    .open_period
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = self.cooldown;
+                *self
+                    .outage_started_at
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            CircuitState::HalfOpen => {}
         }
+        self.changes.notify_waiters();
 
         // Emit lifecycle event for state transition
         let event = match (old_state, new_state) {
@@ -830,7 +900,7 @@ impl CircuitBreakerMiddleware {
                     .expect("every transition into Open must carry decision-point evidence");
                 ChainEventFactory::circuit_breaker_opened(
                     self.writer_id,
-                    evidence.into_event_params(self.unit.clone(), self.cooldown),
+                    evidence.into_event_params(self.unit.clone(), open_period),
                 )
             }
             (CircuitState::Open, CircuitState::HalfOpen) => ChainEventFactory::execution_event(
@@ -901,16 +971,62 @@ impl CircuitBreakerMiddleware {
         transitioned
     }
 
+    fn current_open_period(&self) -> Duration {
+        *self
+            .open_period
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn should_attempt_reset(&self) -> bool {
+        let period = self.current_open_period();
         if let Ok(opened_at_guard) = self.opened_at.lock() {
             if let Some(opened_at) = *opened_at_guard {
-                opened_at.elapsed() >= self.cooldown
+                opened_at.elapsed() >= period
             } else {
                 false
             }
         } else {
             false
         }
+    }
+
+    pub(in crate::middleware::control) fn effect_outage(&self) -> EffectOutage {
+        let _state_gate = self
+            .effect_recovery_state_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admission = match self.current_state() {
+            CircuitState::Closed => OutageAdmission::Closed,
+            CircuitState::HalfOpen
+                if self.probe_in_flight.load(Ordering::SeqCst)
+                    < self.half_open_policy.permitted_probes.get() =>
+            {
+                OutageAdmission::ReopensAt(Instant::now())
+            }
+            CircuitState::HalfOpen => OutageAdmission::ProbeBusy,
+            CircuitState::Open => {
+                let period = self.current_open_period();
+                let reopens_at = self
+                    .opened_at
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .and_then(|opened_at| opened_at.checked_add(period))
+                    .unwrap_or_else(Instant::now);
+                OutageAdmission::ReopensAt(reopens_at)
+            }
+        };
+        EffectOutage {
+            admission,
+            started_at: *self
+                .outage_started_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
+    }
+
+    pub(in crate::middleware::control) fn changes(&self) -> Arc<tokio::sync::Notify> {
+        self.changes.clone()
     }
 
     /// FLOWIP-115a: source-boundary admission, reusing the same state machine as
@@ -941,13 +1057,14 @@ impl CircuitBreakerMiddleware {
                     };
                     self.source_reserve_probe(transition_event)
                 } else {
+                    let period = self.current_open_period();
                     let cooldown_remaining = self
                         .opened_at
                         .lock()
                         .ok()
                         .and_then(|guard| *guard)
-                        .map(|opened_at| self.cooldown.saturating_sub(opened_at.elapsed()))
-                        .unwrap_or(self.cooldown);
+                        .map(|opened_at| period.saturating_sub(opened_at.elapsed()))
+                        .unwrap_or(period);
                     SourceAdmit::Pause(cooldown_remaining)
                 }
             }
@@ -1543,6 +1660,183 @@ mod tests {
                 EffectAdmissionFence::new(replacement_epoch, replacement_epoch)
             ),
             crate::middleware::PolicyAdmission::Admit
+        ));
+    }
+
+    fn growing_breaker() -> CircuitBreakerMiddleware {
+        let mut breaker = CircuitBreakerMiddleware::with_cooldown_for_stage(
+            1,
+            Duration::from_millis(10),
+            StageId::new(),
+            StageKey::from("breaker"),
+        );
+        breaker.open_for_curve = OpenForCurve::Exponential {
+            multiplier: 2.0,
+            max_open_for: Duration::from_millis(25),
+        };
+        breaker
+    }
+
+    fn settle(breaker: &CircuitBreakerMiddleware, classification: FailureClassification) {
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        breaker.settle_classified_call(&classification, &mut ctx);
+    }
+
+    fn probe(
+        breaker: &CircuitBreakerMiddleware,
+        classification: FailureClassification,
+    ) -> MiddlewareContext {
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let epoch = breaker.effect_precheck(&mut ctx, None).unwrap();
+        assert!(matches!(
+            breaker.effect_admit(&mut ctx, EffectAdmissionFence::new(epoch, epoch)),
+            crate::middleware::PolicyAdmission::Admit
+        ));
+        breaker.settle_classified_call(&classification, &mut ctx);
+        ctx
+    }
+
+    fn opened_cooldown_ms(ctx: &MiddlewareContext) -> Option<u64> {
+        ctx.control_events()
+            .iter()
+            .find_map(|event| match &event.payload {
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                    CircuitBreakerFact::Opened { cooldown_ms, .. },
+                )) => Some(*cooldown_ms),
+                _ => None,
+            })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_failed_probe_extends_open_period() {
+        let breaker = growing_breaker();
+        settle(&breaker, FailureClassification::TransientFailure);
+        tokio::time::advance(Duration::from_millis(10)).await;
+
+        probe(&breaker, FailureClassification::TransientFailure);
+
+        assert_eq!(breaker.current_open_period(), Duration::from_millis(20));
+        tokio::time::advance(Duration::from_millis(19)).await;
+        assert!(!breaker.should_attempt_reset());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(breaker.should_attempt_reset());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_growth_beyond_cap_clamped() {
+        let breaker = growing_breaker();
+        settle(&breaker, FailureClassification::TransientFailure);
+        for wait in [10, 20] {
+            tokio::time::advance(Duration::from_millis(wait)).await;
+            probe(&breaker, FailureClassification::TransientFailure);
+        }
+
+        assert_eq!(breaker.current_open_period(), Duration::from_millis(25));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reopened_event_records_grown_cooldown() {
+        let breaker = growing_breaker();
+        let mut first = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        breaker.settle_classified_call(&FailureClassification::TransientFailure, &mut first);
+        tokio::time::advance(Duration::from_millis(10)).await;
+
+        let reopened = probe(&breaker, FailureClassification::TransientFailure);
+
+        assert_eq!(opened_cooldown_ms(&first), Some(10));
+        assert_eq!(opened_cooldown_ms(&reopened), Some(20));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_breaker_resets_open_period() {
+        let breaker = growing_breaker();
+        settle(&breaker, FailureClassification::TransientFailure);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        probe(&breaker, FailureClassification::TransientFailure);
+        tokio::time::advance(Duration::from_millis(20)).await;
+        probe(&breaker, FailureClassification::Success);
+        assert_eq!(breaker.current_state(), CircuitState::Closed);
+
+        let mut reopening =
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        breaker.settle_classified_call(&FailureClassification::TransientFailure, &mut reopening);
+
+        assert_eq!(opened_cooldown_ms(&reopening), Some(10));
+        assert_eq!(breaker.current_open_period(), Duration::from_millis(10));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handle_shares_grown_period() {
+        let breaker = growing_breaker();
+        let member = breaker.handle_for(StageId::new());
+        settle(&breaker, FailureClassification::TransientFailure);
+        tokio::time::advance(Duration::from_millis(10)).await;
+
+        probe(&breaker, FailureClassification::TransientFailure);
+
+        assert_eq!(member.current_open_period(), Duration::from_millis(20));
+        tokio::time::advance(Duration::from_millis(20)).await;
+        let reopened = probe(&member, FailureClassification::TransientFailure);
+        assert_eq!(opened_cooldown_ms(&reopened), Some(25));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_probe_preserves_outage_start() {
+        let breaker = growing_breaker();
+        let outage_start = Instant::now();
+        settle(&breaker, FailureClassification::TransientFailure);
+        tokio::time::advance(Duration::from_millis(10)).await;
+
+        probe(&breaker, FailureClassification::TransientFailure);
+
+        assert_eq!(breaker.effect_outage().started_at, Some(outage_start));
+        assert_eq!(
+            breaker.effect_outage().admission,
+            OutageAdmission::ReopensAt(Instant::now() + Duration::from_millis(20))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reopening_after_close_restarts_outage() {
+        let breaker = growing_breaker();
+        settle(&breaker, FailureClassification::TransientFailure);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        probe(&breaker, FailureClassification::Success);
+        assert_eq!(breaker.effect_outage().started_at, None);
+
+        tokio::time::advance(Duration::from_millis(5)).await;
+        let second_outage = Instant::now();
+        settle(&breaker, FailureClassification::TransientFailure);
+
+        assert_eq!(breaker.effect_outage().started_at, Some(second_outage));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn source_breaker_failed_probe_lengthens_pause() {
+        let breaker = growing_breaker();
+        breaker.source_settle(SourceOutcome::Failure {
+            poll_duration: Duration::ZERO,
+        });
+        assert!(matches!(
+            breaker.source_admit(),
+            SourceAdmit::Pause(pause) if pause == Duration::from_millis(10)
+        ));
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let SourceAdmit::Continue {
+            guard: Some(guard), ..
+        } = breaker.source_admit()
+        else {
+            panic!("the elapsed opening admits one source probe");
+        };
+
+        breaker.source_settle(SourceOutcome::Failure {
+            poll_duration: Duration::ZERO,
+        });
+        drop(guard);
+
+        assert!(matches!(
+            breaker.source_admit(),
+            SourceAdmit::Pause(pause) if pause == Duration::from_millis(20)
         ));
     }
 

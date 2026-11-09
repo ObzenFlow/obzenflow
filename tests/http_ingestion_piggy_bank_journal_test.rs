@@ -19,14 +19,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use support::domain::AchDebit;
+use support::domain::{AccountId, AchDebit, CompanyId};
 use support::flow::{assemble_flow, AccountIngress, AchIngress, LedgerIngress};
+use support::money::{Balance, UsdCents};
 
 const RETRY_KEY: &str = "ach-20260306-000412";
 
 const RETURN_RECORDS: [&str; 2] = ["bank.fee_charged", "bank.retry_returned"];
 
-type Decision = (String, String, u64, String, Option<u64>, String);
+type Decision = (String, String, u64, String, Option<String>, String);
 
 const RETURNS: [(&str, &str, u64); 6] = [
     ("chk-58213", "NORTHSIDE FIT", 1),
@@ -79,19 +80,19 @@ fn ingress_config(base_path: &str) -> IngestionConfig {
 
 fn retry() -> AchDebit {
     AchDebit {
-        account_id: "chk-58213".to_owned(),
+        account: AccountId("chk-58213".to_owned()),
         company_name: "NORTHSIDE FIT".to_owned(),
-        company_id: "1834577921".to_owned(),
+        company_id: CompanyId("1834577921".to_owned()),
         entry_description: "RETRY PYMT".to_owned(),
-        amount_cents: 4999,
+        amount: UsdCents::parse("49.99").expect("an amount"),
     }
 }
 
 fn is_retry_return(record: &JournalRecord<ChainPayload>) -> bool {
     let payload = record.payload();
     RETURN_RECORDS.contains(&record.event_type_name())
-        && payload["account_id"] == "chk-58213"
-        && payload["presentment"] == 2
+        && payload["account"] == "chk-58213"
+        && payload["attempt"] == 2
 }
 
 async fn record_fee_run(config: &Path, journal_root: &Path) -> (IngressOutcome, IngressOutcome) {
@@ -232,11 +233,11 @@ async fn rows(run: &Path, stage: &str) -> Vec<JournalRecord<ChainPayload>> {
 fn decision(record: &JournalRecord<ChainPayload>) -> Decision {
     let fact = record.payload();
     (
-        fact["account_id"].as_str().expect("account").to_owned(),
+        fact["account"].as_str().expect("account").to_owned(),
         fact["company_name"].as_str().expect("company").to_owned(),
-        fact["presentment"].as_u64().expect("presentment"),
+        fact["attempt"].as_u64().expect("attempt"),
         record.event_type(),
-        fact["fee_cents"].as_u64(),
+        fact["fee"].as_str().map(str::to_owned),
         fact["fee_rule"].as_str().expect("rule").to_owned(),
     )
 }
@@ -258,7 +259,10 @@ async fn balances_chain_from_their_opening_balances(run: &Path) {
         .filter(|row| row.event_type() == "bank.posted_entry")
         .map(|row| (row.envelope.provenance.event.id, row.payload()))
         .collect();
-    let mut balances: BTreeMap<String, i64> = BTreeMap::new();
+    let balance = |text: &serde_json::Value| {
+        Balance::parse(text.as_str().expect("a balance")).expect("a balance parses")
+    };
+    let mut balances: BTreeMap<String, Balance> = BTreeMap::new();
     for row in rows(run, "assess").await {
         if row.event_type() != "bank.balance_moved" {
             continue;
@@ -273,26 +277,23 @@ async fn balances_chain_from_their_opening_balances(run: &Path) {
             .first()
             .and_then(|parent| entries.get(parent))
             .unwrap_or_else(|| panic!("{moved} names the posted entry that moved it"));
-        assert_eq!(entry["account_id"], moved["account_id"], "{moved}");
-        let account = moved["account_id"].as_str().expect("an account");
-        let before = moved["balance_before_cents"]
-            .as_i64()
-            .expect("a balance before");
-        let opening = entry["initial_balance_cents"]
-            .as_i64()
-            .expect("an opening balance");
+        assert_eq!(entry["account"], moved["account"], "{moved}");
+        let account = moved["account"].as_str().expect("an account");
+        let before = balance(&moved["balance_before"]);
+        let opening = balance(&entry["opening_balance"]);
         assert_eq!(
             before,
             *balances.get(account).unwrap_or(&opening),
             "{moved}"
         );
-        let amount = moved["amount_cents"].as_i64().expect("an amount");
+        let amount = UsdCents::parse(moved["amount"].as_str().expect("an amount"))
+            .expect("an amount parses");
         let after = match moved["kind"].as_str() {
-            Some("Credit") => before + amount,
-            Some("Debit") => before - amount,
+            Some("Credit") => before.credited(amount),
+            Some("Debit") => before.debited(amount),
             other => panic!("an entry kind, not {other:?}"),
         };
-        assert_eq!(moved["balance_cents"].as_i64(), Some(after), "{moved}");
+        assert_eq!(balance(&moved["balance"]), after, "{moved}");
         balances.insert(account.to_owned(), after);
     }
     assert!(!balances.is_empty(), "the run moved balances");
@@ -331,11 +332,11 @@ async fn printed_returns(run: &Path) -> Vec<Decision> {
     printed
 }
 
-fn expected(fees: [Option<u64>; 6], rule: &str) -> Vec<Decision> {
+fn expected(fees: [Option<&str>; 6], rule: &str) -> Vec<Decision> {
     RETURNS
         .iter()
         .zip(fees)
-        .map(|((account, company, presentment), fee)| {
+        .map(|((account, company, attempt), fee)| {
             let record = match fee {
                 Some(_) => "bank.fee_charged",
                 None => "bank.retry_returned",
@@ -343,9 +344,9 @@ fn expected(fees: [Option<u64>; 6], rule: &str) -> Vec<Decision> {
             (
                 (*account).to_owned(),
                 (*company).to_owned(),
-                *presentment,
+                *attempt,
                 record.to_owned(),
-                fee,
+                fee.map(str::to_owned),
                 rule.to_owned(),
             )
         })
@@ -371,8 +372,8 @@ async fn a_retry_charged_under_v1_replays_under_v2_with_no_fee() {
     let baseline = runs(&journal_root).pop().expect("the fee run's archive");
     assert_eq!(
         returns(&baseline).await,
-        expected([Some(3500); 6], "fee_per_return v1"),
-        "rule v1 charges every return, the retry included"
+        expected([Some("35.00"); 6], "fee_per_return"),
+        "fee_per_return charges every return, the retry included"
     );
     balances_chain_from_their_opening_balances(&baseline).await;
 
@@ -383,10 +384,10 @@ async fn a_retry_charged_under_v1_replays_under_v2_with_no_fee() {
     assert_eq!(
         corrected,
         expected(
-            [Some(3500), Some(3500), Some(3500), None, None, None],
-            "one_fee_per_payment v2"
+            [Some("35.00"), Some("35.00"), Some("35.00"), None, None, None],
+            "one_fee_per_payment"
         ),
-        "rule v2 charges one fee per unpaid payment and returns its retries with no fee"
+        "one_fee_per_payment charges one fee per unpaid payment and returns its retries with no fee"
     );
     let mut printed = printed_returns(&candidate).await;
     printed.sort();

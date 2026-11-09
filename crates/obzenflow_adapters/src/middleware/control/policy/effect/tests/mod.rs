@@ -9,3 +9,5 @@ mod onion;
 mod resilience;
 mod single_use;
 mod support;
+#[cfg(feature = "test-support")]
+mod waiting;

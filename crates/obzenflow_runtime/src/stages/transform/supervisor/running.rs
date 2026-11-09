@@ -498,6 +498,11 @@ async fn dispatch_running_inner<
                             effect_declarations: ctx.effect_declarations.clone(),
                             output_contract: ctx.output_contract.clone(),
                             backpressure_writer: ctx.backpressure_writer.clone(),
+                            backpressure_readers: ctx
+                                .backpressure_readers
+                                .values()
+                                .cloned()
+                                .collect(),
                             emit_enabled: true,
                             effect_boundary: None,
                             catch_up: Some(ctx.catch_up.clone()),

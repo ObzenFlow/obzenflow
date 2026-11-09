@@ -227,7 +227,7 @@ pub enum CircuitState {
 pub enum CircuitBreakerFact {
     Opened {
         unit: StageKey,
-        /// Configured minimum wait before another probe is permitted.
+        /// How long this opening lasts before another probe is permitted.
         cooldown_ms: u64,
         /// Failure rate in the population that caused this transition, not the
         /// breaker's cumulative lifetime failure rate.
@@ -829,6 +829,7 @@ pub enum RetryStopReason {
     AttemptLimit,
     AttemptStartWindow,
     CircuitNoLongerClosed,
+    OutageWaitLimit,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

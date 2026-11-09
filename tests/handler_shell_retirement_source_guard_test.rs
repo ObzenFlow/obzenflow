@@ -276,13 +276,13 @@ fn payment_tutorial_is_proof_free_and_uses_configured_retry() {
         );
     }
     for required in [
-        "let gateway_retry = retry()",
+        "let authorize_retry = retry()",
         ".fixed_delay(Duration::from_millis(250))",
         ".max_attempts(3)",
         ".attempt_start_window(Duration::from_secs(30))",
-        "gateway_breaker",
-        "gateway_limiter",
-        "gateway_retry",
+        "authorize_breaker",
+        "authorize_limiter",
+        "authorize_retry",
     ] {
         assert!(
             flow.contains(required),

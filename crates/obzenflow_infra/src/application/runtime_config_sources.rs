@@ -735,6 +735,33 @@ fn admit_middleware_fields(
         rb.open_for_ms,
         &format!("{at_prefix}.circuit_breaker.open_for_ms")
     );
+    if let Some(mode) = &rb.open_for_mode {
+        admit(
+            set,
+            "middleware.circuit_breaker.open_for_mode",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::Text(mode.clone()),
+            &format!("{at_prefix}.circuit_breaker.open_for_mode"),
+        )?;
+    }
+    if let Some(value) = rb.open_for_multiplier {
+        admit(
+            set,
+            "middleware.circuit_breaker.open_for_multiplier",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::F64(value),
+            &format!("{at_prefix}.circuit_breaker.open_for_multiplier"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "middleware.circuit_breaker.max_open_for_ms",
+        address.clone(),
+        rb.max_open_for_ms,
+        &format!("{at_prefix}.circuit_breaker.max_open_for_ms")
+    );
     file_u64!(
         set,
         "middleware.circuit_breaker.probes",
@@ -790,6 +817,23 @@ fn admit_middleware_fields(
         address.clone(),
         retry.attempt_start_window_ms,
         &format!("{at_prefix}.retry.attempt_start_window_ms")
+    );
+    if let Some(on_refusal) = &retry.on_refusal {
+        admit(
+            set,
+            "middleware.retry.on_refusal",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::Text(on_refusal.clone()),
+            &format!("{at_prefix}.retry.on_refusal"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "middleware.retry.max_outage_wait_ms",
+        address.clone(),
+        retry.max_outage_wait_ms,
+        &format!("{at_prefix}.retry.max_outage_wait_ms")
     );
 
     for (key, value, at) in [

@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use obzenflow_core::event::payloads::effect_payload::EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX;
 use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::CausalFrontier;
 use obzenflow_core::journal::ArchiveStatus;
@@ -180,6 +181,7 @@ pub(crate) struct EffectCursorHistory {
     pub terminal_attempt: Option<Option<EffectAttemptOrdinal>>,
     pub terminal_group_events: Vec<ChainEvent>,
     pub escape_control_batches: BTreeMap<EffectAttemptOrdinal, Vec<ChainEvent>>,
+    pub progress_batches: BTreeMap<u32, Vec<ChainEvent>>,
     /// The key the recorded call sent, as its rows recorded it. Replay
     /// reproduces it rather than deriving one, so an archive written before
     /// keys were journalled replays without them.
@@ -351,6 +353,12 @@ impl EffectHistory {
             for (attempt, events) in history.escape_control_batches {
                 grouped_events.insert(
                     effect_escape_controls_group_id(&cursor, attempt).to_string(),
+                    positioned(events),
+                );
+            }
+            for (wait, events) in history.progress_batches {
+                grouped_events.insert(
+                    effect_recovery_progress_group_id(&cursor, wait).to_string(),
                     positioned(events),
                 );
             }
@@ -551,6 +559,15 @@ impl EffectHistory {
                         .merge(group)
                         .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
                 }
+            }
+            for wait in 1.. {
+                let group = effect_recovery_progress_group_id(cursor, wait);
+                let Some(group) = group_causal.get(group.as_str()) else {
+                    break;
+                };
+                frontier
+                    .merge(group)
+                    .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
             }
         }
         history.causal = Arc::new(causal);
@@ -809,6 +826,20 @@ impl EffectHistory {
                 })
             })
             .collect();
+        let progress_batches = (1..)
+            .map_while(|wait| {
+                let group_id = effect_recovery_progress_group_id(cursor, wait);
+                self.grouped_events.get(group_id.as_str()).map(|events| {
+                    (
+                        wait,
+                        events
+                            .iter()
+                            .map(|(_, _, event)| event.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .collect();
         EffectCursorHistory {
             causal: self.causal.get(cursor).cloned().unwrap_or_default(),
             records: self
@@ -823,6 +854,7 @@ impl EffectHistory {
             terminal_attempt: self.terminal_attempts.get(cursor).copied(),
             terminal_group_events,
             escape_control_batches,
+            progress_batches,
             idempotency_key: self.idempotency_keys.get(cursor).cloned(),
         }
     }
@@ -969,12 +1001,33 @@ pub(crate) async fn current_cursor_history(
             })
         })
         .collect();
-    let selected_groups = std::iter::once(effect_outcome_group_id(cursor)).chain(
-        history
-            .attempts
-            .iter()
-            .map(|attempt| effect_escape_controls_group_id(cursor, attempt.attempt)),
-    );
+    history.progress_batches = (1..)
+        .map_while(|wait| {
+            let group_id = effect_recovery_progress_group_id(cursor, wait);
+            groups.remove(group_id.as_str()).map(|events| {
+                (
+                    wait,
+                    events
+                        .into_iter()
+                        .map(|(_, _, event)| event)
+                        .collect::<Vec<_>>(),
+                )
+            })
+        })
+        .collect();
+    let progress_groups = history
+        .progress_batches
+        .keys()
+        .map(|wait| effect_recovery_progress_group_id(cursor, *wait))
+        .collect::<Vec<_>>();
+    let selected_groups = std::iter::once(effect_outcome_group_id(cursor))
+        .chain(
+            history
+                .attempts
+                .iter()
+                .map(|attempt| effect_escape_controls_group_id(cursor, attempt.attempt)),
+        )
+        .chain(progress_groups);
     for group_id in selected_groups {
         if let Some(frontier) = group_causal.get(group_id.as_str()) {
             history
@@ -1072,6 +1125,11 @@ pub(crate) fn merge_cursor_histories(
             "effect cursor {cursor:?} has conflicting archived and current-run terminal-group identity"
         )));
     };
+    let progress_batches = if current.progress_batches.is_empty() {
+        archived.progress_batches
+    } else {
+        current.progress_batches
+    };
     let merged = EffectCursorHistory {
         causal,
         records,
@@ -1081,6 +1139,7 @@ pub(crate) fn merge_cursor_histories(
         terminal_attempt,
         terminal_group_events,
         escape_control_batches,
+        progress_batches,
         idempotency_key,
     };
     validate_cursor_history(cursor, &merged)?;
@@ -1673,6 +1732,7 @@ fn validate_group_grammar_parts(
     for (group_id, events) in grouped_events {
         if group_id.starts_with("effect-outcome:v1:")
             || group_id.starts_with("effect-escape-controls:v1:")
+            || group_id.starts_with(EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX)
         {
             validate_atomic_group_members(group_id, events)?;
         }
@@ -1681,6 +1741,10 @@ fn validate_group_grammar_parts(
             return Err(EffectError::EffectProvenanceMismatch(format!(
                 "atomic journal group '{group_id}' repeats an event id"
             )));
+        }
+        if let Some(fields) = group_id.strip_prefix(EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX) {
+            validate_progress_group(group_id, fields, events, grouped_events)?;
+            continue;
         }
         if !group_id.starts_with("effect-escape-controls:v1:") {
             continue;
@@ -1720,6 +1784,44 @@ fn validate_group_grammar_parts(
                     "escape-control batch '{group_id}' appears after settlement"
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_progress_group(
+    group_id: &str,
+    fields: &str,
+    events: &[(usize, Option<JournalGroupMember>, ChainEvent)],
+    grouped_events: &GroupedJournalEvents,
+) -> Result<(), EffectError> {
+    if events
+        .iter()
+        .any(|(_, _, event)| event.consumes_data_credit())
+    {
+        return Err(EffectError::EffectProvenanceMismatch(format!(
+            "recovery progress '{group_id}' contains Data"
+        )));
+    }
+    let Some((cursor_fields, _wait)) = fields.rsplit_once(':') else {
+        return Err(EffectError::EffectProvenanceMismatch(format!(
+            "recovery progress '{group_id}' names no wait"
+        )));
+    };
+    let terminal_group_id = format!("effect-outcome:v1:{cursor_fields}");
+    if let Some(terminal_events) = grouped_events.get(terminal_group_id.as_str()) {
+        let terminal_position = terminal_events
+            .iter()
+            .map(|(position, _, _)| *position)
+            .min()
+            .expect("grouped journal events are non-empty");
+        if events
+            .iter()
+            .any(|(position, _, _)| *position >= terminal_position)
+        {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "recovery progress '{group_id}' appears after settlement"
+            )));
         }
     }
     Ok(())
@@ -1874,6 +1976,36 @@ mod tests {
         let error = validate_group_grammar_parts(&starts, &groups)
             .expect_err("escape evidence must precede settlement");
         assert!(matches!(error, EffectError::EffectProvenanceMismatch(_)));
+    }
+
+    #[test]
+    fn progress_batch_after_settlement_refused() {
+        let cursor = EffectCursor::new("flow", "stage", 1_u64, 0_u32);
+        let mut groups = GroupedJournalEvents::new();
+        groups.insert(
+            effect_outcome_group_id(&cursor).to_string(),
+            vec![(1, member(0, 1), control_event())],
+        );
+        groups.insert(
+            effect_recovery_progress_group_id(&cursor, 1).to_string(),
+            vec![(2, member(0, 1), control_event())],
+        );
+
+        let error = validate_group_grammar_parts(&HashMap::new(), &groups)
+            .expect_err("rows committed before a wait precede settlement");
+        assert!(matches!(error, EffectError::EffectProvenanceMismatch(_)));
+    }
+
+    #[test]
+    fn progress_batch_without_outcome_accepted() {
+        let cursor = EffectCursor::new("flow", "stage", 1_u64, 0_u32);
+        let groups = GroupedJournalEvents::from([(
+            effect_recovery_progress_group_id(&cursor, 1).to_string(),
+            vec![(0, member(0, 1), control_event())],
+        )]);
+
+        validate_group_grammar_parts(&HashMap::new(), &groups)
+            .expect("a call stopped during its wait keeps the rows it committed");
     }
 
     #[test]

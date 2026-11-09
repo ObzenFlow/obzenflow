@@ -4,7 +4,7 @@
 
 use super::config::{
     CircuitBreakerConfigError, CircuitBreakerFailureMode, EffectCircuitBreakerConfig,
-    HalfOpenPolicy, RateThreshold,
+    HalfOpenPolicy, OpenForCurve, OpenForMode, RateThreshold,
 };
 use super::hook_adapters::{
     CircuitBreakerCompletionGate, CircuitBreakerSinkPolicy, CircuitBreakerSourcePolicy,
@@ -51,6 +51,9 @@ pub struct CircuitBreaker {
     pub(in crate::middleware::control) slow_call_duration: Option<Duration>,
     pub(in crate::middleware::control) slow_call_rate_threshold: Option<f64>,
     pub(in crate::middleware::control) open_for: Duration,
+    pub(in crate::middleware::control) open_for_mode: Option<OpenForMode>,
+    pub(in crate::middleware::control) open_for_multiplier: Option<f64>,
+    pub(in crate::middleware::control) max_open_for: Option<Duration>,
     pub(in crate::middleware::control) probes: u32,
     pub(in crate::middleware::control) rate_limited_counts_as_failure: bool,
     pub(in crate::middleware::control) classifier: Option<FailureClassificationClassifier>,
@@ -68,6 +71,9 @@ pub fn circuit_breaker() -> CircuitBreaker {
         slow_call_duration: None,
         slow_call_rate_threshold: None,
         open_for: Duration::from_secs(60),
+        open_for_mode: None,
+        open_for_multiplier: None,
+        max_open_for: None,
         probes: 1,
         rate_limited_counts_as_failure: false,
         classifier: None,
@@ -114,9 +120,62 @@ impl CircuitBreaker {
         self
     }
 
+    /// How long the first opening of an outage lasts.
     pub fn open_for(mut self, duration: Duration) -> Self {
         self.open_for = duration;
         self
+    }
+
+    /// Multiply the open period by `multiplier` after each failed probe, up
+    /// to [`Self::max_open_for`]. The period returns to `open_for` once the
+    /// breaker closes.
+    pub fn open_for_multiplier(mut self, multiplier: f64) -> Self {
+        self.open_for_multiplier = Some(multiplier);
+        self
+    }
+
+    /// The longest an opening grown by [`Self::open_for_multiplier`] lasts.
+    pub fn max_open_for(mut self, duration: Duration) -> Self {
+        self.max_open_for = Some(duration);
+        self
+    }
+
+    pub(in crate::middleware::control) fn resolved_open_for_mode(&self) -> OpenForMode {
+        self.open_for_mode.unwrap_or(
+            if self.open_for_multiplier.is_some() || self.max_open_for.is_some() {
+                OpenForMode::Exponential
+            } else {
+                OpenForMode::Fixed
+            },
+        )
+    }
+
+    fn open_for_curve(&self) -> Result<OpenForCurve, CircuitBreakerConfigError> {
+        match self.resolved_open_for_mode() {
+            OpenForMode::Fixed => Ok(OpenForCurve::Fixed),
+            OpenForMode::Exponential => {
+                let (Some(multiplier), Some(max_open_for)) =
+                    (self.open_for_multiplier, self.max_open_for)
+                else {
+                    return Err(CircuitBreakerConfigError::IncompleteExponentialOpenFor);
+                };
+                if !(multiplier.is_finite() && multiplier > 1.0) {
+                    return Err(CircuitBreakerConfigError::InvalidOpenForMultiplier {
+                        value: multiplier,
+                    });
+                }
+                if max_open_for <= self.open_for {
+                    return Err(CircuitBreakerConfigError::MaxOpenForNotAboveOpenFor {
+                        max_open_for_ms: duration_ms(max_open_for),
+                        open_for_ms: duration_ms(self.open_for),
+                    });
+                }
+                Ok(OpenForCurve::Exponential {
+                    multiplier,
+                    max_open_for,
+                })
+            }
+        }
     }
 
     pub fn probes(mut self, probes: u32) -> Self {
@@ -150,6 +209,7 @@ impl CircuitBreaker {
         if self.open_for.is_zero() {
             return Err(CircuitBreakerConfigError::Zero { field: "open_for" });
         }
+        let open_for_curve = self.open_for_curve()?;
         let probes = non_zero(self.probes, "probes")?;
         let has_rate_fields = self.minimum_calls.is_some()
             || self.failure_rate_threshold.is_some()
@@ -217,6 +277,7 @@ impl CircuitBreaker {
             config: EffectCircuitBreakerConfig {
                 failure_mode,
                 open_for: self.open_for,
+                open_for_curve,
                 probes,
                 classifier: self.classifier.clone(),
                 rate_limited_counts_as_failure: self.rate_limited_counts_as_failure,
@@ -273,6 +334,7 @@ impl CircuitBreakerFactory {
             context.unit_name(),
         );
         middleware.failure_mode = self.config.failure_mode.clone();
+        middleware.open_for_curve = self.config.open_for_curve;
         middleware.rate_window = rate_window;
         middleware.half_open_policy = HalfOpenPolicy::new(self.config.probes);
         middleware.failure_classification_classifier = self.config.classifier.clone();
@@ -533,12 +595,28 @@ impl MiddlewareFactory for CircuitBreaker {
                 "slow_call_duration_ms": slow_call_duration_threshold.map(|d| d.as_millis() as u64),
             }),
         };
+        let open_for_curve = match config.open_for_curve {
+            OpenForCurve::Fixed => json!({ "kind": "fixed" }),
+            OpenForCurve::Exponential {
+                multiplier,
+                max_open_for,
+            } => json!({
+                "kind": "exponential",
+                "open_for_multiplier": multiplier,
+                "max_open_for_ms": duration_ms(max_open_for),
+            }),
+        };
         Some(json!({
             "mode": mode,
             "open_for_ms": config.open_for.as_millis() as u64,
+            "open_for_curve": open_for_curve,
             "probes": config.probes.get(),
         }))
     }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
 }
 
 #[cfg(test)]
@@ -635,6 +713,48 @@ mod tests {
                 field: "slow_call_duration"
             })
         ));
+
+        let growing = || {
+            crate::middleware::control::circuit_breaker()
+                .consecutive_failures(1)
+                .open_for(Duration::from_secs(10))
+        };
+        let refusal = |breaker: CircuitBreaker| {
+            breaker
+                .validate()
+                .err()
+                .expect("an invalid curve fails the build")
+                .to_string()
+        };
+        assert_eq!(
+            refusal(growing().open_for_multiplier(2.0)),
+            "exponential open_for_mode requires open_for_multiplier and max_open_for"
+        );
+        assert_eq!(
+            refusal(
+                growing()
+                    .open_for_multiplier(1.0)
+                    .max_open_for(Duration::from_secs(60))
+            ),
+            "open_for_multiplier must be finite and greater than 1.0, got 1.0"
+        );
+        for multiplier in [0.5, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                growing()
+                    .open_for_multiplier(multiplier)
+                    .max_open_for(Duration::from_secs(60))
+                    .validate(),
+                Err(CircuitBreakerConfigError::InvalidOpenForMultiplier { .. })
+            ));
+        }
+        assert_eq!(
+            refusal(
+                growing()
+                    .open_for_multiplier(2.0)
+                    .max_open_for(Duration::from_secs(5))
+            ),
+            "max_open_for (5000 ms) must be greater than open_for (10000 ms)"
+        );
     }
 
     #[test]

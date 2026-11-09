@@ -892,6 +892,24 @@ pub fn effect_escape_controls_group_id(
     ))
 }
 
+/// The atomic group of recovery rows a call commits before its `wait`th wait,
+/// counted from 1.
+pub fn effect_recovery_progress_group_id(cursor: &EffectCursor, wait: u32) -> EffectOutcomeGroupId {
+    EffectOutcomeGroupId::new(format!(
+        "{EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX}{}:{}:{}:{}:{}:{}:{}",
+        cursor.recorded_flow_id.len(),
+        cursor.recorded_flow_id.as_str(),
+        cursor.stage_key.len(),
+        cursor.stage_key.as_str(),
+        cursor.input_seq.get(),
+        cursor.effect_ordinal.get(),
+        wait
+    ))
+}
+
+/// The prefix every recovery progress group id starts with.
+pub const EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX: &str = "effect-recovery-progress:v1:";
+
 impl EffectRecord {
     pub fn event_type(&self) -> &'static str {
         self.observation.event_type()

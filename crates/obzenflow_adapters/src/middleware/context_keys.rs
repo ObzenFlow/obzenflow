@@ -45,13 +45,15 @@ impl MiddlewareContextKey for CircuitBreakerProbeGeneration {
 #[derive(Debug)]
 pub(crate) struct CircuitBreakerProbeSlotGuard {
     probe_in_flight: Arc<AtomicU32>,
+    changes: Arc<tokio::sync::Notify>,
     released: bool,
 }
 
 impl CircuitBreakerProbeSlotGuard {
-    pub(crate) fn new(probe_in_flight: Arc<AtomicU32>) -> Self {
+    pub(crate) fn new(probe_in_flight: Arc<AtomicU32>, changes: Arc<tokio::sync::Notify>) -> Self {
         Self {
             probe_in_flight,
+            changes,
             released: false,
         }
     }
@@ -70,6 +72,7 @@ impl CircuitBreakerProbeSlotGuard {
         {
             tracing::warn!("circuit breaker probe released with none in flight");
         }
+        self.changes.notify_waiters();
     }
 }
 

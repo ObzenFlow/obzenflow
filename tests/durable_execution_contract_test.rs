@@ -35,7 +35,7 @@ use gateway_demo::domain::{
     CustomerOrderPlaced, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
     PaymentMethodState,
 };
-use gateway_demo::gateway::{AuthorizePaymentOutcome, GatewayResponse};
+use gateway_demo::gateway::{AuthorizePaymentOutcome, ProcessorResponse};
 use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
 use obzenflow::application::{verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication};
 use obzenflow::effects::simulated::CallLog;
@@ -237,7 +237,7 @@ enum WebOrders {
 struct GatewayCall {
     result: CallResult,
     key: String,
-    response: Option<GatewayResponse>,
+    response: Option<ProcessorResponse>,
 }
 
 impl GatewayCall {
@@ -249,8 +249,8 @@ impl GatewayCall {
 
     fn decision(&self) -> Option<&'static str> {
         match self.response {
-            Some(GatewayResponse::Charged { .. }) => Some(AUTHORIZED),
-            Some(GatewayResponse::Declined { .. }) => Some(DECLINED),
+            Some(ProcessorResponse::Charged { .. }) => Some(AUTHORIZED),
+            Some(ProcessorResponse::Declined { .. }) => Some(DECLINED),
             None => None,
         }
     }
@@ -288,7 +288,7 @@ async fn hold_until(release: &Path) {
 /// Keeps every physical call in a call log, whose lines survive SIGKILL. Holds
 /// `hold` after recording its call until `release` exists.
 struct Gateway {
-    calls: CallLog<GatewayResponse>,
+    calls: CallLog<ProcessorResponse>,
     hold: Option<String>,
     release: PathBuf,
 }
@@ -311,7 +311,7 @@ impl Gateway {
             hold_until(&self.release).await;
         }
         Ok(match response {
-            GatewayResponse::Charged { authorization_id } => {
+            ProcessorResponse::Charged { authorization_id } => {
                 AuthorizePaymentOutcome::Authorized(PaymentAuthorized {
                     order_id: order.order_id.clone(),
                     customer_id: order.customer_id.clone(),
@@ -320,22 +320,24 @@ impl Gateway {
                     authorization_id,
                 })
             }
-            GatewayResponse::Declined { reason } => declined(order, reason),
+            ProcessorResponse::Declined { reason } => declined(order, reason),
         })
     }
 }
 
-fn decide(order: &CustomerOrderPlaced) -> GatewayResponse {
+fn decide(order: &CustomerOrderPlaced) -> ProcessorResponse {
     match order.payment_method_state {
-        PaymentMethodState::InsufficientFunds => GatewayResponse::Declined {
+        PaymentMethodState::InsufficientFunds => ProcessorResponse::Declined {
             reason: PaymentDeclineReason::InsufficientFunds,
         },
-        PaymentMethodState::AddressMismatch => GatewayResponse::Declined {
+        PaymentMethodState::AddressMismatch => ProcessorResponse::Declined {
             reason: PaymentDeclineReason::AddressMismatch,
         },
-        PaymentMethodState::Valid | PaymentMethodState::InvalidNumber => GatewayResponse::Charged {
-            authorization_id: format!("AUTH-{}", order.order_id),
-        },
+        PaymentMethodState::Valid | PaymentMethodState::InvalidNumber => {
+            ProcessorResponse::Charged {
+                authorization_id: format!("AUTH-{}", order.order_id),
+            }
+        }
     }
 }
 
@@ -3744,6 +3746,9 @@ mod payment_demo {
     use gateway_demo::domain::{PaymentAuthorizationUnavailable, TrafficPhase};
     use gateway_demo::fixtures;
     use obzenflow::application::{Banner, Presentation};
+    use obzenflow::effects::EffectCursor;
+    use obzenflow_core::event::payloads::execution_payload::RecoveryFact;
+    use std::collections::HashSet;
 
     const BANNER: &str = "Durable execution contract: payment demo";
     const FIRST_RECOVERY_PAUSE: Duration = Duration::from_millis(5_250);
@@ -3818,6 +3823,92 @@ mod payment_demo {
         .any(|prefix| event_type.as_str().starts_with(prefix))
     }
 
+    fn settled_cursors(archive: &Archive) -> HashSet<EffectCursor> {
+        archive
+            .rows("authorize_payment", RunJournalKind::Data)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) => {
+                    Some(record.cursor.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn waiting_cursors(archive: &Archive) -> HashSet<EffectCursor> {
+        let settled = settled_cursors(archive);
+        scheduled_cursors(archive, false)
+            .into_iter()
+            .filter(|cursor| !settled.contains(cursor))
+            .collect()
+    }
+
+    fn scheduled_cursors(archive: &Archive, replayed: bool) -> HashSet<EffectCursor> {
+        archive
+            .rows("authorize_payment", RunJournalKind::Data)
+            .filter(|row| row.authored().replay_context.is_some() == replayed)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::Recovery(
+                    RecoveryFact::RetryScheduled { cursor, .. },
+                )) => Some(cursor.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn payment_loop_killed_during_wait_resumes() {
+        let name = "payment_wait";
+        let scenario = Scenario::for_graph(name, Graph::PaymentDemo);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, |archive: &Archive| {
+            !waiting_cursors(archive).is_empty()
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let at_kill = Archive::read(&killed).await;
+        let waiting = waiting_cursors(&at_kill);
+        assert_eq!(
+            waiting.len(),
+            1,
+            "{name}: the killed archive keeps the waiting call's committed wait: {waiting:?}"
+        );
+
+        let resumed = Child::spawn(&scenario, resume(&killed), None)
+            .completed()
+            .await;
+        assert!(
+            waiting.is_subset(&settled_cursors(&Archive::read(&resumed).await)),
+            "{name}: the waiting call settles after the resume"
+        );
+        let check = verify_call_logs(
+            &[killed.clone(), resumed.clone()],
+            &[gateway_calls(&scenario)],
+        )
+        .expect("the lineage check runs");
+        let CallLogCheck::Judged { logs, .. } = &check else {
+            panic!("{name}: the killed and resumed runs name one lineage: {check:?}");
+        };
+        assert_eq!(logs[0].verdict, CallLogVerdict::Passed, "{name}: {logs:?}");
+
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&resumed, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+        let replay = Archive::read(&replayed).await;
+        assert!(
+            scheduled_cursors(&replay, false).is_empty(),
+            "{name}: the replay schedules no retry of its own"
+        );
+        assert!(
+            waiting.is_subset(&scheduled_cursors(&replay, true)),
+            "{name}: the replay reproduces the waited call's committed wait"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn the_payment_loop_killed_during_the_outage_routes_as_the_demo_does() {
         let name = "payment_loop";
@@ -3870,15 +3961,25 @@ mod payment_demo {
             .map(|order| (order.order_id, order.phase))
             .collect();
         let calls: Vec<GatewayCall> = read_lines(&gateway_calls(&scenario));
+        let mut outage_decisions = BTreeMap::<&str, usize>::new();
         for call in &calls {
             if phases[call.order_id()] == TrafficPhase::Outage {
-                assert_eq!(
-                    call.result,
-                    CallResult::Failed,
-                    "{name}: an outage order decides nothing: {call:?}"
-                );
+                *outage_decisions.entry(call.order_id()).or_default() +=
+                    usize::from(call.result == CallResult::Decided);
             }
         }
+        assert_eq!(
+            outage_decisions
+                .values()
+                .filter(|decided| **decided == 0)
+                .count(),
+            1,
+            "{name}: one outage order decides nothing: {outage_decisions:?}"
+        );
+        assert!(
+            outage_decisions.values().all(|decided| *decided <= 1),
+            "{name}: every other outage order is decided once: {outage_decisions:?}"
+        );
         for (order, _) in RECOVERY_ROUTES {
             let decided = calls
                 .iter()

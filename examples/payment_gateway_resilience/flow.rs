@@ -9,10 +9,8 @@ use super::domain::{
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
-use super::gateway::{GatewayTransform, ScriptedGateway};
+use super::gateway::{simulated_processor, AuthorizePayment};
 use super::validation;
-use obzenflow::effects::simulated::CallLogError;
-use obzenflow::effects::{EffectPortResolutionError, Port};
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry, sink_delivery_observer};
@@ -23,8 +21,10 @@ use std::time::Duration;
 
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
-const GATEWAY_CALLS_PER_SECOND: f64 = 1.0;
-const GATEWAY_BREAKER_OPEN_FOR: Duration = Duration::from_secs(5);
+const AUTHORIZE_CALLS_PER_SECOND: f64 = 1.0;
+const AUTHORIZE_BREAKER_OPEN_FOR: Duration = Duration::from_secs(5);
+const AUTHORIZE_BREAKER_OPEN_FOR_MULTIPLIER: f64 = 2.0;
+const AUTHORIZE_BREAKER_MAX_OPEN_FOR: Duration = Duration::from_secs(20);
 const FIRST_RECOVERY_PAUSE: Duration = Duration::from_millis(5_250);
 
 pub(super) const DEMO_JOURNAL_ROOT: &str = "target/payment-gateway-logs";
@@ -36,7 +36,7 @@ pub fn build_flow() -> FlowDefinition {
         fixtures::scripted_web_orders(),
         fixtures::scripted_store_orders(),
         Some(FIRST_RECOVERY_PAUSE),
-        GATEWAY_CALLS_PER_SECOND,
+        AUTHORIZE_CALLS_PER_SECOND,
         PathBuf::from(DEMO_JOURNAL_ROOT),
         PathBuf::from(DEMO_GATEWAY_CALLS),
     )
@@ -46,28 +46,29 @@ pub fn assemble_flow(
     scripted_web_orders: Vec<CustomerOrderPlaced>,
     scripted_store_orders: Vec<CustomerOrderPlaced>,
     first_recovery_pause: Option<Duration>,
-    gateway_calls_per_second: f64,
+    authorize_calls_per_second: f64,
     journal_root: PathBuf,
-    gateway_calls: PathBuf,
+    processor_calls: PathBuf,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let calls = gateway_calls.clone();
-        let gateway =
-            Port::deferred(move || ScriptedGateway::open(&calls).map_err(gateway_unavailable));
-        let gateway_transform = match first_recovery_pause {
-            Some(pause) => GatewayTransform::new(gateway).with_first_recovery_pause(pause),
-            None => GatewayTransform::new(gateway),
+        let port = simulated_processor(&processor_calls);
+        let authorize = AuthorizePayment::new(port);
+        let authorize = match first_recovery_pause {
+            Some(pause) => authorize.with_first_recovery_pause(pause),
+            None => authorize,
         };
-        let gateway_breaker = circuit_breaker()
+        let authorize_breaker = circuit_breaker()
             .count_window(5)
             .minimum_calls(5)
             .failure_rate_threshold(0.6)
             .slow_call_duration(Duration::from_millis(250))
             .slow_call_rate_threshold(0.5)
-            .open_for(GATEWAY_BREAKER_OPEN_FOR)
+            .open_for(AUTHORIZE_BREAKER_OPEN_FOR)
+            .open_for_multiplier(AUTHORIZE_BREAKER_OPEN_FOR_MULTIPLIER)
+            .max_open_for(AUTHORIZE_BREAKER_MAX_OPEN_FOR)
             .probes(1);
-        let gateway_limiter = rate_limit(gateway_calls_per_second);
-        let gateway_retry = retry()
+        let authorize_limiter = rate_limit(authorize_calls_per_second);
+        let authorize_retry = retry()
             .fixed_delay(Duration::from_millis(250))
             .max_attempts(3)
             .attempt_start_window(Duration::from_secs(30));
@@ -108,8 +109,12 @@ pub fn assemble_flow(
                         PaymentDeclined,
                         PaymentAuthorizationUnavailable,
                     }
-                    with { gateway_breaker, gateway_retry, gateway_limiter }
-                    => gateway_transform,
+                    with {
+                        authorize_breaker,
+                        authorize_retry,
+                        authorize_limiter,
+                    }
+                    => authorize,
                 );
 
                 paid_orders = sink!(
@@ -139,9 +144,4 @@ pub fn assemble_flow(
             }
         })
     })
-}
-
-fn gateway_unavailable(error: CallLogError) -> EffectPortResolutionError {
-    tracing::error!(%error, "the scripted gateway could not open its call log");
-    EffectPortResolutionError::ClientConstructionFailed
 }

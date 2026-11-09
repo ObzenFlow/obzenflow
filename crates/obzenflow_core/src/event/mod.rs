@@ -40,13 +40,13 @@ pub use journal_event::JournalEvent;
 pub use journal_record::JournalRecord;
 pub use observability::{EdgeLivenessState, StageActivity};
 pub use payloads::effect_payload::{
-    effect_escape_controls_group_id, CanonicalInputHash, EffectAttemptOrdinal,
-    EffectAttemptStarted, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,
-    EffectFactOwner, EffectFailureCause, EffectFailureCode, EffectFailureDetail, EffectFailureKind,
-    EffectFailureSource, EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId,
-    EffectOutcomePayload, EffectProvenance, EffectRecord, EffectRecoveryAbandoned,
-    EffectSchemaVersion, EffectStageKey, EffectType, IdempotencyKey, OutcomeFactOrdinal,
-    RecordedFlowId, RetryDisposition, StageLogicVersion,
+    effect_escape_controls_group_id, effect_recovery_progress_group_id, CanonicalInputHash,
+    EffectAttemptOrdinal, EffectAttemptStarted, EffectCursor, EffectDescriptor,
+    EffectDescriptorHash, EffectFactOrigin, EffectFactOwner, EffectFailureCause, EffectFailureCode,
+    EffectFailureDetail, EffectFailureKind, EffectFailureSource, EffectInputPosition, EffectLabel,
+    EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload, EffectProvenance, EffectRecord,
+    EffectRecoveryAbandoned, EffectSchemaVersion, EffectStageKey, EffectType, IdempotencyKey,
+    OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion,
 };
 pub use payloads::sink_operation_payload::{
     SinkDestinationErrorCode, SinkDestinationErrorCodeError, SinkOperationFailed,

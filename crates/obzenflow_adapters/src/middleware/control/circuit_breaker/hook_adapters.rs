@@ -317,7 +317,10 @@ impl CircuitBreakerMiddleware {
                                 transition_event,
                                 probe: Some((
                                     probe_generation,
-                                    CircuitBreakerProbeSlotGuard::new(self.probe_in_flight.clone()),
+                                    CircuitBreakerProbeSlotGuard::new(
+                                        self.probe_in_flight.clone(),
+                                        self.changes.clone(),
+                                    ),
                                 )),
                             }
                         }

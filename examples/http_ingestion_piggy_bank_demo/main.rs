@@ -25,12 +25,12 @@
 //! pays or returns each one under `[app] fee_rule`. `fee_report` prints each
 //! fee it charges, and `free_retries` each retry it returns with no fee.
 //! Open an account, wait for its `202`, then post to it:
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -H 'Idempotency-Key: "acct-0003"' -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-3","owner":"Carol","initial_balance_cents":0}}'`
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "live-0001"' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-3","kind":"Credit","amount_cents":700,"note":"first deposit"}}'`
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "live-0002"' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Debit","amount_cents":99,"note":"coffee"}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -H 'Idempotency-Key: "acct-0003"' -d '{"event_type":"bank.account_opened","data":{"account":"acct-3","owner":"Carol","opening_balance":"0.00"}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "live-0001"' -d '{"event_type":"bank.ledger_entry","data":{"account":"acct-3","kind":"Credit","amount":"7.00","note":"first deposit"}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "live-0002"' -d '{"event_type":"bank.ledger_entry","data":{"account":"acct-1","kind":"Debit","amount":"0.99","note":"coffee"}}'`
 //!
 //! A merchant's retry of a returned ACH debit keeps its company and amount:
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/ach/events -H 'content-type: application/json' -H 'Idempotency-Key: "ach-20260306-000412"' -d '{"event_type":"bank.ach_debit","data":{"account_id":"chk-58213","company_name":"NORTHSIDE FIT","company_id":"1834577921","entry_description":"RETRY PYMT","amount_cents":4999}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/ach/events -H 'content-type: application/json' -H 'Idempotency-Key: "ach-20260306-000412"' -d '{"event_type":"bank.ach_debit","data":{"account":"chk-58213","company_name":"NORTHSIDE FIT","company_id":"1834577921","entry_description":"RETRY PYMT","amount":"49.99"}}'`
 //!
 //! Notes:
 //! - The CSV source rejects a zero-amount or malformed row. Ingress answers `400`
@@ -45,7 +45,7 @@
 //! - Transaction ingress has its own rate limiter.
 //! - `checkbook` emits a `bank.checkbook` snapshot for every balance `assess` moves.
 //! - Replaying a run with `-- --config examples/http_ingestion_piggy_bank_demo/obzenflow.fee-rule-v2.toml --replay-from <run-dir>`
-//!   decides every presentment again under `one_fee_per_payment`.
+//!   decides every attempt again under `one_fee_per_payment`.
 //! - A `202` names each entry's committed row (`outcome` `committed`). Resending the
 //!   same entry with the same `Idempotency-Key` answers `duplicate` with the original
 //!   `event_id`; other content under that key answers `422`. A `503 outcome_unknown`

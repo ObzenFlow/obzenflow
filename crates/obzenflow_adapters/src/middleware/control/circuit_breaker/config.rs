@@ -75,12 +75,72 @@ pub enum CircuitBreakerConfigError {
         minimum_calls: u32,
         count_window: u32,
     },
+    #[error("exponential open_for_mode requires open_for_multiplier and max_open_for")]
+    IncompleteExponentialOpenFor,
+    #[error("open_for_multiplier must be finite and greater than 1.0, got {value:?}")]
+    InvalidOpenForMultiplier { value: f64 },
+    #[error(
+        "max_open_for ({max_open_for_ms} ms) must be greater than open_for ({open_for_ms} ms)"
+    )]
+    MaxOpenForNotAboveOpenFor {
+        max_open_for_ms: u64,
+        open_for_ms: u64,
+    },
+    #[error("circuit breaker open_for_mode must be 'fixed' or 'exponential', got '{value}'")]
+    UnknownOpenForMode { value: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::middleware::control) enum OpenForMode {
+    Fixed,
+    Exponential,
+}
+
+impl OpenForMode {
+    pub(in crate::middleware::control) fn parse(
+        value: &str,
+    ) -> Result<Self, CircuitBreakerConfigError> {
+        match value {
+            "fixed" => Ok(Self::Fixed),
+            "exponential" => Ok(Self::Exponential),
+            other => Err(CircuitBreakerConfigError::UnknownOpenForMode {
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::middleware::control) enum OpenForCurve {
+    Fixed,
+    Exponential {
+        multiplier: f64,
+        max_open_for: Duration,
+    },
+}
+
+impl OpenForCurve {
+    pub(in crate::middleware::control) fn after_failed_probe(
+        self,
+        open_for: Duration,
+        current: Duration,
+    ) -> Duration {
+        match self {
+            Self::Fixed => open_for,
+            Self::Exponential {
+                multiplier,
+                max_open_for,
+            } => Duration::try_from_secs_f64(current.as_secs_f64() * multiplier)
+                .map_or(max_open_for, |grown| grown.min(max_open_for)),
+        }
+    }
 }
 
 #[derive(Clone)]
 pub(in crate::middleware::control) struct EffectCircuitBreakerConfig {
     pub(in crate::middleware::control) failure_mode: CircuitBreakerFailureMode,
     pub(in crate::middleware::control) open_for: Duration,
+    pub(in crate::middleware::control) open_for_curve: OpenForCurve,
     pub(in crate::middleware::control) probes: NonZeroU32,
     pub(in crate::middleware::control) classifier: Option<FailureClassificationClassifier>,
     pub(in crate::middleware::control) rate_limited_counts_as_failure: bool,

@@ -178,7 +178,7 @@ pub use obzenflow_runtime::stages::observer::{ObserverError, ObserverResult};
 // Control middleware
 pub use control::{
     circuit_breaker, rate_limit, retry, CircuitBreaker, CircuitBreakerConfigError, FailureHealth,
-    RateLimiter, RateLimiterMiddleware, Retry,
+    OnRefusal, RateLimiter, RateLimiterMiddleware, Retry,
 };
 
 #[doc(hidden)]
