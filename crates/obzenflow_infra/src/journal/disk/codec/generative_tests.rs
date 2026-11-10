@@ -160,7 +160,7 @@ fn mutate(original: &[u8], boundaries: &[usize], mutation: &Mutation) -> Vec<u8>
 enum Expected {
     Clean { frames: usize },
     Interrupted { committed: usize, start: usize },
-    Refused { committed: usize },
+    Refused { committed: usize, start: usize },
 }
 
 fn validates(bytes: &[u8]) -> bool {
@@ -168,6 +168,10 @@ fn validates(bytes: &[u8]) -> bool {
         .ok()
         .and_then(|length| bytes.get(..length))
         .is_some_and(|candidate| frame::validate(candidate).is_ok())
+}
+
+fn cut_short(bytes: &[u8]) -> bool {
+    frame::frame_length(bytes).is_ok_and(|length| length > bytes.len())
 }
 
 fn expected(frames: &[Vec<u8>], mutated: &[u8]) -> Expected {
@@ -185,14 +189,10 @@ fn expected(frames: &[Vec<u8>], mutated: &[u8]) -> Expected {
     }
     let rest = &mutated[start..];
     if validates(rest) || frame::frame_length(rest) == Err(frame::FrameProblem::SchemaMismatch) {
-        return Expected::Refused { committed };
+        return Expected::Refused { committed, start };
     }
-    let search_from = match frame::frame_length(rest) {
-        Ok(length) => start.saturating_add(length),
-        Err(_) => start + 1,
-    };
-    if (search_from..mutated.len()).any(|at| validates(&mutated[at..])) {
-        Expected::Refused { committed }
+    if (start + 1..mutated.len()).any(|at| validates(&mutated[at..])) {
+        Expected::Refused { committed, start }
     } else {
         Expected::Interrupted { committed, start }
     }
@@ -288,13 +288,18 @@ proptest! {
             }
             let count = match expected {
                 Expected::Clean { frames } => frames,
-                Expected::Interrupted { committed, .. } | Expected::Refused { committed } => {
+                Expected::Interrupted { committed, .. } | Expected::Refused { committed, .. } => {
                     committed
                 }
             };
             prop_assert_eq!(read_frames.len(), count, "{:?} under {:?}", expected, policy);
             match (expected, policy) {
                 (Expected::Clean { .. }, _) => prop_assert_eq!(end, End::Clean),
+                (Expected::Refused { start, .. }, ReadPolicy::LiveTail)
+                    if cut_short(&mutated[start..]) =>
+                {
+                    prop_assert_eq!(end, End::Skipped)
+                }
                 (Expected::Refused { .. }, _) => prop_assert_eq!(end, End::Refused),
                 (Expected::Interrupted { start, .. }, TOLERANT) => prop_assert_eq!(
                     end,

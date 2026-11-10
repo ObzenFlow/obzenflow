@@ -72,6 +72,24 @@ fn read_payload<P: JournalPayload>(provenance: &P::Provenance, bytes: &[u8]) -> 
 pub(crate) enum Error {
     #[error("invalid compact journal: {0}")]
     Invalid(String),
+    #[error(
+        "its definition is carried by the frame at offset {offset} of {journal}, which ends at \
+         offset {end}; restore {journal} from a copy, or put back the bytes moved out of it"
+    )]
+    CarrierPastEnd {
+        journal: String,
+        offset: u64,
+        end: u64,
+    },
+    #[error(
+        "its definition is carried by the frame at offset {offset} of {journal}, which is \
+         damaged ({problem}); restore {journal} from a copy"
+    )]
+    CarrierDamaged {
+        journal: String,
+        offset: u64,
+        problem: frame::FrameProblem,
+    },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

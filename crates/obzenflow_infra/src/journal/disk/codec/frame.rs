@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow_core::journal::JOURNAL_SCHEMA_VERSION;
+#[cfg(any(test, feature = "test-support"))]
 use std::io;
 
 // The complete schema version is part of every frame. No independent format
@@ -36,6 +37,18 @@ pub(crate) enum FrameProblem {
     Incomplete(String),
     SchemaMismatch,
     Corrupt(String),
+}
+
+impl std::fmt::Display for FrameProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Incomplete(message) | Self::Corrupt(message) => f.write_str(message),
+            Self::SchemaMismatch => write!(
+                f,
+                "journal schema marker mismatch (supported: {JOURNAL_SCHEMA_VERSION})"
+            ),
+        }
+    }
 }
 
 pub(crate) fn encode(body: &[u8]) -> Vec<u8> {
@@ -117,6 +130,7 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<&[u8], FrameProblem> {
     Ok(&bytes[HEADER_LEN..trailer])
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn io_error(problem: FrameProblem) -> io::Error {
     match problem {
         FrameProblem::SchemaMismatch => io::Error::new(io::ErrorKind::InvalidData, format!("journal schema marker mismatch (supported: {JOURNAL_SCHEMA_VERSION}); re-record the archive")),

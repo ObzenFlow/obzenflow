@@ -53,9 +53,10 @@ impl std::fmt::Display for ParseProblem {
             } => write!(
                 f,
                 "{problem} at offset {offset}, and a valid frame follows at offset {next}, so the \
-                 damage is not the append that was in flight; restore the file from a copy, or \
-                 move the bytes after offset {offset} into {damage_file} to resume without the \
-                 facts after it; any effect they record may run again"
+                 bytes from offset {offset} may hold acknowledged facts; restore the file from a \
+                 copy, or move those bytes into {damage_file} to resume without them; any effect \
+                 they record may run again, and if another journal refers to them the resume \
+                 names it and the bytes go back"
             ),
         }
     }
@@ -188,18 +189,16 @@ pub(crate) fn tail_after(
     offset: u64,
     rest: &mut dyn Read,
 ) -> io::Result<Tail> {
+    let mut bytes = frame.chain(rest);
     let mut scan = TailScan {
-        rest,
-        window: frame.to_vec(),
+        rest: &mut bytes,
+        window: Vec::new(),
         window_offset: offset,
-        left_bytes: frame.len() as u64,
-        zeros: frame.iter().all(|byte| *byte == 0),
+        left_bytes: 0,
+        zeros: true,
         ended: false,
     };
-    let mut at = match frame::frame_length(frame) {
-        Ok(length) => offset.saturating_add(length as u64),
-        Err(_) => offset + 1,
-    };
+    let mut at = offset + 1;
     while let Some(candidate) = scan.next_marker(at)? {
         if scan.validates_at(candidate)? {
             return Ok(Tail::FrameFollows {
@@ -678,13 +677,31 @@ mod tests {
             problem.to_string(),
             format!(
                 "frame body checksum mismatch at offset {0}, and a valid frame follows at offset \
-                 {1}, so the damage is not the append that was in flight; restore the file from \
-                 a copy, or move the bytes after offset {0} into fixture.log.{0}.damage to resume \
-                 without the facts after it; any effect they record may run again",
+                 {1}, so the bytes from offset {0} may hold acknowledged facts; restore the file \
+                 from a copy, or move those bytes into fixture.log.{0}.damage to resume without \
+                 them; any effect they record may run again, and if another journal refers to \
+                 them the resume names it and the bytes go back",
                 first.len(),
                 first.len() + second.len()
             )
         );
+    }
+
+    #[test]
+    fn tolerant_scan_frame_within_damage_refused() {
+        let first = serialize_record(&record()).unwrap();
+        let mut second = serialize_record(&record()).unwrap();
+        let third = serialize_record(&record()).unwrap();
+        let longer = serialize_record(&record_with(json!({ "body": "x".repeat(10_000) }))).unwrap();
+        second[..frame::HEADER_LEN].copy_from_slice(&longer[..frame::HEADER_LEN]);
+        let bytes = [first.clone(), second.clone(), third].concat();
+        let (yielded, end) = scan(&bytes, TOLERANT);
+        assert_eq!(yielded, 1);
+        let Disposition::Corrupt(ParseProblem::FrameFollows { offset, next, .. }) = end else {
+            panic!("a frame inside the damaged frame's declared range must refuse the read");
+        };
+        assert_eq!(offset, first.len() as u64);
+        assert_eq!(next, (first.len() + second.len()) as u64);
     }
 
     #[test]

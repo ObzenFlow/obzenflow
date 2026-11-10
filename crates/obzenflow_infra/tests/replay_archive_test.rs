@@ -903,3 +903,48 @@ async fn admission_merged_ancestor_tail_recorded() {
         }]
     );
 }
+
+#[tokio::test]
+async fn archive_read_moved_carrier_names_journal() {
+    const ERROR_LOG: &str = "FiniteSource_returns_error_stage_01H00000000000000000000000.log";
+    let dir = tempdir().unwrap();
+    let carrier = DiskJournal::<ChainEvent>::with_owner_in_run(
+        dir.path().join(ERROR_LOG),
+        obzenflow_core::JournalOwner::stage("stage_01H00000000000000000000000".parse().unwrap()),
+        FLOW_ID.parse().unwrap(),
+        JournalSync::BeforeAck,
+    )
+    .unwrap();
+    carrier
+        .append(source_fact(0), Default::default())
+        .await
+        .unwrap();
+    write_stopped_run(dir.path(), FLOW_ID, None, &[source_fact(1)]).await;
+    drop(carrier);
+    let error_log = dir.path().join(ERROR_LOG);
+    std::fs::copy(&error_log, dir.path().join(format!("{ERROR_LOG}.0.damage"))).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&error_log)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+
+    let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .unwrap();
+    let mut reader = archive
+        .open_source_reader("returns", StageType::FiniteSource)
+        .await
+        .unwrap();
+    let Err(error) = reader.next().await else {
+        panic!("a record whose definition was moved out of its carrier must fail");
+    };
+    assert!(
+        error.to_string().contains(&format!(
+            "its definition is carried by the frame at offset 0 of {ERROR_LOG}, which ends at \
+             offset 0; restore {ERROR_LOG} from a copy, or put back the bytes moved out of it"
+        )),
+        "{error}"
+    );
+}

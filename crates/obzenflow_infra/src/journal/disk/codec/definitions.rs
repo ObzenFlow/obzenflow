@@ -5,7 +5,7 @@
 use super::layout::DefinitionKind;
 use super::primitives::{bytes, text, unsigned, Cursor};
 use super::values::{self, ReadDefinitions, Standalone, WriteDefinitions};
-use super::{frame, invalid, Result};
+use super::{frame, invalid, Error, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -409,22 +409,32 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         if canonical.parent() != Some(archive.as_path()) {
             return Err(invalid("definition escapes the archive"));
         }
+        let damaged = |problem| Error::CarrierDamaged {
+            journal: locator.journal.clone(),
+            offset: locator.offset,
+            problem,
+        };
         let bytes = {
             let mut file = std::fs::File::open(path)?;
-            file.seek(SeekFrom::Start(locator.offset))?;
-            let mut header = [0u8; frame::HEADER_LEN];
-            file.read_exact(&mut header)?;
-            let length = frame::frame_length(&header).map_err(frame::io_error)?;
-            let remaining = file.metadata()?.len().saturating_sub(locator.offset);
-            if length as u64 > remaining {
-                return Err(invalid("definition carrier is uncommitted"));
+            let end = file.metadata()?.len();
+            if end <= locator.offset {
+                return Err(Error::CarrierPastEnd {
+                    journal: locator.journal.clone(),
+                    offset: locator.offset,
+                    end,
+                });
             }
-            let mut bytes = header.to_vec();
+            file.seek(SeekFrom::Start(locator.offset))?;
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(frame::HEADER_LEN as u64)
+                .read_to_end(&mut bytes)?;
+            let length = frame::frame_length(&bytes).map_err(damaged)?;
             file.take((length - frame::HEADER_LEN) as u64)
                 .read_to_end(&mut bytes)?;
             bytes
         };
-        let body = frame::validate(&bytes).map_err(frame::io_error)?;
+        let body = frame::validate(&bytes).map_err(damaged)?;
         let envelope = super::routing::Envelope::parse(body)?;
         let mut cursor = Cursor::new(envelope.definitions);
         let (_, entries) = read_entries(&mut cursor, &canonical, None)?;
@@ -826,5 +836,110 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not before"));
+    }
+
+    fn carrier_frame() -> Vec<u8> {
+        let mut table = Vec::new();
+        WriteTable {
+            store: DefinitionStore::default(),
+            journal: "carrier.log".into(),
+            path: PathBuf::from("carrier.log"),
+            entries: vec![Entry::Local(Definition {
+                kind: DefinitionKind::Descriptor,
+                body: Arc::from([1, b'x']),
+            })],
+            ordinals: HashMap::new(),
+            capture: None,
+        }
+        .encode(&mut table);
+        let event = obzenflow_core::event::ChainEventFactory::data_event(
+            obzenflow_core::StageId::new().into(),
+            "carrier",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
+        let record =
+            obzenflow_core::JournalRecord::new(obzenflow_core::JournalWriterId::new(), event);
+        let mut member = Vec::new();
+        bytes(&[0], &mut member);
+        member.push(0);
+        bytes(b"{}", &mut member);
+        let mut carrier = super::super::routing::encode(&[record], None, &[member.len()]).unwrap();
+        bytes(&table, &mut carrier);
+        carrier.extend_from_slice(&member);
+        frame::encode(&carrier)
+    }
+
+    fn carrier_error(directory: &Path, offset: u64) -> String {
+        let store = DefinitionStore::default();
+        let path = directory.join("reader.log");
+        let mut encoded = Vec::new();
+        WriteTable {
+            store: store.clone(),
+            journal: "reader.log".into(),
+            path: path.clone(),
+            entries: vec![Entry::External(
+                DefinitionKind::Descriptor,
+                Locator {
+                    journal: "carrier.log".into(),
+                    offset,
+                    slot: 0,
+                },
+            )],
+            ordinals: HashMap::new(),
+            capture: None,
+        }
+        .encode(&mut encoded);
+        ReadTable::<false>::new(&mut Cursor::new(&encoded), &store, &path, 0)
+            .unwrap()
+            .resolve(DefinitionKind::Descriptor, &mut Cursor::new(&[0]))
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn definition_carrier_past_end_names_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let carrier = carrier_frame();
+        let offset = carrier.len();
+        for end in [0, offset] {
+            std::fs::write(directory.path().join("carrier.log"), &carrier[..end]).unwrap();
+            assert_eq!(
+                carrier_error(directory.path(), offset as u64),
+                format!(
+                    "its definition is carried by the frame at offset {offset} of carrier.log, \
+                     which ends at offset {end}; restore carrier.log from a copy, or put back \
+                     the bytes moved out of it"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn definition_damaged_carrier_names_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let carrier = carrier_frame();
+        let mut flipped = carrier.clone();
+        flipped[frame::HEADER_LEN + 2] ^= 0xff;
+        let cut = carrier.len() - 1;
+        for (journal, problem) in [
+            (flipped, "frame body checksum mismatch".to_string()),
+            (
+                carrier[..cut].to_vec(),
+                format!(
+                    "incomplete frame: expected {} bytes, found {cut}",
+                    carrier.len()
+                ),
+            ),
+        ] {
+            std::fs::write(directory.path().join("carrier.log"), journal).unwrap();
+            assert_eq!(
+                carrier_error(directory.path(), 0),
+                format!(
+                    "its definition is carried by the frame at offset 0 of carrier.log, which is \
+                     damaged ({problem}); restore carrier.log from a copy"
+                )
+            );
+        }
     }
 }
