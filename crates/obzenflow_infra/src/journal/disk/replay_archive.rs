@@ -11,14 +11,16 @@
 use super::codec::Decoder;
 use super::manifest_gate::require_current_journal_schema_version;
 use super::reader::DiskJournalReader;
-use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
+use super::scanner::{
+    classify_frame, dispose, read_frame_sync, tail_after, Disposition, ReadPolicy,
+};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::journal::archive::manifest::{
-    RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
-    RUN_MANIFEST_FILENAME,
+    RunManifest, RunManifestInterruptedAppend, EFFECT_BINDING_DESCRIPTOR_CAPABILITY,
+    JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
@@ -56,6 +58,7 @@ pub struct DiskReplayArchive {
     ancestors: Vec<Arc<DiskReplayArchive>>,
     live_writer: bool,
     failure: obzenflow_core::journal::archive_actions::FailureEvidence,
+    interrupted_appends: Vec<RunManifestInterruptedAppend>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +74,56 @@ impl DiskReplayArchive {
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
     ) -> Result<Self, ReplayError> {
-        Self::open_replay(archive_path, allow_incomplete_archive, Liveness::Probe).await
+        let mut archive =
+            Self::open_replay(archive_path, allow_incomplete_archive, Liveness::Probe).await?;
+        archive.record_interrupted_appends();
+        Ok(archive)
+    }
+
+    fn record_interrupted_appends(&mut self) {
+        if self.live_writer {
+            return;
+        }
+        let mut entries = self.own_interrupted_appends();
+        for ancestor in &self.ancestors {
+            entries.extend(ancestor.own_interrupted_appends().into_iter().map(|entry| {
+                RunManifestInterruptedAppend {
+                    ancestor: Some(ancestor.archive_path.clone()),
+                    ..entry
+                }
+            }));
+        }
+        self.interrupted_appends = entries;
+    }
+
+    fn own_interrupted_appends(&self) -> Vec<RunManifestInterruptedAppend> {
+        if self.status == ArchiveStatus::Completed {
+            return Vec::new();
+        }
+        let mut entries: Vec<_> = super::identity::manifest_journal_files(&self.manifest)
+            .filter_map(|journal| {
+                let path = self.archive_path.join(journal);
+                match super::scanner::interrupted_append(&path) {
+                    Ok(append) => append.map(|append| RunManifestInterruptedAppend {
+                        ancestor: None,
+                        journal: journal.to_string(),
+                        committed_end: append.committed_end,
+                        left_bytes: append.left_bytes,
+                        tail_kind: append.kind,
+                    }),
+                    Err(error) => {
+                        tracing::debug!(
+                            path = %path.display(),
+                            %error,
+                            "an archive journal's tail could not be read; the read path decides"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+        entries.sort_by(|left, right| left.journal.cmp(&right.journal));
+        entries
     }
 
     async fn open_replay(
@@ -247,6 +299,7 @@ impl DiskReplayArchive {
                 ancestors: Vec::new(),
                 live_writer,
                 failure: Default::default(),
+                interrupted_appends: Vec::new(),
             });
         }
 
@@ -326,6 +379,7 @@ impl DiskReplayArchive {
             ancestors: Vec::new(),
             live_writer,
             failure,
+            interrupted_appends: Vec::new(),
         })
     }
 
@@ -336,7 +390,10 @@ impl DiskReplayArchive {
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
     ) -> Result<Self, ReplayError> {
-        Self::open_resume(archive_path, allow_incomplete_archive, Liveness::Probe).await
+        let mut head =
+            Self::open_resume(archive_path, allow_incomplete_archive, Liveness::Probe).await?;
+        head.record_interrupted_appends();
+        Ok(head)
     }
 
     async fn open_resume(
@@ -759,10 +816,76 @@ impl ReplayArchive for DiskReplayArchive {
             .and_then(|stage| stage.max_open_keys)
     }
 
+    fn interrupted_appends(&self) -> &[RunManifestInterruptedAppend] {
+        &self.interrupted_appends
+    }
+
     /// The highest generation with a recorded catch-up boundary in any source
     /// or effect-stage journal, scanned at open.
     fn max_recorded_generation(&self) -> obzenflow_core::ReaderGeneration {
         self.max_recorded_generation
+    }
+}
+
+#[cfg(test)]
+impl DiskReplayArchive {
+    pub(super) fn for_source_journal(
+        archive_path: PathBuf,
+        journal: &str,
+        replayable: u64,
+    ) -> Self {
+        use obzenflow_core::journal::archive::manifest::{DeliveryOrder, RunManifestStage};
+        let stage = RunManifestStage {
+            dsl_var: "src".into(),
+            stage_type: StageType::FiniteSource,
+            is_effectful: false,
+            stage_id: StageId::new().to_string(),
+            stage_logic_version: "1".into(),
+            data_journal_file: journal.into(),
+            error_journal_file: format!("{journal}.errors"),
+            inbound: Vec::new(),
+            delivery_order: DeliveryOrder::SingleInput,
+            ai_models: Vec::new(),
+            max_open_keys: None,
+        };
+        Self {
+            archive_path,
+            manifest: RunManifest {
+                journal_schema_version: JOURNAL_SCHEMA_VERSION.into(),
+                obzenflow_version: obzenflow_core::build_info::OBZENFLOW_VERSION.into(),
+                flow_id: obzenflow_core::FlowId::new().to_string(),
+                recorded_flow_id: None,
+                pipeline_writer_id: obzenflow_core::SystemId::new().into(),
+                flow_name: "source_prefix".into(),
+                created_at: chrono::Utc::now(),
+                replay: None,
+                resume: None,
+                interrupted_appends: Vec::new(),
+                stages: HashMap::from([("src".to_string(), stage)]),
+                system_journal_file: "system.log".into(),
+                metrics_journals: None,
+                effective_config: None,
+                capabilities: Default::default(),
+                bounded_direct_fact_admission: Vec::new(),
+            },
+            status: ArchiveStatus::Cancelled,
+            status_derivation: StatusDerivation {
+                terminal_events_found: 1,
+                chosen: ArchiveStatus::Cancelled,
+                warning: None,
+            },
+            allow_incomplete_archive: false,
+            read_write_lock: Arc::new(RwLock::new(())),
+            max_recorded_generation: obzenflow_core::ReaderGeneration(0),
+            recorded_source_eof: HashMap::new(),
+            recorded_frontier: HashMap::new(),
+            replayable_by_source: HashMap::from([("src".to_string(), replayable)]),
+            reconstruction_completed: None,
+            ancestors: Vec::new(),
+            live_writer: false,
+            failure: Default::default(),
+            interrupted_appends: Vec::new(),
+        }
     }
 }
 
@@ -779,7 +902,7 @@ struct SourceJournalScan {
 
 /// A shorter member's records for `stage_key` must open the longest member's,
 /// by recorded event id (FLOWIP-134i B6). Streams both journals.
-fn verify_source_prefix(
+pub(super) fn verify_source_prefix(
     shorter: &DiskReplayArchive,
     longest: &DiskReplayArchive,
     stage_key: &str,
@@ -875,6 +998,7 @@ impl ReplayableIds {
                 classify_frame::<ChainEvent>(&self.buf, &mut self.decoder, record_offset),
                 termination,
                 self.policy,
+                || tail_after(&self.path, &self.buf, record_offset, &mut self.reader),
             ) {
                 Disposition::Yield(frame) => self.pending.extend(
                     frame
@@ -883,7 +1007,9 @@ impl ReplayableIds {
                         .filter(|record| record.replay_disposition() != ReplayDisposition::ReAuthor)
                         .map(|record| *record.id()),
                 ),
-                Disposition::EndOfCommittedRecords | Disposition::Skip => self.done = true,
+                Disposition::EndOfCommittedRecords
+                | Disposition::Interrupted(_)
+                | Disposition::Skip => self.done = true,
                 Disposition::Corrupt(problem) => {
                     return Err(ReplayError::CorruptedArchive {
                         path: self.path.clone(),
@@ -949,6 +1075,7 @@ fn scan_source_journals(
                 classify_frame::<ChainEvent>(&buf, &mut decoder, record_offset),
                 termination,
                 policy,
+                || tail_after(&path, &buf, record_offset, &mut reader),
             ) {
                 Disposition::Yield(frame) => {
                     for record in frame.into_records() {
@@ -976,7 +1103,9 @@ fn scan_source_journals(
                         }
                     }
                 }
-                Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+                Disposition::EndOfCommittedRecords
+                | Disposition::Interrupted(_)
+                | Disposition::Skip => break,
                 Disposition::Corrupt(problem) => {
                     if matches!(problem, super::scanner::ParseProblem::SchemaMismatch) {
                         return Err(ReplayError::UnsupportedJournalSchemaVersion {
@@ -1034,6 +1163,7 @@ fn scan_marker_generation(path: &Path, policy: ReadPolicy) -> Result<u64, Replay
             classify_frame::<ChainEvent>(&buf, &mut decoder, record_offset),
             termination,
             policy,
+            || tail_after(path, &buf, record_offset, &mut reader),
         ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
@@ -1046,7 +1176,9 @@ fn scan_marker_generation(path: &Path, policy: ReadPolicy) -> Result<u64, Replay
                     }
                 }
             }
-            Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+            Disposition::EndOfCommittedRecords
+            | Disposition::Interrupted(_)
+            | Disposition::Skip => break,
             Disposition::Corrupt(problem) => {
                 if matches!(problem, super::scanner::ParseProblem::SchemaMismatch) {
                     return Err(ReplayError::UnsupportedJournalSchemaVersion {
@@ -1097,6 +1229,7 @@ fn scan_failure_evidence(
                 classify_frame::<ChainEvent>(&buf, &mut decoder, record_offset),
                 termination,
                 policy,
+                || tail_after(&path, &buf, record_offset, &mut reader),
             ) {
                 Disposition::Yield(frame) => {
                     for record in frame.into_records() {
@@ -1105,7 +1238,9 @@ fn scan_failure_evidence(
                         }
                     }
                 }
-                Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+                Disposition::EndOfCommittedRecords
+                | Disposition::Interrupted(_)
+                | Disposition::Skip => break,
                 Disposition::Corrupt(_) => return Ok(FailureEvidence::Other),
             }
         }
@@ -1165,6 +1300,7 @@ pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError>
             ReadPolicy::SealedScan {
                 tolerate_torn_tail: true,
             },
+            || tail_after(path, &buf, record_offset, &mut reader),
         ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
@@ -1197,7 +1333,9 @@ pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError>
                     }
                 }
             }
-            Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+            Disposition::EndOfCommittedRecords
+            | Disposition::Interrupted(_)
+            | Disposition::Skip => break,
             Disposition::Corrupt(problem) => {
                 if matches!(problem, super::scanner::ParseProblem::SchemaMismatch) {
                     return Err(ReplayError::UnsupportedJournalSchemaVersion {

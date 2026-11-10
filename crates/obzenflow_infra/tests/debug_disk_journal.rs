@@ -7,6 +7,7 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime::runtime_config::JournalSync;
 use serde_json::json;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -21,7 +22,8 @@ async fn debug_flight_delays_issue() {
 
     println!("Creating DiskJournal...");
     let owner = JournalOwner::stage(StageId::new());
-    let journal = DiskJournal::with_owner(journal_path.clone(), owner).unwrap();
+    let journal =
+        DiskJournal::with_owner(journal_path.clone(), owner, JournalSync::BeforeAck).unwrap();
 
     println!("Testing single journal append...");
     let writer_id = WriterId::from(StageId::new());

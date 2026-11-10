@@ -14,6 +14,7 @@ use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::Journal;
 use obzenflow_core::{StageId, SystemId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
+use obzenflow_runtime::runtime_config::JournalSync;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,8 +26,9 @@ async fn test_journal_parity() {
     let temp_dir = TempDir::new().unwrap();
     let owner = JournalOwner::stage(StageId::new());
     let log_path = temp_dir.path().join("parity_test.log");
-    let disk_journal = Arc::new(DiskJournal::with_owner(log_path, owner.clone()).unwrap())
-        as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+    let disk_journal =
+        Arc::new(DiskJournal::with_owner(log_path, owner.clone(), JournalSync::BeforeAck).unwrap())
+            as Arc<dyn Journal<ChainEvent> + Send + Sync>;
 
     let memory_journal =
         Arc::new(MemoryJournal::with_owner(owner)) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
@@ -189,8 +191,9 @@ async fn test_journal_physical_order_precedes_event_id_across_authors() {
     let owner = JournalOwner::stage(StageId::new());
     let log_path = temp_dir.path().join("tiebreak_test.log");
 
-    let disk_journal = Arc::new(DiskJournal::with_owner(log_path, owner.clone()).unwrap())
-        as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+    let disk_journal =
+        Arc::new(DiskJournal::with_owner(log_path, owner.clone(), JournalSync::BeforeAck).unwrap())
+            as Arc<dyn Journal<ChainEvent> + Send + Sync>;
     let memory_journal =
         Arc::new(MemoryJournal::with_owner(owner)) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
 
@@ -268,8 +271,9 @@ async fn test_read_causally_after_matches_slice_across_event_authors() {
     let owner = JournalOwner::stage(StageId::new());
     let log_path = temp_dir.path().join("after_slice_test.log");
 
-    let disk_journal = Arc::new(DiskJournal::with_owner(log_path, owner.clone()).unwrap())
-        as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+    let disk_journal =
+        Arc::new(DiskJournal::with_owner(log_path, owner.clone(), JournalSync::BeforeAck).unwrap())
+            as Arc<dyn Journal<ChainEvent> + Send + Sync>;
     let memory_journal =
         Arc::new(MemoryJournal::with_owner(owner)) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
 
@@ -342,6 +346,7 @@ fn independent_journal_sets<const N: usize>(
             DiskJournal::with_owner(
                 directory.join(format!("branch_{index}.log")),
                 owners[index].clone(),
+                JournalSync::BeforeAck,
             )
             .unwrap(),
         ) as Arc<dyn Journal<ChainEvent>>
@@ -608,8 +613,9 @@ async fn test_reader_surface_parity() {
     let temp_dir = TempDir::new().unwrap();
     let owner = JournalOwner::stage(StageId::new());
     let log_path = temp_dir.path().join("reader_surface.log");
-    let disk = Arc::new(DiskJournal::with_owner(log_path, owner.clone()).unwrap())
-        as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+    let disk =
+        Arc::new(DiskJournal::with_owner(log_path, owner.clone(), JournalSync::BeforeAck).unwrap())
+            as Arc<dyn Journal<ChainEvent> + Send + Sync>;
     let memory =
         Arc::new(MemoryJournal::with_owner(owner)) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
 
@@ -714,8 +720,10 @@ async fn test_system_event_parity() {
     let temp_dir = TempDir::new().unwrap();
     let owner = JournalOwner::system(SystemId::new());
     let log_path = temp_dir.path().join("system_parity.log");
-    let disk = Arc::new(DiskJournal::<SystemEvent>::with_owner(log_path, owner.clone()).unwrap())
-        as Arc<dyn Journal<SystemEvent> + Send + Sync>;
+    let disk = Arc::new(
+        DiskJournal::<SystemEvent>::with_owner(log_path, owner.clone(), JournalSync::BeforeAck)
+            .unwrap(),
+    ) as Arc<dyn Journal<SystemEvent> + Send + Sync>;
     let memory = Arc::new(MemoryJournal::<SystemEvent>::with_owner(owner))
         as Arc<dyn Journal<SystemEvent> + Send + Sync>;
 
@@ -795,7 +803,9 @@ async fn discarded_command_facts_survive_disk_reopen_and_json_round_trip() {
     let path = directory.path().join("discarded_commands.log");
     let stage_id = StageId::new();
     let owner = JournalOwner::stage(stage_id);
-    let disk = DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).unwrap();
+    let disk =
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone(), JournalSync::BeforeAck)
+            .unwrap();
     let memory = MemoryJournal::<ChainEvent>::with_owner(owner.clone());
     for (command, disposition, error) in [
         ("Ready", CommandDiscardDisposition::ObsoleteControl, None),
@@ -826,7 +836,8 @@ async fn discarded_command_facts_survive_disk_reopen_and_json_round_trip() {
         memory.append(event, Default::default()).await.unwrap();
     }
     drop(disk);
-    let reopened = DiskJournal::<ChainEvent>::with_owner(path, owner).unwrap();
+    let reopened =
+        DiskJournal::<ChainEvent>::with_owner(path, owner, JournalSync::BeforeAck).unwrap();
     let actual = reopened.read_all_unordered().await.unwrap();
     let expected = memory.read_all_unordered().await.unwrap();
     assert_eq!(actual.len(), 3);

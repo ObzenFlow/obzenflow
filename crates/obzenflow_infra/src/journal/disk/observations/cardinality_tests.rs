@@ -10,6 +10,7 @@ use obzenflow_core::event::observability::{CaptureSeq, ObservationRecord};
 use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, Journal, JournalOwner, StageId};
+use obzenflow_runtime::runtime_config::JournalSync;
 
 const FORMER_KEY_LIMIT: usize = 4096;
 
@@ -137,7 +138,8 @@ async fn disk_and_memory_retain_quiet_subjects_and_bound_history_past_the_key_li
         .observer = foreign.into();
     let quiet = subject(&template, 0);
     let new = subject(&template, FORMER_KEY_LIMIT);
-    let disk = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+    let disk = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+        .unwrap();
     let memory = MemoryJournal::with_owner(JournalOwner::stage(stage));
     for journal in [&disk as &dyn Journal<ChainEvent>, &memory] {
         append_subjects(journal, &template, FORMER_KEY_LIMIT).await;
@@ -215,7 +217,8 @@ async fn atomic_group_crosses_the_key_limit_with_forwarded_captures_and_terminal
     let forwarded = subject_event(&event(StageId::new(), 1), "forwarded".into(), 9000);
     let eof = ChainEventFactory::eof_event(stage.into(), true)
         .with_observability_context(forwarded.envelope.observability.clone().unwrap());
-    let disk = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+    let disk = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+        .unwrap();
     let memory = MemoryJournal::with_owner(JournalOwner::stage(stage));
     let committed_len = prefix as u64 + 3;
     for journal in [&disk as &dyn Journal<ChainEvent>, &memory] {
@@ -286,7 +289,9 @@ async fn checkpoints_above_the_key_limit_load_completely_or_rebuild_when_missing
     let quiet = subject(&template, 0);
     let last = subject(&template, FORMER_KEY_LIMIT);
     let count = FORMER_KEY_LIMIT as u64 + 1;
-    let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+    let journal =
+        DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+            .unwrap();
     append_subjects(&journal, &template, FORMER_KEY_LIMIT + 1).await;
     assert_ready(
         journal.observation_reader().unwrap(),
@@ -335,7 +340,9 @@ async fn oversized_checkpoint_preserves_live_coverage_and_the_last_complete_chec
     let stage = StageId::new();
     let template = event(stage, 1);
     let quiet = subject(&template, 0);
-    let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+    let journal =
+        DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+            .unwrap();
     journal
         .append(quiet.clone(), Default::default())
         .await

@@ -642,6 +642,7 @@ async fn only_the_head_of_a_history_resumes() -> Result<()> {
             standing: continued,
             rebuild: Some(Rebuild::Complete),
             evidence: vec![holds(&r0, 0)],
+            tails: Vec::new(),
         }
     );
     assert_eq!(
@@ -654,6 +655,7 @@ async fn only_the_head_of_a_history_resumes() -> Result<()> {
             standing: Standing::Head,
             rebuild: Some(Rebuild::Complete),
             evidence: vec![holds(&r1, 1), holds(&r0, 0)],
+            tails: Vec::new(),
         }
     );
 

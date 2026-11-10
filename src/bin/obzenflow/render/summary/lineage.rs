@@ -122,6 +122,9 @@ fn lineage_lines(
         )),
         Standing::Head | Standing::Continued { .. } => {}
     }
+    for tail in &lineage.tails {
+        lines.push(("Tail", tail_text(tail)));
+    }
     match &lineage.rebuild {
         Some(Rebuild::Complete) => {
             lines.push(("Rebuild", "complete; resume needs no earlier run".into()))
@@ -159,6 +162,22 @@ fn lineage_lines(
         ));
     }
     lines
+}
+
+fn tail_text(tail: &InterruptedTail) -> String {
+    let left = match tail.left_bytes {
+        1 => "1 byte after it is".to_string(),
+        bytes => format!("{bytes} bytes after it are"),
+    };
+    let kind = match tail.kind {
+        TailKind::TornFrame => "torn frame",
+        TailKind::ZeroFilled => "zero-filled",
+    };
+    format!(
+        "{} ends at offset {}; {left} left in place ({kind})",
+        tail.journal.display(),
+        tail.committed_end
+    )
 }
 
 fn joined(runs: &[PathBuf]) -> String {
@@ -261,6 +280,7 @@ mod tests {
                 generation: Some(0),
                 missing: true,
             }],
+            tails: Vec::new(),
         };
         assert_eq!(
             rendered(&torn, None),
@@ -321,6 +341,43 @@ mod tests {
             ["Replayed   /runs/r1; recording ended at 'authorize_payment', input 9"]
         );
         assert!(rendered(&RunLineage::default(), None).is_empty());
+    }
+
+    #[test]
+    fn lineage_interrupted_append_renders_tail_line() {
+        let resumed = RunLineage {
+            resumed_from: Some(ResumedFrom {
+                parent: "/runs/r0".into(),
+                generation: 1,
+            }),
+            rebuild: Some(Rebuild::Complete),
+            tails: vec![
+                InterruptedTail {
+                    journal: "/runs/r0/system.log".into(),
+                    committed_end: 327680,
+                    left_bytes: 4096,
+                    kind: TailKind::ZeroFilled,
+                },
+                InterruptedTail {
+                    journal: "/runs/r0/source.log".into(),
+                    committed_end: 81920,
+                    left_bytes: 1,
+                    kind: TailKind::TornFrame,
+                },
+            ],
+            ..RunLineage::default()
+        };
+        assert_eq!(
+            rendered(&resumed, None),
+            [
+                "Resumed    from /runs/r0, generation 1",
+                "Tail       /runs/r0/system.log ends at offset 327680; 4096 bytes after it are \
+                 left in place (zero-filled)",
+                "Tail       /runs/r0/source.log ends at offset 81920; 1 byte after it is left \
+                 in place (torn frame)",
+                "Rebuild    complete; resume needs no earlier run",
+            ]
+        );
     }
 
     #[test]

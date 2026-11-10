@@ -156,7 +156,12 @@ pub async fn build_flow<J, P>(
 ) -> Result<FlowBuildOutput, crate::FlowBuildFailure>
 where
     J: FlowJournalFactory,
-    P: FnOnce(FlowId, Option<&std::path::Path>) -> Result<J, JournalError> + Send,
+    P: FnOnce(
+            FlowId,
+            Option<&std::path::Path>,
+            obzenflow_runtime::runtime_config::JournalSync,
+        ) -> Result<J, JournalError>
+        + Send,
 {
     let LoweredFlow {
         stages,
@@ -1000,8 +1005,10 @@ where
         let pipeline_id = pipeline_system_id;
 
         let __journal_root = __flow_effective.journal_root();
-        let mut journal_factory = journal_factory_provider(flow_id, __journal_root)
-            .map_err(|e| FlowBuildError::JournalFactoryFailed(format!("{:?}", e)))?;
+        let (__journal_sync, __journal_sync_source) = __flow_effective.journal_sync();
+        let mut journal_factory =
+            journal_factory_provider(flow_id, __journal_root, __journal_sync)
+                .map_err(|e| FlowBuildError::JournalFactoryFailed(format!("{:?}", e)))?;
 
         // FLOWIP-120u: capture the substrate declaration, then run the
         // provider's resource preflight before any journal is created.
@@ -1017,6 +1024,16 @@ where
                     located: located.map(std::path::Path::to_path_buf),
                 });
             }
+        }
+        if __journal_sync_source == obzenflow_core::config::ConfigSource::File
+            && matches!(
+                __substrate,
+                obzenflow_core::journal::factory::RunSubstrateState::Ephemeral
+            )
+        {
+            return Err(FlowBuildError::JournalSyncUnused {
+                sync: __journal_sync,
+            });
         }
         obzenflow_core::journal::factory::FlowJournalFactory::resource_preflight(
             &journal_factory,
@@ -1252,6 +1269,31 @@ where
                 }
             });
 
+        let interrupted_appends = match (
+            replay_archive.as_ref(),
+            obzenflow_runtime::bootstrap::replay_bootstrap(),
+        ) {
+            (Some(archive), Some(replay)) => {
+                for entry in archive.interrupted_appends() {
+                    tracing::warn!(
+                        path = %entry
+                            .ancestor
+                            .as_deref()
+                            .unwrap_or(archive.archive_path())
+                            .join(&entry.journal)
+                            .display(),
+                        committed_end = entry.committed_end,
+                        left_bytes = entry.left_bytes,
+                        tail_kind = %entry.tail_kind,
+                        verb = %replay.verb.word(),
+                        "left an interrupted journal append in place while opening an archive"
+                    );
+                }
+                archive.interrupted_appends().to_vec()
+            }
+            _ => Vec::new(),
+        };
+
         let mut manifest_capabilities = std::collections::BTreeMap::new();
         manifest_capabilities.insert(
             obzenflow_core::journal::archive::manifest::OBSERVABILITY_CAPTURE_CAPABILITY.to_string(),
@@ -1294,6 +1336,7 @@ where
             created_at: obzenflow_core::chrono::Utc::now(),
             replay: replay_manifest,
             resume: resume_manifest,
+            interrupted_appends,
             stages: manifest_stages,
             system_journal_file: JournalName::System.to_filename(),
             metrics_journals: metrics_journals.as_ref().map(|journals| obzenflow_core::journal::archive::manifest::RunManifestMetrics {

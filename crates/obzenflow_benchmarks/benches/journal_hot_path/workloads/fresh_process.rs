@@ -9,6 +9,7 @@ use crate::{control, declare, measure, timed, Category, Census, Sample};
 use criterion::{measurement::WallTime, BenchmarkGroup, Throughput};
 use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime::runtime_config::JournalSync;
 use serde::{Deserialize, Serialize};
 use std::{cell::LazyCell, path::PathBuf, process::Stdio};
 use tokio::{process::Command, runtime::Runtime};
@@ -48,6 +49,7 @@ pub(crate) fn run_child() -> bool {
                 request.journal,
                 JournalOwner::stage(request.stage),
                 request.run,
+                JournalSync::BeforeAck,
             )
             .unwrap();
             let mut reader = journal.reader().await.unwrap();
@@ -126,7 +128,7 @@ pub(super) fn bench(
     let input = serde_json::json!({
         "records": READ_RECORDS, "inherited_clock_width": 33,
         "observations": true, "distinct_provenance": false, "payload_bytes": 256,
-        "workers": 2, "blocking_workers": 2, "sync_on_write": false,
+        "workers": 2, "blocking_workers": 2, "sync": "before_ack",
         "process_state": "fresh_per_operation", "filesystem_cache": "uncontrolled",
         "includes_journal_open": true, "includes_process_launch": false,
         "includes_runtime_construction": false, "includes_output_check": false

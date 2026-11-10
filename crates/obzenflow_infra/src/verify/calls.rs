@@ -393,6 +393,7 @@ mod tests {
                 resume_generation: 1,
                 merged_from: Vec::new(),
             }),
+            interrupted_appends: Vec::new(),
             stages: HashMap::new(),
             system_journal_file: "system.log".to_string(),
             metrics_journals: None,

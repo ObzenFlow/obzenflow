@@ -24,8 +24,8 @@ mod storage;
 
 pub use append::{AppendOptions, JournalCapture, ObservationCapture};
 pub use archive::{
-    ArchiveStatus, RunManifest, RunManifestReplayConfig, RunManifestStage, StatusDerivation,
-    JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
+    ArchiveStatus, RunManifest, RunManifestInterruptedAppend, RunManifestReplayConfig,
+    RunManifestStage, StatusDerivation, TailKind, JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 pub use config::{JournalConfig, ObservabilityPolicy};
 pub use journal_error::JournalError;

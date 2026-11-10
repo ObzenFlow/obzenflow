@@ -5,7 +5,9 @@
 use thiserror::Error;
 
 use obzenflow_adapters::middleware::MiddlewareFactoryError;
-use obzenflow_runtime::runtime_config::{ApplicationSettingsError, ConfigResolveError};
+use obzenflow_runtime::runtime_config::{
+    ApplicationSettingsError, ConfigResolveError, JournalSync,
+};
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
@@ -209,6 +211,15 @@ pub enum FlowBuildError {
         root: PathBuf,
         located: Option<PathBuf>,
     },
+
+    /// `journal.sync` is set in the configuration file, but the flow records
+    /// to memory journals, which never sync.
+    #[error(
+        "journal.sync is \"{}\", but this flow records to memory journals, which never sync; \
+         unset journal.sync or record the flow with disk_journals",
+        .sync.as_token()
+    )]
+    JournalSyncUnused { sync: JournalSync },
 
     /// A `handler_set!` sink has no resolved framework configuration value.
     #[error(

@@ -446,6 +446,20 @@ rationale = "Owned HTTP peer verifies real wire requests and client initialisati
 
 [[prerequisites]]
 binary = "obzenflow_infra"
+test = "journal::disk::codec::generative_tests::mutated_journal_reads_written_prefix"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Each generated case writes a mutated journal to a temporary directory, reads it under every policy and opens a writer that moves an interrupted append to a damage file."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::codec::generative_tests::resume_prefix_accepts_only_prefixes"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Each generated case writes two source journals to a temporary directory and compares their recorded event ids."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
 test = "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records"
 lanes = ["journal-fixtures"]
 capabilities = ["temp-files"]

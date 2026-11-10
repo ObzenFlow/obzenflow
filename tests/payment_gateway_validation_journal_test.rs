@@ -167,7 +167,7 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
                 == Some("delivery")
         })
         .collect();
-    assert_eq!(deliveries.len(), 2);
+    assert_eq!(deliveries.len(), 3);
     let destinations: BTreeSet<_> = deliveries
         .iter()
         .map(|row| {
@@ -178,10 +178,10 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
         .collect();
     assert_eq!(
         destinations,
-        BTreeSet::from(["cancelled_orders", "paid_orders"])
+        BTreeSet::from(["cancelled_orders", "invalid_orders", "paid_orders"])
     );
 
-    // Both console destinations deliver one item and measure their real output.
+    // Every console destination delivers one item and measures its real output.
     for delivery in deliveries {
         assert_eq!(
             delivery.pointer("/payload/items_delivered"),

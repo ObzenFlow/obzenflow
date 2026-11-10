@@ -5,7 +5,6 @@
 //! Disk-based journal implementation
 
 pub(crate) mod codec;
-pub mod config;
 pub(crate) mod continuation;
 pub mod identity;
 pub mod inspect;

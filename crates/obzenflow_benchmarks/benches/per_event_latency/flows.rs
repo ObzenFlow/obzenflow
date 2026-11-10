@@ -18,7 +18,14 @@ pub async fn build<P, J>(
     sink: Sink,
 ) -> anyhow::Result<FlowHandle>
 where
-    P: Fn(FlowId, Option<&std::path::Path>) -> Result<J, JournalError> + Send + Sync + 'static,
+    P: Fn(
+            FlowId,
+            Option<&std::path::Path>,
+            obzenflow_runtime::runtime_config::JournalSync,
+        ) -> Result<J, JournalError>
+        + Send
+        + Sync
+        + 'static,
     J: FlowJournalFactory + 'static,
 {
     anyhow::ensure!(

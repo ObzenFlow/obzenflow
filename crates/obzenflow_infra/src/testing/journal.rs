@@ -8,7 +8,7 @@
 use crate::journal::disk::codec::{self, Decoder, DefinitionStore};
 use crate::journal::disk::inspect::{export_jsonl, load_manifest};
 use crate::journal::disk::scanner::{
-    classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy,
+    classify_frame, dispose, read_frame_sync, unscanned_tail, Disposition, ReadPolicy,
 };
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::JournalPayload;
@@ -175,6 +175,7 @@ pub fn corrupt_chain_frame(
             ReadPolicy::SealedScan {
                 tolerate_torn_tail: false,
             },
+            unscanned_tail,
         ) {
             Disposition::Yield(frame) => frame,
             Disposition::Corrupt(problem) => return Err(problem.to_string().into()),
@@ -276,6 +277,7 @@ fn rewrite_file<T: JournalEvent>(
             ReadPolicy::SealedScan {
                 tolerate_torn_tail: false,
             },
+            unscanned_tail,
         ) {
             Disposition::Yield(frame) => frame,
             Disposition::Corrupt(problem) => return Err(problem.to_string().into()),

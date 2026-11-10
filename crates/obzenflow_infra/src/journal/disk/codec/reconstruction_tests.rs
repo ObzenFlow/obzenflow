@@ -8,6 +8,7 @@ use super::*;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::JournalConfig;
 use obzenflow_core::{Journal, JournalOwner, StageId};
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
 #[tokio::test(start_paused = true)]
@@ -33,12 +34,14 @@ async fn periodic_capture_reduces_representative_storage_without_changing_protec
                 DiskJournal::<ChainEvent>::with_owner(
                     directory.path().join(format!("dense-{stage}.log")),
                     JournalOwner::stage(stage),
+                    JournalSync::BeforeAck,
                 )
                 .unwrap(),
             );
             let journal = DiskJournal::<ChainEvent>::with_owner(
                 directory.path().join(format!("sparse-{stage}.log")),
                 JournalOwner::stage(stage),
+                JournalSync::BeforeAck,
             )
             .unwrap();
             journal
@@ -169,8 +172,12 @@ async fn representative_stream_preserves_every_record_on_cold_warm_addressed_and
         serde_json::to_value(&restored[0]).unwrap(),
         serde_json::to_value(records.last().unwrap()).unwrap()
     );
-    let journal =
-        DiskJournal::<ChainEvent>::with_owner(path, JournalOwner::stage(StageId::new())).unwrap();
+    let journal = DiskJournal::<ChainEvent>::with_owner(
+        path,
+        JournalOwner::stage(StageId::new()),
+        JournalSync::BeforeAck,
+    )
+    .unwrap();
     let tail = journal.read_last_n(16).await.unwrap();
     assert_eq!(tail.len(), 16);
     // The public tail contract returns newest first.

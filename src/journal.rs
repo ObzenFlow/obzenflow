@@ -17,11 +17,11 @@ pub mod read {
     };
     pub use obzenflow_core::event::{ChainPayload, PipelineLifecycleEvent, SystemPayload};
     pub use obzenflow_core::journal::read::*;
-    pub use obzenflow_core::journal::{RunManifest, RUN_MANIFEST_FILENAME};
+    pub use obzenflow_core::journal::{RunManifest, TailKind, RUN_MANIFEST_FILENAME};
     pub use obzenflow_infra::journal::read::{
         open_disk_run, read_config_changes, ConfigChanges, ConfigDifference, EarlierRun,
-        EvidenceHolder, JournalReadError, Rebuild, RecordedAt, ResumedFrom, RunConfigChanges,
-        RunLineage, RunSnapshot, RunTail, Standing,
+        EvidenceHolder, InterruptedTail, JournalReadError, Rebuild, RecordedAt, ResumedFrom,
+        RunConfigChanges, RunLineage, RunSnapshot, RunTail, Standing,
     };
 }
 
@@ -33,6 +33,7 @@ pub use obzenflow_infra::journal::{
     disk_journals, memory_journals, DiskJournal, DiskJournalFactory, MemoryJournal,
     MemoryJournalFactory,
 };
+pub use obzenflow_runtime::runtime_config::JournalSync;
 
 // Read-only evidence vocabulary used when inspecting recorded runs.
 pub use obzenflow_core::event::payloads::effect_payload::{

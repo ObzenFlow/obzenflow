@@ -13,6 +13,7 @@ use obzenflow_core::journal::archive::manifest::{
     RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::{FlowId, Journal, JournalOwner, SystemId};
+use obzenflow_runtime::runtime_config::JournalSync;
 
 fn observation(flow: FlowId, observer: SystemId) -> ObservabilityContext {
     let mut packet = ObservabilityContext::new(CaptureStamp {
@@ -44,6 +45,7 @@ fn read<T: JournalEvent>(
             ReadPolicy::SealedScan {
                 tolerate_torn_tail: false,
             },
+            crate::journal::disk::scanner::unscanned_tail,
         ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
@@ -83,18 +85,21 @@ async fn archive_observation_rewrite_preserves_both_metrics_consumers() {
         paths[0].clone(),
         JournalOwner::system(pipeline),
         flow,
+        JournalSync::BeforeAck,
     )
     .unwrap();
     let coordination = DiskJournal::<SystemEvent>::with_owner_in_run(
         paths[1].clone(),
         JournalOwner::system(metrics),
         flow,
+        JournalSync::BeforeAck,
     )
     .unwrap();
     let export = DiskJournal::<SystemEvent>::with_owner_in_run(
         paths[2].clone(),
         JournalOwner::system(metrics),
         flow,
+        JournalSync::BeforeAck,
     )
     .unwrap();
     let factory = SystemEventFactory::new(pipeline);
@@ -138,6 +143,7 @@ async fn archive_observation_rewrite_preserves_both_metrics_consumers() {
         created_at: chrono::Utc::now(),
         replay: None,
         resume: None,
+        interrupted_appends: Vec::new(),
         stages: Default::default(),
         system_journal_file: names[0].into(),
         metrics_journals: Some(RunManifestMetrics {
@@ -229,6 +235,7 @@ async fn observation_archive() -> ObservationArchive {
         root.join("system.log"),
         JournalOwner::system(pipeline),
         flow,
+        JournalSync::BeforeAck,
     )
     .unwrap();
     system
@@ -242,12 +249,14 @@ async fn observation_archive() -> ObservationArchive {
         root.join("z-source.log"),
         JournalOwner::stage(stages[0]),
         flow,
+        JournalSync::BeforeAck,
     )
     .unwrap();
     let sink = DiskJournal::<ChainEvent>::with_owner_in_run(
         root.join("a-sink.log"),
         JournalOwner::stage(stages[1]),
         flow,
+        JournalSync::BeforeAck,
     )
     .unwrap();
     let mut event = ChainEventFactory::data_event(
@@ -291,6 +300,7 @@ async fn observation_archive() -> ObservationArchive {
         created_at: chrono::Utc::now(),
         replay: None,
         resume: None,
+        interrupted_appends: Vec::new(),
         stages: [
             (
                 "a_source",

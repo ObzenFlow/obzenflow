@@ -10,7 +10,7 @@ use super::JournalReadError;
 use crate::journal::disk::continuation::{history_head, read_claim, takeover, Takeover};
 use crate::journal::disk::inspect::{load_manifest, JournalInspectError};
 use crate::journal::disk::replay_archive::{recorded_reconstruction_completion, replayed_run};
-use obzenflow_core::journal::RunManifest;
+use obzenflow_core::journal::{RunManifest, TailKind};
 use std::path::{Path, PathBuf};
 
 /// The run a resumed run continued, and the generation it entered.
@@ -56,6 +56,18 @@ pub enum Standing {
     Replay { replayed: PathBuf },
 }
 
+/// A journal that ends at an interrupted append, whose bytes after the
+/// committed end stay where the interruption left them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedTail {
+    /// The journal under the run that holds it, or its file name for a journal
+    /// of the run itself.
+    pub journal: PathBuf,
+    pub committed_end: u64,
+    pub left_bytes: u64,
+    pub kind: TailKind,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunLineage {
     pub resumed_from: Option<ResumedFrom>,
@@ -64,6 +76,9 @@ pub struct RunLineage {
     pub rebuild: Option<Rebuild>,
     /// Following replay and resume links, nearest first.
     pub evidence: Vec<EvidenceHolder>,
+    /// The interrupted appends the run recorded in the archive it opened,
+    /// then those of its own journals.
+    pub tails: Vec<InterruptedTail>,
 }
 
 impl RunLineage {
@@ -121,7 +136,34 @@ pub fn read_run_lineage(run_dir: &Path) -> Result<RunLineage, JournalReadError> 
         standing,
         rebuild,
         evidence,
+        tails: recorded_tails(&manifest),
     })
+}
+
+fn recorded_tails(manifest: &RunManifest) -> Vec<InterruptedTail> {
+    let opened = manifest
+        .resume
+        .as_ref()
+        .map(|resume| resume.resumed_from.clone())
+        .or_else(|| {
+            manifest
+                .replay
+                .as_ref()
+                .map(|replay| PathBuf::from(&replay.replay_from))
+        });
+    manifest
+        .interrupted_appends
+        .iter()
+        .map(|entry| InterruptedTail {
+            journal: entry.ancestor.as_ref().or(opened.as_ref()).map_or_else(
+                || PathBuf::from(&entry.journal),
+                |run| run.join(&entry.journal),
+            ),
+            committed_end: entry.committed_end,
+            left_bytes: entry.left_bytes,
+            kind: entry.tail_kind,
+        })
+        .collect()
 }
 
 fn standing(run: &Path, manifest: &RunManifest) -> Result<Standing, JournalReadError> {

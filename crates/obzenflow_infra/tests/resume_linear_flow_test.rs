@@ -432,6 +432,64 @@ async fn memory_resume_from_disk_archive_is_refused_at_build() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_manifest_records_interrupted_appends() -> Result<()> {
+    use obzenflow_core::journal::archive::manifest::{
+        RunManifestInterruptedAppend, TailKind, RUN_MANIFEST_FILENAME,
+    };
+    const RECORDED: u64 = 4;
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
+    let recorded_run = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+    let system_log = recorded_run.join("system.log");
+    let committed_end = std::fs::metadata(&system_log)?.len();
+    std::io::Write::write_all(
+        &mut std::fs::OpenOptions::new().append(true).open(&system_log)?,
+        &[0; 4096],
+    )?;
+    let interrupted = std::fs::read(&system_log)?;
+
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
+                archive_path: recorded_run.clone(),
+                allow_incomplete_archive: true,
+                allow_duplicate_sink_delivery: false,
+                verb: ReplayVerb::Resume,
+            })
+            .await,
+        );
+        run_until_delivered(&journal_base, RECORDED + 1, 1, RECORDED + 1).await?;
+    }
+
+    let resumed_run = replay_testkit::latest_run_dir(&journal_base);
+    let manifest: RunManifest = serde_json::from_str(&std::fs::read_to_string(
+        resumed_run.join(RUN_MANIFEST_FILENAME),
+    )?)?;
+    assert_eq!(
+        manifest.resume.map(|resume| resume.resumed_from),
+        Some(recorded_run)
+    );
+    assert_eq!(
+        manifest.interrupted_appends,
+        [RunManifestInterruptedAppend {
+            ancestor: None,
+            journal: "system.log".into(),
+            committed_end,
+            left_bytes: 4096,
+            tail_kind: TailKind::ZeroFilled,
+        }]
+    );
+    assert_eq!(
+        std::fs::read(&system_log)?,
+        interrupted,
+        "the interrupted run keeps its bytes where they were"
+    );
+    Ok(())
+}
+
 /// A journal's rows reduced to the resume-relevant kinds, in physical append
 /// order: data payloads and authored catch-up watermarks.
 #[derive(Debug, Clone, PartialEq)]

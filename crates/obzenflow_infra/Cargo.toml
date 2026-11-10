@@ -86,6 +86,7 @@ test-support = ["obzenflow_runtime/test-support"]
 
 [dev-dependencies]
 hyper = { workspace = true, features = ["client", "http2"] }
+proptest = { workspace = true }
 warp = { workspace = true, features = ["test"] }
 # FLOWIP-114o: `test-util` enables `#[tokio::test(start_paused = true)]` for the
 # deterministic emit-interval clock test.

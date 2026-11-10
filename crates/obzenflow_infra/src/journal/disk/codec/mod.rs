@@ -9,6 +9,8 @@ mod clock;
 mod definitions;
 mod deserialize;
 pub(crate) mod frame;
+#[cfg(test)]
+mod generative_tests;
 mod layout;
 mod primitives;
 #[cfg(test)]

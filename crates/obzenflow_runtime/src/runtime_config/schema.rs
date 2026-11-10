@@ -32,6 +32,39 @@ pub const CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY: &str =
 pub const CIRCUIT_BREAKER_PROBES_KEY: &str = "middleware.circuit_breaker.probes";
 /// Where a durable run records its location.
 pub const JOURNAL_ROOT_KEY: &str = "journal.root";
+/// When a disk journal acknowledges an append.
+pub const JOURNAL_SYNC_KEY: &str = "journal.sync";
+
+/// When a disk journal acknowledges an append, one value for every disk
+/// journal of a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalSync {
+    /// After the frame's bytes and the file size that includes them reach
+    /// storage, so the fact survives the process, the host and the power.
+    BeforeAck,
+    /// Once the operating system holds the bytes, so a power cut or kernel
+    /// panic can lose acknowledged facts.
+    Off,
+}
+
+impl JournalSync {
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::BeforeAck => "before_ack",
+            Self::Off => "off",
+        }
+    }
+
+    /// The valid tokens for the Token knob, in schema order.
+    pub const TOKENS: &'static [&'static str] = &[Self::BeforeAck.as_token(), Self::Off.as_token()];
+
+    /// Parse a token; `None` if it is not a known value.
+    pub fn from_token(token: &str) -> Option<Self> {
+        [Self::BeforeAck, Self::Off]
+            .into_iter()
+            .find(|sync| sync.as_token() == token)
+    }
+}
 pub const CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY: &str =
     "middleware.circuit_breaker.rate_limited_counts_as_failure";
 pub const CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY: &str =
@@ -444,6 +477,21 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 role: KnobRole::Invocation,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: JOURNAL_SYNC_KEY,
+                file_path: None,
+                value_type: KnobType::Token {
+                    allowed: JournalSync::TOKENS,
+                },
+                target: KnobTarget::Global,
+                default: KnobDefault::Value(ConfigValue::Text(
+                    JournalSync::BeforeAck.as_token().to_string(),
+                )),
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::None,
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,

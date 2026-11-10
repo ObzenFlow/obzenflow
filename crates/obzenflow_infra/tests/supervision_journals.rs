@@ -7,6 +7,7 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::sync::Arc;
 
 fn stage_running(stage: StageId) -> ChainEvent {
@@ -25,8 +26,12 @@ async fn physical_group_limits_reject_before_commit_and_members_stream_in_order(
         let stage = StageId::new();
         let journal: Arc<dyn Journal<ChainEvent>> = if disk {
             Arc::new(
-                DiskJournal::with_owner(dir.path().join("groups.log"), JournalOwner::stage(stage))
-                    .unwrap(),
+                DiskJournal::with_owner(
+                    dir.path().join("groups.log"),
+                    JournalOwner::stage(stage),
+                    JournalSync::BeforeAck,
+                )
+                .unwrap(),
             )
         } else {
             Arc::new(MemoryJournal::with_owner(JournalOwner::stage(stage)))
@@ -103,7 +108,14 @@ async fn large_in_process_documents_roundtrip_through_memory_and_reopened_disk()
         let path = dir.path().join("documents.log");
         let stage = StageId::new();
         let journal: Arc<dyn Journal<ChainEvent>> = if disk {
-            Arc::new(DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap())
+            Arc::new(
+                DiskJournal::with_owner(
+                    path.clone(),
+                    JournalOwner::stage(stage),
+                    JournalSync::BeforeAck,
+                )
+                .unwrap(),
+            )
         } else {
             Arc::new(MemoryJournal::with_owner(JournalOwner::stage(stage)))
         };
@@ -134,8 +146,12 @@ async fn large_in_process_documents_roundtrip_through_memory_and_reopened_disk()
         drop(journal);
 
         if disk {
-            let reopened =
-                DiskJournal::<ChainEvent>::with_owner(path, JournalOwner::stage(stage)).unwrap();
+            let reopened = DiskJournal::<ChainEvent>::with_owner(
+                path,
+                JournalOwner::stage(stage),
+                JournalSync::BeforeAck,
+            )
+            .unwrap();
             let mut reader = reopened.reader_from(0).await.unwrap();
             let observed = reader.next().await.unwrap().unwrap();
             assert_eq!(observed.id(), committed.id());

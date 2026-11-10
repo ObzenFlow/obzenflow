@@ -18,6 +18,7 @@ use obzenflow_core::{
     },
     FlowId,
 };
+use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_runtime::runtime_resource_limits::{
     env_try_raise_nofile, estimate_disk_journal_fds, preflight_nofile_for_disk_journals,
 };
@@ -32,23 +33,50 @@ use super::memory::MemoryJournal;
 pub struct DiskJournalFactory {
     base_path: PathBuf,
     flow_id: FlowId,
+    sync: JournalSync,
     // Cache journals so all consumers share the same instance (and shared locks)
     chain_journals: HashMap<JournalName, Arc<dyn Journal<ChainEvent>>>,
     system_journals: HashMap<JournalName, Arc<dyn Journal<SystemEvent>>>,
 }
 
 impl DiskJournalFactory {
-    pub fn new(base_path: PathBuf, flow_id: FlowId) -> Result<Self, JournalError> {
-        // Create the flow directory NOW
+    /// Create the run's directory now. Each directory it creates reaches
+    /// storage in its parent before any journal is written inside it.
+    pub fn new(
+        base_path: PathBuf,
+        flow_id: FlowId,
+        sync: JournalSync,
+    ) -> Result<Self, JournalError> {
         let flow_path = base_path.join("flows").join(flow_id.to_string());
+        let created: Vec<PathBuf> = flow_path
+            .ancestors()
+            .take_while(|directory| !directory.as_os_str().is_empty() && !directory.exists())
+            .map(Path::to_path_buf)
+            .collect();
         std::fs::create_dir_all(&flow_path).map_err(|e| JournalError::Implementation {
             message: format!("Failed to create flow directory: {}", flow_path.display()),
             source: Box::new(e),
         })?;
+        for directory in created.iter().rev() {
+            let parent = match directory.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => Path::new("."),
+            };
+            std::fs::File::open(parent)
+                .and_then(|parent| parent.sync_all())
+                .map_err(|e| JournalError::Implementation {
+                    message: format!(
+                        "Failed to sync the directory holding {}",
+                        directory.display()
+                    ),
+                    source: Box::new(e),
+                })?;
+        }
 
         Ok(Self {
             base_path,
             flow_id,
+            sync,
             chain_journals: HashMap::new(),
             system_journals: HashMap::new(),
         })
@@ -81,6 +109,7 @@ impl DiskJournalFactory {
             journal_path,
             owner,
             self.flow_id,
+            self.sync,
         )?);
         self.chain_journals.insert(name, journal.clone());
         Ok(journal)
@@ -108,6 +137,7 @@ impl DiskJournalFactory {
             journal_path,
             owner,
             self.flow_id,
+            self.sync,
         )?);
         self.system_journals.insert(name, journal.clone());
         Ok(journal)
@@ -194,22 +224,24 @@ impl MemoryJournalFactory {
 }
 
 /// Disk journals under `base_path`, or under the operator's `journal.root`
-/// when set.
+/// when set, each acknowledging appends as the run's `journal.sync` says.
 pub fn disk_journals(
     base_path: PathBuf,
-) -> impl Fn(FlowId, Option<&Path>) -> Result<DiskJournalFactory, JournalError> {
-    move |flow_id, root| {
+) -> impl Fn(FlowId, Option<&Path>, JournalSync) -> Result<DiskJournalFactory, JournalError> {
+    move |flow_id, root, sync| {
         DiskJournalFactory::new(
             root.map_or_else(|| base_path.clone(), Path::to_path_buf),
             flow_id,
+            sync,
         )
     }
 }
 
-/// Memory journals keep no location, so the build refuses a `journal.root`.
+/// Memory journals keep no location and never sync, so the build refuses a
+/// `journal.root` and a `journal.sync` set in the configuration file.
 pub fn memory_journals(
-) -> impl Fn(FlowId, Option<&Path>) -> Result<MemoryJournalFactory, JournalError> {
-    move |flow_id, _| Ok(MemoryJournalFactory::new(flow_id))
+) -> impl Fn(FlowId, Option<&Path>, JournalSync) -> Result<MemoryJournalFactory, JournalError> {
+    move |flow_id, _, _| Ok(MemoryJournalFactory::new(flow_id))
 }
 
 impl FlowJournalFactory for DiskJournalFactory {

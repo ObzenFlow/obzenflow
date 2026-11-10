@@ -23,6 +23,7 @@ use obzenflow_core::{JournalWriterId, WriterId};
 use obzenflow_infra::journal::disk::log_record::LogRecord;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use tempfile::tempdir;
@@ -39,6 +40,17 @@ fn binding_descriptor_capabilities() -> BTreeMap<String, u32> {
 }
 
 fn write_manifest(dir: &Path) {
+    write_manifest_of(dir, FLOW_ID, None);
+}
+
+const FLOW_ID: &str = "flow_01H00000000000000000000000";
+const SOURCE_LOG: &str = "FiniteSource_returns_stage_01H00000000000000000000000.log";
+
+fn write_manifest_of(
+    dir: &Path,
+    flow_id: &str,
+    resume: Option<obzenflow_core::journal::archive::manifest::RunManifestResumeConfig>,
+) {
     let mut stages = HashMap::new();
     stages.insert(
         "returns".to_string(),
@@ -64,13 +76,14 @@ fn write_manifest(dir: &Path) {
         journal_schema_version: JOURNAL_SCHEMA_VERSION.to_string(),
 
         obzenflow_version: OBZENFLOW_VERSION.to_string(),
-        flow_id: "flow_01H00000000000000000000000".to_string(),
+        flow_id: flow_id.to_string(),
         recorded_flow_id: None,
         pipeline_writer_id: SystemId::new().into(),
         flow_name: "test_flow".to_string(),
         created_at: Utc::now(),
         replay: None,
-        resume: None,
+        resume,
+        interrupted_appends: Vec::new(),
         stages,
         system_journal_file: "system.log".to_string(),
         effective_config: None,
@@ -106,6 +119,7 @@ async fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
         dir.join("system.log"),
         obzenflow_core::JournalOwner::system(SystemId::new()),
         "flow_01H00000000000000000000000".parse().unwrap(),
+        JournalSync::BeforeAck,
     )
     .unwrap();
     journal
@@ -635,6 +649,7 @@ async fn manifest_frame_mismatches_refuse_replay_inspect_export_and_verify() {
                         )
                         .unwrap()
                         .run_id,
+                        JournalSync::BeforeAck,
                     )
                     .unwrap(),
                 );
@@ -662,4 +677,229 @@ async fn manifest_frame_mismatches_refuse_replay_inspect_export_and_verify() {
             assert!(outcome.is_err() || outcome.unwrap().exit_code() != 0);
         }
     }
+}
+
+async fn write_stopped_run(
+    dir: &Path,
+    flow_id: &str,
+    resume: Option<obzenflow_core::journal::archive::manifest::RunManifestResumeConfig>,
+    facts: &[ChainEvent],
+) {
+    write_manifest_of(dir, flow_id, resume);
+    let run: obzenflow_core::FlowId = flow_id.parse().unwrap();
+    let system_id = SystemId::new();
+    let system = DiskJournal::<SystemEvent>::with_owner_in_run(
+        dir.join("system.log"),
+        obzenflow_core::JournalOwner::system(system_id),
+        run,
+        JournalSync::BeforeAck,
+    )
+    .unwrap();
+    system
+        .append(
+            SystemEvent::new(
+                system_id.into(),
+                SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running {
+                    stage_count: Some(1),
+                }),
+            ),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let stage: obzenflow_core::StageId = "stage_01H00000000000000000000000".parse().unwrap();
+    let source = DiskJournal::<ChainEvent>::with_owner_in_run(
+        dir.join(SOURCE_LOG),
+        obzenflow_core::JournalOwner::stage(stage),
+        run,
+        JournalSync::BeforeAck,
+    )
+    .unwrap();
+    for fact in facts {
+        source
+            .append(fact.clone(), Default::default())
+            .await
+            .unwrap();
+    }
+}
+
+fn source_fact(row: u64) -> ChainEvent {
+    ChainEventFactory::data_event(
+        WriterId::from(
+            "stage_01H00000000000000000000000"
+                .parse::<obzenflow_core::StageId>()
+                .unwrap(),
+        ),
+        "returns.row",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({ "row": row }),
+    )
+}
+
+fn append_tail(journal: &Path, tail: &[u8]) -> u64 {
+    let committed_end = std::fs::metadata(journal).unwrap().len();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(journal)
+        .unwrap();
+    std::io::Write::write_all(&mut file, tail).unwrap();
+    committed_end
+}
+
+fn archive_bytes(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .map(|path| {
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read(&path).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn admission_zero_tail_records_interrupted_append() {
+    use obzenflow_core::journal::{RunManifestInterruptedAppend, TailKind};
+    let dir = tempdir().unwrap();
+    write_stopped_run(dir.path(), FLOW_ID, None, &[source_fact(1)]).await;
+    let committed_end = append_tail(&dir.path().join("system.log"), &[0; 4096]);
+    let before = archive_bytes(dir.path());
+
+    let archive = DiskReplayArchive::open_for_resume(dir.path().to_path_buf(), false)
+        .await
+        .expect("an interrupted append is accepted");
+    assert_eq!(
+        archive.interrupted_appends(),
+        [RunManifestInterruptedAppend {
+            ancestor: None,
+            journal: "system.log".into(),
+            committed_end,
+            left_bytes: 4096,
+            tail_kind: TailKind::ZeroFilled,
+        }]
+    );
+    assert_eq!(archive.archive_status(), ArchiveStatus::Unknown);
+    assert_eq!(
+        archive_bytes(dir.path()),
+        before,
+        "admission moves no bytes"
+    );
+}
+
+#[tokio::test]
+async fn admission_damaged_frame_records_torn_frame() {
+    use obzenflow_core::journal::{RunManifestInterruptedAppend, TailKind};
+    let dir = tempdir().unwrap();
+    write_stopped_run(dir.path(), FLOW_ID, None, &[source_fact(1)]).await;
+    let source = dir.path().join(SOURCE_LOG);
+    let mut torn = std::fs::read(&source).unwrap();
+    torn.truncate(torn.len() / 2);
+    let committed_end = append_tail(&source, &torn);
+
+    let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        archive.interrupted_appends(),
+        [RunManifestInterruptedAppend {
+            ancestor: None,
+            journal: SOURCE_LOG.into(),
+            committed_end,
+            left_bytes: torn.len() as u64,
+            tail_kind: TailKind::TornFrame,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn admission_damage_before_frame_records_nothing() {
+    let dir = tempdir().unwrap();
+    write_stopped_run(dir.path(), FLOW_ID, None, &[source_fact(1), source_fact(2)]).await;
+    let source = dir.path().join(SOURCE_LOG);
+    let mut bytes = std::fs::read(&source).unwrap();
+    bytes[40] ^= 0xff;
+    std::fs::write(&source, &bytes).unwrap();
+
+    let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .expect("admission refuses nothing it accepted before");
+    assert!(archive.interrupted_appends().is_empty());
+    let mut reader = archive
+        .open_source_reader("returns", StageType::FiniteSource)
+        .await
+        .unwrap();
+    let Err(error) = reader.next().await else {
+        panic!("the read path refuses damage that a valid frame follows");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("a valid frame follows at offset"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn admission_completed_archive_records_nothing() {
+    let dir = tempdir().unwrap();
+    write_manifest(dir.path());
+    write_system_log_completed(dir.path()).await;
+    append_tail(&dir.path().join("system.log"), &[0; 512]);
+
+    let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .unwrap();
+    assert_eq!(archive.archive_status(), ArchiveStatus::Completed);
+    assert!(archive.interrupted_appends().is_empty());
+}
+
+#[tokio::test]
+async fn admission_merged_ancestor_tail_recorded() {
+    use obzenflow_core::journal::{RunManifestInterruptedAppend, TailKind};
+    const RESUMED_ID: &str = "flow_01H00000000000000000000001";
+    let base = tempdir().unwrap();
+    let (r0, r1) = (base.path().join("r0"), base.path().join("r1"));
+    let fact = source_fact(1);
+    std::fs::create_dir_all(&r0).unwrap();
+    std::fs::create_dir_all(&r1).unwrap();
+    write_stopped_run(&r0, FLOW_ID, None, std::slice::from_ref(&fact)).await;
+    let committed_end = append_tail(&r0.join("system.log"), &[0; 4096]);
+    let r0 = std::fs::canonicalize(&r0).unwrap();
+    write_stopped_run(
+        &r1,
+        RESUMED_ID,
+        Some(
+            obzenflow_core::journal::archive::manifest::RunManifestResumeConfig {
+                resumed_from: r0.clone(),
+                resume_generation: 1,
+                merged_from: Vec::new(),
+            },
+        ),
+        std::slice::from_ref(&fact),
+    )
+    .await;
+    let r1 = std::fs::canonicalize(&r1).unwrap();
+    DiskReplayArchive::open_for_resume(r0.clone(), false)
+        .await
+        .unwrap()
+        .claim_continuation(
+            RESUMED_ID.parse().unwrap(),
+            &obzenflow_core::journal::factory::CurrentRunLocator::new(r1.clone()),
+        )
+        .unwrap();
+
+    let head = DiskReplayArchive::open_for_resume(r1, false).await.unwrap();
+    assert_eq!(head.ancestors().len(), 1);
+    assert_eq!(
+        head.interrupted_appends(),
+        [RunManifestInterruptedAppend {
+            ancestor: Some(r0),
+            journal: "system.log".into(),
+            committed_end,
+            left_bytes: 4096,
+            tail_kind: TailKind::ZeroFilled,
+        }]
+    );
 }

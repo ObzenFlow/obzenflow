@@ -46,6 +46,10 @@ pub struct RunManifest {
     /// Omission is the current schema's representation of a non-resume run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<RunManifestResumeConfig>,
+    /// Each journal of the opened archive, or of an ancestor it merged, that
+    /// ends at an interrupted append whose bytes were left in place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interrupted_appends: Vec<RunManifestInterruptedAppend>,
     pub stages: HashMap<String, RunManifestStage>,
     pub system_journal_file: String,
     pub metrics_journals: Option<RunManifestMetrics>,
@@ -104,6 +108,47 @@ pub struct RunManifestResumeConfig {
     /// completion, nearest first (FLOWIP-134i B6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_from: Vec<PathBuf>,
+}
+
+/// A journal that ends at an append a crash or power cut interrupted, its
+/// `left_bytes` after `committed_end` left in place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunManifestInterruptedAppend {
+    /// The merged ancestor holding the journal, absent for the archive this run
+    /// opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ancestor: Option<PathBuf>,
+    /// The journal's file name in its run directory.
+    pub journal: String,
+    pub committed_end: u64,
+    pub left_bytes: u64,
+    pub tail_kind: TailKind,
+}
+
+/// The shape of the bytes an interrupted append left after the committed end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TailKind {
+    /// Part of a frame, or any other bytes that are not all zero.
+    TornFrame,
+    /// Only zeros, as when a file's size reached storage before its data.
+    ZeroFilled,
+}
+
+impl TailKind {
+    /// The token logs and the manifest use.
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::TornFrame => "torn_frame",
+            Self::ZeroFilled => "zero_filled",
+        }
+    }
+}
+
+impl std::fmt::Display for TailKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_token())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +224,7 @@ mod tests {
             created_at: Utc::now(),
             replay: None,
             resume: None,
+            interrupted_appends: Vec::new(),
             stages: HashMap::new(),
             system_journal_file: "system.log".to_string(),
             metrics_journals: None,
@@ -186,6 +232,42 @@ mod tests {
             capabilities: BTreeMap::new(),
             bounded_direct_fact_admission: Vec::new(),
         }
+    }
+
+    #[test]
+    fn manifest_without_interrupted_appends_reads_empty() {
+        let mut recorded = manifest(None);
+        recorded.interrupted_appends = vec![
+            RunManifestInterruptedAppend {
+                ancestor: None,
+                journal: "system.log".into(),
+                committed_end: 81920,
+                left_bytes: 1214,
+                tail_kind: TailKind::TornFrame,
+            },
+            RunManifestInterruptedAppend {
+                ancestor: Some("/runs/r0".into()),
+                journal: "system.log".into(),
+                committed_end: 327680,
+                left_bytes: 4096,
+                tail_kind: TailKind::ZeroFilled,
+            },
+        ];
+        let json = serde_json::to_value(&recorded).unwrap();
+        assert_eq!(
+            json["interrupted_appends"],
+            serde_json::json!([
+                {"journal": "system.log", "committed_end": 81920, "left_bytes": 1214, "tail_kind": "torn_frame"},
+                {"ancestor": "/runs/r0", "journal": "system.log", "committed_end": 327680, "left_bytes": 4096, "tail_kind": "zero_filled"}
+            ])
+        );
+        let read: RunManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(read.interrupted_appends, recorded.interrupted_appends);
+
+        let older = serde_json::to_value(manifest(None)).unwrap();
+        assert!(older.get("interrupted_appends").is_none());
+        let read: RunManifest = serde_json::from_value(older).unwrap();
+        assert!(read.interrupted_appends.is_empty());
     }
 
     #[test]

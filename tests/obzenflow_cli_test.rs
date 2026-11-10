@@ -925,7 +925,12 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             assert!(line.starts_with("\x1b[38;5;217mDELIVERY (stage: "));
             assert!(line.ends_with(")\x1b[0m"));
         }
-        for line in events.lines().filter(|line| !line.contains('⟨')) {
+        let mut in_clock = false;
+        for line in events.lines().filter(|line| {
+            let clock = in_clock || line.contains('⟨');
+            in_clock = clock && !line.contains('⟩');
+            !clock
+        }) {
             assert!(
                 line.matches('\x1b').count()
                     <= if line.contains("(stage:") {
@@ -1091,6 +1096,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 });
             let lines: Vec<_> = block.lines().collect();
             let clock = lines.iter().position(|line| line.starts_with('⟨')).unwrap();
+            let clock_end = clock
+                + lines[clock..]
+                    .iter()
+                    .position(|line| line.ends_with('⟩'))
+                    .unwrap();
             let expression = lines[1..clock].join(" ");
             assert!(
                 expression.starts_with(&format!("{event_type} ← {stage}({input})")),
@@ -1098,13 +1108,13 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             );
             let schema = if stage == "authorize_payment" {
                 assert_eq!(
-                    lines[clock + 1],
+                    lines[clock_end + 1],
                     format!("idempotency key: payment-authorize:{order}"),
                     "a keyed call shows its key after the clock: {block}"
                 );
-                clock + 2
+                clock_end + 2
             } else {
-                clock + 1
+                clock_end + 1
             };
             assert_eq!(lines[schema], "payload schema version: 1");
             assert_eq!(lines[schema + 1], "{", "payload starts at the left margin");
@@ -1293,7 +1303,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert_fact_origins(&human);
     assert!(!human.contains("← cause") && !human.contains("root (no recorded parent)"));
     assert!(human.ends_with(&format!(
-        "CLI observed {} journal entries across 17 journals.\nRun completed. CLI reached the end of its snapshot.\n",
+        "CLI observed {} journal entries across 19 journals.\nRun completed. CLI reached the end of its snapshot.\n",
         rows.len()
     )));
     let manifest: serde_json::Value =
@@ -1421,8 +1431,8 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .collect();
     assert_eq!(
         registrations.len(),
-        9,
-        "eight stage supervisors and pipeline register themselves"
+        10,
+        "nine stage supervisors and pipeline register themselves"
     );
     let stage_names: std::collections::BTreeMap<_, _> = manifest["stages"]
         .as_object()
@@ -1525,9 +1535,9 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert_eq!(system_counts.values().sum::<usize>(), system_count);
     // One per stage, and one per topology edge.
     for (event_type, expected) in [
-        (".ready@1", 8),
-        (".completed@1", 8),
-        ("execution/runtime.contract.continuation_allowed@1", 7),
+        (".ready@1", 9),
+        (".completed@1", 9),
+        ("execution/runtime.contract.continuation_allowed@1", 8),
     ] {
         assert_eq!(
             expected_journals
@@ -2624,4 +2634,50 @@ async fn show_reports_lineage_and_source_continuation() {
     // Deleting an ancestor is a retention choice the lineage reports (B16).
     std::fs::remove_dir_all(&r0).expect("remove the ancestor");
     assert_eq!(section(&show(&r1), "LINEAGE"), resumed_lineage(", missing"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resumed_lineage_names_left_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+    let r0 = stop_cli_flow_with_a_lagging_sink(&journal_base).await;
+    let system_log = r0.join("system.log");
+    let committed_end = std::fs::metadata(&system_log).unwrap().len();
+    std::io::Write::write_all(
+        &mut std::fs::OpenOptions::new()
+            .append(true)
+            .open(&system_log)
+            .unwrap(),
+        &[0; 4096],
+    )
+    .unwrap();
+    let r1 = run_cli_flow(&journal_base, &["--resume-from".as_ref(), r0.as_os_str()]).await;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+        .arg("show")
+        .arg(&r1)
+        .args(["--color", "never"])
+        .output()
+        .expect("obzenflow binary should run");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown = String::from_utf8(output.stdout).expect("show prints UTF-8");
+    let squeezed = |text: &str| text.split_whitespace().collect::<String>();
+    let lineage = shown
+        .split_once("\nLINEAGE\n")
+        .map_or("", |(_, rest)| rest.split("\n\n").next().unwrap_or(rest));
+    let r0_dir = r0.display();
+    assert_eq!(
+        squeezed(lineage),
+        squeezed(&format!(
+            "Resumed from {r0_dir}, generation 1 \
+             Tail {r0_dir}/system.log ends at offset {committed_end}; 4096 bytes after it are \
+             left in place (zero-filled) \
+             Rebuild complete; resume needs no earlier run \
+             Evidence {r0_dir} holds generation 0"
+        ))
+    );
 }

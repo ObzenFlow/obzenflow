@@ -681,6 +681,7 @@ async fn resuming_a_torn_resume_continues_the_prefix_its_ancestor_committed() ->
                 requires: vec![r0.clone()],
             }),
             evidence: Vec::new(),
+            tails: Vec::new(),
         }
     );
     let torn = read_run_lineage(&r1)?;
@@ -746,6 +747,7 @@ async fn resuming_a_torn_resume_continues_the_prefix_its_ancestor_committed() ->
                 generation: Some(0),
                 missing: false,
             }],
+            tails: Vec::new(),
         }
     );
     let continued = read_run_lineage(&r1)?;

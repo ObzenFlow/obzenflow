@@ -222,6 +222,19 @@ impl FlowEffectiveConfig {
             .map(std::path::Path::new)
     }
 
+    /// The run's `journal.sync` and its winning source, defaulting to `before_ack`.
+    pub fn journal_sync(&self) -> (super::schema::JournalSync, ConfigSource) {
+        self.get(super::schema::JOURNAL_SYNC_KEY, &ConfigScope::Global)
+            .and_then(|resolved| {
+                resolved
+                    .value
+                    .as_text()
+                    .and_then(super::schema::JournalSync::from_token)
+                    .map(|sync| (sync, resolved.meta.source.clone()))
+            })
+            .unwrap_or((super::schema::JournalSync::BeforeAck, ConfigSource::Default))
+    }
+
     /// `contracts.source_contract_strict_mode` token: `abort` or `warn`.
     pub fn source_contract_strict_mode(&self) -> &str {
         self.get(

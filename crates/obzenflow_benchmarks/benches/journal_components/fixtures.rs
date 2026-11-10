@@ -9,6 +9,7 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{CausalFrontier, ChainEventFactory};
 use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -50,8 +51,13 @@ impl History {
         for stage in stages {
             let path = fixture.directory.path().join(format!("{stage}.log"));
             let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(
-                DiskJournal::with_owner_in_run(path.clone(), JournalOwner::stage(*stage), run)
-                    .unwrap(),
+                DiskJournal::with_owner_in_run(
+                    path.clone(),
+                    JournalOwner::stage(*stage),
+                    run,
+                    JournalSync::BeforeAck,
+                )
+                .unwrap(),
             );
             let mut events = Vec::with_capacity(business + lifecycle_facts);
             for index in 0..business {
