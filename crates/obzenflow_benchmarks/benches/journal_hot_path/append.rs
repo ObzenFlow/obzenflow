@@ -6,6 +6,7 @@ use super::{declare, fixtures, measure, timed, Category, Census, Sample};
 use criterion::{Criterion, Throughput};
 use obzenflow_core::{ChainEvent, Journal, JournalOwner};
 use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::cell::LazyCell;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -18,6 +19,7 @@ fn run(runtime: &Runtime, history: &fixtures::History) -> Sample {
             path.clone(),
             JournalOwner::stage(history.stage),
             history.run,
+            JournalSync::BeforeAck,
         )
         .unwrap(),
     );

@@ -25,7 +25,8 @@ pub enum ReplayVerb {
 }
 
 impl ReplayVerb {
-    fn word(self) -> &'static str {
+    /// The verb as operators write it, `replay` or `resume`.
+    pub const fn word(self) -> &'static str {
         match self {
             Self::Replay => "replay",
             Self::Resume => "resume",

@@ -16,6 +16,7 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemPayload, WriterId};
 use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
+use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
 
 use obzenflow_core::journal::AppendOptions;
@@ -41,6 +42,7 @@ async fn initial_prefix_includes_every_atomic_member_and_stays_fixed_while_taili
             crate::journal::disk::DiskJournal::with_owner(
                 directory.path().join("prefix.log"),
                 JournalOwner::system(system),
+                JournalSync::BeforeAck,
             )
             .unwrap(),
         ),
@@ -1057,6 +1059,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                         crate::journal::disk::DiskJournal::with_owner(
                             directory.path().join(name),
                             JournalOwner::stage(stage),
+                            JournalSync::BeforeAck,
                         )
                         .unwrap(),
                     )
@@ -2180,6 +2183,7 @@ async fn forwarded_stage_facts_advance_the_cursor_without_becoming_owner_observa
                     directory.path().join("owner.log"),
                     JournalOwner::stage(owner),
                     run,
+                    JournalSync::BeforeAck,
                 )
                 .unwrap(),
             )

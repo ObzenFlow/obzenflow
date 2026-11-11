@@ -270,6 +270,14 @@ pub trait ReplayArchive: Send + Sync {
         None
     }
 
+    /// Each journal of this archive, and of the ancestors it merges, that ends
+    /// at an interrupted append; an ancestor's entries name it.
+    fn interrupted_appends(
+        &self,
+    ) -> &[crate::journal::archive::manifest::RunManifestInterruptedAppend] {
+        &[]
+    }
+
     /// Maximum recorded resume generation in this archive (FLOWIP-120n). A
     /// resume run enters this plus one. The default answers for archives with
     /// no recorded catch-up boundary; `DiskReplayArchive` derives it from

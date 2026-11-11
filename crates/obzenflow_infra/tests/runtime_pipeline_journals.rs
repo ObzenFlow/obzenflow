@@ -147,6 +147,7 @@ where
                 obzenflow_infra::journal::DiskJournalFactory::new(
                     dir.path().to_path_buf(),
                     FlowId::new(),
+                    obzenflow_runtime::runtime_config::JournalSync::BeforeAck,
                 )
                 .unwrap(),
             )

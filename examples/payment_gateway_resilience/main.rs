@@ -47,7 +47,7 @@ fn banner_for(mode: &RunMode) -> Banner {
             .bullets(
                 "What to watch",
                 [
-                    "validate_order classifies once and authors multiple named facts; InvalidOrder stays in the journal as provenance and CancelledOrder carries the order's fate",
+                    "validate_order classifies once and authors multiple named facts; InvalidOrder goes to invalid_orders for intake review and CancelledOrder carries the order's fate",
                     "Gateway declines are payment outcomes, not cancellations; PaymentDeclined reaches its own delivery",
                     "Transient gateway failures receive bounded retry; sustained outages open the circuit breaker (obzenflow_circuit_breaker_*), and terminal unavailability does not cancel",
                     "Re-run with --replay-from target/payment-gateway-logs/flows/<flow_id> to replay with zero gateway calls",

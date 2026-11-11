@@ -18,6 +18,7 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::metrics::instrumentation::StageInstrumentation;
 use obzenflow_runtime::metrics::observations::LatestObservationMap;
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::{cell::LazyCell, sync::Arc};
 use tokio::runtime::Runtime;
 
@@ -131,6 +132,7 @@ impl Fixture {
                 path,
                 JournalOwner::stage(self.stage),
                 self.seed.record.envelope.provenance.journal.run_id,
+                JournalSync::BeforeAck,
             )
             .unwrap(),
         )
@@ -289,7 +291,7 @@ pub fn bench(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
             };
             declare(&full, category, boundary);
             let mut taken = false;
-            let input = serde_json::json!({"records":count,"inherited_clock_width":width,"observations":observations,"distinct_provenance":distinct,"payload_bytes":payload,"workers":2,"sync_on_write":false,"reopened_scan_includes_open":true});
+            let input = serde_json::json!({"records":count,"inherited_clock_width":width,"observations":observations,"distinct_provenance":distinct,"payload_bytes":payload,"workers":2,"sync":"before_ack","reopened_scan_includes_open":true});
             group.bench_function(&name, |b| measure(b, censuses, &mut taken, &full, &input, || {
                 let (rows, mut sample) = if operation == "append" {
                     let directory = tempfile::tempdir().unwrap();

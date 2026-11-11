@@ -26,7 +26,12 @@ impl Fixture {
             .unwrap();
         let path = dir.path().join("events.log");
         let stage = StageId::new();
-        let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+        let journal = DiskJournal::with_owner(
+            path.clone(),
+            JournalOwner::stage(stage),
+            JournalSync::BeforeAck,
+        )
+        .unwrap();
         Self {
             _dir: dir,
             journal,

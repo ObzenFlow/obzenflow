@@ -31,8 +31,10 @@ pub struct DepotLookup {
 }
 
 impl DepotLookup {
-    pub fn for_update(update: ParcelUpdate) -> Self {
-        Self { update }
+    pub fn for_update(update: &ParcelUpdate) -> Self {
+        Self {
+            update: update.clone(),
+        }
     }
 }
 

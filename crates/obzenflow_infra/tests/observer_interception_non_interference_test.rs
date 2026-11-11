@@ -19,6 +19,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
+use obzenflow_runtime::runtime_config::JournalSync;
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,7 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<Chai
     let journal = DiskJournal::<ChainEvent>::with_owner(
         run_dir.join(&stage.data_journal_file),
         JournalOwner::stage(StageId::new()),
+        JournalSync::BeforeAck,
     )
     .unwrap_or_else(|error| panic!("open {stage_key} journal: {error}"));
     journal

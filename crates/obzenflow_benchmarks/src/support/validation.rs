@@ -17,6 +17,7 @@ use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId, TypedPa
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -218,6 +219,7 @@ impl ObserverJournals {
                 directory.path().join("data.log"),
                 JournalOwner::stage(stage),
                 flow,
+                JournalSync::BeforeAck,
             )
             .unwrap(),
         );
@@ -226,6 +228,7 @@ impl ObserverJournals {
                 directory.path().join("error.log"),
                 JournalOwner::stage(stage),
                 flow,
+                JournalSync::BeforeAck,
             )
             .unwrap(),
         );
@@ -234,6 +237,7 @@ impl ObserverJournals {
                 directory.path().join("system.log"),
                 JournalOwner::system(system_id),
                 flow,
+                JournalSync::BeforeAck,
             )
             .unwrap(),
         );

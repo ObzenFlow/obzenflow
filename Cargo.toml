@@ -202,7 +202,6 @@ sqlx = { workspace = true }
 obzenflow-topology = { workspace = true }
 
 tokio-test = { workspace = true }
-proptest = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio"] }
 fastrand = { workspace = true }
 sysinfo = { workspace = true }

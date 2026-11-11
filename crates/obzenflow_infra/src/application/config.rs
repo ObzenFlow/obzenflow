@@ -741,6 +741,7 @@ pub(crate) struct RawFileContractsConfig {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawFileJournalConfig {
     pub(crate) root: Option<PathBuf>,
+    pub(crate) sync: Option<String>,
 }
 
 /// `[middleware]`: shared family settings at global, flow, stage and effect scope.

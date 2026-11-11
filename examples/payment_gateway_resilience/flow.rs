@@ -78,6 +78,7 @@ pub fn assemble_flow(
         let validate_order = validation::ValidateOrder;
         let shipping_handoff = ConsoleSink::new(console::format_shipping);
         let record_declined = ConsoleSink::new(console::format_declined);
+        let record_invalid = ConsoleSink::new(console::format_invalid);
         let record_cancelled = ConsoleSink::new(console::format_cancelled);
         let record_unavailable = ConsoleSink::new(console::format_unavailable);
 
@@ -124,6 +125,7 @@ pub fn assemble_flow(
                     ) } => shipping_handoff.idempotent()
                 );
                 declined_orders = sink!(PaymentDeclined => record_declined.idempotent());
+                invalid_orders = sink!(InvalidOrder => record_invalid.idempotent());
                 cancelled_orders = sink!(CancelledOrder => record_cancelled.idempotent());
                 manual_review = sink!(
                     PaymentAuthorizationUnavailable with { sink_delivery_observer(
@@ -137,6 +139,7 @@ pub fn assemble_flow(
                 web_orders |> validate_order;
                 store_orders |> validate_order;
                 validate_order |> authorize_payment;
+                validate_order |> invalid_orders;
                 validate_order |> cancelled_orders;
                 authorize_payment |> paid_orders;
                 authorize_payment |> declined_orders;

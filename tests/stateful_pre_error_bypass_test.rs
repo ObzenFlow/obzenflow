@@ -18,6 +18,7 @@ mod replay_testkit {
 }
 
 use async_trait::async_trait;
+use obzenflow::journal::JournalSync;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
@@ -202,12 +203,13 @@ impl FlowJournalFactory for MarkingJournalFactory {
 
 fn marking_disk_journals(
     base_path: PathBuf,
-) -> impl Fn(FlowId, Option<&Path>) -> Result<MarkingJournalFactory, JournalError> {
-    move |flow_id, root| {
+) -> impl Fn(FlowId, Option<&Path>, JournalSync) -> Result<MarkingJournalFactory, JournalError> {
+    move |flow_id, root, sync| {
         Ok(MarkingJournalFactory {
             inner: DiskJournalFactory::new(
                 root.map_or_else(|| base_path.clone(), Path::to_path_buf),
                 flow_id,
+                sync,
             )?,
         })
     }

@@ -5,6 +5,7 @@
 //! Outward application certification for production sink connectors.
 
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
+use obzenflow_runtime::runtime_config::JournalSync;
 
 use crate::application::{CurrentRunLocator, FlowApplication};
 use crate::journal::DiskJournal;
@@ -607,6 +608,7 @@ async fn read_chain_journal(
     let journal = DiskJournal::<ChainEvent>::with_owner(
         path.to_path_buf(),
         JournalOwner::stage(StageId::new()),
+        JournalSync::BeforeAck,
     )
     .map_err(|error| failure("journal", path.display().to_string(), error.to_string()))?;
     let mut reader = journal

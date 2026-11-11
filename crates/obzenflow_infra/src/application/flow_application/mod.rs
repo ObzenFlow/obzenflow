@@ -844,7 +844,8 @@ impl FlowApplication {
                         obzenflow_dsl::FlowBuildError::ApplicationSettings(error) => {
                             ApplicationError::InvalidConfiguration(error.to_string())
                         }
-                        obzenflow_dsl::FlowBuildError::JournalRootUnused { .. } => {
+                        obzenflow_dsl::FlowBuildError::JournalRootUnused { .. }
+                        | obzenflow_dsl::FlowBuildError::JournalSyncUnused { .. } => {
                             ApplicationError::InvalidConfiguration(failure.error.to_string())
                         }
                         other => ApplicationError::FlowBuildFailed(other.to_string()),

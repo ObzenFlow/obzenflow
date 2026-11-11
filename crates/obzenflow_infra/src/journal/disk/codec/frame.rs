@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow_core::journal::JOURNAL_SCHEMA_VERSION;
+#[cfg(any(test, feature = "test-support"))]
 use std::io;
 
 // The complete schema version is part of every frame. No independent format
@@ -38,6 +39,18 @@ pub(crate) enum FrameProblem {
     Corrupt(String),
 }
 
+impl std::fmt::Display for FrameProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Incomplete(message) | Self::Corrupt(message) => f.write_str(message),
+            Self::SchemaMismatch => write!(
+                f,
+                "journal schema marker mismatch (supported: {JOURNAL_SCHEMA_VERSION})"
+            ),
+        }
+    }
+}
+
 pub(crate) fn encode(body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + body.len() + TRAILER_LEN);
     out.extend_from_slice(&MAGIC);
@@ -53,13 +66,19 @@ pub(crate) fn encode(body: &[u8]) -> Vec<u8> {
 
 /// Validate a header before its untrusted length controls any read/allocation.
 pub(crate) fn frame_length(header: &[u8]) -> Result<usize, FrameProblem> {
-    if header
+    if let Some(index) = header
         .iter()
-        .take(MAGIC.len())
         .zip(MAGIC)
-        .any(|(actual, expected)| *actual != expected)
+        .position(|(actual, expected)| *actual != expected)
     {
-        return Err(FrameProblem::SchemaMismatch);
+        let version_start = MAGIC.len() - JOURNAL_SCHEMA_VERSION.len();
+        let another_version =
+            index >= version_start && (header[index].is_ascii_digit() || header[index] == b'.');
+        return Err(if another_version {
+            FrameProblem::SchemaMismatch
+        } else {
+            FrameProblem::Corrupt("invalid frame marker".into())
+        });
     }
     if header.len() < HEADER_LEN {
         return Err(FrameProblem::Incomplete(
@@ -111,6 +130,7 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<&[u8], FrameProblem> {
     Ok(&bytes[HEADER_LEN..trailer])
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn io_error(problem: FrameProblem) -> io::Error {
     match problem {
         FrameProblem::SchemaMismatch => io::Error::new(io::ErrorKind::InvalidData, format!("journal schema marker mismatch (supported: {JOURNAL_SCHEMA_VERSION}); re-record the archive")),
@@ -130,6 +150,31 @@ mod tests {
             frame_length(b"OJF4"),
             Err(FrameProblem::SchemaMismatch)
         ));
+    }
+
+    #[test]
+    fn frame_length_damaged_marker_returns_corrupt() {
+        let other = [b"OJF".as_slice(), b"21.0"].concat();
+        assert!(matches!(
+            frame_length(&other),
+            Err(FrameProblem::SchemaMismatch)
+        ));
+        for damaged in [
+            vec![0; HEADER_LEN],
+            b"XJF".to_vec(),
+            [&MAGIC[..4], &[0; 3]].concat(),
+        ] {
+            assert!(
+                matches!(frame_length(&damaged), Err(FrameProblem::Corrupt(_))),
+                "{damaged:?}"
+            );
+        }
+        for cut in 0..MAGIC.len() {
+            assert!(matches!(
+                frame_length(&MAGIC[..cut]),
+                Err(FrameProblem::Incomplete(_))
+            ));
+        }
     }
 
     #[test]

@@ -200,20 +200,11 @@ pub(crate) fn admit(run: &Path, manifest: &RunManifest) -> Result<bool, ReplayEr
 pub(crate) fn has_live_writer(run: &Path, manifest: &RunManifest) -> Result<bool, ReplayError> {
     for file in super::identity::manifest_journal_files(manifest) {
         let path = run.join(file);
-        let journal = match File::open(&path) {
-            Ok(journal) => journal,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+        match writer_holds(&path) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(io_error(
-                    format!("Failed to open journal {}", path.display()),
-                    error,
-                ))
-            }
-        };
-        match journal.try_lock_shared() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Ok(true),
-            Err(TryLockError::Error(error)) => {
                 return Err(io_error(
                     format!("Failed to probe the writer of {}", path.display()),
                     error,
@@ -222,6 +213,14 @@ pub(crate) fn has_live_writer(run: &Path, manifest: &RunManifest) -> Result<bool
         }
     }
     Ok(false)
+}
+
+pub(crate) fn writer_holds(path: &Path) -> std::io::Result<bool> {
+    match File::open(path)?.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(error)) => Err(error),
+    }
 }
 
 /// Whether a resumed run took over the run it resumed from.

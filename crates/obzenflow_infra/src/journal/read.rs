@@ -28,7 +28,9 @@ pub use config_changes::{
     read_logic_version_changes, ConfigChanges, LogicVersionChange, RunConfigChanges,
 };
 pub use earlier::EarlierRun;
-pub use lineage::{read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing};
+pub use lineage::{
+    read_run_lineage, EvidenceHolder, InterruptedTail, Rebuild, ResumedFrom, RunLineage, Standing,
+};
 pub use obzenflow_runtime::runtime_config::ConfigDifference;
 pub use rejections::RecordedAt;
 
@@ -69,6 +71,12 @@ impl Reader {
         match self {
             Self::System(r) => r.is_at_end(),
             Self::Chain(r) => r.is_at_end(),
+        }
+    }
+    fn interrupted_append(&self) -> Option<super::disk::scanner::InterruptedAppend> {
+        match self {
+            Self::System(r) => r.interrupted_append(),
+            Self::Chain(r) => r.interrupted_append(),
         }
     }
     async fn next(&mut self) -> Result<Option<RunRecordData>, JournalError> {
@@ -216,6 +224,7 @@ struct ReadState {
     progress: RunReadProgress,
     settled_ends: BTreeMap<JournalId, JournalPosition>,
     failure: Option<String>,
+    tails: Vec<InterruptedTail>,
 }
 
 /// Admit all manifest-selected journals without creating or changing any file.
@@ -226,7 +235,9 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
         journals: files,
     } = admit_run(path)?;
     let mut journals = Vec::with_capacity(files.len());
+    let mut tails = Vec::new();
     for (journal, file) in files {
+        let name = file.file_name().map(PathBuf::from).unwrap_or_default();
         let reader = match journal.kind {
             RunJournalKind::System
             | RunJournalKind::MetricsCoordination
@@ -235,6 +246,14 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
             }
             _ => Reader::Chain(DiskJournalReader::open_observer(file, journal.id).await?),
         };
+        if let Some(append) = reader.interrupted_append() {
+            tails.push(InterruptedTail {
+                journal: name,
+                committed_end: append.committed_end,
+                left_bytes: append.left_bytes,
+                kind: append.kind,
+            });
+        }
         journals.push(SelectedJournal { journal, reader });
     }
     let merge = merge::CausalMerge::new(journals.iter().map(|selected| selected.journal.id));
@@ -250,6 +269,7 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
             progress: RunReadProgress::default(),
             settled_ends: BTreeMap::new(),
             failure: None,
+            tails,
         },
     })
 }
@@ -373,9 +393,10 @@ impl RunSnapshot {
     pub fn journals(&self) -> impl ExactSizeIterator<Item = &RunJournal> {
         self.state.journals.iter().map(|selected| &selected.journal)
     }
-    /// The run's place in its history, read now from manifests and claims.
+    /// The run's place in its history, read now from manifests and claims,
+    /// with its own journals that ended at an interrupted append at admission.
     pub fn lineage(&self) -> Result<RunLineage, JournalReadError> {
-        read_run_lineage(&self.state.run_dir)
+        self.state.lineage()
     }
     /// Returns records in causal order, lowest causal rank first with ties broken
     /// by event ID, so every record follows each record its clock counts.
@@ -423,9 +444,10 @@ impl RunTail {
     pub fn progress(&self) -> &RunReadProgress {
         &self.state.progress
     }
-    /// The run's place in its history, read now from manifests and claims.
+    /// The run's place in its history, read now from manifests and claims,
+    /// with its own journals that ended at an interrupted append at admission.
     pub fn lineage(&self) -> Result<RunLineage, JournalReadError> {
-        read_run_lineage(&self.state.run_dir)
+        self.state.lineage()
     }
     /// How the run's configuration differs from the runs it rebuilt.
     pub fn config_changes(&self) -> Result<Vec<RunConfigChanges>, JournalReadError> {
@@ -467,6 +489,12 @@ impl RunTail {
 }
 
 impl ReadState {
+    fn lineage(&self) -> Result<RunLineage, JournalReadError> {
+        let mut lineage = read_run_lineage(&self.run_dir)?;
+        lineage.tails.extend(self.tails.iter().cloned());
+        Ok(lineage)
+    }
+
     async fn next(&mut self, snapshot: bool) -> Result<Option<RunRecord>, JournalReadError> {
         if let Some(error) = &self.failure {
             return Err(JournalReadError::Integrity(error.clone()));

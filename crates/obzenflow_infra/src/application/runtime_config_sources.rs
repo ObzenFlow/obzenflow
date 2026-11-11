@@ -19,8 +19,9 @@ use crate::env::{env_bool, env_var};
 use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
 use obzenflow_runtime::runtime_config::{
     knob_registry, AiEndpointTable, AiEndpointTables, CandidateSet, ConfigResolveError,
-    ConfigValue, KnobType, ResolvedRuntimeConfig, ScopedCandidate, AI_EMBEDDINGS_SECTION,
-    AI_MODELS_SECTION, JOURNAL_ROOT_KEY, MAX_OPEN_KEYS_KEY, SINK_HANDLER_KEY,
+    ConfigValue, JournalSync, KnobType, ResolvedRuntimeConfig, ScopedCandidate,
+    AI_EMBEDDINGS_SECTION, AI_MODELS_SECTION, JOURNAL_ROOT_KEY, JOURNAL_SYNC_KEY,
+    MAX_OPEN_KEYS_KEY, SINK_HANDLER_KEY,
 };
 
 const REMOVED_AI_ENV: &[&str] = &[
@@ -558,6 +559,26 @@ fn admit_file_candidates(
             ConfigSource::File,
             ConfigValue::Text(root.display().to_string()),
             JOURNAL_ROOT_KEY,
+        )?;
+    }
+    if let Some(sync) = &file.journal.sync {
+        if JournalSync::from_token(sync).is_none() {
+            return Err(ConfigError::at(
+                JOURNAL_SYNC_KEY,
+                format!(
+                    "must be \"{}\" or \"{}\", got {sync:?}",
+                    JournalSync::BeforeAck.as_token(),
+                    JournalSync::Off.as_token()
+                ),
+            ));
+        }
+        admit(
+            set,
+            JOURNAL_SYNC_KEY,
+            ConfigScope::Global,
+            ConfigSource::File,
+            ConfigValue::Text(sync.clone()),
+            JOURNAL_SYNC_KEY,
         )?;
     }
 
@@ -1753,6 +1774,49 @@ mod tests {
             "config error at journal.root: must name a directory"
         );
         assert!(toml::from_str::<RawFileStartupConfig>("[journal]\ndir = \"x\"").is_err());
+    }
+
+    fn journal_sync(snapshot: &ResolvedRuntimeConfig) -> (serde_json::Value, String) {
+        snapshot
+            .global_view()
+            .into_iter()
+            .find(|doc| doc.key_path == JOURNAL_SYNC_KEY)
+            .map(|doc| (doc.value, doc.source))
+            .expect("journal.sync always resolves")
+    }
+
+    #[test]
+    fn journal_sync_absent_resolves_before_ack() {
+        let _lock = env_lock();
+        assert_eq!(
+            journal_sync(&snapshot("", &[])),
+            (serde_json::json!("before_ack"), "default".to_string())
+        );
+    }
+
+    #[test]
+    fn journal_sync_file_overrides_default() {
+        let _lock = env_lock();
+        assert_eq!(
+            journal_sync(&snapshot("[journal]\nsync = \"off\"", &[])),
+            (serde_json::json!("off"), "file".to_string())
+        );
+        assert_eq!(
+            journal_sync(&snapshot("[journal]\nsync = \"before_ack\"", &[])),
+            (serde_json::json!("before_ack"), "file".to_string())
+        );
+    }
+
+    #[test]
+    fn journal_sync_unknown_value_refused() {
+        let _lock = env_lock();
+        let err =
+            build_runtime_config_snapshot(&cli(&[]), &parse_file("[journal]\nsync = \"every_64\""))
+                .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "config error at journal.sync: must be \"before_ack\" or \"off\", got \"every_64\""
+        );
     }
 
     #[test]

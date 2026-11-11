@@ -10,7 +10,10 @@
 
 use super::codec::Decoder;
 use super::identity::CommitmentAdmission;
-use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
+use super::scanner::{
+    classify_frame, dispose, read_frame_async, tail_after, Disposition, InterruptedAppend,
+    ReadPolicy,
+};
 use async_trait::async_trait;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::JournalEvent;
@@ -95,6 +98,7 @@ pub struct DiskJournalReader<T: JournalEvent> {
     observer: bool,
     /// Retain the admitted file identity, refusing replacement on a later poll.
     pinned_file: Option<Arc<StdFile>>,
+    interrupted: Option<InterruptedAppend>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -146,6 +150,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             read_write_lock,
             observer: false,
             pinned_file: None,
+            interrupted: None,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -193,6 +198,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             read_write_lock,
             observer: false,
             pinned_file: None,
+            interrupted: None,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -203,10 +209,11 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         journal_id: JournalId,
     ) -> Result<Self, JournalError> {
         let scan_path = path.clone();
-        let (file, end) = tokio::task::spawn_blocking(move || {
+        let (file, end, interrupted) = tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let file = open_existing_std_file(&scan_path)?;
-            let scan = || -> Result<u64, JournalError> {
+            let writer = super::continuation::writer_holds(&scan_path).unwrap_or(true);
+            let scan = || -> Result<(u64, Option<InterruptedAppend>), JournalError> {
                 let length = file.metadata().map_err(observer_io)?.len();
                 let mut input =
                     std::io::BufReader::new(file.try_clone().map_err(observer_io)?.take(length));
@@ -220,13 +227,19 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                     match dispose(
                         classify_frame::<T>(&buf, &mut decoder, end),
                         termination,
-                        ReadPolicy::LiveTail,
+                        ReadPolicy::SealedScan {
+                            tolerate_torn_tail: true,
+                        },
+                        || tail_after(&scan_path, &buf, end, &mut input),
                     ) {
                         Disposition::Yield(frame) => {
                             for record in frame.into_records() {
                                 admission.admit(&record)?;
                             }
                             end += consumed as u64;
+                        }
+                        Disposition::Interrupted(append) => {
+                            return Ok((end, (!writer).then_some(append)))
                         }
                         Disposition::Skip | Disposition::EndOfCommittedRecords => break,
                         Disposition::Corrupt(problem) => {
@@ -244,10 +257,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                         }
                     }
                 }
-                Ok(end)
+                Ok((end, None))
             };
-            let end = scan()?;
-            Ok::<_, JournalError>((file, end))
+            let (end, interrupted) = scan()?;
+            Ok::<_, JournalError>((file, end, interrupted))
         })
         .await
         .map_err(|error| JournalError::Implementation {
@@ -264,7 +277,12 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         reader.initial_end = Some(end);
         reader.observer = true;
         reader.pinned_file = Some(Arc::new(file));
+        reader.interrupted = interrupted;
         Ok(reader)
+    }
+
+    pub(crate) fn interrupted_append(&self) -> Option<InterruptedAppend> {
+        self.interrupted
     }
 
     /// Create a new live-tail reader advanced to a specific append position.
@@ -303,7 +321,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             let (disposition, frame_start) = self.advance_one(&mut reader, read_guard).await?;
             match disposition {
                 Disposition::Yield(_) => {}
-                Disposition::EndOfCommittedRecords => {
+                Disposition::EndOfCommittedRecords | Disposition::Interrupted(_) => {
                     self.at_end = true;
                     break;
                 }
@@ -379,9 +397,17 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             // a fresh decoder here would canonicalize the archive directory
             // and lock the global registry for every physical frame.
             let mut decoder = self.decoder.clone();
-            let (classification, decoder, bytes) = tokio::task::spawn_blocking(move || {
+            let policy = self.policy;
+            let path = self.path.clone();
+            let after = frame_start + consumed as u64;
+            let (disposition, decoder, bytes) = tokio::task::spawn_blocking(move || {
                 let classification = classify_frame::<T>(&bytes, &mut decoder, frame_start);
-                (classification, decoder, bytes)
+                let disposition = dispose(classification, termination, policy, || {
+                    let mut rest = std::io::BufReader::new(StdFile::open(&path)?);
+                    std::io::Seek::seek(&mut rest, SeekFrom::Start(after))?;
+                    tail_after(&path, &bytes, frame_start, &mut rest)
+                });
+                (disposition, decoder, bytes)
             })
             .await
             .map_err(|error| JournalError::Implementation {
@@ -390,7 +416,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             })?;
             self.decoder = decoder;
             self.buf = bytes;
-            match dispose(classification, termination, self.policy) {
+            match disposition {
                 Disposition::Yield(frame) => {
                     let records = frame.into_records();
                     // Validate the whole group privately before publishing any
@@ -504,7 +530,7 @@ impl<T: JournalEvent> obzenflow_core::journal::JournalStorageReader<T> for DiskJ
                 self.stall_polls = 0;
                 Ok(Some(record))
             }
-            Disposition::EndOfCommittedRecords => {
+            Disposition::EndOfCommittedRecords | Disposition::Interrupted(_) => {
                 // Clean EOF (live tail) or a tolerated final torn tail (sealed).
                 self.at_end = true;
                 self.stall_polls = 0;
@@ -581,6 +607,7 @@ mod tests {
     use obzenflow_core::event::provenance::JournalGroupMember;
     use obzenflow_core::event::JournalRecord;
     use obzenflow_core::{ChainEvent, JournalId, StageId, WriterId};
+    use obzenflow_runtime::runtime_config::JournalSync;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -599,9 +626,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("group-gap.log");
         let stage = StageId::new();
-        let journal =
-            DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
-                .unwrap();
+        let journal = DiskJournal::<ChainEvent>::with_owner(
+            path.clone(),
+            JournalOwner::stage(stage),
+            JournalSync::BeforeAck,
+        )
+        .unwrap();
         let event = || {
             ChainEventFactory::data_event(
                 stage.into(),
@@ -676,9 +706,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("decode-lock.log");
         let stage = StageId::new();
-        let journal =
-            DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
-                .unwrap();
+        let journal = DiskJournal::<ChainEvent>::with_owner(
+            path.clone(),
+            JournalOwner::stage(stage),
+            JournalSync::BeforeAck,
+        )
+        .unwrap();
         let expected = journal
             .append(
                 ChainEventFactory::data_event(
@@ -719,6 +752,7 @@ mod tests {
             let journal = DiskJournal::<ChainEvent>::with_owner(
                 path.clone(),
                 obzenflow_core::JournalOwner::stage(stage),
+                JournalSync::BeforeAck,
             )
             .unwrap();
             let first = journal
@@ -1018,6 +1052,89 @@ mod tests {
         // Should read index 7
         let envelope = reader2.next().await.unwrap().expect("Should have event");
         assert_eq!(envelope.payload()["index"], 7);
+    }
+
+    fn observed_journal(path: &Path) -> (JournalId, Vec<Vec<u8>>) {
+        let (identity, lease) = super::super::identity::open_identity(path, None).unwrap();
+        drop(lease);
+        let stage = StageId::new();
+        let mut previous = None;
+        let frames = [
+            json_payload("a"),
+            json_payload("b"),
+            json_payload(&"x".repeat(10_000)),
+        ]
+        .into_iter()
+        .map(|payload| {
+            let event = ChainEventFactory::data_event(
+                stage.into(),
+                "observed",
+                std::num::NonZeroU32::MIN,
+                payload,
+            );
+            serialize_record(&super::super::identity::fixture_record(
+                identity,
+                event,
+                &mut previous,
+            ))
+            .unwrap()
+        })
+        .collect();
+        (identity.journal_id, frames)
+    }
+
+    fn json_payload(body: &str) -> serde_json::Value {
+        serde_json::json!({ "body": body })
+    }
+
+    #[tokio::test]
+    async fn observer_partial_frame_yields_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("system.log");
+        let (journal_id, frames) = observed_journal(&path);
+        let committed = frames[0].len() + frames[1].len();
+        let mut bytes = frames.concat();
+        let landed = (committed + super::super::codec::frame::HEADER_LEN) / 4096 * 4096 + 4096;
+        bytes[landed..].fill(0);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut reader = DiskJournalReader::<ChainEvent>::open_observer(path.clone(), journal_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.interrupted_append(),
+            Some(InterruptedAppend {
+                committed_end: committed as u64,
+                left_bytes: (bytes.len() - committed) as u64,
+                kind: obzenflow_core::journal::TailKind::TornFrame,
+            })
+        );
+        for _ in 0..2 {
+            assert!(reader.next().await.unwrap().is_some());
+        }
+        assert!(reader.initial_prefix_complete().unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "readers move nothing");
+    }
+
+    #[tokio::test]
+    async fn observer_damage_before_frame_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("system.log");
+        let (journal_id, mut frames) = observed_journal(&path);
+        frames[1][super::super::codec::frame::HEADER_LEN + 2] ^= 0xff;
+        let next = frames[0].len() + frames[1].len();
+        std::fs::write(&path, frames.concat()).unwrap();
+
+        let refused = DiskJournalReader::<ChainEvent>::open_observer(path, journal_id).await;
+        let Err(error) = refused else {
+            panic!("damage that a valid frame follows must refuse admission");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("a valid frame follows at offset {next}")),
+            "{error}"
+        );
     }
 
     #[tokio::test]

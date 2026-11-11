@@ -25,7 +25,7 @@ use crate::journal::disk::identity::CommitmentAdmission;
 use crate::journal::disk::manifest_gate::require_current_journal_schema_version;
 use crate::journal::disk::replay_archive::scan_system_log;
 use crate::journal::disk::scanner::{
-    classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy,
+    classify_frame, dispose, read_frame_sync, tail_after, Disposition, ReadPolicy,
 };
 
 use super::error::{RefusalReason, VerifyError};
@@ -246,6 +246,7 @@ impl Iterator for JournalRows {
                 classify_frame::<ChainEvent>(&self.buf, &mut self.decoder, record_offset),
                 termination,
                 self.policy,
+                || tail_after(&self.path, &self.buf, record_offset, &mut self.reader),
             ) {
                 Disposition::Yield(frame) => {
                     let records = frame.into_records();
@@ -266,7 +267,9 @@ impl Iterator for JournalRows {
                     self.pending.pop_front().map(Ok)
                 }
                 // A tolerated final torn tail ends the sealed history cleanly.
-                Disposition::EndOfCommittedRecords | Disposition::Skip => {
+                Disposition::EndOfCommittedRecords
+                | Disposition::Interrupted(_)
+                | Disposition::Skip => {
                     self.done = true;
                     None
                 }
@@ -286,6 +289,7 @@ impl Iterator for JournalRows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_runtime::runtime_config::JournalSync;
 
     #[tokio::test]
     async fn verification_rejects_missing_commitments_before_yielding_later_rows() {
@@ -296,9 +300,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("source.log");
         let stage = StageId::new();
-        let journal =
-            DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
-                .unwrap();
+        let journal = DiskJournal::<ChainEvent>::with_owner(
+            path.clone(),
+            JournalOwner::stage(stage),
+            JournalSync::BeforeAck,
+        )
+        .unwrap();
         let mut ends = vec![0usize];
         for i in 0..3 {
             journal

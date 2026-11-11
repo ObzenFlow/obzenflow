@@ -18,6 +18,7 @@ use obzenflow_core::journal::archive::manifest::{
 };
 use obzenflow_core::source::SourceInputIdentity;
 use obzenflow_core::{Journal, JournalOwner, SystemId};
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::io::Write;
 
 struct Run {
@@ -40,18 +41,21 @@ impl Run {
             dir.path().join("system.log"),
             JournalOwner::system(pipeline),
             run_id,
+            JournalSync::BeforeAck,
         )
         .unwrap();
         let data = DiskJournal::with_owner_in_run(
             dir.path().join("data.log"),
             JournalOwner::stage(stage),
             run_id,
+            JournalSync::BeforeAck,
         )
         .unwrap();
         let error = DiskJournal::<ChainEvent>::with_owner_in_run(
             dir.path().join("error.log"),
             JournalOwner::stage(stage),
             run_id,
+            JournalSync::BeforeAck,
         )
         .unwrap();
         let manifest = RunManifest {
@@ -65,6 +69,7 @@ impl Run {
             created_at: chrono::Utc::now(),
             replay: None,
             resume: None,
+            interrupted_appends: Vec::new(),
             effective_config: None,
             system_journal_file: "system.log".into(),
             stages: [(
@@ -452,9 +457,10 @@ async fn committed_corruption_is_an_error_without_repair_or_resuming_past_it() {
     let mut tail = run.open().await.into_tail();
     run.data(0).await;
     let path = run.dir.path().join("data.log");
+    let first_end = std::fs::metadata(&path).unwrap().len() as usize;
+    run.data(1).await;
     let mut bytes = std::fs::read(&path).unwrap();
-    let index = bytes.len() / 2;
-    bytes[index] ^= 0x01;
+    bytes[first_end / 2] ^= 0x01;
     std::fs::write(&path, &bytes).unwrap();
     assert!(tail.read_next().await.is_err());
     assert!(tail.read_next().await.is_err());

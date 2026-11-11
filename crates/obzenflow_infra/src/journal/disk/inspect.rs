@@ -25,7 +25,9 @@ use thiserror::Error;
 use super::codec::Decoder;
 use super::manifest_gate::require_current_journal_schema_version;
 use super::replay_archive::scan_system_log;
-use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
+use super::scanner::{
+    classify_frame, dispose, read_frame_sync, tail_after, Disposition, ReadPolicy,
+};
 
 #[derive(Debug, Error)]
 pub enum JournalInspectError {
@@ -159,6 +161,7 @@ fn export_journal_file<R: JournalEvent>(
             classify_frame::<R>(&buf, &mut decoder, record_offset),
             termination,
             policy,
+            || tail_after(path, &buf, record_offset, &mut reader),
         ) {
             Disposition::Yield(frame) => {
                 let records = frame.into_records();
@@ -185,7 +188,9 @@ fn export_journal_file<R: JournalEvent>(
                         })?;
                 }
             }
-            Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+            Disposition::EndOfCommittedRecords
+            | Disposition::Interrupted(_)
+            | Disposition::Skip => break,
             Disposition::Corrupt(problem) => {
                 return Err(JournalInspectError::Corrupt {
                     path: path.to_path_buf(),
@@ -231,6 +236,7 @@ fn inspect_chain_journal(
             classify_frame::<ChainEvent>(&buf, &mut decoder, record_offset),
             termination,
             policy,
+            || tail_after(path, &buf, record_offset, &mut reader),
         ) {
             Disposition::Yield(frame) => {
                 let records = frame.into_records();
@@ -251,7 +257,9 @@ fn inspect_chain_journal(
                     println!("  {record_offset:>10}  {ty}");
                 }
             }
-            Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+            Disposition::EndOfCommittedRecords
+            | Disposition::Interrupted(_)
+            | Disposition::Skip => break,
             Disposition::Corrupt(problem) => {
                 return Err(JournalInspectError::Corrupt {
                     path: path.to_path_buf(),
@@ -350,6 +358,7 @@ pub(crate) fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspec
 mod tests {
     use super::*;
     use obzenflow_core::journal::JournalReader;
+    use obzenflow_runtime::runtime_config::JournalSync;
 
     #[tokio::test]
     async fn missing_commitments_cannot_produce_a_complete_export_or_terminal_status() {
@@ -360,9 +369,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("system.log");
         let system = SystemId::new();
-        let journal =
-            DiskJournal::<SystemEvent>::with_owner(path.clone(), JournalOwner::system(system))
-                .unwrap();
+        let journal = DiskJournal::<SystemEvent>::with_owner(
+            path.clone(),
+            JournalOwner::system(system),
+            JournalSync::BeforeAck,
+        )
+        .unwrap();
         let factory = SystemEventFactory::new(system);
         journal
             .append(factory.pipeline_starting(), Default::default())
@@ -506,6 +518,7 @@ mod tests {
         let journal = DiskJournal::<ChainEvent>::with_owner(
             dir.path().join("original.log"),
             JournalOwner::stage(stage),
+            JournalSync::BeforeAck,
         )
         .unwrap();
         let mut original = vec![journal

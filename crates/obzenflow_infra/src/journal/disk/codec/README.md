@@ -59,9 +59,10 @@ offset to establish the physical tail boundary, then use terminal lengths.
 This prevents a torn payload ending with an embedded frame from inventing a
 boundary. Reopened journals rebuild the disposable index through the same
 forward scanner. No reader uses newline discovery.
-An incomplete final frame follows the live/incomplete-archive policy;
-invalid complete frames are corruption. A partial header with incorrect bytes is
-corruption.
+A live reader retries an incomplete final frame, and a strict read refuses any
+damaged one. A read that tolerates a torn tail ends at the first frame that fails
+to validate when no later frame validates, and refuses it otherwise. Another
+schema version's marker is always refused.
 
 ## Body layout
 

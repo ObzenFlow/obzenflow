@@ -11,6 +11,7 @@ use obzenflow_core::journal::{AppendOptions, Journal, JournalStorage};
 use obzenflow_core::JournalOwner;
 use obzenflow_core::{ChainEvent, FlowId, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::sync::Arc;
 
 fn rejects_unadmitted(record: &JournalRecord<ChainPayload>) {
@@ -36,7 +37,12 @@ async fn construction_decoding_and_mutation_cannot_create_committed_evidence() {
         let owner = JournalOwner::stage(author);
         let journal: Arc<dyn Journal<ChainEvent>> = if disk {
             Arc::new(
-                DiskJournal::with_owner(directory.path().join("admission.log"), owner).unwrap(),
+                DiskJournal::with_owner(
+                    directory.path().join("admission.log"),
+                    owner,
+                    JournalSync::BeforeAck,
+                )
+                .unwrap(),
             )
         } else {
             Arc::new(MemoryJournal::with_owner(owner))
@@ -126,7 +132,14 @@ async fn storage_data_becomes_evidence_only_through_successful_journal_operation
         let author = StageId::new();
         let owner = JournalOwner::stage(author);
         let storage: Box<dyn JournalStorage<ChainEvent>> = if disk {
-            Box::new(DiskJournal::with_owner(directory.path().join("storage.log"), owner).unwrap())
+            Box::new(
+                DiskJournal::with_owner(
+                    directory.path().join("storage.log"),
+                    owner,
+                    JournalSync::BeforeAck,
+                )
+                .unwrap(),
+            )
         } else {
             Box::new(MemoryJournal::with_owner(owner))
         };
@@ -196,6 +209,7 @@ async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
                             directory.path().join(format!("{index}.log")),
                             owner.clone(),
                             run,
+                            JournalSync::BeforeAck,
                         )
                         .unwrap(),
                     ) as Arc<dyn Journal<ChainEvent>>
@@ -211,6 +225,7 @@ async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
                     directory.path().join("system.log"),
                     owner.clone(),
                     run,
+                    JournalSync::BeforeAck,
                 )
                 .unwrap(),
             )
@@ -342,15 +357,29 @@ async fn empty_and_populated_reopen_preserve_identity_with_surviving_readers() {
     let path = directory.path().join("stable.log");
     let author = StageId::new();
     let owner = JournalOwner::stage(author);
-    let journal = DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).unwrap();
+    let journal =
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone(), JournalSync::BeforeAck)
+            .unwrap();
     let id = *journal.id();
     let mut reader = journal.reader().await.unwrap();
-    assert!(DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).is_err());
+    assert!(DiskJournal::<ChainEvent>::with_owner(
+        path.clone(),
+        owner.clone(),
+        JournalSync::BeforeAck
+    )
+    .is_err());
     let clone = journal.clone();
     drop(journal);
-    assert!(DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).is_err());
+    assert!(DiskJournal::<ChainEvent>::with_owner(
+        path.clone(),
+        owner.clone(),
+        JournalSync::BeforeAck
+    )
+    .is_err());
     drop(clone);
-    let reopened = DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).unwrap();
+    let reopened =
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone(), JournalSync::BeforeAck)
+            .unwrap();
     assert_eq!(reopened.id(), &id);
     let first = reopened
         .append(
@@ -366,7 +395,8 @@ async fn empty_and_populated_reopen_preserve_identity_with_surviving_readers() {
         .unwrap();
     assert_eq!(reader.next().await.unwrap().unwrap().id(), first.id());
     drop(reopened);
-    let reopened = DiskJournal::<ChainEvent>::with_owner(path, owner).unwrap();
+    let reopened =
+        DiskJournal::<ChainEvent>::with_owner(path, owner, JournalSync::BeforeAck).unwrap();
     let second = reopened
         .append(first.authored(), Default::default())
         .await
@@ -387,8 +417,12 @@ async fn missing_committed_frames_cannot_advance_a_journal_prefix() {
             let path = directory.path().join("missing.log");
             let author = StageId::new();
             let owner = JournalOwner::stage(author);
-            let journal =
-                DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).unwrap();
+            let journal = DiskJournal::<ChainEvent>::with_owner(
+                path.clone(),
+                owner.clone(),
+                JournalSync::BeforeAck,
+            )
+            .unwrap();
             let event = || {
                 ChainEventFactory::data_event(
                     author.into(),
@@ -444,7 +478,9 @@ async fn missing_committed_frames_cannot_advance_a_journal_prefix() {
             assert!(journal.read_all_unordered().await.is_err());
 
             drop((reader, resumed, journal));
-            assert!(DiskJournal::<ChainEvent>::with_owner(path, owner).is_err());
+            assert!(
+                DiskJournal::<ChainEvent>::with_owner(path, owner, JournalSync::BeforeAck).is_err()
+            );
         }
     }
 }

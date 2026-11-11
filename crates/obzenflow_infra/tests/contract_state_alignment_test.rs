@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::sync::Arc;
 
 use obzenflow_core::event::types::{Count, DurationMs, SeqNo, ViolationCause};
@@ -61,8 +62,12 @@ async fn build_subscription_with_contracts(
     std::fs::create_dir_all(&base).expect("failed to create temp dir for disk journal");
     let upstream_path = base.join("upstream.log");
     let upstream_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(upstream_path, JournalOwner::stage(StageId::new()))
-            .expect("failed to create disk journal"),
+        DiskJournal::with_owner(
+            upstream_path,
+            JournalOwner::stage(StageId::new()),
+            JournalSync::BeforeAck,
+        )
+        .expect("failed to create disk journal"),
     );
 
     let stage_id = StageId::new();

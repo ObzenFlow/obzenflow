@@ -18,6 +18,7 @@ use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::{
     disk_journals, memory_journals, DiskJournalFactory, MemoryJournalFactory,
 };
+use obzenflow_runtime::runtime_config::JournalSync;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -40,7 +41,7 @@ impl TypedPayload for OtherEvent {
 fn factories_declare_their_substrate() {
     let base = tempfile::tempdir().expect("tempdir");
     let flow_id = FlowId::new();
-    let disk = DiskJournalFactory::new(base.path().to_path_buf(), flow_id)
+    let disk = DiskJournalFactory::new(base.path().to_path_buf(), flow_id, JournalSync::BeforeAck)
         .expect("disk factory should build");
     match disk.run_state() {
         RunSubstrateState::Durable(locator) => {
@@ -59,8 +60,12 @@ fn factories_declare_their_substrate() {
 #[test]
 fn provider_preflight_accepts_small_plans() {
     let base = tempfile::tempdir().expect("tempdir");
-    let disk = DiskJournalFactory::new(base.path().to_path_buf(), FlowId::new())
-        .expect("disk factory should build");
+    let disk = DiskJournalFactory::new(
+        base.path().to_path_buf(),
+        FlowId::new(),
+        JournalSync::BeforeAck,
+    )
+    .expect("disk factory should build");
     let plan = RunResourcePlan {
         stage_count: 2,
         edge_count: 1,
@@ -345,6 +350,110 @@ fn context_with_journal_root(
     )))
 }
 
+fn context_with_journal_sync(sync: &str) -> obzenflow_runtime::run_context::FlowBuildContext {
+    use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_runtime::runtime_config::{
+        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate, JOURNAL_SYNC_KEY,
+    };
+    let mut candidates = CandidateSet::default();
+    candidates
+        .admit(ScopedCandidate::unqualified(
+            JOURNAL_SYNC_KEY,
+            ConfigScope::Global,
+            ConfigSource::File,
+            ConfigValue::Text(sync.to_string()),
+        ))
+        .expect("journal.sync admits a known value");
+    obzenflow_runtime::run_context::FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(
+        candidates,
+    )))
+}
+
+#[tokio::test]
+async fn memory_journals_explicit_sync_refused() {
+    let failure = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "memory_with_sync",
+            journals: memory_journals(),
+
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(TestEvent => placeholder!());
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
+    .build(context_with_journal_sync("off"))
+    .await
+    .err()
+    .expect("memory journals refuse a journal.sync set in the file");
+    assert!(
+        matches!(
+            failure.error,
+            obzenflow_dsl::FlowBuildError::JournalSyncUnused {
+                sync: JournalSync::Off
+            }
+        ),
+        "{failure}"
+    );
+    assert_eq!(
+        failure.error.to_string(),
+        "journal.sync is \"off\", but this flow records to memory journals, which never sync; \
+         unset journal.sync or record the flow with disk_journals"
+    );
+}
+
+#[tokio::test]
+async fn disk_run_manifest_records_journal_sync() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let base_path = base.path().to_path_buf();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "disk_with_sync",
+            journals: disk_journals(base_path),
+
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(TestEvent => placeholder!());
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
+    .build(context_with_journal_sync("off"))
+    .await
+    .expect("disk journals take journal.sync from the file");
+    let locator = handle
+        .run_substrate()
+        .locator()
+        .expect("a disk run is durable")
+        .clone();
+    let manifest: obzenflow_core::journal::RunManifest = serde_json::from_str(
+        &std::fs::read_to_string(locator.path().join("run_manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let recorded = manifest
+        .effective_config
+        .expect("the run records its effective config")
+        .values
+        .into_iter()
+        .find(|doc| doc.key_path == "journal.sync")
+        .expect("journal.sync is recorded");
+    assert_eq!(
+        (recorded.value, recorded.source.as_str()),
+        (serde_json::json!("off"), "file")
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(30), handle.run())
+        .await
+        .expect("empty finite flow must complete promptly")
+        .expect("run should succeed");
+}
+
 #[tokio::test]
 async fn configured_journal_root_outranks_the_compiled_root() {
     let compiled = tempfile::tempdir().expect("tempdir");
@@ -423,8 +532,9 @@ async fn configured_journal_root_refuses_a_provider_that_does_not_honour_it() {
     let elsewhere = tempfile::tempdir().expect("tempdir");
     let fixed = elsewhere.path().to_path_buf();
     let failure = FlowDefinition::materialize(move |_runtime_config| {
-        let ignores_root =
-            move |flow_id, _: Option<&std::path::Path>| DiskJournalFactory::new(fixed, flow_id);
+        let ignores_root = move |flow_id, _: Option<&std::path::Path>, sync| {
+            DiskJournalFactory::new(fixed, flow_id, sync)
+        };
         Ok(flow! {
             name: "provider_ignores_root",
             journals: ignores_root,

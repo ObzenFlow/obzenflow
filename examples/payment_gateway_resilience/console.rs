@@ -3,7 +3,8 @@
 // https://obzenflow.dev
 
 use super::domain::{
-    CancelledOrder, PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined,
+    CancelledOrder, InvalidOrder, PaymentAuthorizationUnavailable, PaymentAuthorized,
+    PaymentDeclined,
 };
 
 pub fn format_shipping(authorized: &PaymentAuthorized) -> String {
@@ -23,6 +24,16 @@ pub fn format_declined(declined: &PaymentDeclined) -> String {
         declined.reason.label(),
         declined.customer_id,
         declined.amount_cents as f64 / 100.0
+    )
+}
+
+pub fn format_invalid(invalid: &InvalidOrder) -> String {
+    format!(
+        "🔍 Invalid order {} needs intake review: {} (customer {}, amount: ${:.2})",
+        invalid.order_id,
+        invalid.reason.label(),
+        invalid.customer_id,
+        invalid.amount_cents as f64 / 100.0
     )
 }
 

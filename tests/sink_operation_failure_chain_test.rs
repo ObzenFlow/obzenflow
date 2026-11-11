@@ -11,6 +11,7 @@ mod replay_testkit {
 }
 
 use async_trait::async_trait;
+use obzenflow::journal::JournalSync;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::provenance::causality_context::CausalInput;
@@ -570,12 +571,13 @@ fn build_flow(
 fn probed_disk_journals(
     base_path: PathBuf,
     probe: AppendProbe,
-) -> impl Fn(FlowId, Option<&Path>) -> Result<ProbedDiskJournalFactory, JournalError> {
-    move |flow_id, root| {
+) -> impl Fn(FlowId, Option<&Path>, JournalSync) -> Result<ProbedDiskJournalFactory, JournalError> {
+    move |flow_id, root, sync| {
         Ok(ProbedDiskJournalFactory {
             inner: DiskJournalFactory::new(
                 root.map_or_else(|| base_path.clone(), Path::to_path_buf),
                 flow_id,
+                sync,
             )?,
             probe: probe.clone(),
         })

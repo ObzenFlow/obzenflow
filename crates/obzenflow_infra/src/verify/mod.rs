@@ -502,6 +502,7 @@ mod tests {
             created_at: obzenflow_core::chrono::Utc::now(),
             replay,
             resume: None,
+            interrupted_appends: Vec::new(),
             stages: map,
             system_journal_file: "system.log".to_string(),
             effective_config: None,

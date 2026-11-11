@@ -10,6 +10,7 @@ use obzenflow_core::event::{CausalFrontier, ChainEventFactory};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
+use obzenflow_runtime::runtime_config::JournalSync;
 use std::sync::Arc;
 
 pub fn execution(stage: StageId, payload: ExecutionPayload) -> ChainEvent {
@@ -106,8 +107,13 @@ impl RecordFixture {
         }
         let stage = StageId::new();
         let path = directory.path().join("record.log");
-        let journal =
-            DiskJournal::with_owner_in_run(path.clone(), JournalOwner::stage(stage), run).unwrap();
+        let journal = DiskJournal::with_owner_in_run(
+            path.clone(),
+            JournalOwner::stage(stage),
+            run,
+            JournalSync::BeforeAck,
+        )
+        .unwrap();
         let seed = journal
             .append(running(stage), AppendOptions::new(initial))
             .await
@@ -168,7 +174,13 @@ impl History {
         let stage = StageId::new();
         let run = FlowId::new();
         let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(
-            DiskJournal::with_owner_in_run(path.clone(), JournalOwner::stage(stage), run).unwrap(),
+            DiskJournal::with_owner_in_run(
+                path.clone(),
+                JournalOwner::stage(stage),
+                run,
+                JournalSync::BeforeAck,
+            )
+            .unwrap(),
         );
         let events: Vec<_> = (0..count)
             .map(|i| {

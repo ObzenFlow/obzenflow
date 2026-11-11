@@ -128,6 +128,7 @@ pub(crate) mod tests {
     use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
+    use obzenflow_runtime::runtime_config::JournalSync;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -394,6 +395,7 @@ pub(crate) mod tests {
                 DiskJournal::with_owner(
                     directory.path().join("data.log"),
                     JournalOwner::stage(stage),
+                    JournalSync::BeforeAck,
                 )
                 .unwrap(),
             ),
@@ -401,6 +403,7 @@ pub(crate) mod tests {
                 DiskJournal::with_owner(
                     directory.path().join("errors.log"),
                     JournalOwner::stage(stage),
+                    JournalSync::BeforeAck,
                 )
                 .unwrap(),
             ),
