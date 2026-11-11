@@ -3,9 +3,9 @@
 // https://obzenflow.dev
 
 use super::domain::{self, EmailSent, LocatedParcel, ParcelUpdate, SmsSent};
-use super::handlers::{LocateParcel, NotifyCustomer};
-use super::services::{EmailNotice, SimulatedDepots, SimulatedMessaging, SmsNotice};
-use obzenflow::effects::Port;
+use super::handlers::NotifyCustomer;
+use super::services::{DepotLookup, EmailNotice, SimulatedDepots, SimulatedMessaging, SmsNotice};
+use obzenflow::effects::{perform, Port};
 use obzenflow::flow::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry, MiddlewareFactory};
@@ -44,7 +44,7 @@ pub fn build_flow() -> FlowDefinition {
         let sms_limiter = rate_limit(1.0).for_effect::<SmsNotice>();
 
         let updates = sources::ValuesSource::new(domain::carrier_updates());
-        let locate = LocateParcel::new(Port::to(SimulatedDepots));
+        let locate = perform(DepotLookup::for_update).through(Port::to(SimulatedDepots));
         let notify = NotifyCustomer::new(Port::to(SimulatedMessaging));
         let emails = ConsoleSink::new(domain::format_email);
         let texts = ConsoleSink::new(domain::format_sms);
