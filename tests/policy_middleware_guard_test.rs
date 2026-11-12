@@ -105,7 +105,7 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await;
 
     let err = match result {

@@ -2,12 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod exported_jsonl {
-    mod chain;
-    pub use self::chain::*;
-}
-#[path = "../examples/payment_gateway_resilience/domain.rs"]
-pub mod payment_domain;
+use crate::{exported_jsonl, replay_testkit};
 #[path = "test_support/payment_gateway_retry_fixture.rs"]
 mod retry_fixture;
 
@@ -210,11 +205,11 @@ fn run_witness(
             "--verify".to_string(),
         ]);
     }
-    let mut application =
-        obzenflow_infra::application::FlowApplication::builder().with_cli_args(args);
+    let mut application = replay_testkit::unsynced_application().with_cli_args(args);
     if let Some(config) = config {
         let path = journal_root.join("obzenflow.toml");
-        std::fs::write(&path, config).expect("witness configuration should be writable");
+        std::fs::write(&path, format!("[journal]\nsync = \"off\"\n\n{config}"))
+            .expect("witness configuration should be writable");
         application = application.with_config_file(path);
     }
     application
@@ -1500,6 +1495,7 @@ fn independent_retry_plans_preserve_terminal_groups_and_strict_replay() {
             ConfigValue::Text("fail".to_string()),
         ))
         .expect("a flow-scope on_refusal admits");
+    replay_testkit::admit_unsynced(&mut candidates);
     let flow_scope = Arc::new(ResolvedRuntimeConfig::new(candidates));
     let runtime = tokio::runtime::Runtime::new().expect("build runtime");
     for policy in [

@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "../examples/payment_gateway_resilience/support.rs"]
-pub mod support;
+use crate::payment_gateway as support;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -73,7 +72,7 @@ fn order_id(row: &serde_json::Value) -> Option<&str> {
 #[test]
 fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
     let root = tempfile::tempdir().expect("validation journal root");
-    obzenflow_infra::application::FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["payment_gateway_validation_journal_test"])
         .run_blocking(build_validation_journal_flow(root.path().to_path_buf()))
         .expect("validation journal flow should complete");
@@ -197,8 +196,8 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
 // Runtime adapter regression belongs to framework integration coverage.
 mod shipping_adapter {
 
-    use crate::support::console::format_shipping;
-    use crate::support::domain::{PaymentAuthorized, TrafficPhase};
+    use super::support::console::format_shipping;
+    use super::support::domain::{PaymentAuthorized, TrafficPhase};
     use obzenflow::schema::{StageId, TypedPayload, WriterId};
     use obzenflow::stages::sinks::{
         ConsoleSink, DeliveryMethod, DeliveryResult, SinkConnector, SinkWriterInitContext,

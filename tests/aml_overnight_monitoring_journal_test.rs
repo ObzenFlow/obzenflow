@@ -213,6 +213,13 @@ fn shipped_config(file: &str, dir: &Path, fx_rates: &Path) -> PathBuf {
             toml::Value::String(path.display().to_string()),
         );
     }
+    config.insert(
+        "journal".to_owned(),
+        toml::Value::Table(toml::Table::from_iter([(
+            "sync".to_owned(),
+            toml::Value::String("off".to_owned()),
+        )])),
+    );
     let path = dir.join(file);
     std::fs::write(
         &path,

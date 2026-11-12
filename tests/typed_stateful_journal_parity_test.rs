@@ -4,12 +4,7 @@
 
 //! FLOWIP-134e journal oracle for plain typed stateful handlers and accumulators.
 
-mod replay_testkit {
-    mod discard;
-    mod journal;
-    mod ordered_journal;
-    pub use self::{discard::*, ordered_journal::*};
-}
+use crate::replay_testkit;
 
 use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
@@ -18,7 +13,6 @@ use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::{EventId, StageId, StageOutputFacts, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -612,7 +606,7 @@ async fn run(journal_base: &Path, replay_from: Option<&Path>) {
         args.push(OsString::from("--replay-from"));
         args.push(archive.as_os_str().to_os_string());
     }
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(args)
         .run_async(build_flow(journal_base.to_path_buf()))
         .await
@@ -801,7 +795,7 @@ fn build_limit_flow(journal_base: PathBuf) -> FlowDefinition {
 async fn a_rejected_aggregate_is_a_fact_and_leaves_the_error_journal_empty() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![OsString::from("obzenflow")])
         .run_async(build_limit_flow(journal_base.clone()))
         .await

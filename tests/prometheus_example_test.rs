@@ -9,6 +9,7 @@
 //! It asserts that the typed `try_map` uses its fixed terminal-error path:
 //! `error_processor` reports exactly 50 Unknown errors and no Domain errors.
 
+use crate::replay_testkit;
 use anyhow::Result;
 use obzenflow_adapters::sinks::DiscardSink;
 use obzenflow_core::TypedPayload;
@@ -23,12 +24,7 @@ use serde::{Deserialize, Serialize};
 mod prometheus_demo;
 
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
-mod exported_jsonl {
-    mod chain;
-    mod commitment;
-    mod without_observations;
-    pub use self::{chain::*, commitment::*, without_observations::*};
-}
+use crate::exported_jsonl;
 
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
 #[path = "test_support/prometheus_measurement.rs"]
@@ -94,6 +90,7 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
             )
             .unwrap();
     }
+    replay_testkit::admit_unsynced(&mut candidates);
     let directory = tempfile::tempdir_in("target").unwrap();
     let flow = prometheus_demo::flow_definition_with_outage_interval(
         1_000,
@@ -360,8 +357,8 @@ async fn prometheus_5k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     let started = std::time::Instant::now();
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
-    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_exporter(metrics_model.clone());
+    let metrics_context =
+        replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     // Own a unique directory for the entire run, including metrics finalization.
     let journals = tempfile::tempdir_in("target")?;
     let journal_root = journals.path().to_path_buf();
@@ -526,6 +523,9 @@ fn prometheus_demo_host_preserves_data_errors_and_delivery_receipts() {
             &config,
             format!(
                 r#"
+[journal]
+sync = "off"
+
 [server]
 enabled = {hosted}
 host = "127.0.0.1"
@@ -1155,7 +1155,7 @@ mod managed_lifecycle_regressions {
         let config = dir.path().join("stopped.toml");
         std::fs::write(
             &config,
-            "[server]\nenabled = false\n[metrics]\nenabled = false\n",
+            "[journal]\nsync = \"off\"\n[server]\nenabled = false\n[metrics]\nenabled = false\n",
         )
         .unwrap();
         let captured = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
@@ -1404,6 +1404,9 @@ mod managed_lifecycle_regressions {
             &config,
             format!(
                 r#"
+[journal]
+sync = "off"
+
 [server]
 enabled = {hosted}
 host = "127.0.0.1"
@@ -1873,7 +1876,7 @@ enabled = {prometheus}
         let replay_config = dir.join("replay.toml");
         std::fs::write(
             &replay_config,
-            "[server]\nenabled = false\n[metrics]\nenabled = false\n",
+            "[journal]\nsync = \"off\"\n[server]\nenabled = false\n[metrics]\nenabled = false\n",
         )
         .unwrap();
         // Keeping the old port bound also proves replay needs no listener.
@@ -1995,6 +1998,9 @@ enabled = {prometheus}
                 std::fs::write(
                     &config,
                     r#"
+[journal]
+sync = "off"
+
 [server]
 enabled = true
 host = "127.0.0.1"
@@ -2080,6 +2086,9 @@ enabled = false
             &config,
             format!(
                 r#"
+[journal]
+sync = "off"
+
 [server]
 enabled = true
 host = "127.0.0.1"

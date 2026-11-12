@@ -85,21 +85,21 @@ async fn archive_observation_rewrite_preserves_both_metrics_consumers() {
         paths[0].clone(),
         JournalOwner::system(pipeline),
         flow,
-        JournalSync::BeforeAck,
+        JournalSync::Off,
     )
     .unwrap();
     let coordination = DiskJournal::<SystemEvent>::with_owner_in_run(
         paths[1].clone(),
         JournalOwner::system(metrics),
         flow,
-        JournalSync::BeforeAck,
+        JournalSync::Off,
     )
     .unwrap();
     let export = DiskJournal::<SystemEvent>::with_owner_in_run(
         paths[2].clone(),
         JournalOwner::system(metrics),
         flow,
-        JournalSync::BeforeAck,
+        JournalSync::Off,
     )
     .unwrap();
     let factory = SystemEventFactory::new(pipeline);
@@ -235,7 +235,7 @@ async fn observation_archive() -> ObservationArchive {
         root.join("system.log"),
         JournalOwner::system(pipeline),
         flow,
-        JournalSync::BeforeAck,
+        JournalSync::Off,
     )
     .unwrap();
     system
@@ -249,14 +249,14 @@ async fn observation_archive() -> ObservationArchive {
         root.join("z-source.log"),
         JournalOwner::stage(stages[0]),
         flow,
-        JournalSync::BeforeAck,
+        JournalSync::Off,
     )
     .unwrap();
     let sink = DiskJournal::<ChainEvent>::with_owner_in_run(
         root.join("a-sink.log"),
         JournalOwner::stage(stages[1]),
         flow,
-        JournalSync::BeforeAck,
+        JournalSync::Off,
     )
     .unwrap();
     let mut event = ChainEventFactory::data_event(

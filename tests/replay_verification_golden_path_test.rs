@@ -18,10 +18,7 @@
 //! deleted, against generation zero, because lineage is proven from the
 //! effect-lane namespace in the journals rather than from manifest chains.
 
-mod replay_testkit {
-    mod discard;
-    pub use self::discard::*;
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
@@ -327,7 +324,7 @@ async fn run_flow(journal_base: &Path, replay_from: Option<&Path>) -> Arc<Atomic
         args.push(OsString::from("--replay-from"));
         args.push(archive.as_os_str().to_os_string());
     }
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(args)
         .run_async(build_flow(journal_base.to_path_buf(), calls.clone()))
         .await
@@ -361,7 +358,8 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
         std::fs::write(
             &config,
             format!(
-                "[server]\nenabled = {}\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\n\
+                "[journal]\nsync = \"off\"\n\n\
+             [server]\nenabled = {}\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\n\
              [metrics]\nenabled = {}\n",
                 mode == "prometheus",
                 mode == "prometheus"

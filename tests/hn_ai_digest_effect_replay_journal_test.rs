@@ -257,7 +257,8 @@ fn run_config(journal_base: &Path, ai: &str) -> PathBuf {
     std::fs::write(
         &config,
         format!(
-            "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 5000\n\n{ai}"
+            "[journal]\nsync = \"off\"\n\n\
+             [runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 5000\n\n{ai}"
         ),
     )
     .expect("write the run configuration");
@@ -1982,6 +1983,13 @@ fn shipped_witness_config(file: &str, dir: &Path, edit: impl FnOnce(&mut toml::T
     let mut config = shipped_config(file);
     assert!(config.remove("app").is_some(), "the demo ships [app]");
     edit(&mut config);
+    config.insert(
+        "journal".to_owned(),
+        toml::Value::Table(toml::Table::from_iter([(
+            "sync".to_owned(),
+            toml::Value::String("off".to_owned()),
+        )])),
+    );
     let path = dir.join(format!("witness-{file}"));
     std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
     path

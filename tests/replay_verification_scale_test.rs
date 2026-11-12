@@ -7,9 +7,9 @@
 //! row size rather than run size; this suite is the executable witness that
 //! the posture holds on real journals.
 
+use crate::replay_testkit;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
@@ -194,7 +194,7 @@ async fn five_figure_run_verifies_with_streaming_comparison() {
         &live_progress,
         &journal_base,
         Duration::from_secs(120),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(build_flow(
                 journal_base.clone(),
@@ -224,7 +224,7 @@ async fn five_figure_run_verifies_with_streaming_comparison() {
         &replay_progress,
         &journal_base,
         Duration::from_secs(120),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(vec![
                 OsString::from("obzenflow"),
                 OsString::from("--replay-from"),
@@ -292,7 +292,7 @@ async fn blocked_sink_reports_live_phase_and_progress_before_recovery() {
     let journals = temp.path().join("journals");
     let progress = Arc::new(Progress::default());
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    let application = FlowApplication::builder()
+    let application = replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journals.clone(),

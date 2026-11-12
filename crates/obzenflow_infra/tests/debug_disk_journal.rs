@@ -22,8 +22,7 @@ async fn debug_flight_delays_issue() {
 
     println!("Creating DiskJournal...");
     let owner = JournalOwner::stage(StageId::new());
-    let journal =
-        DiskJournal::with_owner(journal_path.clone(), owner, JournalSync::BeforeAck).unwrap();
+    let journal = DiskJournal::with_owner(journal_path.clone(), owner, JournalSync::Off).unwrap();
 
     println!("Testing single journal append...");
     let writer_id = WriterId::from(StageId::new());

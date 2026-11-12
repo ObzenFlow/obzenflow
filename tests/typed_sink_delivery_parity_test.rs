@@ -4,10 +4,7 @@
 
 //! FLOWIP-134h journal oracle for immediate and deferred typed sink settlement.
 
-mod replay_testkit {
-    mod journal;
-    pub use self::journal::*;
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
@@ -17,7 +14,6 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
@@ -302,7 +298,7 @@ async fn run(journal_base: &Path, csv_path: &Path, replay_from: Option<&Path>) {
         args.push(OsString::from("--replay-from"));
         args.push(archive.as_os_str().to_os_string());
     }
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(args)
         .run_async(build_parity_flow(
             journal_base.to_path_buf(),
@@ -504,7 +500,7 @@ async fn invalid_settlement_records_stage_fatal_without_a_delivery_receipt() {
     let journal_base = temp.path().join("journals");
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(build_invalid_flow(journal_base.clone())),
     )
@@ -590,7 +586,7 @@ async fn failed_receipts_use_declared_and_final_bound_destinations() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_failure_destination_flow(journal_base.clone()))
         .await

@@ -2,13 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit {
-    mod journal;
-    pub use self::journal::*;
-}
+use crate::replay_testkit;
 
 #[path = "../examples/product_catalog_enrichment/support.rs"]
-mod product_catalog_enrichment;
+mod example;
 
 #[path = "test_support/product_catalog_summary_delivery.rs"]
 mod summary_delivery;
@@ -22,11 +19,9 @@ mod catalog_presentation;
 #[ignore = "long-running end-to-end flow; enable when validating example behavior"]
 async fn product_catalog_enrichment_completes() {
     let temp = tempfile::tempdir().unwrap();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args([OsString::from("product_catalog_enrichment")])
-        .run_async(product_catalog_enrichment::flow::build_flow(
-            temp.path().to_path_buf(),
-        ))
+        .run_async(example::flow::build_flow(temp.path().to_path_buf()))
         .await
         .expect("product_catalog_enrichment example should complete");
 }
@@ -36,7 +31,6 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::journal::{RunManifest, JOURNAL_SCHEMA_VERSION};
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_infra::application::FlowApplication;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -96,7 +90,7 @@ async fn explicit_join_topology_current_schema_live_replay_and_rejected_control(
         invalid_wiring: true,
         ..Default::default()
     };
-    let error = FlowApplication::builder()
+    let error = replay_testkit::unsynced_application()
         .with_cli_args([OsString::from("catalog-proof")])
         .run_async(build_for_proof(control_root.clone(), control.clone()))
         .await
@@ -112,7 +106,7 @@ async fn explicit_join_topology_current_schema_live_replay_and_rejected_control(
 
     let live_root = temp.path().join("live");
     let live_probe = ProofProbe::default();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args([OsString::from("catalog-proof")])
         .run_async(build_for_proof(live_root.clone(), live_probe.clone()))
         .await
@@ -150,16 +144,14 @@ async fn explicit_join_topology_current_schema_live_replay_and_rejected_control(
     // Exercise the unmodified demo against the same archive as the instrumented
     // fixture, so changes to the user-facing flow remain covered by this test.
     let example_replay_root = temp.path().join("example-replay");
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args([
             OsString::from("product_catalog_enrichment"),
             OsString::from("--replay-from"),
             live.as_os_str().to_os_string(),
             OsString::from("--verify"),
         ])
-        .run_async(product_catalog_enrichment::flow::build_flow(
-            example_replay_root.clone(),
-        ))
+        .run_async(example::flow::build_flow(example_replay_root.clone()))
         .await
         .unwrap();
     assert_eq!(
@@ -170,7 +162,7 @@ async fn explicit_join_topology_current_schema_live_replay_and_rejected_control(
 
     let replay_root = temp.path().join("replay");
     let replay_probe = ProofProbe::default();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args([
             OsString::from("catalog-proof"),
             OsString::from("--replay-from"),

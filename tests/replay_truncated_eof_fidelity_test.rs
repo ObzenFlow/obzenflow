@@ -16,7 +16,6 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::{StageOutputs, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, infinite_source, sink, source, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -32,15 +31,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-mod replay_testkit {
-    mod count_deliveries;
-    mod journal;
-    mod manifest;
-    mod ordered_stage_journal;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{count_deliveries::*, ordered_stage_journal::*, run_dir::*, stage_journal::*};
-}
+use crate::replay_testkit;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Tick {
@@ -268,7 +259,7 @@ macro_rules! linear_flow {
 async fn replay_run(journal_base: &Path, archive: &Path, delivered: Arc<AtomicUsize>) {
     let base = journal_base.to_path_buf();
     let counter = delivered;
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -288,7 +279,7 @@ async fn record_cancelled_linear(journal_base: &Path) -> std::path::PathBuf {
     let base = journal_base.to_path_buf();
     let counter = delivered.clone();
     let handle = linear_flow!(base, counter, Ticks::stalling(4))
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .expect("baseline flow should build");
     let run_dir = replay_testkit::latest_run_dir(journal_base);
@@ -446,7 +437,7 @@ async fn clean_archive_replay_still_finalizes_naturally() {
     let delivered = Arc::new(AtomicUsize::new(0));
     let base = journal_base.clone();
     let counter = delivered.clone();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(linear_flow!(base, counter, Ticks::sealing(4)))
         .await
@@ -525,7 +516,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     let base = journal_base.clone();
     let counter = delivered.clone();
     let handle = fan_in_flow!(base, counter)
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .expect("fan-in flow should build");
     let baseline = replay_testkit::latest_run_dir(&journal_base);
@@ -564,7 +555,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     let replay_delivered = Arc::new(AtomicUsize::new(0));
     let base = journal_base.clone();
     let counter = replay_delivered.clone();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -697,7 +688,7 @@ async fn graceful_stop_truncates_finite_and_infinite_inputs_of_a_stateful_fan_in
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .expect("mixed fan-in flow should build");
     let run = replay_testkit::latest_run_dir(&journal_base);
@@ -816,7 +807,7 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
     let base = journal_base.clone();
     let counter = delivered.clone();
     let handle = cycle_flow!(base, counter)
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .expect("cycle flow should build");
     let baseline = replay_testkit::latest_run_dir(&journal_base);
@@ -859,7 +850,7 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
     let replay_delivered = Arc::new(AtomicUsize::new(0));
     let replay_base = journal_base.clone();
     let replay_counter = replay_delivered.clone();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

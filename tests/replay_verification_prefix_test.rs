@@ -13,14 +13,10 @@
 //! also pins the killed-run tail shape (torn trailing writes are skipped at
 //! the framed-record layer) that the FLOWIP flagged for fixture confirmation.
 
-mod replay_testkit {
-    mod count_deliveries;
-    pub use self::count_deliveries::*;
-}
+use crate::replay_testkit;
 
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
@@ -116,7 +112,7 @@ async fn cancelled_baseline_verifies_under_prefix_semantics() {
     let baseline_base = journal_base.clone();
     let baseline_counter = delivered.clone();
     let handle = prefix_flow!(baseline_base, baseline_counter)
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .expect("baseline flow should build");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -140,7 +136,7 @@ async fn cancelled_baseline_verifies_under_prefix_semantics() {
     let replay_delivered = Arc::new(AtomicUsize::new(0));
     let replay_base = journal_base.clone();
     let replay_counter = replay_delivered.clone();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

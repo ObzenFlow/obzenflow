@@ -10,7 +10,6 @@ use obzenflow_adapters::middleware::stateful_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission, TypedFiniteSourceHandler,
@@ -323,7 +322,7 @@ async fn counter_emits_single_event_on_drain() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_flow = events.clone();
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(5);
@@ -363,7 +362,7 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_flow = events.clone();
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(5);
@@ -401,7 +400,7 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_flow = events.clone();
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(10);
@@ -443,7 +442,7 @@ async fn immediate_emitter_emits_during_accumulating() {
     let observer_calls = Arc::new(AtomicUsize::new(0));
     let observer_calls_for_flow = observer_calls.clone();
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(5);
@@ -491,7 +490,7 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_flow = events.clone();
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = EmptySource::new();

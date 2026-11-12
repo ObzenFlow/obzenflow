@@ -15,16 +15,7 @@
 //! per-stage flip is local by design and the fan-in is where admission is
 //! blocked.
 
-#[path = "../../../tests/replay_testkit"]
-mod replay_testkit {
-    mod bootstrap;
-    mod journal;
-    mod manifest;
-    mod reattaching_source;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{bootstrap::*, reattaching_source::*, run_dir::*, stage_journal::*};
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -376,7 +367,7 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
             calls.clone(),
             delivered.clone(),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -429,7 +420,7 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
             calls.clone(),
             delivered.clone(),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("resume flow failed to build: {e:?}"))?;
         let reason = wait_for_failed(&handle).await?;

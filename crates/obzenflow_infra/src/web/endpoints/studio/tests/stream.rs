@@ -25,6 +25,25 @@ use obzenflow_core::{web::SseFrame, EventId, FlowId, JournalOwner, StageId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+fn unsynced_context() -> obzenflow_runtime::run_context::FlowBuildContext {
+    use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_runtime::runtime_config::{
+        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+    };
+    let mut candidates = CandidateSet::default();
+    candidates
+        .admit(ScopedCandidate::unqualified(
+            "journal.sync",
+            ConfigScope::Global,
+            ConfigSource::File,
+            ConfigValue::Text("off".to_owned()),
+        ))
+        .unwrap();
+    obzenflow_runtime::run_context::FlowBuildContext::new(std::sync::Arc::new(
+        ResolvedRuntimeConfig::new(candidates),
+    ))
+}
+
 fn definition(left: StageId, right: StageId) -> Vec<CompositeDefinition> {
     vec![CompositeDefinition::new(
         CompositeId::new("test:pair"),
@@ -42,7 +61,7 @@ async fn initial_prefix_includes_every_atomic_member_and_stays_fixed_while_taili
             crate::journal::disk::DiskJournal::with_owner(
                 directory.path().join("prefix.log"),
                 JournalOwner::system(system),
-                JournalSync::BeforeAck,
+                JournalSync::Off,
             )
             .unwrap(),
         ),
@@ -1059,7 +1078,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                         crate::journal::disk::DiskJournal::with_owner(
                             directory.path().join(name),
                             JournalOwner::stage(stage),
-                            JournalSync::BeforeAck,
+                            JournalSync::Off,
                         )
                         .unwrap(),
                     )
@@ -1405,7 +1424,6 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
     use obzenflow_core::TypedPayload;
     use obzenflow_dsl::{flow, sink, source, FlowDefinition};
-    use obzenflow_runtime::run_context::FlowBuildContext;
     use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
     use obzenflow_runtime::stages::SourceError;
 
@@ -1477,10 +1495,7 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         })
     });
     // No metrics exporter or observation source participates in delivery.
-    let handle = definition
-        .build(FlowBuildContext::for_tests())
-        .await
-        .unwrap();
+    let handle = definition.build(unsynced_context()).await.unwrap();
     let topology = handle.topology().unwrap();
     let input = topology
         .stages()
@@ -1976,13 +1991,12 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
         let lowered =
             obzenflow_dsl::dsl::composites::lower_composites(members, connections).unwrap();
         let model = Arc::new(MetricsReadModel::default());
-        let context = FlowBuildContext::for_tests().with_metrics_exporter(model);
         let built = if disk {
             obzenflow_dsl::dsl::flow_builder::build_flow(
                 "supervision_scale",
                 crate::journal::disk_journals(directory.path().to_owned()),
                 lowered,
-                context,
+                unsynced_context().with_metrics_exporter(model),
             )
             .await
         } else {
@@ -1990,7 +2004,7 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
                 "supervision_scale",
                 crate::journal::memory_journals(),
                 lowered,
-                context,
+                FlowBuildContext::for_tests().with_metrics_exporter(model),
             )
             .await
         }
@@ -2183,7 +2197,7 @@ async fn forwarded_stage_facts_advance_the_cursor_without_becoming_owner_observa
                     directory.path().join("owner.log"),
                     JournalOwner::stage(owner),
                     run,
-                    JournalSync::BeforeAck,
+                    JournalSync::Off,
                 )
                 .unwrap(),
             )

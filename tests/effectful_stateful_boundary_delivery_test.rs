@@ -350,7 +350,7 @@ async fn build_running_flow(
     let probe = Arc::new(BoundaryProbe::default());
     let gate = Arc::new(EffectGate::default());
     let handle = build_probe_flow(journal_root, receiver, probe.clone(), gate.clone())
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(crate::replay_testkit::unsynced_context())
         .await
         .map_err(|error| anyhow!("boundary probe flow failed to build: {error:?}"))?;
     wait_for_state(&handle, PipelineState::Running).await?;

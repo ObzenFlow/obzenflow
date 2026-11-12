@@ -271,7 +271,7 @@ async fn cycle_guard_rejects_cycles_with_non_transform_members() {
         })
     });
     let result = definition
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(crate::replay_testkit::unsynced_context())
         .await;
 
     let err = match result {
@@ -323,7 +323,7 @@ async fn cycle_guard_rejects_stateful_emit_per_window_cycle() {
         })
     });
     let result = definition
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(crate::replay_testkit::unsynced_context())
         .await;
 
     let err = match result {
@@ -369,7 +369,7 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
         })
     });
     let handle = definition
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(crate::replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
@@ -411,6 +411,7 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     let transform_b = IdentityTransform::<SeedEvent>::new();
 
     let harness = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "cycle_guard_bounds_data",
         journals: disk_journals(base_for_flow),
 

@@ -11,7 +11,6 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::MiddlewarePlanError;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::sink::{
@@ -118,7 +117,7 @@ async fn every_non_current_manifest_shape_fails_before_materialisation_or_connec
                 OsString::from("--allow-incomplete-archive"),
             ];
 
-            let result = FlowApplication::builder()
+            let result = crate::replay_testkit::unsynced_application()
                 .with_cli_args(args)
                 .run_async(guarded_flow(
                     output_root.clone(),
@@ -185,7 +184,6 @@ impl obzenflow_adapters::middleware::MiddlewareFactory for CountingObserverFacto
 #[tokio::test]
 async fn invalid_later_stage_plan_prevents_all_middleware_and_connector_materialisation() {
     use obzenflow_adapters::middleware::circuit_breaker;
-    use obzenflow_runtime::run_context::FlowBuildContext;
 
     let root = tempfile::tempdir().unwrap();
     let output_root = root.path().join("must-not-exist");
@@ -212,7 +210,7 @@ async fn invalid_later_stage_plan_prevents_all_middleware_and_connector_material
         })
     });
     let failure = definition
-        .build(FlowBuildContext::for_tests())
+        .build(crate::replay_testkit::unsynced_context())
         .await
         .map(|_| ())
         .expect_err("the complete plan must reject an invalid later breaker");
@@ -230,7 +228,6 @@ async fn invalid_later_stage_plan_prevents_all_middleware_and_connector_material
 #[tokio::test]
 async fn empty_observer_labels_fail_before_any_materialisation_or_connector_io() {
     use obzenflow_adapters::middleware::source_poll_observer;
-    use obzenflow_runtime::run_context::FlowBuildContext;
     for label in ["", "  "] {
         let root = tempfile::tempdir().unwrap();
         let output_root = root.path().join("must-not-exist");
@@ -256,7 +253,7 @@ async fn empty_observer_labels_fail_before_any_materialisation_or_connector_io()
             })
         });
         let failure = definition
-            .build(FlowBuildContext::for_tests())
+            .build(crate::replay_testkit::unsynced_context())
             .await
             .map(|_| ())
             .expect_err("empty labels must fail preflight");
@@ -291,7 +288,6 @@ async fn hosted_slot_ownership_fails_before_materialisation_or_connector_io() {
     use obzenflow_adapters::middleware::rate_limit;
     use obzenflow_core::ingress::{FilledHostedIngress, HostedIngressBindingSlot};
     use obzenflow_dsl::async_infinite_source;
-    use obzenflow_runtime::run_context::FlowBuildContext;
     use obzenflow_runtime::stages::common::handlers::HostedIngressSource;
 
     for prefilled in [false, true] {
@@ -334,7 +330,7 @@ async fn hosted_slot_ownership_fails_before_materialisation_or_connector_io() {
             })
         });
         let failure = definition
-            .build(FlowBuildContext::for_tests())
+            .build(crate::replay_testkit::unsynced_context())
             .await
             .map(|_| ())
             .expect_err("hosted ownership must fail before live build work");

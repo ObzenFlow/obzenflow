@@ -15,7 +15,6 @@ use obzenflow_core::journal::archive::manifest::{RunManifest, RUN_MANIFEST_FILEN
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{ArchiveStatus, Journal};
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
@@ -147,7 +146,7 @@ struct CompletedRun {
 async fn run_live(base: &Path, treatment: ObserverTreatment) -> CompletedRun {
     let journal_root = base.join(treatment.label());
     let probe = Probe::default();
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(journal_root.clone(), treatment, probe.clone()))
         .await
@@ -165,7 +164,7 @@ async fn run_strict_replay(
 ) -> CompletedRun {
     let journal_root = base.join(format!("{}-replay", treatment.label()));
     let probe = Probe::default();
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

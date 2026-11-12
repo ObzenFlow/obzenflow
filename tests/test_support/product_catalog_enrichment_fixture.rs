@@ -5,7 +5,7 @@
 //! Instrumented catalog flow for rejection and replay tests.
 //! Business transformations, domain types and input fixtures come from the demo.
 
-use crate::product_catalog_enrichment::{
+use super::example::{
     console, domain::*, handlers, sources::*, summary_delivery::SingleSummaryDelivery,
 };
 use anyhow::Result;

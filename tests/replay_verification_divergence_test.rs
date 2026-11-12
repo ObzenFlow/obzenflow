@@ -13,15 +13,11 @@
 //! share no replay lineage, so identity is excluded and the comparison runs
 //! under the positional projection.
 
-mod replay_testkit {
-    mod discard;
-    pub use self::discard::*;
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::Effects;
@@ -215,7 +211,7 @@ async fn run_flow(journal_base: &Path, nondeterministic: bool, replay_from: Opti
         args.push(OsString::from("--replay-from"));
         args.push(archive.as_os_str().to_os_string());
     }
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(args)
         .run_async(build_flow(journal_base.to_path_buf(), nondeterministic))
         .await
@@ -266,7 +262,7 @@ async fn changed_code_replay_diverges_and_is_classified_changed_code() {
     run_flow(&journal_base, false, None).await;
     let baseline = latest_run_dir(&journal_base);
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

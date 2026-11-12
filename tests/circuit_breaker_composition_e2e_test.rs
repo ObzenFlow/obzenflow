@@ -21,11 +21,7 @@
 //!     without re-executing effects; source and sink policies remain suppressed,
 //!     while effect-history settlement rows retain their archived identities.
 
-mod replay_testkit {
-    mod journal;
-    mod ordered_journal;
-    pub use self::ordered_journal::*;
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{circuit_breaker, retry, MiddlewareFactory};
@@ -39,7 +35,6 @@ use obzenflow_core::{
     StageOutputs, TypedPayload,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{EffectCursor, EffectError, Effects, Port, SinkRedeliverySafety};
 use obzenflow_runtime::runtime_config::RETRY_MAX_ATTEMPTS_KEY;
@@ -530,7 +525,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
         live_calls.clone(),
         live_outputs.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .expect("live composition flow should build");
     let topology = live_handle
@@ -584,7 +579,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     let replay_source_calls = Arc::new(AtomicUsize::new(0));
     let replay_calls = Arc::new(Mutex::new(BTreeMap::new()));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

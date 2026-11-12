@@ -4,7 +4,7 @@
 
 //! Checked materialisation proofs for the application's summary policy.
 
-use crate::product_catalog_enrichment::summary_delivery::SingleSummaryDelivery;
+use super::example::summary_delivery::SingleSummaryDelivery;
 use obzenflow::middleware::{SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx};
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{

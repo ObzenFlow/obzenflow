@@ -304,6 +304,7 @@ async fn emit_per_window_flushes_final_partial_window_before_authored_eof() -> R
     )
     .emit(emit::per_window(Duration::from_secs(60)));
     let harness = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "emit_per_window_final_flush",
         journals: disk_journals(unique_journal_dir("emit_per_window_final_flush")),
 
@@ -381,6 +382,7 @@ async fn emit_per_window_final_aggregate_preserves_buffered_input_lineage() -> R
     )
     .emit(emit::per_window(Duration::from_secs(60)));
     let harness = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "emit_per_window_lineage",
         journals: disk_journals(unique_journal_dir("emit_per_window_lineage")),
 
@@ -437,6 +439,7 @@ async fn emit_per_window_final_aggregate_folds_runtime_minted_source_correlation
     )
     .emit(emit::per_window(Duration::from_secs(60)));
     let harness = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "emit_per_window_runtime_source_correlation",
         journals: disk_journals(unique_journal_dir("emit_per_window_runtime_source_correlation")),
 
@@ -514,6 +517,7 @@ async fn emit_per_window_emits_more_than_one_window_aggregate_per_run_and_resets
     )
     .emit(emit::per_window(window));
     let harness = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "emit_per_window_multi_window",
         journals: disk_journals(unique_journal_dir("emit_per_window_multi_window")),
 
@@ -569,6 +573,7 @@ async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<(
     .emit(emit::per_window(Duration::from_secs(60)));
     let identity = IdentityTransform;
     let harness = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "emit_per_window_forwarded_eof_invariant",
         journals: disk_journals(unique_journal_dir("emit_per_window_forwarded_eof_invariant")),
 
@@ -659,6 +664,7 @@ async fn group_by_emit_per_window_parents_each_group_to_its_own_inputs() -> Resu
     .updated_groups();
     let sink = AckSink;
     let harness = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "emit_per_window_group_by_lineage",
         journals: disk_journals(unique_journal_dir("emit_per_window_group_by_lineage")),
 

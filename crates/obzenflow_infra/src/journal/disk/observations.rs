@@ -839,12 +839,9 @@ mod tests {
         let path = directory.path().join("live-tail.log");
         let stage = StageId::new();
         {
-            let journal = DiskJournal::with_owner(
-                path.clone(),
-                JournalOwner::stage(stage),
-                JournalSync::BeforeAck,
-            )
-            .unwrap();
+            let journal =
+                DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                    .unwrap();
             journal
                 .append(event(stage, 1), Default::default())
                 .await
@@ -867,12 +864,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let journal = DiskJournal::with_owner(
-            path.clone(),
-            JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
-        )
-        .unwrap();
+        let journal =
+            DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                .unwrap();
         let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
         // Holding archive maintenance would deadlock an accidental archive lookup.
         let _maintenance = reader.shared.maintenance.lock().await;
@@ -907,12 +901,9 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("stalled.log");
             let stage = StageId::new();
-            let journal = DiskJournal::with_owner(
-                path.clone(),
-                JournalOwner::stage(stage),
-                JournalSync::BeforeAck,
-            )
-            .unwrap();
+            let journal =
+                DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                    .unwrap();
             let observed = event(stage, 1);
             let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
             let mut expected = vec![journal
@@ -1053,12 +1044,9 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("held-index.log");
             let stage = StageId::new();
-            let journal = DiskJournal::with_owner(
-                path.clone(),
-                JournalOwner::stage(stage),
-                JournalSync::BeforeAck,
-            )
-            .unwrap();
+            let journal =
+                DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                    .unwrap();
             let observed = event(stage, 1);
             let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
             let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
@@ -1149,12 +1137,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("moving-tail.log");
         let stage = StageId::new();
-        let journal = DiskJournal::with_owner(
-            path.clone(),
-            JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
-        )
-        .unwrap();
+        let journal =
+            DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                .unwrap();
         let observed = event(stage, 1);
         let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
         for seq in 1..=600 {
@@ -1215,12 +1200,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("bootstrap.log");
         let stage = StageId::new();
-        let original = DiskJournal::with_owner(
-            path.clone(),
-            JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
-        )
-        .unwrap();
+        let original =
+            DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                .unwrap();
         let observed = event(stage, 1);
         original
             .append(observed.clone(), Default::default())
@@ -1236,8 +1218,7 @@ mod tests {
         let lookup = tokio::spawn(async move { query_reader.latest_observation(&query_key).await });
         completes(latch.0.entered.notified()).await;
         let journal =
-            DiskJournal::with_owner(path, JournalOwner::stage(stage), JournalSync::BeforeAck)
-                .unwrap();
+            DiskJournal::with_owner(path, JournalOwner::stage(stage), JournalSync::Off).unwrap();
         completes(journal.append(recapture(&observed, 2), Default::default()))
             .await
             .unwrap();
@@ -1264,12 +1245,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("panic.log");
         let stage = StageId::new();
-        let journal = DiskJournal::with_owner(
-            path.clone(),
-            JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
-        )
-        .unwrap();
+        let journal =
+            DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                .unwrap();
         let observed = event(stage, 1);
         journal
             .append(observed.clone(), Default::default())
@@ -1368,7 +1346,7 @@ mod tests {
         let journal = DiskJournal::with_owner(
             path.to_owned(),
             JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         let observed = event(stage, 1);
@@ -1581,7 +1559,7 @@ mod tests {
         let disk = DiskJournal::with_owner(
             directory.path().join("families.log"),
             JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         let memory = MemoryJournal::with_owner(JournalOwner::stage(stage));
@@ -1632,12 +1610,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("million.log");
         let stage = StageId::new();
-        let journal = DiskJournal::with_owner(
-            path.clone(),
-            JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
-        )
-        .unwrap();
+        let journal =
+            DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                .unwrap();
         let observed = event(stage, 1);
         let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
         let mut noise = observed.clone();
@@ -1717,12 +1692,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("reopened.log");
         let stage = StageId::new();
-        let first = DiskJournal::with_owner(
-            path.clone(),
-            JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
-        )
-        .unwrap();
+        let first =
+            DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                .unwrap();
         first
             .configure(obzenflow_core::journal::JournalConfig {
                 observability: ObservabilityPolicy::Periodic {
@@ -1739,7 +1711,7 @@ mod tests {
         assert!(DiskJournal::<ChainEvent>::with_owner(
             path.clone(),
             JournalOwner::stage(stage),
-            JournalSync::BeforeAck
+            JournalSync::Off
         )
         .is_err());
         let second = first.clone();
@@ -1761,12 +1733,9 @@ mod tests {
         let checkpoint = std::fs::read(checkpoint_path(&path)).unwrap();
 
         tokio::time::advance(Duration::from_millis(250)).await;
-        let reopened = DiskJournal::with_owner(
-            path.clone(),
-            JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
-        )
-        .unwrap();
+        let reopened =
+            DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                .unwrap();
         let mut next = observed;
         next.envelope
             .observability
@@ -1797,12 +1766,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("recovery.log");
         let stage = StageId::new();
-        let journal = DiskJournal::with_owner(
-            path.clone(),
-            JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
-        )
-        .unwrap();
+        let journal =
+            DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                .unwrap();
         let observed = event(stage, 1);
         let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
         let mut noise = observed.clone();
@@ -1840,7 +1806,7 @@ mod tests {
         let foreign = DiskJournal::with_owner(
             foreign_path.clone(),
             JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         foreign
@@ -1895,12 +1861,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("faults.log");
         let stage = StageId::new();
-        let journal = DiskJournal::with_owner(
-            path.clone(),
-            JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
-        )
-        .unwrap();
+        let journal =
+            DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                .unwrap();
         let observation = event(stage, 1);
         let key = key(&observation, ObservationFamily::new("runtime.in_flight"));
         journal

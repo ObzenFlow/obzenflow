@@ -24,7 +24,10 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Runtime;
+
+const ARCHIVE_DEADLINE: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Tick {
@@ -101,7 +104,7 @@ impl Archive {
         .unwrap();
         runtime.block_on(async {
             tokio::time::timeout(
-                super::DEADLINE,
+                ARCHIVE_DEADLINE,
                 FlowApplication::builder()
                     .with_log_level(LogLevel::Warn)
                     .with_config_file(&config)
@@ -116,7 +119,7 @@ impl Archive {
         let replay = replay.then(|| {
             runtime.block_on(async {
                 tokio::time::timeout(
-                    super::DEADLINE,
+                    ARCHIVE_DEADLINE,
                     FlowApplication::builder()
                         .with_log_level(LogLevel::Warn)
                         .with_config_file(&config)

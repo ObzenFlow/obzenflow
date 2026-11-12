@@ -119,7 +119,7 @@ async fn live_join_processes_stream_without_reference_eof() {
         DiskJournal::with_owner(
             reference_path,
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -127,17 +127,13 @@ async fn live_join_processes_stream_without_reference_eof() {
         DiskJournal::with_owner(
             stream_path,
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(
-            join_path,
-            JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
-        )
-        .expect("create join disk journal"),
+        DiskJournal::with_owner(join_path, JournalOwner::stage(join_stage), JournalSync::Off)
+            .expect("create join disk journal"),
     );
 
     let mut stage_journals: std::collections::HashMap<StageId, Arc<dyn Journal<ChainEvent>>> =
@@ -165,7 +161,7 @@ async fn live_join_processes_stream_without_reference_eof() {
         DiskJournal::<SystemEvent>::with_owner(
             tmp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );
@@ -525,7 +521,7 @@ where
         DiskJournal::with_owner(
             temp.path().join("reference.log"),
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("reference journal"),
     );
@@ -533,7 +529,7 @@ where
         DiskJournal::with_owner(
             temp.path().join("stream.log"),
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("stream journal"),
     );
@@ -541,7 +537,7 @@ where
         DiskJournal::with_owner(
             temp.path().join("join.log"),
             JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("join journal"),
     );
@@ -556,7 +552,7 @@ where
         DiskJournal::<SystemEvent>::with_owner(
             temp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("system journal"),
     );
@@ -1068,7 +1064,7 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
         DiskJournal::with_owner(
             reference_path,
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -1076,17 +1072,13 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
         DiskJournal::with_owner(
             stream_path,
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(
-            join_path,
-            JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
-        )
-        .expect("create join disk journal"),
+        DiskJournal::with_owner(join_path, JournalOwner::stage(join_stage), JournalSync::Off)
+            .expect("create join disk journal"),
     );
 
     let mut stage_journals: std::collections::HashMap<StageId, Arc<dyn Journal<ChainEvent>>> =
@@ -1114,7 +1106,7 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
         DiskJournal::<SystemEvent>::with_owner(
             tmp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );
@@ -1278,7 +1270,7 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
         DiskJournal::with_owner(
             reference_path,
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -1286,17 +1278,13 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
         DiskJournal::with_owner(
             stream_path,
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(
-            join_path,
-            JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
-        )
-        .expect("create join disk journal"),
+        DiskJournal::with_owner(join_path, JournalOwner::stage(join_stage), JournalSync::Off)
+            .expect("create join disk journal"),
     );
 
     let mut stage_journals: std::collections::HashMap<StageId, Arc<dyn Journal<ChainEvent>>> =
@@ -1324,7 +1312,7 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
         DiskJournal::<SystemEvent>::with_owner(
             tmp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );
@@ -1458,7 +1446,7 @@ async fn live_join_forwards_reference_eof_and_records_one_verdict_per_input() {
         DiskJournal::with_owner(
             tmp.path().join("reference.log"),
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -1466,7 +1454,7 @@ async fn live_join_forwards_reference_eof_and_records_one_verdict_per_input() {
         DiskJournal::with_owner(
             tmp.path().join("stream.log"),
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
@@ -1474,7 +1462,7 @@ async fn live_join_forwards_reference_eof_and_records_one_verdict_per_input() {
         DiskJournal::with_owner(
             tmp.path().join("join.log"),
             JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create join disk journal"),
     );
@@ -1504,7 +1492,7 @@ async fn live_join_forwards_reference_eof_and_records_one_verdict_per_input() {
         DiskJournal::<SystemEvent>::with_owner(
             tmp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );
@@ -1715,7 +1703,7 @@ async fn live_join_reference_errors_are_per_record() {
         DiskJournal::with_owner(
             tmp.path().join("reference.log"),
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -1723,7 +1711,7 @@ async fn live_join_reference_errors_are_per_record() {
         DiskJournal::with_owner(
             tmp.path().join("stream.log"),
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
@@ -1731,7 +1719,7 @@ async fn live_join_reference_errors_are_per_record() {
         DiskJournal::with_owner(
             tmp.path().join("join.log"),
             JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create join disk journal"),
     );
@@ -1739,7 +1727,7 @@ async fn live_join_reference_errors_are_per_record() {
         DiskJournal::with_owner(
             tmp.path().join("join_error.log"),
             JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create join error disk journal"),
     );
@@ -1778,7 +1766,7 @@ async fn live_join_reference_errors_are_per_record() {
         DiskJournal::<SystemEvent>::with_owner(
             tmp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );

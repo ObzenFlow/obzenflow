@@ -7,15 +7,7 @@
 //! archive recorded before rejections left data journals can, fails on the
 //! refusal and never folds the record into its state.
 
-mod replay_testkit {
-    mod failures;
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    mod stage_writer;
-    pub use self::{failures::*, run_dir::*, stage_journal::*, stage_writer::*};
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow::journal::JournalSync;
@@ -30,7 +22,7 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{AppendOptions, Journal, JournalError, JournalReader, RunManifest};
 use obzenflow_core::{EventId, FlowId, JournalId, JournalRecord, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{effectful_stateful, flow, sink, source, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::{ApplicationError, FlowApplication};
+use obzenflow_infra::application::ApplicationError;
 use obzenflow_infra::journal::{disk_journals, DiskJournalFactory};
 use obzenflow_runtime::effects::{Effects, SinkRedeliverySafety, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -304,7 +296,7 @@ async fn a_stateful_stage_refuses_an_error_marked_input() {
     let calls = Arc::new(AtomicUsize::new(0));
     let collected = Arc::new(Mutex::new(Vec::new()));
 
-    let outcome = FlowApplication::builder()
+    let outcome = replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -383,7 +375,7 @@ async fn a_stateful_stage_records_the_input_its_handler_rejects() {
     let output_handler = CollectSink {
         events: collected.clone(),
     };
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let input_handler = ThreeRows::new();

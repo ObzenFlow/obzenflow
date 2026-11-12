@@ -97,7 +97,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -130,9 +129,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_BUILD_JOBS: "4"
+      CARGO_TARGET_DIR: target
     strategy:
       fail-fast: false
       matrix:
@@ -171,9 +169,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_BUILD_JOBS: "4"
+      CARGO_TARGET_DIR: target
     steps:
       - uses: actions/checkout@v4
         with:
@@ -208,9 +205,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_BUILD_JOBS: "4"
+      CARGO_TARGET_DIR: target
     steps:
       - uses: actions/checkout@v4
         with:
@@ -238,9 +234,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_BUILD_JOBS: "4"
+      CARGO_TARGET_DIR: target
     steps:
       - uses: actions/checkout@v4
         with:

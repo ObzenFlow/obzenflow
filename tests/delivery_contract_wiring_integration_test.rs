@@ -361,7 +361,7 @@ async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -404,7 +404,7 @@ async fn buffered_sink_edge_emits_passed_delivery_contract_result_after_flush() 
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -455,7 +455,7 @@ async fn fan_out_before_buffered_sink_emits_passed_delivery_contract_result() ->
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

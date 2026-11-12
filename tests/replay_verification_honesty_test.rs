@@ -12,14 +12,10 @@
 //! stage is named `not_order_certified`, per-type row counts are an advisory,
 //! and the run exits 2.
 
-mod replay_testkit {
-    mod discard;
-    pub use self::discard::*;
-}
+use crate::replay_testkit;
 
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome, MATCHED_LINE};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -128,14 +124,14 @@ async fn unordered_fan_in_is_named_not_misreported() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(journal_base.clone()))
         .await
         .expect("live flow should complete");
     let baseline = latest_run_dir(&journal_base);
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

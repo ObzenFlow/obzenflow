@@ -62,7 +62,16 @@ fn app_config(dir: &Path, shipped: &str) -> PathBuf {
         );
     }
     let path = dir.join(shipped);
-    let config = toml::Table::from_iter([("app".to_owned(), toml::Value::Table(app))]);
+    let config = toml::Table::from_iter([
+        (
+            "journal".to_owned(),
+            toml::Value::Table(toml::Table::from_iter([(
+                "sync".to_owned(),
+                toml::Value::String("off".to_owned()),
+            )])),
+        ),
+        ("app".to_owned(), toml::Value::Table(app)),
+    ]);
     std::fs::write(
         &path,
         toml::to_string(&config).expect("configuration serializes"),

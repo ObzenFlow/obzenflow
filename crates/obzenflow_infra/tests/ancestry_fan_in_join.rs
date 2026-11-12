@@ -260,7 +260,7 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
         DiskJournal::with_owner(
             reference_path,
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -268,17 +268,13 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
         DiskJournal::with_owner(
             stream_path,
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(
-            join_path,
-            JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
-        )
-        .expect("create join disk journal"),
+        DiskJournal::with_owner(join_path, JournalOwner::stage(join_stage), JournalSync::Off)
+            .expect("create join disk journal"),
     );
 
     let mut stage_journals: std::collections::HashMap<StageId, Arc<dyn Journal<ChainEvent>>> =
@@ -306,7 +302,7 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
         DiskJournal::<SystemEvent>::with_owner(
             tmp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );
@@ -472,7 +468,7 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
         DiskJournal::with_owner(
             reference_path,
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -480,17 +476,13 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
         DiskJournal::with_owner(
             stream_path,
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(
-            join_path,
-            JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
-        )
-        .expect("create join disk journal"),
+        DiskJournal::with_owner(join_path, JournalOwner::stage(join_stage), JournalSync::Off)
+            .expect("create join disk journal"),
     );
 
     let mut stage_journals: std::collections::HashMap<StageId, Arc<dyn Journal<ChainEvent>>> =
@@ -518,7 +510,7 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
         DiskJournal::<SystemEvent>::with_owner(
             tmp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );
@@ -706,7 +698,7 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
         DiskJournal::with_owner(
             reference_path,
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -714,17 +706,13 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
         DiskJournal::with_owner(
             stream_path,
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(
-            join_path,
-            JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
-        )
-        .expect("create join disk journal"),
+        DiskJournal::with_owner(join_path, JournalOwner::stage(join_stage), JournalSync::Off)
+            .expect("create join disk journal"),
     );
 
     let mut stage_journals: std::collections::HashMap<StageId, Arc<dyn Journal<ChainEvent>>> =
@@ -752,7 +740,7 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
         DiskJournal::<SystemEvent>::with_owner(
             tmp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );
@@ -928,7 +916,7 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
         DiskJournal::with_owner(
             reference_path,
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -936,23 +924,19 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
         DiskJournal::with_owner(
             stream_path,
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(
-            join_path,
-            JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
-        )
-        .expect("create join disk journal"),
+        DiskJournal::with_owner(join_path, JournalOwner::stage(join_stage), JournalSync::Off)
+            .expect("create join disk journal"),
     );
     let join_error_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
         DiskJournal::with_owner(
             join_error_path,
             JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create join error disk journal"),
     );
@@ -991,7 +975,7 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
         DiskJournal::<SystemEvent>::with_owner(
             tmp.path().join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );

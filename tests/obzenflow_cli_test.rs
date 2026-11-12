@@ -15,10 +15,13 @@ mod replay_testkit {
     mod journal;
     mod manifest;
     mod stage_journal;
-    pub use self::{discard::*, stage_journal::*};
+    mod unsynced_application;
+    mod unsynced_candidate;
+    mod unsynced_config;
+    mod unsynced_context;
+    pub use self::{discard::*, stage_journal::*, unsynced_application::*, unsynced_context::*};
 }
 
-use obzenflow::application::FlowApplication;
 use obzenflow::flow::{flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;
@@ -177,7 +180,7 @@ impl TypedFiniteSourceHandler for RejectingTicks {
 async fn a_run_that_rejects_500_rows_completes_and_show_lists_them_all() {
     let temp = tempfile::tempdir().unwrap();
     let journals = temp.path().to_owned();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["rejecting-ticks"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let ticks_handler = RejectingTicks { next: 1 };
@@ -343,7 +346,7 @@ async fn runtime_writer_columns_use_journaled_registration() {
             .build(context.with_metrics_exporter(metrics))
             .await
     });
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["writer-registration"])
         .run_async(definition)
         .await
@@ -494,7 +497,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(journal_base.clone()))
         .await
@@ -679,7 +682,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
     assert_eq!(facts.len(), 3);
     assert!(facts.iter().all(|record| record["payload"]["n"].is_u64()));
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -731,7 +734,7 @@ async fn cli_verify_calls_exit_codes_follow_the_contract() {
     let mut runs = Vec::new();
     for lineage in ["first", "second"] {
         let journal_base = temp.path().join(lineage);
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(build_flow(journal_base.clone()))
             .await
@@ -1128,7 +1131,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     }
 
     let temp = tempfile::tempdir().unwrap();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["gateway"])
         .run_async(build_gateway(temp.path().to_path_buf()))
         .await
@@ -1651,7 +1654,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     let (colored, _) = show(&baseline, &["--color", "always"]);
     assert_palette(&colored);
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args([
             OsString::from("gateway"),
             OsString::from("--replay-from"),
@@ -1988,7 +1991,7 @@ mod control_client {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn advertised_archive_identity_is_checked_before_play() {
         let dir = tempfile::tempdir().unwrap();
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["application"])
             .run_async(build_flow(dir.path().to_path_buf()))
             .await
@@ -2124,7 +2127,7 @@ mod hosted {
                 topology: { ticks |> out; }
             })
         });
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args([
                 "application",
                 "--server",
@@ -2491,7 +2494,7 @@ mod hosted {
 
 /// Run the CLI test flow with `args`, returning the run it wrote.
 async fn run_cli_flow(journal_base: &Path, args: &[&std::ffi::OsStr]) -> PathBuf {
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(
             std::iter::once(std::ffi::OsStr::new("obzenflow")).chain(args.iter().copied()),
         )
@@ -2543,7 +2546,7 @@ async fn stop_cli_flow_with_a_lagging_sink(journal_base: &Path) -> PathBuf {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .expect("the flow builds");
     let run = std::fs::canonicalize(latest_run_dir(journal_base)).expect("the run resolves");

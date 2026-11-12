@@ -316,7 +316,7 @@ async fn cycle_guard_fan_out_siblings_converge_without_spurious_abort() -> Resul
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 

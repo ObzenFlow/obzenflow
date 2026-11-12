@@ -29,7 +29,7 @@ async fn physical_group_limits_reject_before_commit_and_members_stream_in_order(
                 DiskJournal::with_owner(
                     dir.path().join("groups.log"),
                     JournalOwner::stage(stage),
-                    JournalSync::BeforeAck,
+                    JournalSync::Off,
                 )
                 .unwrap(),
             )
@@ -109,12 +109,8 @@ async fn large_in_process_documents_roundtrip_through_memory_and_reopened_disk()
         let stage = StageId::new();
         let journal: Arc<dyn Journal<ChainEvent>> = if disk {
             Arc::new(
-                DiskJournal::with_owner(
-                    path.clone(),
-                    JournalOwner::stage(stage),
-                    JournalSync::BeforeAck,
-                )
-                .unwrap(),
+                DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage), JournalSync::Off)
+                    .unwrap(),
             )
         } else {
             Arc::new(MemoryJournal::with_owner(JournalOwner::stage(stage)))
@@ -149,7 +145,7 @@ async fn large_in_process_documents_roundtrip_through_memory_and_reopened_disk()
             let reopened = DiskJournal::<ChainEvent>::with_owner(
                 path,
                 JournalOwner::stage(stage),
-                JournalSync::BeforeAck,
+                JournalSync::Off,
             )
             .unwrap();
             let mut reader = reopened.reader_from(0).await.unwrap();

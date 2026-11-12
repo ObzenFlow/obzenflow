@@ -7,8 +7,8 @@
 //! Scripted failures, physical-call counters, policy variants, and cooldown
 //! pauses belong here rather than in the user-facing resilience example.
 
-pub use crate::payment_domain::ValidatedOrder;
-use crate::payment_domain::{
+pub use crate::payment_gateway::domain::ValidatedOrder;
+use crate::payment_gateway::domain::{
     OrderChannel, PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentMethodState,
     TrafficPhase,
 };

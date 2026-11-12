@@ -7,13 +7,8 @@
 //! This intentionally lives under `tests/`, not `examples/`: its destination
 //! setup and read-back assertions are test concerns rather than user guidance.
 
-mod postgres_support {
-    mod connection;
-    mod pool;
-    pub use self::{connection::*, pool::*};
-}
+use crate::postgres_support;
 
-use obzenflow::application::FlowApplication;
 use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};
 use obzenflow::stages::sources;
 use obzenflow_core::TypedPayload;
@@ -104,7 +99,7 @@ async fn independent_inventory_consumer_delivers_through_the_public_connector() 
         })
     });
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["postgres-sink-inventory-consumer"])
         .run_async(flow)
         .await

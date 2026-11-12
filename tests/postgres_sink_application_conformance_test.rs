@@ -13,8 +13,13 @@ mod replay_testkit {
     mod run_dir;
     mod same_delivered_order;
     mod stage_journal;
+    mod unsynced_application;
+    mod unsynced_candidate;
+    mod unsynced_config;
+    mod unsynced_context;
     pub use self::{
         delivered_order::*, manifest::*, ordered_journal::*, run_dir::*, same_delivered_order::*,
+        unsynced_application::*, unsynced_context::*,
     };
 }
 
@@ -49,11 +54,9 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, transform, FlowBuildError, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::id_conversions::StageIdExt;
-use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::sink::SinkConnector;
 use obzenflow_runtime::stages::source::strategies::{
@@ -1160,7 +1163,7 @@ async fn seed_live_archive(
     class: SinkDestinationClass,
 ) -> Result<PathBuf, SinkFixtureError> {
     probe.clear();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(single_flow(
             root.clone(),
@@ -1183,7 +1186,7 @@ async fn seed_truncated_archive(
 ) -> Result<PathBuf, SinkFixtureError> {
     probe.clear();
     let handle = stalling_flow(root.clone(), connection, schema, probe.clone())
-        .build(FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|error| SinkFixtureError::new(error.to_string()))?;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1568,7 +1571,7 @@ async fn postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_sa
         live_probe.clone(),
         right_gate.clone(),
     )
-    .build(FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .expect("source-fed PostgreSQL fan-in builds");
     let topology = handle.topology().expect("flow exposes its topology");
@@ -1637,7 +1640,7 @@ async fn postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_sa
     drop(handle);
 
     let replay_probe = PostgresTestProbe::default();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -1702,7 +1705,7 @@ async fn postgres_order_sensitive_derived_fan_in_reports_named_quiet_input() {
         PostgresTestProbe::default(),
         delayed_gate.clone(),
     )
-    .build(FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .expect("derived-fed PostgreSQL fan-in builds");
     let topology = handle.topology().expect("flow exposes its topology");
@@ -1802,7 +1805,7 @@ async fn postgres_open_failures_traverse_full_application_lifecycle() {
         let probe = PostgresTestProbe::default();
         let result = tokio::time::timeout(
             Duration::from_secs(30),
-            FlowApplication::builder()
+            replay_testkit::unsynced_application()
                 .with_cli_args(["obzenflow"])
                 .run_async(custom_postgres_flow(
                     journals.clone(),
@@ -1891,7 +1894,7 @@ async fn postgres_eof_flush_failure_archive_redelivery_retries_unresolved_input_
     live_probe.delay_once(PostgresDelayPoint::Rollback, Duration::from_secs(1));
     let live_result = tokio::time::timeout(
         Duration::from_secs(30),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(custom_postgres_flow(
                 journals.clone(),
@@ -1920,7 +1923,7 @@ async fn postgres_eof_flush_failure_archive_redelivery_retries_unresolved_input_
     replay_probe.delay_once(PostgresDelayPoint::Rollback, Duration::from_secs(1));
     let replay_result = tokio::time::timeout(
         Duration::from_secs(30),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(vec![
                 OsString::from("obzenflow"),
                 OsString::from("--replay-from"),
@@ -1972,7 +1975,7 @@ async fn postgres_order_sensitive_cycle_fan_in_is_rejected_before_open() {
         format!("obz083c_cycle_{run_id}"),
         probe.clone(),
     )
-    .build(FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await;
     let failure = match result {
         Err(failure) => failure,

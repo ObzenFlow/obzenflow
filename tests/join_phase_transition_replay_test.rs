@@ -16,26 +16,12 @@
 //!   merge (`dispatch_live_canonical`), so its delivered order, EOF-relative
 //!   positions, and the effect cursors below all reproduce under replay.
 
-mod replay_testkit {
-    mod delivered_order;
-    mod journal;
-    mod manifest;
-    mod ordered_stage_journal;
-    mod run_dir;
-    mod same_delivered_order;
-    mod stage_journal;
-    mod transport_signature;
-    pub use self::{
-        delivered_order::*, ordered_stage_journal::*, run_dir::*, same_delivered_order::*,
-        transport_signature::*,
-    };
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow::stages::joins;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, join, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -335,7 +321,7 @@ fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefini
 }
 
 async fn run_live(flow: FlowDefinition) {
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(flow)
         .await
@@ -343,7 +329,7 @@ async fn run_live(flow: FlowDefinition) {
 }
 
 async fn run_replay(archive: &Path, flow: FlowDefinition) {
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

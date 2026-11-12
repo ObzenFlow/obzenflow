@@ -4,18 +4,7 @@
 
 //! Transform stage integration regression tests.
 
-mod replay_testkit {
-    mod failures;
-    mod journal;
-    mod manifest;
-    mod ordered_journal;
-    mod run_dir;
-    mod stage_journal;
-    mod stage_writer;
-    pub use self::{
-        failures::*, ordered_journal::*, run_dir::*, stage_journal::*, stage_writer::*,
-    };
-}
+use crate::replay_testkit;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -30,7 +19,6 @@ use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{JournalRecord, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
@@ -233,7 +221,7 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
             }
         })
     })
-    .build(FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -372,7 +360,7 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
             }
         })
     })
-    .build(FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow::anyhow!("Failed to create typed try-map flow: {error:?}"))?;
 
@@ -487,7 +475,7 @@ async fn transform_applies_stage_middleware() -> Result<()> {
             }
         })
     })
-    .build(FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -639,7 +627,7 @@ async fn a_sink_behind_a_same_type_validator_writes_only_valid_records() -> Resu
             }
         })
     })
-    .build(FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow::anyhow!("Failed to create flow: {error:?}"))?;
     handle.run().await?;
@@ -675,7 +663,7 @@ async fn a_type_changing_validator_keeps_its_rejection_out_of_its_data() -> Resu
             }
         })
     })
-    .build(FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow::anyhow!("Failed to create flow: {error:?}"))?;
     handle.run().await?;
@@ -719,7 +707,7 @@ async fn a_validator_feeding_two_sinks_records_each_rejection_once() -> Result<(
             }
         })
     })
-    .build(FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow::anyhow!("Failed to create flow: {error:?}"))?;
     handle.run().await?;

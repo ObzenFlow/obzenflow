@@ -372,7 +372,7 @@ mod tests {
         let journal = DiskJournal::<SystemEvent>::with_owner(
             path.clone(),
             JournalOwner::system(system),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         let factory = SystemEventFactory::new(system);
@@ -518,7 +518,7 @@ mod tests {
         let journal = DiskJournal::<ChainEvent>::with_owner(
             dir.path().join("original.log"),
             JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         let mut original = vec![journal

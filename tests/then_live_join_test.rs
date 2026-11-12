@@ -2,16 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit {
-    mod eof_clock;
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    mod stage_writer;
-    mod verdicts;
-    pub use self::{eof_clock::*, manifest::*, run_dir::*, stage_journal::*, verdicts::*};
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -25,7 +16,6 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::{StageKey, TypedPayload};
 use obzenflow_dsl::{async_infinite_source, flow, join, merge, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
@@ -136,6 +126,7 @@ fn enforced_backpressure(window: u64, stall_timeout_ms: u64) -> FlowBuildContext
             ))
             .expect("the backpressure setting admits");
     }
+    replay_testkit::admit_unsynced(&mut candidates);
     FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(candidates)))
 }
 
@@ -325,7 +316,7 @@ async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<
         },
         sink.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;
@@ -378,7 +369,7 @@ async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<
         replay_testkit::assert_eof_carries_the_ending_clock(&run, stage).await;
     }
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -442,7 +433,7 @@ async fn a_stop_during_the_batch_drains_without_reading_live_rows() -> Result<()
         },
         sink.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;
@@ -601,7 +592,7 @@ async fn a_join_with_no_batch_stream_input_journals_only_live_entered() -> Resul
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;
@@ -689,7 +680,7 @@ async fn a_join_whose_stream_is_all_batch_drains_when_its_batch_ends() -> Result
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;
@@ -991,7 +982,7 @@ async fn a_finite_eof_join_stopped_while_hydrating_posts_nothing() -> Result<()>
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;
@@ -1109,7 +1100,7 @@ async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()>
         arrived: Arc::default(),
     };
     let handle = build_two_per_side(journal_base.clone(), (live_a, live_b), sink.clone())
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;
@@ -1194,7 +1185,7 @@ async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()>
         [StageKey::from("batch_a"), StageKey::from("batch_b")]
     );
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

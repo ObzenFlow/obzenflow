@@ -4,15 +4,7 @@
 
 //! FLOWIP-134b journal oracle for scalar and dynamic synchronous transforms.
 
-mod replay_testkit {
-    mod discard;
-    mod journal;
-    mod ordered_journal;
-    pub use self::{discard::*, ordered_journal::*};
-}
-
-#[path = "../examples/csv_demo_support_sla/ticket.rs"]
-mod support_domain;
+use crate::{csv_demo::domain as support_domain, replay_testkit};
 
 use obzenflow_core::ai::{ChunkEnvelope, TokenCount};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
@@ -21,7 +13,6 @@ use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStat
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -499,7 +490,7 @@ async fn run(journal_base: &Path, replay_from: Option<&Path>, console: bool) {
         command
             .args([
                 "--exact",
-                "console_preserves_composed_live_replay_journals",
+                "typed_sync_transform_journal_parity_test::console_preserves_composed_live_replay_journals",
                 "--nocapture",
             ])
             .env("OBZENFLOW_CONSOLE_PARITY_JOURNALS", journal_base)
@@ -531,7 +522,7 @@ async fn run(journal_base: &Path, replay_from: Option<&Path>, console: bool) {
         args.push(OsString::from("--replay-from"));
         args.push(archive.as_os_str().to_os_string());
     }
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(args)
         .run_async(build_flow(journal_base.to_path_buf()))
         .await
@@ -556,7 +547,7 @@ async fn console_preserves_composed_live_replay_journals() {
         if let Some(archive) = std::env::var_os("OBZENFLOW_CONSOLE_PARITY_REPLAY") {
             args.extend(["--replay-from".into(), archive, "--verify".into()]);
         }
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(args)
             .run_async(build_flow(journals.into()))
             .await

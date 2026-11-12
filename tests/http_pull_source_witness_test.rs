@@ -6,12 +6,7 @@
 //! fatal decode abandons the scan, so the source fails without EOF and its
 //! committed diagnostic is the lifecycle failure's cause.
 
-mod replay_testkit {
-    mod discard;
-    mod journal;
-    mod run_dir;
-    pub use self::{discard::*, journal::*, run_dir::*};
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_adapters::sources::{
@@ -26,7 +21,7 @@ use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord, SourceDiagn
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, HttpRequest};
 use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
-use obzenflow_infra::application::{ApplicationError, FlowApplication};
+use obzenflow_infra::application::ApplicationError;
 use obzenflow_infra::journal::disk_journals;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -126,7 +121,7 @@ async fn run(
         args.push(archive.as_os_str().to_os_string());
         args.push(OsString::from("--allow-incomplete-archive"));
     }
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(args)
         .run_async(build_flow(journal_base.to_path_buf(), calls))
         .await

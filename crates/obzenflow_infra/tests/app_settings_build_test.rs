@@ -2,15 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "../../../tests/replay_testkit"]
-mod replay_testkit {
-    mod bootstrap;
-    mod discard;
-    mod manifest;
-    mod reattaching_source;
-    mod run_dir;
-    pub use self::{bootstrap::*, discard::*, manifest::*, reattaching_source::*, run_dir::*};
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use obzenflow_core::TypedPayload;
@@ -22,7 +14,7 @@ use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, Re
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
-    AppTable, ApplicationSettingsError, ResolvedRuntimeConfig,
+    AppTable, ApplicationSettingsError, CandidateSet, ResolvedRuntimeConfig,
 };
 use obzenflow_runtime::stages::common::handlers::TypedInfiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
@@ -51,8 +43,10 @@ fn context_with(app: serde_json::Value) -> FlowBuildContext {
     let serde_json::Value::Object(table) = app else {
         panic!("[app] is a table");
     };
+    let mut candidates = CandidateSet::default();
+    replay_testkit::admit_unsynced(&mut candidates);
     FlowBuildContext::new(Arc::new(
-        ResolvedRuntimeConfig::builtin_defaults()
+        ResolvedRuntimeConfig::new(candidates)
             .with_app(AppTable::new("deploy/staging.toml", table)),
     ))
 }
@@ -132,7 +126,7 @@ async fn an_unextracted_app_table_refuses_before_any_run_directory() {
 
 #[tokio::test]
 async fn an_absent_or_empty_table_builds_without_extraction() {
-    for ctx in [FlowBuildContext::for_tests(), context_with(json!({}))] {
+    for ctx in [replay_testkit::unsynced_context(), context_with(json!({}))] {
         let base = tempfile::tempdir().expect("tempdir");
         let handle = bare_flow(base.path().to_path_buf())
             .build(ctx)
@@ -200,7 +194,7 @@ async fn a_resume_refused_for_an_unextracted_table_leaves_its_parent_unclaimed()
     let temp = tempfile::tempdir()?;
     let base = temp.path().join("journals");
     let handle = resumable_flow(base.clone(), 2)
-        .build(FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("the recording must build: {e:?}"))?;
     let mut state = handle.state_receiver();

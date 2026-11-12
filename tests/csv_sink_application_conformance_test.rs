@@ -24,9 +24,7 @@ use obzenflow_adapters::sinks::csv::testing::CsvTestProbe;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::HandlerError;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
@@ -323,7 +321,7 @@ async fn seed_live_archive(
     class: SinkDestinationClass,
 ) -> Result<PathBuf, SinkFixtureError> {
     probe.clear();
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(single_flow(root.clone(), output, probe, class, false))
         .await
@@ -338,7 +336,7 @@ async fn seed_truncated_archive(
 ) -> Result<PathBuf, SinkFixtureError> {
     probe.clear();
     let handle = stalling_flow(root.clone(), output, probe.clone())
-        .build(FlowBuildContext::for_tests())
+        .build(crate::replay_testkit::unsynced_context())
         .await
         .map_err(|error| SinkFixtureError::new(error.to_string()))?;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

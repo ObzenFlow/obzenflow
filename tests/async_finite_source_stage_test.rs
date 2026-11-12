@@ -156,7 +156,7 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -214,7 +214,7 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -286,7 +286,7 @@ async fn cleanup_failure_is_durable_and_does_not_block_eof_or_completion() -> Re
             topology: { source |> sink; }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
     let source = handle
@@ -396,7 +396,7 @@ async fn fatal_poll_path_attempts_cleanup_once_without_authoring_data() -> Resul
             topology: { source |> sink; }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

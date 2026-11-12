@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 #[path = "domain.rs"]
-mod domain;
+pub mod domain;
 
 #[path = "flow.rs"]
 pub mod flow;

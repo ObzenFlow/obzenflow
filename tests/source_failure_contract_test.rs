@@ -6,14 +6,7 @@
 //! terminal report and an opening failure each commit one diagnostic, fail the
 //! stage and pipeline with a causal link to it, and write no EOF.
 
-mod replay_testkit {
-    mod discard;
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{discard::*, journal::*, manifest::*, run_dir::*, stage_journal::*};
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::{
@@ -25,7 +18,7 @@ use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{
     async_infinite_source, async_source, flow, infinite_source, sink, source, FlowDefinition,
 };
-use obzenflow_infra::application::{ApplicationError, FlowApplication};
+use obzenflow_infra::application::ApplicationError;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, AtMostOnce, FiniteSourceConnector,
@@ -186,7 +179,7 @@ fn source_failures(rows: &[JournalRecord<ChainPayload>]) -> Vec<(EventId, &Execu
 }
 
 async fn run_expecting_failure(definition: FlowDefinition) {
-    let outcome = FlowApplication::builder()
+    let outcome = replay_testkit::unsynced_application()
         .with_cli_args(vec![std::ffi::OsString::from("obzenflow")])
         .run_async(definition)
         .await;

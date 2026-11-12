@@ -7,6 +7,7 @@
 //! This test verifies that circuit breaker middleware emits control events
 //! that flow through the system and appear as Prometheus metrics.
 
+use crate::replay_testkit;
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker;
@@ -142,8 +143,8 @@ impl InlineSink for MetricsSink {
 async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
-    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_exporter(metrics_model.clone());
+    let metrics_context =
+        replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     // Initialize tracing
     if let Err(error) = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -260,8 +261,8 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 async fn test_circuit_breaker_summary_events() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
-    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_exporter(metrics_model.clone());
+    let metrics_context =
+        replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     // Source that generates many events quickly
     #[derive(Clone, Debug)]
     struct RapidSource {

@@ -216,7 +216,7 @@ async fn async_infinite_source_graceful_stop_interrupts_blocked_next_and_calls_d
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -287,7 +287,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 

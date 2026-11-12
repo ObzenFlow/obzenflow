@@ -2,14 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit {
-    mod journal;
-    mod ordered_journal;
-    pub use self::ordered_journal::*;
-}
-
-#[path = "support/fake_ai.rs"]
-pub mod fake_ai;
+use crate::{fake_ai, replay_testkit};
 
 use fake_ai::FakeChatModels;
 use obzenflow::ai::{
@@ -29,6 +22,7 @@ use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
+use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -315,7 +309,12 @@ fn expected_brief(value: u64) -> DecisionBrief {
     }
 }
 
-fn backpressure_config(journal_base: &Path, mode: &str, window: Option<u64>) -> PathBuf {
+fn backpressure_config(
+    journal_base: &Path,
+    mode: &str,
+    window: Option<u64>,
+    sync: JournalSync,
+) -> PathBuf {
     let window = window
         .map(|window| format!("window = {window}\nstall_timeout_ms = 5000\n"))
         .unwrap_or_default();
@@ -323,8 +322,10 @@ fn backpressure_config(journal_base: &Path, mode: &str, window: Option<u64>) -> 
     std::fs::write(
         &path,
         format!(
-            "[runtime.backpressure.flow]\nmode = \"{mode}\"\n{window}\n\
-             [ai.models]\nmodel = \"deterministic\"\n"
+            "[journal]\nsync = \"{}\"\n\n\
+             [runtime.backpressure.flow]\nmode = \"{mode}\"\n{window}\n\
+             [ai.models]\nmodel = \"deterministic\"\n",
+            sync.as_token()
         ),
     )
     .expect("write the run configuration");
@@ -332,7 +333,7 @@ fn backpressure_config(journal_base: &Path, mode: &str, window: Option<u64>) -> 
 }
 
 fn enforced_config(journal_base: &Path, window: u64) -> PathBuf {
-    backpressure_config(journal_base, "enforce", Some(window))
+    backpressure_config(journal_base, "enforce", Some(window), JournalSync::Off)
 }
 
 fn build_flow(
@@ -618,7 +619,12 @@ async fn two_ai_stages_run_live_and_strict_replay_without_connecting() {
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .with_config_file(backpressure_config(&journal_base, "off", None))
+        .with_config_file(backpressure_config(
+            &journal_base,
+            "off",
+            None,
+            JournalSync::Off,
+        ))
         .with_ai_models(live.resolvers())
         .run_async(build_two_stage_flow(
             journal_base.clone(),
@@ -649,7 +655,12 @@ async fn two_ai_stages_run_live_and_strict_replay_without_connecting() {
             archive.as_os_str().to_os_string(),
             OsString::from("--verify"),
         ])
-        .with_config_file(backpressure_config(&journal_base, "off", None))
+        .with_config_file(backpressure_config(
+            &journal_base,
+            "off",
+            None,
+            JournalSync::Off,
+        ))
         .with_ai_models(replay.resolvers())
         .run_async(build_two_stage_flow(journal_base, replay_outputs.clone()))
         .await
@@ -665,7 +676,8 @@ async fn two_ai_stages_run_live_and_strict_replay_without_connecting() {
 
 fn ai_config(journal_base: &Path, body: &str) -> PathBuf {
     let path = journal_base.with_extension("toml");
-    std::fs::write(&path, body).expect("write the run configuration");
+    std::fs::write(&path, format!("[journal]\nsync = \"off\"\n\n{body}"))
+        .expect("write the run configuration");
     path
 }
 
@@ -1022,7 +1034,8 @@ async fn strict_replay_reads_the_recorded_model_and_never_the_configured_one() {
     let unconfigured = temp.path().join("unconfigured.toml");
     std::fs::write(
         &unconfigured,
-        "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 5000\n\n\
+        "[journal]\nsync = \"off\"\n\n\
+         [runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 5000\n\n\
          [ai.models]\nendpoint = \"nowhere\"\n",
     )
     .expect("write a configuration with no usable model");
@@ -1512,7 +1525,8 @@ async fn stage_deadline_reaches_model() {
     let config = journal_base.with_extension("toml");
     std::fs::write(
         &config,
-        "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 5000\n\n\
+        "[journal]\nsync = \"off\"\n\n\
+         [runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 5000\n\n\
          [ai.models]\nmodel = \"deterministic\"\nrequest_timeout_ms = 150000\n\n\
          [ai.models.stages.brief]\nrequest_timeout_ms = 2500\n",
     )
@@ -1549,7 +1563,12 @@ async fn inference_track_and_off_modes_remain_nonblocking_and_locally_bounded() 
 
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
-            .with_config_file(backpressure_config(&journal_base, mode, None))
+            .with_config_file(backpressure_config(
+                &journal_base,
+                mode,
+                None,
+                JournalSync::Off,
+            ))
             .with_ai_models(models.resolvers())
             .run_async(build_flow_for_role(
                 journal_base.clone(),
@@ -1646,7 +1665,12 @@ fn reply_cut_child_process() {
         .block_on(
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
-                .with_config_file(enforced_config(&journal_base, 3))
+                .with_config_file(backpressure_config(
+                    &journal_base,
+                    "enforce",
+                    Some(3),
+                    JournalSync::BeforeAck,
+                ))
                 .with_ai_models(answering().resolvers())
                 .run_async(build_flow_for_role(
                     journal_base,
@@ -1669,7 +1693,7 @@ async fn resume_after_a_durable_reply_reinterprets_without_another_chat_call() {
     let mut child = Command::new(std::env::current_exe().expect("current test executable"))
         .arg("--ignored")
         .arg("--exact")
-        .arg("reply_cut_child_process")
+        .arg("one_shot_inference_effect_journal_test::reply_cut_child_process")
         .arg("--test-threads=1")
         .env(REPLY_CUT_JOURNAL_ENV, &journal_base)
         .stdout(Stdio::null())
@@ -1740,7 +1764,12 @@ async fn resume_after_a_durable_reply_reinterprets_without_another_chat_call() {
             cut_archive.as_os_str().to_os_string(),
             OsString::from("--allow-incomplete-archive"),
         ])
-        .with_config_file(enforced_config(&journal_base, 3))
+        .with_config_file(backpressure_config(
+            &journal_base,
+            "enforce",
+            Some(3),
+            JournalSync::BeforeAck,
+        ))
         .with_ai_models(resume.resolvers())
         .run_async(build_flow(
             journal_base.clone(),

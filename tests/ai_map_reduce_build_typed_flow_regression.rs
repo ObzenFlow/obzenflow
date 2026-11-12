@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "support/fake_ai.rs"]
-pub mod fake_ai;
+use crate::fake_ai;
 
 use async_trait::async_trait;
 use fake_ai::{

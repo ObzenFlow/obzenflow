@@ -12,21 +12,11 @@
 //! recorded outcome and zero re-execution, with identical cursors across
 //! live, replay, and replay-of-replay.
 
-mod replay_testkit {
-    mod delivered_order;
-    mod journal;
-    mod manifest;
-    mod ordered_stage_journal;
-    mod prefix_stable;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{ordered_stage_journal::*, prefix_stable::*, run_dir::*};
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_core::{event::ChainPayload, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -254,7 +244,7 @@ async fn effect_cursor_projection(
 }
 
 async fn run_live(flow: FlowDefinition) {
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(flow)
         .await
@@ -262,7 +252,7 @@ async fn run_live(flow: FlowDefinition) {
 }
 
 async fn run_replay(archive: &Path, flow: FlowDefinition) {
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

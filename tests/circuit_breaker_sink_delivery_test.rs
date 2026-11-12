@@ -159,7 +159,7 @@ async fn sink_observer_input_mismatch_fails_flow_construction() {
             topology: { source |> destination; }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await;
     let error = match result {
         Ok(_) => panic!("mismatched observer must fail flow construction"),
@@ -176,8 +176,8 @@ async fn sink_observer_input_mismatch_fails_flow_construction() {
 async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
-    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_exporter(metrics_model.clone());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     if let Err(error) = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .with_test_writer()

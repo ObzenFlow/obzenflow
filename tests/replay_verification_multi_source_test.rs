@@ -16,15 +16,11 @@
 //! orders by admission sequence, reproducible under replay but
 //! arrival-dependent across independent live runs).
 
-mod replay_testkit {
-    mod discard;
-    pub use self::discard::*;
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{EffectError, Effects, Port};
@@ -212,7 +208,7 @@ async fn run_flow(journal_base: &Path, replay_from: Option<&Path>) -> Arc<Atomic
         args.push(OsString::from("--replay-from"));
         args.push(archive.as_os_str().to_os_string());
     }
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(args)
         .run_async(build_flow(journal_base.to_path_buf(), calls.clone()))
         .await

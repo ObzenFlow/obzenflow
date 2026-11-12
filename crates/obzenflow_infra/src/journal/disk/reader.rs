@@ -629,7 +629,7 @@ mod tests {
         let journal = DiskJournal::<ChainEvent>::with_owner(
             path.clone(),
             JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         let event = || {
@@ -709,7 +709,7 @@ mod tests {
         let journal = DiskJournal::<ChainEvent>::with_owner(
             path.clone(),
             JournalOwner::stage(stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         let expected = journal
@@ -752,7 +752,7 @@ mod tests {
             let journal = DiskJournal::<ChainEvent>::with_owner(
                 path.clone(),
                 obzenflow_core::JournalOwner::stage(stage),
-                JournalSync::BeforeAck,
+                JournalSync::Off,
             )
             .unwrap();
             let first = journal

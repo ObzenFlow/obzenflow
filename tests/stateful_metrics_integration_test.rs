@@ -8,10 +8,7 @@
 //! - record processing time during `accumulate()` (051j-1)
 //! - count input events per-accumulate even when heartbeats are disabled (051j-2)
 
-mod replay_testkit {
-    mod journal;
-    pub use self::journal::*;
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -284,8 +281,8 @@ fn metric_line_value(
 async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
-    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_exporter(metrics_model.clone());
+    let metrics_context =
+        replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
 
     let total_events: usize = 20;
@@ -476,8 +473,8 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
 async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
-    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_exporter(metrics_model.clone());
+    let metrics_context =
+        replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
 
     let reference_events: usize = 10;

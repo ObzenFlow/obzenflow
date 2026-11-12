@@ -2,19 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit {
-    mod discard;
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{discard::*, run_dir::*, stage_journal::*};
-}
+use crate::replay_testkit;
 
 use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{render_verdict, verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
@@ -146,7 +138,7 @@ async fn run(journal_base: &Path, config: Option<&Path>, replay_from: Option<&Pa
             OsString::from("--verify"),
         ]);
     }
-    let mut application = FlowApplication::builder().with_cli_args(args);
+    let mut application = replay_testkit::unsynced_application().with_cli_args(args);
     if let Some(config) = config {
         application = application.with_config_file(config);
     }
@@ -376,7 +368,8 @@ async fn keyed_outputs_link_past_a_stage_cap_of_one() {
     let config = temp.path().join("obzenflow.toml");
     std::fs::write(
         &config,
-        "[runtime.stages.updates]\nmax_lineage_depth = 1\n\n\
+        "[journal]\nsync = \"off\"\n\n\
+         [runtime.stages.updates]\nmax_lineage_depth = 1\n\n\
          [runtime.stages.snapshots]\nmax_lineage_depth = 1\n",
     )
     .expect("stage cap configuration");

@@ -41,21 +41,21 @@ impl Run {
             dir.path().join("system.log"),
             JournalOwner::system(pipeline),
             run_id,
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         let data = DiskJournal::with_owner_in_run(
             dir.path().join("data.log"),
             JournalOwner::stage(stage),
             run_id,
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         let error = DiskJournal::<ChainEvent>::with_owner_in_run(
             dir.path().join("error.log"),
             JournalOwner::stage(stage),
             run_id,
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .unwrap();
         let manifest = RunManifest {

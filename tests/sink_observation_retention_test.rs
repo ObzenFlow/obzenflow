@@ -4,11 +4,7 @@
 
 //! FLOWIP-122a retained-outcome and admission-only boundary proofs.
 
-mod replay_testkit {
-    mod journal;
-    mod ordered_journal;
-    pub use self::ordered_journal::*;
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
@@ -28,7 +24,6 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::{EventId, JournalRecord, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::sink::{
@@ -364,7 +359,7 @@ async fn run_case(
     let observations = Arc::new(AtomicUsize::new(0));
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(build_flow(
                 journals.clone(),

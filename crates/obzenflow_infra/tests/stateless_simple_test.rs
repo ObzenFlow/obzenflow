@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
@@ -108,7 +107,7 @@ async fn stateless_pipeline_runs_to_completion() {
         })
     });
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(flow_definition)
         .await

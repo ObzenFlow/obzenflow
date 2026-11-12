@@ -2,17 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod exported_jsonl {
-    mod chain;
-    pub use self::chain::*;
-}
-mod replay_testkit {
-    mod journal;
-    mod manifest;
-    mod ordered_journal;
-    mod stage_journal;
-    pub use self::{ordered_journal::*, stage_journal::*};
-}
+use crate::{exported_jsonl, replay_testkit};
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry, MiddlewareFactory};
@@ -28,7 +18,7 @@ use obzenflow_core::{
 use obzenflow_dsl::{
     effectful_stateful, effectful_transform, flow, sink, source, transform, FlowDefinition,
 };
-use obzenflow_infra::application::{ApplicationError, FlowApplication};
+use obzenflow_infra::application::ApplicationError;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     EffectCommitHandle, EffectContext, EffectCursor, EffectError, EffectOutcomePayload,
@@ -2091,7 +2081,7 @@ async fn effectful_transform_replay_suppresses_effect_execution() {
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_keys = KeyLog::default();
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow_recording_keys(
             journal_base.clone(),
@@ -2133,7 +2123,7 @@ async fn effectful_transform_replay_suppresses_effect_execution() {
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_keys = KeyLog::default();
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -2175,7 +2165,7 @@ async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_exec
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_fan_out_flow(
             journal_base.clone(),
@@ -2243,7 +2233,7 @@ async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_exec
 
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -2283,7 +2273,7 @@ async fn assert_sibling_stages_call_their_own_systems(stages: SiblingStages) {
     let journal_base = temp.path().join("journals");
 
     let live = SiblingSystems::new();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_sibling_systems_flow(
             journal_base.clone(),
@@ -2319,7 +2309,7 @@ async fn assert_sibling_stages_call_their_own_systems(stages: SiblingStages) {
     );
 
     let replay = SiblingSystems::new();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -2360,7 +2350,7 @@ async fn eof_writer_seq_counts_transport_data_not_effect_results() {
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -2436,7 +2426,7 @@ async fn drain_waits_for_in_flight_effect_before_outputs_and_eof_complete() {
     let run_release = release.clone();
     let run_outputs = outputs.clone();
     let run = tokio::spawn(async move {
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(build_blocking_flow(
                 journal_base,
@@ -2548,7 +2538,7 @@ async fn cancellation_after_perform_preserves_atomic_terminal_evidence_and_resum
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_performed = Arc::new(Semaphore::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -2711,7 +2701,7 @@ async fn graceful_timeout_aborts_pending_recovery_and_resume_reuses_effect_ident
     let resume_calls = Arc::new(AtomicUsize::new(0));
     let resume_release = Arc::new(Semaphore::new(1));
     let resume_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -2818,7 +2808,7 @@ async fn source_admission_limiter_replay_suppresses_delay_events_and_effects() {
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_source_limiter_flow(
             journal_base.clone(),
@@ -2834,7 +2824,7 @@ async fn source_admission_limiter_replay_suppresses_delay_events_and_effects() {
     let archive_dir = latest_run_dir(&journal_base);
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -2933,7 +2923,7 @@ async fn strict_effectful_stateful_replay_suppresses_effect_execution() {
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_stateful_flow(
             journal_base.clone(),
@@ -2966,7 +2956,7 @@ async fn strict_effectful_stateful_replay_suppresses_effect_execution() {
     let archive_dir = latest_run_dir(&journal_base);
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -3038,7 +3028,7 @@ async fn effectful_stateful_policy_rejection_authors_flat_domain_fact_live_and_r
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_failures = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_policy_stateful_flow(
             journal_base.clone(),
@@ -3100,7 +3090,7 @@ async fn effectful_stateful_policy_rejection_authors_flat_domain_fact_live_and_r
 
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_failures = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -3134,7 +3124,7 @@ async fn effectful_stateful_reconciles_completed_facts_before_decide_error_live_
     let live_observed = Arc::new(Mutex::new(Vec::new()));
     let live_applied = Arc::new(Mutex::new(Vec::new()));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_error_after_commit_stateful_flow(
             journal_base.clone(),
@@ -3196,7 +3186,7 @@ async fn effectful_stateful_reconciles_completed_facts_before_decide_error_live_
     let replay_observed = Arc::new(Mutex::new(Vec::new()));
     let replay_applied = Arc::new(Mutex::new(Vec::new()));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -3280,7 +3270,7 @@ async fn effectful_stateful_false_one_fact_marker_is_fatal_live_and_under_strict
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
     let live_result = tokio::time::timeout(
         Duration::from_secs(15),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(build_dishonest_one_fact_stateful_flow(
                 live_journal_base.clone(),
@@ -3332,7 +3322,7 @@ async fn effectful_stateful_false_one_fact_marker_is_fatal_live_and_under_strict
     let replay_journal_base = temp.path().join("strict_replay_journals");
     let fixture_calls = Arc::new(AtomicUsize::new(0));
     let fixture_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_stateful_flow(
             replay_journal_base.clone(),
@@ -3362,7 +3352,7 @@ async fn effectful_stateful_false_one_fact_marker_is_fatal_live_and_under_strict
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
     let replay_result = tokio::time::timeout(
         Duration::from_secs(15),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(vec![
                 OsString::from("obzenflow"),
                 OsString::from("--replay-from"),
@@ -3450,7 +3440,7 @@ async fn effectful_stateful_apply_rejection_is_fatal_live_and_under_strict_repla
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
     let live_result = tokio::time::timeout(
         Duration::from_secs(15),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(build_apply_rejection_stateful_flow(
                 live_journal_base.clone(),
@@ -3506,7 +3496,7 @@ async fn effectful_stateful_apply_rejection_is_fatal_live_and_under_strict_repla
     let fixture_decide_inputs = Arc::new(Mutex::new(Vec::new()));
     let fixture_apply_attempts = Arc::new(Mutex::new(Vec::new()));
     let fixture_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_apply_rejection_stateful_flow(
             replay_journal_base.clone(),
@@ -3535,7 +3525,7 @@ async fn effectful_stateful_apply_rejection_is_fatal_live_and_under_strict_repla
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
     let replay_result = tokio::time::timeout(
         Duration::from_secs(15),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(vec![
                 OsString::from("obzenflow"),
                 OsString::from("--replay-from"),
@@ -3619,7 +3609,7 @@ async fn effectful_stateful_folds_multi_fact_outcome_per_fact() {
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_applied = Arc::new(Mutex::new(Vec::new()));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_product_stateful_flow(
             journal_base.clone(),
@@ -3650,7 +3640,7 @@ async fn effectful_stateful_folds_multi_fact_outcome_per_fact() {
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_applied = Arc::new(Mutex::new(Vec::new()));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -3690,7 +3680,7 @@ async fn resume_incomplete_archive_reexecutes_missing_effect_records_with_archiv
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -3709,7 +3699,7 @@ async fn resume_incomplete_archive_reexecutes_missing_effect_records_with_archiv
 
     let resume_calls = Arc::new(AtomicUsize::new(0));
     let resume_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -3774,7 +3764,7 @@ async fn resume_incomplete_runs_effect_boundary_limiter_for_missing_effect_recor
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_fast_limiter_flow(
             journal_base.clone(),
@@ -3794,7 +3784,7 @@ async fn resume_incomplete_runs_effect_boundary_limiter_for_missing_effect_recor
 
     let resume_calls = Arc::new(AtomicUsize::new(0));
     let resume_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -3847,7 +3837,7 @@ async fn resume_incomplete_archive_suppresses_committed_effect_records() {
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -3865,7 +3855,7 @@ async fn resume_incomplete_archive_suppresses_committed_effect_records() {
 
     let resume_calls = Arc::new(AtomicUsize::new(0));
     let resume_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -3904,7 +3894,7 @@ async fn incomplete_replay_stops_at_the_end_of_its_recording() {
     let journal_base = temp.path().join("journals");
 
     let live_calls = Arc::new(AtomicUsize::new(0));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -3921,7 +3911,7 @@ async fn incomplete_replay_stops_at_the_end_of_its_recording() {
 
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    let error = FlowApplication::builder()
+    let error = replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -4125,7 +4115,7 @@ async fn a_request_over_a_host_port_runs_live_and_strict_replays() {
     let source_calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_ported_flow(
             journal_base.clone(),
@@ -4160,7 +4150,7 @@ async fn a_request_over_a_host_port_runs_live_and_strict_replays() {
 
     let archive = latest_run_dir(&journal_base);
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -4206,7 +4196,7 @@ async fn a_system_reused_by_a_second_flow_registers_its_port_again() {
     let effect_calls = Arc::new(AtomicUsize::new(0));
     let greeting = deferred_greeting_system(resolver_calls.clone(), effect_calls.clone());
     let reused_greeting = greeting.clone();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_ported_flow(
             journal_base.clone(),
@@ -4220,7 +4210,7 @@ async fn a_system_reused_by_a_second_flow_registers_its_port_again() {
     assert_eq!(effect_calls.load(Ordering::SeqCst), 3);
 
     let second_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_ported_flow(
             journal_base,
@@ -4362,7 +4352,7 @@ async fn transactional_request_commits_through_its_port_and_replays_the_record()
     let port_calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_transactional_flow(
             journal_base.clone(),
@@ -4422,7 +4412,7 @@ async fn transactional_request_commits_through_its_port_and_replays_the_record()
 
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -4668,7 +4658,7 @@ async fn fail_fast_rejection_completes_inputs_and_replays_without_execution() {
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_fail_fast_rejection_flow(
             journal_base.clone(),
@@ -4706,7 +4696,7 @@ async fn fail_fast_rejection_completes_inputs_and_replays_without_execution() {
     let archive_dir = latest_run_dir(&journal_base);
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -4747,7 +4737,7 @@ async fn per_effect_breaker_builds_on_multi_effect_stages() {
     let calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_multi_effect_per_effect_breaker_flow(
             journal_base.clone(),

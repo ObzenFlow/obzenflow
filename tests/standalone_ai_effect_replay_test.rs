@@ -262,7 +262,9 @@ fn ai_config(dir: &Path, chat_endpoint: Option<&str>) -> PathBuf {
     };
     std::fs::write(
         &path,
-        format!("{endpoint}\n[ai.embeddings]\nmodel = \"fixture-embedding\"\n"),
+        format!(
+            "[journal]\nsync = \"off\"\n\n{endpoint}\n[ai.embeddings]\nmodel = \"fixture-embedding\"\n"
+        ),
     )
     .expect("write the AI configuration");
     path
@@ -627,7 +629,8 @@ async fn embedding_stage_deadline_reaches_model() {
     let config = temp.path().join("deadline.toml");
     std::fs::write(
         &config,
-        "[ai.models]\nmodel = \"fixture-chat\"\n\n\
+        "[journal]\nsync = \"off\"\n\n\
+         [ai.models]\nmodel = \"fixture-chat\"\n\n\
          [ai.embeddings]\nmodel = \"fixture-embedding\"\nrequest_timeout_ms = 150000\n\n\
          [ai.embeddings.stages.embedding]\nrequest_timeout_ms = 2500\n",
     )

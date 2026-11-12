@@ -431,14 +431,14 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
     let stateful_path = base.join("stateful.log");
 
     let src_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(src_path, JournalOwner::stage(src), JournalSync::BeforeAck)
+        DiskJournal::with_owner(src_path, JournalOwner::stage(src), JournalSync::Off)
             .expect("create src disk journal"),
     );
     let stateful_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
         DiskJournal::with_owner(
             stateful_path,
             JournalOwner::stage(stateful_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stateful disk journal"),
     );
@@ -461,7 +461,7 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
         DiskJournal::<SystemEvent>::with_owner(
             base.join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create system disk journal"),
     );
@@ -600,7 +600,7 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
         DiskJournal::with_owner(
             reference_path,
             JournalOwner::stage(reference_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create reference disk journal"),
     );
@@ -608,17 +608,13 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
         DiskJournal::with_owner(
             stream_path,
             JournalOwner::stage(stream_stage),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(
-            join_path,
-            JournalOwner::stage(join_stage),
-            JournalSync::BeforeAck,
-        )
-        .expect("create join disk journal"),
+        DiskJournal::with_owner(join_path, JournalOwner::stage(join_stage), JournalSync::Off)
+            .expect("create join disk journal"),
     );
 
     let mut stage_journals: std::collections::HashMap<StageId, Arc<dyn Journal<ChainEvent>>> =
@@ -646,7 +642,7 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
         DiskJournal::<SystemEvent>::with_owner(
             base.join("system.log"),
             JournalOwner::system(system_id),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("create join system disk journal"),
     );

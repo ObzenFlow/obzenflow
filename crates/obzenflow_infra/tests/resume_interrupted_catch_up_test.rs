@@ -17,16 +17,7 @@
 //! one resume lineage. The torn-before-watermark case (no watermark authored
 //! at all) is the second test below.
 
-#[path = "../../../tests/replay_testkit"]
-mod replay_testkit {
-    mod bootstrap;
-    mod journal;
-    mod manifest;
-    mod reattaching_source;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{bootstrap::*, reattaching_source::*, run_dir::*, stage_journal::*};
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -322,7 +313,7 @@ async fn journal_probe_leaves_an_incomplete_tail_untouched() -> Result<()> {
     let journal_base = temp.path().join("journals");
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_flow(journal_base.clone(), 1, RECORDED, 0, delivered.clone())
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|error| anyhow!("flow failed to build: {error:?}"))?;
     wait_for_running(&handle).await?;
@@ -359,7 +350,7 @@ async fn record_and_interrupt(journal_base: &Path) -> Result<(PathBuf, PathBuf)>
             0,
             delivered.clone(),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -389,7 +380,7 @@ async fn record_and_interrupt(journal_base: &Path) -> Result<(PathBuf, PathBuf)>
             SLOW_MS,
             delivered.clone(),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("resume flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -457,7 +448,7 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
             0,
             delivered.clone(),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("second resume failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -591,7 +582,7 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
             0,
             delivered.clone(),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("resume of the torn archive failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -708,7 +699,7 @@ async fn resuming_a_torn_resume_continues_the_prefix_its_ancestor_committed() ->
             0,
             delivered.clone(),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("resume of the torn resume failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -776,7 +767,7 @@ async fn a_torn_resume_without_an_agreeing_ancestor_refuses() -> Result<()> {
     {
         let delivered = Arc::new(AtomicU64::new(0));
         let handle = build_flow(journal_base.clone(), 1, RECORDED, 0, delivered.clone())
-            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+            .build(replay_testkit::unsynced_context())
             .await
             .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;

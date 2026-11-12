@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use chrono::{NaiveDate, NaiveDateTime};
-use obzenflow::application::{FlowApplication, LogLevel};
+use obzenflow::application::LogLevel;
 use obzenflow::flow::{flow, join, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::journal::read::{
@@ -106,7 +106,7 @@ fn priced_flow(journal_root: PathBuf, rates: Vec<FxRate>) -> FlowDefinition {
 }
 
 fn run(journal_root: &Path, rates: Vec<FxRate>) -> bool {
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_log_level(LogLevel::Error)
         .with_cli_args(vec![OsString::from("as_of_join_test")])
         .run_blocking(priced_flow(journal_root.to_path_buf(), rates))

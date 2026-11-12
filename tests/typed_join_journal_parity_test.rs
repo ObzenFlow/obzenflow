@@ -9,13 +9,7 @@
 //! end-to-end oracle deliberately does not manufacture envelope provenance from
 //! ordinary middleware.
 
-mod replay_testkit {
-    mod discard;
-    mod failures;
-    mod journal;
-    mod manifest;
-    pub use self::{discard::*, failures::*, journal::*};
-}
+use crate::replay_testkit;
 
 use obzenflow_core::config::{ConfigScope, ConfigSource};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -73,6 +67,7 @@ fn enforced_backpressure(
             .admit(candidate)
             .expect("the backpressure setting admits");
     }
+    replay_testkit::admit_unsynced(&mut candidates);
     FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(candidates)))
 }
 
@@ -82,7 +77,7 @@ fn enforced_backpressure_file(dir: &Path, window: u64, stall_timeout_ms: u64) ->
     std::fs::write(
         &path,
         format!(
-            "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = {window}\nstall_timeout_ms = {stall_timeout_ms}\n"
+            "[journal]\nsync = \"off\"\n\n[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = {window}\nstall_timeout_ms = {stall_timeout_ms}\n"
         ),
     )
     .expect("write the configuration");
@@ -384,7 +379,7 @@ async fn run(
         args.push(OsString::from("--replay-from"));
         args.push(archive.as_os_str().to_os_string());
     }
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(args)
         .run_async(build_flow(
             journal_base.to_path_buf(),

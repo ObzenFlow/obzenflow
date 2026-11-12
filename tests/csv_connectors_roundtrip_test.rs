@@ -104,7 +104,7 @@ async fn csv_source_to_sink_roundtrip_skips_bad_rows() -> anyhow::Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await?;
 
     handle.run().await?;
@@ -157,7 +157,7 @@ async fn csv_untyped_source_to_sink_roundtrip_preserves_strings() -> anyhow::Res
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await?;
 
     handle.run().await?;
@@ -208,7 +208,7 @@ async fn csv_source_to_buffered_sink_roundtrip_flushes_on_eof() -> anyhow::Resul
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await?;
 
     handle.run().await?;

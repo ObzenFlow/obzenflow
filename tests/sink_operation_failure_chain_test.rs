@@ -4,11 +4,7 @@
 
 //! FLOWIP-122a durable sink-operation failure-chain proofs.
 
-mod replay_testkit {
-    mod journal;
-    mod ordered_journal;
-    pub use self::ordered_journal::*;
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow::journal::JournalSync;
@@ -28,7 +24,7 @@ use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader, RunManifest};
 use obzenflow_core::{EventId, FlowId, JournalId, JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, FlowDefinition};
-use obzenflow_infra::application::{ApplicationError, FlowApplication};
+use obzenflow_infra::application::ApplicationError;
 use obzenflow_infra::journal::{disk_journals, DiskJournalFactory};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::sink::{
@@ -839,7 +835,7 @@ async fn run_case(
     let calls = Arc::new(Mutex::new(Vec::new()));
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(build_flow(journals.clone(), mode, Arc::clone(&calls))),
     )
@@ -861,7 +857,7 @@ async fn run_fan_in_case(
     let calls = Arc::new(Mutex::new(Vec::new()));
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        FlowApplication::builder()
+        replay_testkit::unsynced_application()
             .with_cli_args(["obzenflow"])
             .run_async(build_fan_in_flow(
                 journals.clone(),
@@ -1029,7 +1025,7 @@ async fn replay_reproduces_the_unresolved_deferred_origin_failure() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let journals = temp.path().join("journals");
     let live_calls = Arc::new(Mutex::new(Vec::new()));
-    let live_result = FlowApplication::builder()
+    let live_result = replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journals.clone(),
@@ -1041,7 +1037,7 @@ async fn replay_reproduces_the_unresolved_deferred_origin_failure() {
     let live_run = latest_run_dir(&journals);
 
     let replay_calls = Arc::new(Mutex::new(Vec::new()));
-    let replay_result = FlowApplication::builder()
+    let replay_result = replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -1192,7 +1188,7 @@ async fn poisoned_failure_awaits_each_r_o_x_p_append() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let calls = Arc::new(Mutex::new(Vec::new()));
     let append_probe = Arc::new(Mutex::new(Vec::new()));
-    let result = FlowApplication::builder()
+    let result = replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_append_probed_flow(
             temp.path().join("journals"),

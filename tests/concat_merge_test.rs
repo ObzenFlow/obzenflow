@@ -2,20 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit {
-    mod eof_clock;
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    mod stage_writer;
-    mod verdicts;
-    pub use self::{eof_clock::*, manifest::*, run_dir::*, stage_journal::*, verdicts::*};
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow::application::FlowApplication;
 use obzenflow::flow::{flow, merge, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
@@ -118,13 +108,13 @@ fn build(journal_base: PathBuf, inputs: Inputs, sink: Collect) -> FlowDefinition
 async fn run_to_end(journal_base: &Path, inputs: Inputs, args: Vec<OsString>) -> Result<PathBuf> {
     let mut cli = vec![OsString::from("obzenflow")];
     cli.extend(args);
-    let mut app = FlowApplication::builder().with_cli_args(cli);
+    let mut app = replay_testkit::unsynced_application().with_cli_args(cli);
     if let Some((window, stall_timeout_ms)) = inputs.enforce {
         let config = journal_base.with_file_name("obzenflow.toml");
         std::fs::write(
             &config,
             format!(
-                "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = {window}\nstall_timeout_ms = {stall_timeout_ms}\n"
+                "[journal]\nsync = \"off\"\n\n[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = {window}\nstall_timeout_ms = {stall_timeout_ms}\n"
             ),
         )?;
         app = app.with_config_file(config);
@@ -308,7 +298,7 @@ async fn a_stop_in_the_first_phase_drains_without_reading_the_other_producer() -
         },
         sink.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;

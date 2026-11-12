@@ -5,22 +5,13 @@
 //! A validator on either side of a join records each row it rejects in its
 //! own error journal, so the join receives only valid rows and joins them all.
 
+use crate::replay_testkit;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
-mod replay_testkit {
-    mod failures;
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    mod stage_writer;
-    pub use self::{failures::*, run_dir::*, stage_journal::*, stage_writer::*};
-}
 
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -273,7 +264,7 @@ async fn a_join_never_receives_a_rejected_row_and_joins_the_rest() {
     let journal_base = temp.path().join("journals");
     let typed_handler_calls = Arc::new(AtomicUsize::new(0));
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -382,7 +373,7 @@ async fn a_join_records_the_stream_row_its_handler_rejects() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
     let journals = journal_base.clone();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let reference_source = RefSource::new();

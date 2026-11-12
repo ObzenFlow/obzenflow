@@ -208,7 +208,7 @@ async fn stop_infinite_source_reports_cancelled() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -267,7 +267,7 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -344,7 +344,7 @@ async fn graceful_finite_stop_completes_admitted_work_without_exhausting_input()
             stages: { src = source!(LifecycleEvent => source); snk = sink!(LifecycleEvent => sink); },
             topology: { src |> snk; }
         })
-    }).build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()).await?;
+    }).build(crate::replay_testkit::unsynced_context()).await?;
     let journal = handle.system_journal().unwrap();
     tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
     handle.stop_graceful(Duration::from_secs(2)).await?;
@@ -409,7 +409,7 @@ async fn runtime_timeout_is_admitted_once_despite_duplicate_graceful_requests() 
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(crate::replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 

@@ -2,13 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit {
-    mod journal;
-    pub use self::journal::*;
-}
-
-#[path = "support/fake_ai.rs"]
-pub mod fake_ai;
+use crate::{fake_ai, replay_testkit};
 
 use fake_ai::FakeChatModels;
 use obzenflow::ai::{
@@ -806,7 +800,8 @@ async fn exercise(placement: Placement) {
         let config = root.with_extension("toml");
         std::fs::write(
             &config,
-            "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 3000\n\n\
+            "[journal]\nsync = \"off\"\n\n\
+             [runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 3000\n\n\
              [ai.models]\nmodel = \"deterministic\"\n",
         )
         .expect("write the run configuration");
@@ -1056,8 +1051,11 @@ fn build_triage_flow(root: PathBuf, run: TriageRun) -> FlowDefinition {
 
 fn triage_config(root: &Path) -> PathBuf {
     let config = root.with_extension("toml");
-    std::fs::write(&config, "[ai.models]\nmodel = \"deterministic\"\n")
-        .expect("write the run configuration");
+    std::fs::write(
+        &config,
+        "[journal]\nsync = \"off\"\n\n[ai.models]\nmodel = \"deterministic\"\n",
+    )
+    .expect("write the run configuration");
     config
 }
 

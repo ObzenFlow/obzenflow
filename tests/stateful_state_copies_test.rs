@@ -2,16 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit {
-    mod bootstrap;
-    mod count_deliveries;
-    mod discard;
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{bootstrap::*, count_deliveries::*, discard::*, run_dir::*, stage_journal::*};
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow::stages::stateful::{
@@ -21,7 +12,6 @@ use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{Effects, StageCompletion};
@@ -323,7 +313,7 @@ async fn run(journal_base: &Path, copies: &StateCopies, replay_from: Option<&Pat
         args.push(OsString::from("--replay-from"));
         args.push(archive.as_os_str().to_os_string());
     }
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(args)
         .run_async(build_flow(journal_base.to_path_buf(), copies.clone()))
         .await
@@ -567,7 +557,7 @@ async fn a_resumed_stage_marks_what_it_rebuilds_and_not_its_live_drain() {
 
     let delivered = Arc::new(AtomicUsize::new(0));
     let handle = running_total_flow(journal_base.clone(), true, delivered.clone())
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .expect("the held flow builds");
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -600,7 +590,7 @@ async fn a_resumed_stage_marks_what_it_rebuilds_and_not_its_live_drain() {
         .await,
     );
     let handle = running_total_flow(journal_base.clone(), false, Arc::default())
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .expect("the resumed flow builds");
     tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())

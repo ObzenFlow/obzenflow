@@ -224,6 +224,7 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
     let source = SequenceSource::new(2);
     let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_low_rate_half_eps",
         journals: disk_journals(unique_journal_dir("rate_limiter_low_rate_half_eps")),
 
@@ -268,6 +269,7 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
     let source = SequenceSource::new(1);
     let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_weighted_default_burst",
         journals: disk_journals(unique_journal_dir("rate_limiter_weighted_default_burst")),
 
@@ -303,6 +305,7 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
     let passthrough = PassthroughTransform;
     let (sink, _count) = CountingSink::<RateLimiterTestEvent>::new();
     let result = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_invalid",
         journals: disk_journals(unique_journal_dir("rate_limiter_invalid")),
 
@@ -443,6 +446,7 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
     let source = BatchedSource::new(vec![2, 2]);
     let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_source_poll_gating",
         journals: disk_journals(unique_journal_dir("rate_limiter_source_poll_gating")),
 
@@ -502,6 +506,7 @@ async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
     let source =
         ScriptedAsyncSource::new(vec![SourceStep::Data, SourceStep::Data, SourceStep::Done]);
     let test_handle = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_async_finite_eof_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_finite_eof_no_charge")),
 
@@ -544,6 +549,7 @@ async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
     let source =
         ScriptedSyncSource::new(vec![SourceStep::Data, SourceStep::Data, SourceStep::Done]);
     let test_handle = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_sync_finite_eof_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_finite_eof_no_charge")),
 
@@ -590,6 +596,7 @@ async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
         SourceStep::Done,
     ]);
     let test_handle = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_async_empty_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_empty_no_charge")),
 
@@ -636,6 +643,7 @@ async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
         SourceStep::Done,
     ]);
     let test_handle = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_sync_empty_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_empty_no_charge")),
 
@@ -682,6 +690,7 @@ async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> 
         SourceStep::Done,
     ]);
     let test_handle = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_async_error_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_error_no_charge")),
 
@@ -728,6 +737,7 @@ async fn rate_limiter_sync_finite_does_not_charge_source_error() -> Result<()> {
         SourceStep::Done,
     ]);
     let test_handle = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_sync_error_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_error_no_charge")),
 
@@ -879,6 +889,7 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
     let stream_source = TwoStreamEventsSource::new();
     let joiner = PassthroughJoin;
     let result = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_join_support",
         journals: disk_journals(unique_journal_dir("rate_limiter_join_support")),
 
@@ -918,6 +929,7 @@ async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<
     let source = SequenceSource::new(2);
     let passthrough = PassthroughTransform;
     let result = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_transform_reject",
         journals: disk_journals(unique_journal_dir("rate_limiter_transform_reject")),
 
@@ -954,6 +966,7 @@ async fn rate_limiter_stateful_stage_rejects_rate_limit_middleware() -> Result<(
     let source = SequenceSource::new(2);
     let passthrough = PassthroughStateful;
     let result = test_flow! {
+        build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_stateful_reject",
         journals: disk_journals(unique_journal_dir("rate_limiter_stateful_reject")),
 

@@ -65,7 +65,7 @@ async fn build_subscription_with_contracts(
         DiskJournal::with_owner(
             upstream_path,
             JournalOwner::stage(StageId::new()),
-            JournalSync::BeforeAck,
+            JournalSync::Off,
         )
         .expect("failed to create disk journal"),
     );

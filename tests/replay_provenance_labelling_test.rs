@@ -17,16 +17,11 @@
 //! provenance, including the converged fan-in path and outputs derived from
 //! recorded effect failures. Live runs must carry none.
 
-mod replay_testkit {
-    mod journal;
-    mod ordered_journal;
-    pub use self::ordered_journal::*;
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -507,7 +502,7 @@ async fn every_sink_delivery_carries_replay_provenance_under_strict_replay() {
     // Live run: no delivery carries replay provenance.
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_probes = Probes::new();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -555,7 +550,7 @@ async fn every_sink_delivery_carries_replay_provenance_under_strict_replay() {
     // carries replay provenance, including the converged cancellation path.
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_probes = Probes::new();
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

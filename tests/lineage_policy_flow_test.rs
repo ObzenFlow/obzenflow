@@ -9,14 +9,7 @@
 //! value with file provenance, so the run directory alone answers both "what
 //! was configured" and "did the data path obey it".
 
-mod replay_testkit {
-    mod journal;
-    mod manifest;
-    mod ordered_stage_journal;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{manifest::*, ordered_stage_journal::*, run_dir::*};
-}
+use crate::replay_testkit;
 
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
@@ -98,6 +91,7 @@ async fn file_configured_lineage_depth_caps_journalled_parent_ids() {
             ConfigValue::U64(3),
         ))
         .expect("global candidate admits");
+    replay_testkit::admit_unsynced(&mut candidates);
     let snapshot = Arc::new(ResolvedRuntimeConfig::new(candidates));
 
     let journal_base = base.clone();

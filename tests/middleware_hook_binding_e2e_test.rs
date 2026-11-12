@@ -9,11 +9,8 @@
 //! each attachment, is placed by the DSL binder through the public carrier, rejects one effect protected unit, and observes a live run plus
 //! strict replay of the same archive.
 
+use crate::exported_jsonl;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-mod exported_jsonl {
-    mod chain;
-    pub use self::chain::*;
-}
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
@@ -36,7 +33,6 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::config::StageConfig;
@@ -642,7 +638,7 @@ async fn third_party_control_middleware_binds_all_surfaces_and_replays() {
     let live_counters = Arc::new(HookCounters::default());
     let live_effect_calls = Arc::new(AtomicUsize::new(0));
     let live_delivered = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -685,7 +681,7 @@ async fn third_party_control_middleware_binds_all_surfaces_and_replays() {
     let replay_counters = Arc::new(HookCounters::default());
     let replay_effect_calls = Arc::new(AtomicUsize::new(0));
     let replay_delivered = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -752,7 +748,7 @@ async fn public_failure_cause_is_identical_for_both_breaker_codes_live_and_repla
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_delivered = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_failure_cause_flow(
             journal_base.clone(),
@@ -793,7 +789,7 @@ async fn public_failure_cause_is_identical_for_both_breaker_codes_live_and_repla
     );
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_delivered = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

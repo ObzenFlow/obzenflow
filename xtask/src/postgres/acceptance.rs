@@ -78,7 +78,8 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,test-support",
             "--test",
-            "postgres_sink_driver_test",
+            "it_postgres_test_support",
+            "postgres_sink_driver_test::",
         ],
     },
     CommandSpec {
@@ -92,7 +93,8 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,test-support",
             "--test",
-            "postgres_sink_conformance_test",
+            "it_postgres_test_support",
+            "postgres_sink_conformance_test::",
         ],
     },
     CommandSpec {
@@ -120,7 +122,8 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,e2e",
             "--test",
-            "postgres_payments_e2e_test",
+            "it_e2e_postgres",
+            "postgres_payments_e2e_test::",
         ],
     },
     CommandSpec {
@@ -165,7 +168,8 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,e2e",
             "--test",
-            "postgres_sink_inventory_consumer_test",
+            "it_e2e_postgres",
+            "postgres_sink_inventory_consumer_test::",
         ],
     },
     CommandSpec {
@@ -180,18 +184,6 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "postgres",
             "--test",
             "postgres_public_consumer_test",
-        ],
-    },
-    CommandSpec {
-        id: "postgres-package-boundary",
-        label: "PostgreSQL package boundary test",
-        cargo_args: &[
-            "test",
-            "--locked",
-            "-p",
-            "obzenflow",
-            "--test",
-            "postgres_connector_package_boundary_test",
         ],
     },
 ];

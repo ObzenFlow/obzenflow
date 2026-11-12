@@ -5,13 +5,7 @@
 //! FLOWIP-122e: the shipped application's ordinary entry point can replay after
 //! losing both original inputs. All fixtures and archives belong to this test.
 
-mod replay_testkit {
-    mod journal;
-    pub use self::journal::*;
-}
-
-#[path = "../examples/csv_demo_support_sla/support.rs"]
-mod example;
+use crate::{csv_demo as example, replay_testkit};
 
 use obzenflow::application::{Banner, Presentation};
 use obzenflow::stages::sources::{
@@ -86,7 +80,7 @@ impl DemoRun {
         std::fs::write(
             &run.config,
             format!(
-                "[journal]\nroot = {}\n\n[app]\ncustomers_csv = {}\ntickets_csv = {}\noutput_csv = {}\n",
+                "[journal]\nroot = {}\nsync = \"off\"\n\n[app]\ncustomers_csv = {}\ntickets_csv = {}\noutput_csv = {}\n",
                 quoted(&run.journals_dir),
                 quoted(&run.customers_csv),
                 quoted(&run.tickets_csv),
@@ -248,7 +242,12 @@ fn spawn_child(
 ) -> std::io::Result<tokio::process::Child> {
     let mut command = tokio::process::Command::new(std::env::current_exe()?);
     command
-        .args(["--ignored", "--exact", "csv_example_child", "--nocapture"])
+        .args([
+            "--ignored",
+            "--exact",
+            "csv_source_lifecycle_test::csv_example_child",
+            "--nocapture",
+        ])
         .env("OBZENFLOW_CONFIG", &paths.config);
     if let Some(seconds) = shutdown_timeout_secs {
         command.env("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS", seconds);

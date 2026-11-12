@@ -4,12 +4,7 @@
 
 //! FLOWIP-134g journal oracle for all four typed source variants.
 
-mod replay_testkit {
-    mod count_deliveries;
-    mod discard;
-    mod journal;
-    pub use self::{count_deliveries::*, discard::*, journal::*};
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -18,7 +13,6 @@ use obzenflow_core::{StageId, StageOutputFacts, TypedPayload, WriterId};
 use obzenflow_dsl::{
     async_infinite_source, async_source, flow, infinite_source, sink, source, FlowDefinition,
 };
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
@@ -95,7 +89,7 @@ async fn source_replay_rejects_version_drift_before_selected_feed_filtering() {
     }
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().join("journals");
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["live"])
         .run_async(definition::<1>(
             base.clone(),
@@ -107,7 +101,7 @@ async fn source_replay_rejects_version_drift_before_selected_feed_filtering() {
     let live = latest_run_dir(&base);
     let polls = Arc::new(AtomicUsize::new(0));
     let deliveries = Arc::new(AtomicUsize::new(0));
-    let result = FlowApplication::builder()
+    let result = replay_testkit::unsynced_application()
         .with_cli_args([
             OsString::from("replay"),
             OsString::from("--replay-from"),
@@ -370,7 +364,7 @@ async fn wait_for_count(counter: &AtomicUsize, expected: usize, label: &str) {
 
 async fn run_live(journal_base: &Path, counters: Arc<Counters>, connectors: bool) {
     let handle = build_flow(journal_base.to_path_buf(), counters.clone(), connectors)
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .expect("typed source parity flow builds");
     wait_for_running(&handle).await;
@@ -394,7 +388,7 @@ async fn run_replay(
     counters: Arc<Counters>,
     connectors: bool,
 ) {
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args([
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -597,7 +591,7 @@ async fn lazy_iterator_replay_never_consumes_live_input() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().join("journals");
     let live_polls = Arc::new(AtomicUsize::new(0));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["lazy-iterator-live"])
         .run_async(definition(base.clone(), live_polls.clone()))
         .await
@@ -608,7 +602,7 @@ async fn lazy_iterator_replay_never_consumes_live_input() {
     assert_eq!(expected.len(), 2);
 
     let replay_polls = Arc::new(AtomicUsize::new(0));
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args([
             OsString::from("lazy-iterator-replay"),
             OsString::from("--replay-from"),

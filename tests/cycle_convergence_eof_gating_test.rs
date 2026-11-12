@@ -2,15 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit {
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    mod stage_writer;
-    mod verdicts;
-    pub use self::{manifest::*, run_dir::*, stage_journal::*, stage_writer::*, verdicts::*};
-}
+use crate::replay_testkit;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -91,6 +83,7 @@ fn enforced_backpressure(
             ))
             .expect("the backpressure setting admits");
     }
+    replay_testkit::admit_unsynced(&mut candidates);
     obzenflow_runtime::run_context::FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(
         candidates,
     )))
@@ -807,7 +800,7 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
         })
     });
     let handle = definition
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
@@ -871,9 +864,7 @@ async fn cycle_rejects_sccs_with_multiple_entry_points() {
             }
         })
     });
-    let result = definition
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await;
+    let result = definition.build(replay_testkit::unsynced_context()).await;
 
     let err = match result {
         Ok(_) => panic!("expected multi-entry SCC validation to fail"),

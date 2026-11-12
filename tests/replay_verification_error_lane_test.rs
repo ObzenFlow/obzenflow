@@ -13,15 +13,11 @@
 //! named exclusion. Sink delivery rows are independently excluded by the
 //! projection's receipt-lane rule.
 
-mod replay_testkit {
-    mod discard;
-    pub use self::discard::*;
-}
+use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::Effects;
@@ -154,14 +150,14 @@ async fn deterministic_handler_failures_verify_on_the_error_lane() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(journal_base.clone()))
         .await
         .expect("live flow should complete");
     let baseline = latest_run_dir(&journal_base);
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),

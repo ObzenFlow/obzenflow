@@ -11,7 +11,6 @@ use obzenflow_core::{
 };
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
@@ -180,7 +179,7 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
         })
     });
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(flow_definition)
         .await
@@ -244,7 +243,7 @@ async fn reduce_with_on_eof_emits_single_total() {
         })
     });
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(flow_definition)
         .await
@@ -287,7 +286,7 @@ async fn conflate_emits_latest_value_per_key() {
         })
     });
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(flow_definition)
         .await

@@ -324,5 +324,4 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
     );
 }
 
-#[path = "support/liveness_observations.rs"]
-mod liveness_observations;
+use crate::liveness_observations;

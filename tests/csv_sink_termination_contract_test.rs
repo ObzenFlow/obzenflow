@@ -36,13 +36,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-mod replay_testkit {
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{run_dir::*, stage_journal::*};
-}
+use crate::replay_testkit;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct CsvRecord {
@@ -363,7 +357,7 @@ async fn buffered_csv_flushes_and_drains_under_poison_termination() {
     let journal_base = temp.path().join("journals");
     let csv_path = temp.path().join("poison.csv");
 
-    FlowApplication::builder()
+    replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(poison_flow(journal_base.clone(), csv_path.clone()))
         .await
@@ -391,7 +385,11 @@ async fn crash_before_flush_replays_unreceipted_csv_work_under_truncated_eof() {
     let csv_path = temp.path().join("truncated.csv");
 
     let status = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", "crash_fixture_process", "--ignored"])
+        .args([
+            "--exact",
+            "csv_sink_termination_contract_test::crash_fixture_process",
+            "--ignored",
+        ])
         .env("FLOWIP_134H_CRASH_JOURNALS", &journal_base)
         .env("FLOWIP_134H_CRASH_CSV", &csv_path)
         .stdout(Stdio::null())

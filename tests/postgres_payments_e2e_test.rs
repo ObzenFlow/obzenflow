@@ -10,10 +10,7 @@
 
 #[path = "test_support/postgres_payments/mod.rs"]
 mod payments;
-mod postgres_support {
-    mod pool;
-    pub use self::pool::*;
-}
+use crate::postgres_support;
 
 use postgres_support::{pool, required_env};
 use serde_json::Value;
@@ -142,7 +139,7 @@ fn run_payments(schema: &str, journals: &Path, args: &[OsString]) -> Output {
     Command::new(env::current_exe().expect("current test executable"))
         .args([
             "--exact",
-            "payments_application_process",
+            "postgres_payments_e2e_test::payments_application_process",
             "--ignored",
             "--nocapture",
         ])

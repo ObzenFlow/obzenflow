@@ -481,7 +481,7 @@ async fn stages_with_empty_effects_skip_containment() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
-    FlowApplication::builder()
+    crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(empty_effects_flow(journal_base))
         .await
