@@ -100,7 +100,7 @@ fn help() -> String {
         .iter()
         .map(|lane| format!("\n  {:<width$}  {}", lane.name(), lane.description()))
         .collect();
-    format!("cargo xtask test [--correctness | --lane <lane>...]\n\nWithout options, runs the default lane. --correctness runs the seven correctness\nlanes CI requires. Repeat --lane to run only the lanes you name.\n\nLanes: {}{rows}\n\nEach run writes target/test-runs/<run-id>/report.json and fails if any requested\ntest fails or doesn't run. A lane doesn't start when its disk has less free space\nthan minimum_free_gigabytes in .config/validation.toml. Lanes other than default,\njournal-fixtures and performance build in target/lanes/<lane>, removed when the\nlane passes, unless CARGO_TARGET_DIR is set. When target holds more than\nbuild_directory_gigabytes, a run first removes superseded incremental sessions,\nthen the lane directories it doesn't need, then the rest of the incremental state.", lanes.join(", "))
+    format!("cargo xtask test [--correctness | --lane <lane>...]\n\nWithout options, runs the default lane. --correctness runs the seven correctness\nlanes CI requires. Repeat --lane to run only the lanes you name.\n\nLanes: {}{rows}\n\nEach run writes target/test-runs/<run-id>/report.json and fails if any requested\ntest fails or doesn't run. A lane doesn't start when its disk has less free space\nthan minimum_free_gigabytes in .config/validation.toml. Lanes other than default,\njournal-fixtures and performance build in target/lanes/<lane>, removed when the\nlane passes, unless CARGO_TARGET_DIR is set. When target holds more than\nbuild_directory_gigabytes, a run first removes superseded incremental sessions,\nthen the lane directories it doesn't need, then the rest of the incremental state.\nA lane builds its libraries, unit tests and examples first, then its test programs,\nat most test_program_build_jobs at a time.", lanes.join(", "))
 }
 
 const STAGES: [&str; 5] = ["plan", "build", "qualify", "measure", "assemble"];
@@ -257,6 +257,28 @@ impl LaneContext<'_> {
             .env("CARGO_INCREMENTAL", self.incremental.token());
         command
     }
+
+    fn test_program_command(&self, root: &Path, policy: &Policy) -> Command {
+        let mut command = self.command(root, policy, "cargo");
+        cap_test_program_jobs(&mut command, policy);
+        command
+    }
+}
+
+fn cap_test_program_jobs(command: &mut Command, policy: &Policy) {
+    command.env("CARGO_BUILD_JOBS", policy.test_program_jobs().to_string());
+}
+
+fn library_build_commands(mut base: impl FnMut() -> Command, selection: &[String]) -> [Command; 2] {
+    let mut units = base();
+    units
+        .args(["test", "--no-run", "--locked", "--lib", "--bins"])
+        .args(selection);
+    let mut examples = base();
+    examples
+        .args(["build", "--locked", "--examples"])
+        .args(selection);
+    [units, examples]
 }
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
@@ -543,7 +565,8 @@ fn native_policy(policy: &Policy) -> Value {
         "nextest_processes":policy.test_threads,"tokio_default_workers":policy.tokio_workers,
         "explicit_tokio_workers":"retained as authored, including the four-worker Studio proof; source identity pins overrides",
         "minimum_free_gigabytes":policy.minimum_free_gigabytes,
-        "build_directory_gigabytes":policy.build_directory_gigabytes})
+        "build_directory_gigabytes":policy.build_directory_gigabytes,
+        "test_program_build_jobs":policy.test_program_build_jobs})
 }
 
 fn save(directory: &Path, report: &RunReport) -> Result<()> {
@@ -718,6 +741,26 @@ fn nextest(root: &Path, policy: &Policy, context: &LaneContext) -> Result<()> {
         "none".into(),
     ];
     common.extend(selection);
+    let libraries = library_build_commands(
+        || context.command(root, policy, "cargo"),
+        &lane.build_selection(production),
+    );
+    for (label, mut command) in ["library-build", "example-build"]
+        .into_iter()
+        .zip(libraries)
+    {
+        let status = process::execute(
+            &mut command,
+            directory,
+            label,
+            Duration::from_secs(policy.command_watchdog_seconds),
+        )?;
+        if !status.success() {
+            return Err(failed(format!(
+                "{label} did not complete; see compiler diagnostics"
+            )));
+        }
+    }
     let inventory = list(root, policy, context, &common, None, "inventory")?;
     let expensive_ids = if lane == Lane::JournalFixtures {
         BTreeSet::new()
@@ -789,7 +832,7 @@ fn nextest(root: &Path, policy: &Policy, context: &LaneContext) -> Result<()> {
     }
     // One Nextest scheduler executes the disjoint selections with the configured
     // expensive-test group, preserving four total process slots and two proofs.
-    let mut command = context.command(root, policy, "cargo");
+    let mut command = context.test_program_command(root, policy);
     command.env("OBZENFLOW_TEST_ARTIFACTS", &case_artifacts);
     command
         .args(["nextest", "run"])
@@ -846,7 +889,7 @@ fn list(
     filter: Option<&str>,
     label: &str,
 ) -> Result<plan::Inventory> {
-    let mut command = context.command(root, policy, "cargo");
+    let mut command = context.test_program_command(root, policy);
     command
         .args(["nextest", "list", "--message-format", "json"])
         .args(common);

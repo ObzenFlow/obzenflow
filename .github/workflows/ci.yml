@@ -634,9 +634,9 @@ jobs:
           # be explicitly annotated to avoid regressions.
           matches="$(
             rg -n 'tokio::time::sleep\(' \
-              tests/cycle_convergence_eof_gating_test.rs \
-              tests/cycle_unified_guard_test.rs \
-              tests/divergence_mid_flight_abort_test.rs \
+              tests/test_support/pipeline/cycle_convergence_eof_gating.rs \
+              tests/test_support/pipeline/cycle_unified_guard.rs \
+              tests/test_support/contracts/divergence_mid_flight_abort.rs \
               crates/obzenflow_infra/tests/ancestry_fan_in_join.rs \
               crates/obzenflow_infra/tests/live_reference_join.rs \
               crates/obzenflow_infra/tests/replay_determinism.rs \

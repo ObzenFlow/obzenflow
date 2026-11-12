@@ -882,3 +882,38 @@ fn lane_command_omits_package_variables() {
         assert!(!environment.contains_key(name), "{name}");
     }
 }
+
+#[test]
+fn test_program_step_caps_build_jobs() {
+    let fixture = fixture();
+    let mut policy = Policy::read(fixture.path()).unwrap();
+    policy.environment.build_jobs = policy.test_program_build_jobs + 6;
+    let mut command = process::command(fixture.path(), &policy, "cargo");
+    cap_test_program_jobs(&mut command, &policy);
+    assert_eq!(
+        environment_of(&command)["CARGO_BUILD_JOBS"],
+        Some(policy.test_program_build_jobs.to_string())
+    );
+}
+
+#[test]
+fn library_step_keeps_machine_jobs() {
+    let fixture = fixture();
+    let mut policy = Policy::read(fixture.path()).unwrap();
+    policy.environment.build_jobs = policy.test_program_build_jobs + 6;
+    let commands = library_build_commands(
+        || process::command(fixture.path(), &policy, "cargo"),
+        &Lane::Default.build_selection(&[]),
+    );
+    for command in commands {
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            environment_of(&command)["CARGO_BUILD_JOBS"],
+            Some(policy.environment.build_jobs.to_string())
+        );
+        assert!(!args.iter().any(|arg| arg == "--tests"), "{args:?}");
+    }
+}

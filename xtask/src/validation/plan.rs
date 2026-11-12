@@ -126,7 +126,7 @@ impl Lane {
     }
 
     pub(super) fn cargo_selection(self, production: &[String]) -> Vec<String> {
-        let mut args = vec!["--workspace".to_owned()];
+        let mut args = self.build_selection(production);
         if self == Self::JournalFixtures {
             args.extend([
                 "--run-ignored".into(),
@@ -135,6 +135,11 @@ impl Lane {
                 format!("test(={CODEC_TEST})"),
             ]);
         }
+        args
+    }
+
+    pub(super) fn build_selection(self, production: &[String]) -> Vec<String> {
+        let mut args = vec!["--workspace".to_owned()];
         let features = match self {
             Self::ProductionFeatures => Some(production.join(",")),
             Self::TestSupport => Some("test-support,obzenflow_infra/warp-server".to_owned()),
@@ -295,6 +300,7 @@ pub(super) struct Policy {
     pub(super) command_watchdog_seconds: u64,
     pub(super) minimum_free_gigabytes: u64,
     pub(super) build_directory_gigabytes: u64,
+    pub(super) test_program_build_jobs: usize,
     pub(super) ignored: Vec<Ignored>,
     #[serde(default)]
     pub(super) prerequisites: Vec<super::prerequisites::Requirement>,
@@ -313,6 +319,7 @@ impl Policy {
             || policy.command_watchdog_seconds == 0
             || policy.minimum_free_gigabytes == 0
             || policy.build_directory_gigabytes == 0
+            || policy.test_program_build_jobs == 0
         {
             return Err(error(
                 "invalid validation policy version, profile or resource limit",
@@ -333,6 +340,12 @@ impl Policy {
         super::prerequisites::validate(&policy.prerequisites)?;
         policy.environment = Environment::read()?;
         Ok(policy)
+    }
+
+    pub(super) fn test_program_jobs(&self) -> usize {
+        self.environment
+            .build_jobs
+            .min(self.test_program_build_jobs)
     }
 }
 

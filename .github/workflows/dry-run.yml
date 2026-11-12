@@ -329,7 +329,7 @@ jobs:
 
       - name: Verify the facade executable
         run: |
-          cargo test -p obzenflow --locked --features cli,web-host --test obzenflow_cli_test
+          cargo test -p obzenflow --locked --features cli,web-host --test cli
           cargo run -p obzenflow --locked --features cli --bin obzenflow -- --version
 
       - name: Write the dry-run report

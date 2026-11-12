@@ -117,3 +117,7 @@ required-features = ["test-support"]
 name = "it_ai_rig"
 path = "tests/it_ai_rig.rs"
 required-features = ["ai-rig"]
+
+[[example]]
+name = "regenerate_journal_fixtures"
+required-features = ["test-support"]

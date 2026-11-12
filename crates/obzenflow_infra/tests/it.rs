@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "../../../tests/replay_testkit"]
+#[path = "../../../tests/support/replay_testkit"]
 mod replay_testkit {
     mod bootstrap;
     mod count_deliveries;

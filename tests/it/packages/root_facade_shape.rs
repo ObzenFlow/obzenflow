@@ -1,0 +1,246 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! Root-facade source-shape and ownership tripwires.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[path = "../../fixtures/facade_consumer.rs"]
+mod facade_consumer;
+
+fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
+    if !path.is_dir() {
+        return;
+    }
+
+    for entry in fs::read_dir(path).expect("read root source directory") {
+        let path = entry.expect("read root source entry").path();
+        if path.is_dir() {
+            rust_sources_under(&path, output);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            output.push(path);
+        }
+    }
+}
+
+fn item_kind(item: &syn::Item) -> &'static str {
+    match item {
+        syn::Item::Const(_) => "constant",
+        syn::Item::Enum(_) => "enum",
+        syn::Item::ExternCrate(_) => "extern crate",
+        syn::Item::Fn(_) => "function",
+        syn::Item::ForeignMod(_) => "foreign module",
+        syn::Item::Impl(_) => "implementation",
+        syn::Item::Macro(_) => "item macro",
+        syn::Item::Static(_) => "static",
+        syn::Item::Struct(_) => "struct",
+        syn::Item::Trait(_) => "trait",
+        syn::Item::TraitAlias(_) => "trait alias",
+        syn::Item::Type(_) => "type alias",
+        syn::Item::Union(_) => "union",
+        syn::Item::Verbatim(_) => "unparsed item",
+        syn::Item::Mod(_) | syn::Item::Use(_) => "allowed facade item",
+        _ => "unsupported item",
+    }
+}
+
+fn collect_violations(items: &[syn::Item], path: &Path, violations: &mut Vec<String>) {
+    for item in items {
+        match item {
+            syn::Item::Use(_) => {}
+            syn::Item::Mod(module) => {
+                if let Some((_, items)) = &module.content {
+                    collect_violations(items, path, violations);
+                }
+            }
+            forbidden => violations.push(format!("{}: {}", path.display(), item_kind(forbidden))),
+        }
+    }
+}
+
+#[test]
+fn root_library_source_contains_only_facade_items() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let typed_root = root.join("src/typed");
+    assert!(
+        !root
+            .join("crates/obzenflow_infra/src/config_cli/mod.rs")
+            .exists(),
+        "CLI-only configuration implementation must not return to the framework"
+    );
+    assert!(
+        !typed_root.exists(),
+        "retired root namespace exists: {}",
+        typed_root.display()
+    );
+
+    let mut sources = Vec::new();
+    let source_root = root.join("src");
+    rust_sources_under(&source_root, &mut sources);
+    sources.sort();
+
+    let mut violations = Vec::new();
+    for source_path in sources {
+        // The explicitly declared executable is an outer adapter. Library
+        // modules retain the facade-only ownership rule.
+        if source_path == root.join("src/bin/obzenflow.rs")
+            || source_path.starts_with(root.join("src/bin/obzenflow"))
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&source_path).expect("read root library source");
+        let syntax = syn::parse_file(&source)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", source_path.display()));
+        let relative = source_path
+            .strip_prefix(&root)
+            .expect("root library source has relative path");
+        collect_violations(&syntax.items, relative, &mut violations);
+    }
+
+    assert!(
+        violations.is_empty(),
+        "root library source contains implementation-bearing items:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn root_facades_export_the_owned_authoring_surfaces() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let ai_facade =
+        fs::read_to_string(root.join("src/ai.rs")).expect("AI facade module should be readable");
+    assert!(
+        ai_facade.contains("pub use obzenflow_runtime::ai::{AiEffect, AiModelResolvers, AiReply, AiRequest, AiRole};"),
+        "obzenflow::ai must remain the root facade for AI roles and model resolvers"
+    );
+    for retired in [
+        "inference_handler",
+        "InferenceHandler",
+        "ChatEffectBinding",
+        "ChatTransform",
+        "ChatEffects",
+    ] {
+        assert!(
+            !ai_facade.contains(retired),
+            "the retired AI surface `{retired}` must not return"
+        );
+    }
+
+    let source_facade = fs::read_to_string(root.join("src/stages/sources.rs"))
+        .expect("source facade module should be readable");
+    assert!(
+        source_facade.contains("pub use obzenflow_adapters::sources"),
+        "obzenflow::stages::sources must re-export its constructors from adapters"
+    );
+}
+
+fn used_names(tree: &syn::UseTree, names: &mut Vec<String>) {
+    match tree {
+        syn::UseTree::Path(path) => used_names(&path.tree, names),
+        syn::UseTree::Name(name) => names.push(name.ident.to_string()),
+        syn::UseTree::Rename(rename) => names.push(rename.ident.to_string()),
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                used_names(tree, names);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+#[test]
+fn the_effects_facade_documents_no_request_machinery() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join("src/effects.rs"))
+        .expect("effects facade module should be readable");
+    let facade = syn::parse_file(&source).expect("parse the effects facade");
+    for item in &facade.items {
+        let syn::Item::Use(item) = item else {
+            continue;
+        };
+        let hidden = item.attrs.iter().any(|attribute| {
+            matches!(&attribute.meta, syn::Meta::List(list)
+                if list.path.is_ident("doc") && list.tokens.to_string() == "hidden")
+        });
+        let mut names = Vec::new();
+        used_names(&item.tree, &mut names);
+        for machinery in [
+            "AtLeastOnce",
+            "Call",
+            "CallRequest",
+            "CallSafety",
+            "Idempotent",
+            "KeyRule",
+            "RequiresKey",
+            "Transactional",
+        ] {
+            assert!(
+                hidden || !names.iter().any(|name| name == machinery),
+                "obzenflow::effects documents `{machinery}`, which only `#[effect]` names"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_example_uses_only_the_application_facade() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    rust_sources_under(&root.join("examples"), &mut sources);
+    assert!(!sources.is_empty());
+    for path in sources {
+        let source = fs::read_to_string(&path).expect("read example");
+        for internal in [
+            "obzenflow_core::",
+            "obzenflow_runtime::",
+            "obzenflow_adapters::",
+            "obzenflow_dsl::",
+            "obzenflow_infra::",
+            "obzenflow_topology::",
+        ] {
+            assert!(
+                !source.contains(internal),
+                "{} imports {internal}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn exported_dsl_macros_resolve_support_in_the_defining_crate() {
+    fn check(stream: proc_macro2::TokenStream) {
+        for token in stream {
+            match token {
+                proc_macro2::TokenTree::Group(group) => check(group.stream()),
+                proc_macro2::TokenTree::Ident(ident) => {
+                    assert!(
+                        !ident.to_string().starts_with("obzenflow_"),
+                        "caller-site implementation crate in exported macro: {ident}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for file in ["dsl.rs", "stage_macros.rs"] {
+        let path = root.join("crates/obzenflow_dsl/src/dsl").join(file);
+        let source = fs::read_to_string(path).expect("read macros");
+        let syntax = syn::parse_file(&source).expect("parse macro source");
+        for item in syntax.items {
+            if let syn::Item::Macro(item) = item {
+                if item
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.path().is_ident("macro_export"))
+                {
+                    check(item.mac.tokens);
+                }
+            }
+        }
+    }
+}
