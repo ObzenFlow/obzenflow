@@ -19,7 +19,7 @@ use obzenflow_core::event::payloads::execution_payload::{
 };
 use obzenflow_core::event::provenance::RuntimeProvenance;
 use obzenflow_core::event::status::processing_status::ErrorKind;
-use obzenflow_core::event::{SinkOperationPhase, SystemPayload, WriterId};
+use obzenflow_core::event::{CausalCoordinate, SinkOperationPhase, SystemPayload, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::metrics::{
     BoundaryMetricsView, ContractMetricEdgeKey, ContractMetricsSnapshot, ControlUnit, Percentile,
@@ -167,6 +167,18 @@ impl std::ops::DerefMut for MetricsAggregatorContext {
 pub struct ObservedCircuitState {
     pub value: f64,
     pub event_time: u64,
+    pub writer: CausalCoordinate,
+    pub sequence: u64,
+}
+
+impl ObservedCircuitState {
+    fn supersedes(&self, current: &Self) -> bool {
+        if self.writer == current.writer {
+            self.sequence > current.sequence
+        } else {
+            self.event_time > current.event_time
+        }
+    }
 }
 
 fn control_unit(stage_id: StageId, stage_name: Option<&str>, unit: &StageKey) -> ControlUnit {
@@ -1519,12 +1531,14 @@ impl MetricsAggregatorAction {
                                     let observed = ObservedCircuitState {
                                         value,
                                         event_time: event.processing.event_time,
+                                        writer: envelope.causal_coordinate(),
+                                        sequence: seq,
                                     };
                                     store
                                         .circuit_breaker_state
                                         .entry(unit)
                                         .and_modify(|current| {
-                                            if observed.event_time > current.event_time {
+                                            if observed.supersedes(current) {
                                                 *current = observed;
                                             }
                                         })

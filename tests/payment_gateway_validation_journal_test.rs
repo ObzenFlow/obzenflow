@@ -30,7 +30,7 @@ fn build_validation_journal_flow(journal_root: PathBuf) -> obzenflow_dsl::FlowDe
         None,
         1_000.0,
         journal_root,
-        gateway_calls,
+        support::gateway::simulated_processor(&gateway_calls),
     )
 }
 

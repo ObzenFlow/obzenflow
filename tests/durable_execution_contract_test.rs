@@ -3774,7 +3774,7 @@ mod payment_demo {
             Some(FIRST_RECOVERY_PAUSE),
             GATEWAY_CALLS_PER_SECOND,
             scenario.journals(),
-            gateway_calls(scenario),
+            gateway_demo::gateway::simulated_processor(&gateway_calls(scenario)),
         )
     }
 

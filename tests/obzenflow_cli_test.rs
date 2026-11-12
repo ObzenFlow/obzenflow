@@ -857,7 +857,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             None,
             1_000.0,
             root,
-            gateway_calls,
+            gateway_demo::gateway::simulated_processor(&gateway_calls),
         )
     }
 

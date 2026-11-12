@@ -626,6 +626,45 @@ pub async fn metrics_breaker_state_is_one_series_per_protected_unit(
     );
 }
 
+pub async fn breaker_state_tie_follows_journal_order(mut factory: Box<dyn FlowJournalFactory>) {
+    use obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact;
+    use obzenflow_core::metrics::ControlUnit;
+    let stage = StageId::new();
+    let journal = stage_journal(&mut *factory, stage, "probe");
+    let half_open = CircuitBreakerFact::HalfOpen {
+        unit: "probe".into(),
+        test_request_count: 1,
+    };
+    journal
+        .append(
+            breaker_transition(stage, "probe", half_open, 10),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let (mut ctx, _, _) = context(&mut *factory, vec![(stage, journal.clone())], vec![]).await;
+    refresh(&mut ctx).await;
+    let closed = CircuitBreakerFact::Closed {
+        unit: "probe".into(),
+        success_count: 1,
+        recovery_duration_ms: 1,
+    };
+    journal
+        .append(
+            breaker_transition(stage, "probe", closed, 10),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    refresh(&mut ctx).await;
+    let state = ctx
+        .metrics_store
+        .circuit_breaker_state
+        .get(&ControlUnit::Stage(stage))
+        .map(|observed| observed.value);
+    assert_eq!(state, Some(0.0));
+}
+
 pub async fn metrics_refresh_failures_retain_values_and_exports_do_no_reads(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {

@@ -176,6 +176,12 @@ async fn metrics_breaker_state_is_one_series_per_protected_unit() {
 }
 
 #[tokio::test]
+async fn breaker_state_tie_follows_journal_order() {
+    metrics_backends(obzenflow_runtime::testing::metrics::breaker_state_tie_follows_journal_order)
+        .await;
+}
+
+#[tokio::test]
 async fn metrics_refresh_failures_retain_values_and_exports_do_no_reads() {
     metrics_backends(obzenflow_runtime::testing::metrics::metrics_refresh_failures_retain_values_and_exports_do_no_reads).await;
 }
