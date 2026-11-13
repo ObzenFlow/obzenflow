@@ -54,9 +54,9 @@ cargo machete --skip-target-dir
 
 ## Testing
 
-CI runs `cargo xtask test` on every pull request, and you can run it the same
-way locally. `cargo xtask test --help` lists the lanes, so you can run only the
-ones your change touches. The test helpers, such as `JournalProbe` and
+`cargo xtask test` runs the default lane, and `cargo xtask test --correctness`
+runs every lane CI runs on a pull request. `cargo xtask test --help` lists the
+lanes, so you can run only the ones your change touches. The test helpers, such as `JournalProbe` and
 `TestClock`, are documented in `obzenflow_runtime::testing`.
 
 Test names follow `<subject>_<condition>_<result>`, six words at most. No

@@ -43,8 +43,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Tests
-cargo test --workspace
-cargo test --workspace --all-features
+cargo xtask test
 
 # Dependency policy checks (CI runs these)
 cargo deny --all-features check

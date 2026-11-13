@@ -217,8 +217,8 @@ them. After a deliberate schema bump, regenerate both frames from the JSON
 records with the separate development command:
 
 ```sh
-cargo xtask regenerate-journal-fixtures
+cargo run -p obzenflow_infra --features test-support --example regenerate_journal_fixtures
 ```
 
 Then run the verification test above and review the changes before committing.
-The regeneration command lives in the unpublished `xtask` development tooling.
+The regeneration command is an `obzenflow_infra` example.
