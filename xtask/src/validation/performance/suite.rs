@@ -228,7 +228,12 @@ pub(super) fn run_shard(
 
 /// Builds every benchmark target in the test profile, checks its declarations
 /// against its listed cases and runs every case once. Nothing is timed.
-pub(in crate::validation) fn smoke(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
+pub(in crate::validation) fn smoke(
+    root: &Path,
+    tools: &Policy,
+    directory: &Path,
+    build: &Path,
+) -> Result<()> {
     let targets = schedule::inventory(root)?;
     let mut groups: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
     for target in &targets {
@@ -249,7 +254,7 @@ pub(in crate::validation) fn smoke(root: &Path, tools: &Policy, directory: &Path
             compile_tests(
                 root,
                 tools,
-                directory,
+                (directory, build),
                 &label,
                 (&names, &features.join(",")),
             )
@@ -277,12 +282,12 @@ pub(in crate::validation) fn smoke(root: &Path, tools: &Policy, directory: &Path
 fn compile_tests(
     root: &Path,
     tools: &Policy,
-    directory: &Path,
+    (directory, build): (&Path, &Path),
     label: &str,
     (targets, features): (&[String], &str),
 ) -> Compiled {
     let mut command = process::command(root, tools, "cargo");
-    command.args([
+    command.env("CARGO_TARGET_DIR", build).args([
         "test",
         "--no-run",
         "--locked",

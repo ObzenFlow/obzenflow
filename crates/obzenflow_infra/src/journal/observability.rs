@@ -395,7 +395,7 @@ pub(crate) mod tests {
                 DiskJournal::with_owner(
                     directory.path().join("data.log"),
                     JournalOwner::stage(stage),
-                    JournalSync::BeforeAck,
+                    JournalSync::Off,
                 )
                 .unwrap(),
             ),
@@ -403,7 +403,7 @@ pub(crate) mod tests {
                 DiskJournal::with_owner(
                     directory.path().join("errors.log"),
                     JournalOwner::stage(stage),
-                    JournalSync::BeforeAck,
+                    JournalSync::Off,
                 )
                 .unwrap(),
             ),

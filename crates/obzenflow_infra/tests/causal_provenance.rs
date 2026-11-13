@@ -40,7 +40,7 @@ async fn construction_decoding_and_mutation_cannot_create_committed_evidence() {
                 DiskJournal::with_owner(
                     directory.path().join("admission.log"),
                     owner,
-                    JournalSync::BeforeAck,
+                    JournalSync::Off,
                 )
                 .unwrap(),
             )
@@ -136,7 +136,7 @@ async fn storage_data_becomes_evidence_only_through_successful_journal_operation
                 DiskJournal::with_owner(
                     directory.path().join("storage.log"),
                     owner,
-                    JournalSync::BeforeAck,
+                    JournalSync::Off,
                 )
                 .unwrap(),
             )
@@ -209,7 +209,7 @@ async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
                             directory.path().join(format!("{index}.log")),
                             owner.clone(),
                             run,
-                            JournalSync::BeforeAck,
+                            JournalSync::Off,
                         )
                         .unwrap(),
                     ) as Arc<dyn Journal<ChainEvent>>
@@ -225,7 +225,7 @@ async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
                     directory.path().join("system.log"),
                     owner.clone(),
                     run,
-                    JournalSync::BeforeAck,
+                    JournalSync::Off,
                 )
                 .unwrap(),
             )
@@ -358,27 +358,23 @@ async fn empty_and_populated_reopen_preserve_identity_with_surviving_readers() {
     let author = StageId::new();
     let owner = JournalOwner::stage(author);
     let journal =
-        DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone(), JournalSync::BeforeAck)
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone(), JournalSync::Off)
             .unwrap();
     let id = *journal.id();
     let mut reader = journal.reader().await.unwrap();
-    assert!(DiskJournal::<ChainEvent>::with_owner(
-        path.clone(),
-        owner.clone(),
-        JournalSync::BeforeAck
-    )
-    .is_err());
+    assert!(
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone(), JournalSync::Off)
+            .is_err()
+    );
     let clone = journal.clone();
     drop(journal);
-    assert!(DiskJournal::<ChainEvent>::with_owner(
-        path.clone(),
-        owner.clone(),
-        JournalSync::BeforeAck
-    )
-    .is_err());
+    assert!(
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone(), JournalSync::Off)
+            .is_err()
+    );
     drop(clone);
     let reopened =
-        DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone(), JournalSync::BeforeAck)
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone(), JournalSync::Off)
             .unwrap();
     assert_eq!(reopened.id(), &id);
     let first = reopened
@@ -395,8 +391,7 @@ async fn empty_and_populated_reopen_preserve_identity_with_surviving_readers() {
         .unwrap();
     assert_eq!(reader.next().await.unwrap().unwrap().id(), first.id());
     drop(reopened);
-    let reopened =
-        DiskJournal::<ChainEvent>::with_owner(path, owner, JournalSync::BeforeAck).unwrap();
+    let reopened = DiskJournal::<ChainEvent>::with_owner(path, owner, JournalSync::Off).unwrap();
     let second = reopened
         .append(first.authored(), Default::default())
         .await
@@ -420,7 +415,7 @@ async fn missing_committed_frames_cannot_advance_a_journal_prefix() {
             let journal = DiskJournal::<ChainEvent>::with_owner(
                 path.clone(),
                 owner.clone(),
-                JournalSync::BeforeAck,
+                JournalSync::Off,
             )
             .unwrap();
             let event = || {
@@ -478,9 +473,7 @@ async fn missing_committed_frames_cannot_advance_a_journal_prefix() {
             assert!(journal.read_all_unordered().await.is_err());
 
             drop((reader, resumed, journal));
-            assert!(
-                DiskJournal::<ChainEvent>::with_owner(path, owner, JournalSync::BeforeAck).is_err()
-            );
+            assert!(DiskJournal::<ChainEvent>::with_owner(path, owner, JournalSync::Off).is_err());
         }
     }
 }

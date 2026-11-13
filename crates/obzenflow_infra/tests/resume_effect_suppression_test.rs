@@ -11,18 +11,7 @@
 //! at `input_seq` beyond the recorded range. Assertions read the effect
 //! provenance rows of the event-sourced journals.
 
-#[path = "../../../tests/replay_testkit"]
-mod replay_testkit {
-    mod bootstrap;
-    mod journal;
-    mod manifest;
-    mod reattaching_source;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{
-        bootstrap::*, manifest::*, reattaching_source::*, run_dir::*, stage_journal::*,
-    };
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -276,7 +265,7 @@ async fn run_until_delivered(
         calls.clone(),
         delivered.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -589,7 +578,7 @@ async fn replay_to_completion(journal_base: &Path) -> Result<usize> {
         calls.clone(),
         Arc::new(AtomicU64::new(0)),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("replay flow failed to build: {e:?}"))?;
     tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())

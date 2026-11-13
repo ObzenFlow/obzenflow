@@ -147,7 +147,7 @@ where
                 obzenflow_infra::journal::DiskJournalFactory::new(
                     dir.path().to_path_buf(),
                     FlowId::new(),
-                    obzenflow_runtime::runtime_config::JournalSync::BeforeAck,
+                    obzenflow_runtime::runtime_config::JournalSync::Off,
                 )
                 .unwrap(),
             )
@@ -173,6 +173,12 @@ async fn metrics_breaker_state_is_one_series_per_protected_unit() {
         obzenflow_runtime::testing::metrics::metrics_breaker_state_is_one_series_per_protected_unit,
     )
     .await;
+}
+
+#[tokio::test]
+async fn breaker_state_tie_follows_journal_order() {
+    metrics_backends(obzenflow_runtime::testing::metrics::breaker_state_tie_follows_journal_order)
+        .await;
 }
 
 #[tokio::test]

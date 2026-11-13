@@ -5,7 +5,12 @@
 use crate::{error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::BTreeSet,
+    ffi::{OsStr, OsString},
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub(super) const CODEC_TEST: &str =
     "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records";
@@ -121,22 +126,20 @@ impl Lane {
     }
 
     pub(super) fn cargo_selection(self, production: &[String]) -> Vec<String> {
-        let args = match self {
-            Self::JournalFixtures => vec![
-                "--package",
-                "obzenflow_infra",
-                "--lib",
-                "--run-ignored",
-                "only",
-                "-E",
-                CODEC_TEST,
-            ],
-            _ => vec!["--workspace"],
-        };
-        let mut args: Vec<_> = args.into_iter().map(str::to_owned).collect();
+        let mut args = self.build_selection(production);
         if self == Self::JournalFixtures {
-            *args.last_mut().unwrap() = format!("test(={CODEC_TEST})");
+            args.extend([
+                "--run-ignored".into(),
+                "only".into(),
+                "-E".into(),
+                format!("test(={CODEC_TEST})"),
+            ]);
         }
+        args
+    }
+
+    pub(super) fn build_selection(self, production: &[String]) -> Vec<String> {
+        let mut args = vec!["--workspace".to_owned()];
         let features = match self {
             Self::ProductionFeatures => Some(production.join(",")),
             Self::TestSupport => Some("test-support,obzenflow_infra/warp-server".to_owned()),
@@ -155,6 +158,55 @@ impl Lane {
         }
         args
     }
+
+    pub(super) fn build_directory(self, root: &Path, configured: Option<&Path>) -> BuildDirectory {
+        match (configured, self) {
+            (Some(directory), _) => BuildDirectory::Configured(root.join(directory)),
+            (None, Self::Default | Self::JournalFixtures | Self::Performance) => {
+                BuildDirectory::Shared(root.join("target"))
+            }
+            (None, lane) => BuildDirectory::Lane(root.join("target/lanes").join(lane.name())),
+        }
+    }
+
+    pub(super) fn incremental(self, configured: Option<&OsStr>) -> Incremental {
+        match self {
+            Self::Default | Self::JournalFixtures if configured != Some(OsStr::new("0")) => {
+                Incremental::Enabled
+            }
+            _ => Incremental::Disabled,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum BuildDirectory {
+    Shared(PathBuf),
+    Lane(PathBuf),
+    Configured(PathBuf),
+}
+
+impl BuildDirectory {
+    pub(super) fn path(&self) -> &Path {
+        match self {
+            Self::Shared(path) | Self::Lane(path) | Self::Configured(path) => path,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Incremental {
+    Enabled,
+    Disabled,
+}
+
+impl Incremental {
+    pub(super) fn token(self) -> &'static str {
+        match self {
+            Self::Enabled => "1",
+            Self::Disabled => "0",
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -162,29 +214,47 @@ pub(super) struct Options {
     pub(super) lanes: Vec<Lane>,
 }
 
+enum Selection {
+    Default,
+    Correctness,
+    Lanes(BTreeSet<Lane>),
+}
+
 impl Options {
     pub(super) fn parse(args: &[String]) -> Result<Self> {
-        let mut lanes = BTreeSet::new();
+        let mut selection = Selection::Default;
         let mut args = args.iter();
         while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--lane" => {
+            selection = match (arg.as_str(), selection) {
+                ("--correctness", Selection::Default) => Selection::Correctness,
+                ("--correctness", Selection::Correctness) => {
+                    return Err(error("duplicate option: --correctness"))
+                }
+                ("--lane", Selection::Correctness) | ("--correctness", Selection::Lanes(_)) => {
+                    return Err(error("--correctness cannot be combined with --lane"))
+                }
+                ("--lane", selection) => {
                     let name = args
                         .next()
                         .ok_or_else(|| error("--lane requires a lane name"))?;
                     let lane = Lane::parse(name)?;
+                    let mut lanes = match selection {
+                        Selection::Lanes(lanes) => lanes,
+                        Selection::Default | Selection::Correctness => BTreeSet::new(),
+                    };
                     if !lanes.insert(lane) {
                         return Err(error(format!("duplicate lane: {name}")));
                     }
+                    Selection::Lanes(lanes)
                 }
                 _ => return Err(error(format!("unsupported validation option: {arg}"))),
-            }
+            };
         }
         Ok(Self {
-            lanes: if lanes.is_empty() {
-                Lane::correctness()
-            } else {
-                lanes.into_iter().collect()
+            lanes: match selection {
+                Selection::Default => vec![Lane::Default],
+                Selection::Correctness => Lane::correctness(),
+                Selection::Lanes(lanes) => lanes.into_iter().collect(),
             },
         })
     }
@@ -194,6 +264,8 @@ impl Options {
             "correctness-and-performance"
         } else if self.lanes == Lane::correctness() {
             "correctness"
+        } else if self.lanes == [Lane::Default] {
+            "default"
         } else if self.lanes == [Lane::Performance] {
             "performance"
         } else {
@@ -223,25 +295,31 @@ pub(super) struct Policy {
     pub(super) rust: String,
     pub(super) nextest: String,
     pub(super) profile: String,
-    pub(super) build_jobs: usize,
     pub(super) test_threads: usize,
     pub(super) tokio_workers: usize,
     pub(super) command_watchdog_seconds: u64,
+    pub(super) minimum_free_gigabytes: u64,
+    pub(super) build_directory_gigabytes: u64,
+    pub(super) test_program_build_jobs: usize,
     pub(super) ignored: Vec<Ignored>,
     #[serde(default)]
     pub(super) prerequisites: Vec<super::prerequisites::Requirement>,
+    #[serde(skip)]
+    pub(super) environment: Environment,
 }
 
 impl Policy {
     pub(super) fn read(root: &Path) -> Result<Self> {
-        let policy: Self =
+        let mut policy: Self =
             toml::from_str(&fs::read_to_string(root.join(".config/validation.toml"))?)?;
-        if policy.version != 2
+        if policy.version != 3
             || policy.profile != "ci-fast"
-            || policy.build_jobs == 0
             || policy.test_threads == 0
             || policy.tokio_workers == 0
             || policy.command_watchdog_seconds == 0
+            || policy.minimum_free_gigabytes == 0
+            || policy.build_directory_gigabytes == 0
+            || policy.test_program_build_jobs == 0
         {
             return Err(error(
                 "invalid validation policy version, profile or resource limit",
@@ -260,7 +338,44 @@ impl Policy {
             ));
         }
         super::prerequisites::validate(&policy.prerequisites)?;
+        policy.environment = Environment::read()?;
         Ok(policy)
+    }
+
+    pub(super) fn test_program_jobs(&self) -> usize {
+        self.environment
+            .build_jobs
+            .min(self.test_program_build_jobs)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Environment {
+    pub(super) build_jobs: usize,
+    pub(super) target_dir: Option<PathBuf>,
+    pub(super) incremental: Option<OsString>,
+}
+
+impl Environment {
+    fn read() -> Result<Self> {
+        Ok(Self {
+            build_jobs: build_jobs(std::env::var_os("CARGO_BUILD_JOBS").as_deref())?,
+            target_dir: std::env::var_os("CARGO_TARGET_DIR")
+                .filter(|directory| !directory.is_empty())
+                .map(PathBuf::from),
+            incremental: std::env::var_os("CARGO_INCREMENTAL"),
+        })
+    }
+}
+
+pub(super) fn build_jobs(configured: Option<&OsStr>) -> Result<usize> {
+    match configured {
+        None => Ok(std::thread::available_parallelism()?.get()),
+        Some(value) => value
+            .to_str()
+            .and_then(|text| text.parse::<usize>().ok())
+            .filter(|jobs| *jobs > 0)
+            .ok_or_else(|| error("CARGO_BUILD_JOBS must be a whole number above zero")),
     }
 }
 
@@ -374,9 +489,13 @@ pub(super) fn inventory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn arguments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
     #[test]
     fn only_declared_lanes_and_execution_flags_are_accepted() {
-        assert_eq!(Options::parse(&[]).unwrap().lanes, Lane::correctness());
+        assert_eq!(Options::parse(&[]).unwrap().lanes, [Lane::Default]);
         for args in [
             vec!["--profile", "ci-full"],
             vec!["--lane"],
@@ -395,6 +514,121 @@ mod tests {
             [Lane::TestSupport]
         );
     }
+    #[test]
+    fn correctness_flag_selects_correctness_lanes() {
+        let options = Options::parse(&arguments(&["--correctness"])).unwrap();
+        assert_eq!(options.lanes, Lane::correctness());
+        assert_eq!(options.scope(), "correctness");
+    }
+
+    #[test]
+    fn correctness_flag_with_lane_refused() {
+        for args in [
+            ["--correctness", "--lane", "default"],
+            ["--lane", "default", "--correctness"],
+        ] {
+            assert_eq!(
+                Options::parse(&arguments(&args)).unwrap_err().to_string(),
+                "--correctness cannot be combined with --lane"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_command_reports_default_scope() {
+        assert_eq!(Options::parse(&[]).unwrap().scope(), "default");
+    }
+
+    #[test]
+    fn build_jobs_unset_uses_logical_cpus() {
+        assert_eq!(
+            build_jobs(None).unwrap(),
+            std::thread::available_parallelism().unwrap().get()
+        );
+    }
+
+    #[test]
+    fn build_jobs_set_uses_environment_value() {
+        assert_eq!(build_jobs(Some(OsStr::new("6"))).unwrap(), 6);
+    }
+
+    #[test]
+    fn build_jobs_zero_refused() {
+        for value in ["0", "-2", "default", ""] {
+            assert_eq!(
+                build_jobs(Some(OsStr::new(value))).unwrap_err().to_string(),
+                "CARGO_BUILD_JOBS must be a whole number above zero",
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_default_lane_enabled() {
+        assert_eq!(Lane::Default.incremental(None), Incremental::Enabled);
+    }
+
+    #[test]
+    fn incremental_named_lane_disabled() {
+        for lane in Lane::ALL
+            .into_iter()
+            .filter(|lane| !matches!(lane, Lane::Default | Lane::JournalFixtures))
+        {
+            assert_eq!(
+                lane.incremental(None),
+                Incremental::Disabled,
+                "{}",
+                lane.name()
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_environment_zero_disabled() {
+        for lane in [Lane::Default, Lane::JournalFixtures] {
+            assert_eq!(
+                lane.incremental(Some(OsStr::new("0"))),
+                Incremental::Disabled
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_journal_fixtures_lane_enabled() {
+        assert_eq!(
+            Lane::JournalFixtures.incremental(None),
+            Incremental::Enabled
+        );
+    }
+
+    #[test]
+    fn journal_fixtures_selection_matches_default_lane() {
+        let default = Lane::Default.cargo_selection(&[]);
+        let fixtures = Lane::JournalFixtures.cargo_selection(&[]);
+        let filter = format!("test(={CODEC_TEST})");
+        assert_eq!(fixtures[..default.len()], default[..]);
+        assert_eq!(
+            fixtures[default.len()..],
+            ["--run-ignored", "only", "-E", filter.as_str()][..]
+        );
+    }
+
+    #[test]
+    fn named_lane_builds_in_own_directory() {
+        assert_eq!(
+            Lane::TestSupport.build_directory(Path::new("/repo"), None),
+            BuildDirectory::Lane(PathBuf::from("/repo/target/lanes/test-support"))
+        );
+    }
+
+    #[test]
+    fn default_lane_builds_in_target() {
+        assert_eq!(
+            Lane::Default.build_directory(Path::new("/repo"), None),
+            BuildDirectory::Shared(PathBuf::from("/repo/target"))
+        );
+    }
+
     #[test]
     fn production_feature_discovery_includes_new_features_and_cli() {
         let json = serde_json::json!({"packages":[{"manifest_path":"/repo/Cargo.toml","features":{"cli":[],"new-production-feature":[],"test-support":[],"e2e":[]}}]});

@@ -25,3 +25,10 @@ stall_timeout_ms = 30000
 # policy above; only the stall timeout is overridden here.
 [runtime.backpressure.stages.authorize_payment]
 stall_timeout_ms = 120000
+
+# The application's own settings, read by flow.rs as `PaymentSettings` when the flow is built.
+# `processor` picks the system behind the payment gateway port, and the simulated processor keeps
+# its call log at `processor_calls`.
+[app]
+processor = "simulated"
+processor_calls = "target/gateway-calls.jsonl"

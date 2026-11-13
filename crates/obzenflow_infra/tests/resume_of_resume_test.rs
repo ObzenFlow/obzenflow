@@ -16,21 +16,7 @@
 //! only the head of a history resumes, and resuming a replay resumes the run
 //! it reproduces.
 
-#[path = "../../../tests/replay_testkit"]
-mod replay_testkit {
-    mod bootstrap;
-    mod delivered_order;
-    mod journal;
-    mod manifest;
-    mod ordered_stage_journal;
-    mod prefix_stable;
-    mod reattaching_source;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{
-        bootstrap::*, prefix_stable::*, reattaching_source::*, run_dir::*, stage_journal::*,
-    };
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -51,7 +37,6 @@ use obzenflow_infra::journal::read::{
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, TypedInfiniteSourceHandler,
@@ -237,7 +222,7 @@ async fn run_until_delivered(
         count,
         delivered.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -254,7 +239,7 @@ async fn run_until_delivered(
 async fn run_replay_to_completion(journal_base: &Path) -> Result<()> {
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_flow(journal_base.to_path_buf(), 1, 0, delivered)
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("replay flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -688,7 +673,7 @@ async fn racing_resumes_of_one_archive_cannot_both_proceed() -> Result<()> {
         );
         let racer = || {
             build_flow(journal_base.clone(), 5, 0, Arc::new(AtomicU64::new(0)))
-                .build(FlowBuildContext::for_tests())
+                .build(replay_testkit::unsynced_context())
         };
         let (winner, loser) = match tokio::join!(racer(), racer()) {
             (Ok(winner), Err(loser)) | (Err(loser), Ok(winner)) => (winner, loser),
@@ -747,7 +732,7 @@ async fn a_run_still_being_written_refuses_until_its_process_stops() -> Result<(
     let journal_base = temp.path().join("journals");
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_flow(journal_base.clone(), 1, 4, delivered.clone())
-        .build(FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -835,7 +820,7 @@ async fn an_orphan_and_its_staged_claim_never_block_the_parent() -> Result<()> {
         );
         set_mode(0o555)?;
         let failure = build_flow(journal_base.clone(), 5, 0, Arc::new(AtomicU64::new(0)))
-            .build(FlowBuildContext::for_tests())
+            .build(replay_testkit::unsynced_context())
             .await
             .err();
         set_mode(0o755)?;

@@ -13,18 +13,18 @@ final-status-level = "fail"
 
 # Cheap defect controls get a slot before the full archive/scale obligations.
 [[profile.default.overrides]]
-filter = "test(archive_observation_rewrite_preserves_both_metrics_consumers) | test(validation::) | test(=blocked_sink_reports_live_phase_and_progress_before_recovery) | test(=web::endpoints::studio::tests::stream::composed_stall_reports_source_progress_before_recovery)"
+filter = "test(archive_observation_rewrite_preserves_both_metrics_consumers) | test(validation::) | test(=replay::verification::scale::blocked_sink_reports_live_phase_and_progress_before_recovery) | test(=web::endpoints::studio::tests::stream::composed_stall_reports_source_progress_before_recovery)"
 priority = 100
 
 # Start the recently failing archive proof immediately. All these expensive
 # proofs own temporary journals; Prometheus listeners use allocated ports.
 # Two concurrent proofs leave capacity for other tests on four-slot CI runners.
 [[profile.default.overrides]]
-filter = "binary(=prometheus_example_test) & test(=prometheus_demo_host_preserves_data_errors_and_delivery_receipts)"
+filter = "binary_id(obzenflow::it_examples) & test(=examples::prometheus_demo::prometheus_demo_host_preserves_data_errors_and_delivery_receipts)"
 priority = 90
 
 [[profile.default.overrides]]
-filter = "(binary(=prometheus_example_test) & (test(prometheus_example_5k_completes_) | test(=prometheus_5k_typed_try_map_errors_are_unknown_only) | test(=prometheus_demo_host_preserves_data_errors_and_delivery_receipts))) | (binary(=replay_verification_scale_test) & test(=five_figure_run_verifies_with_streaming_comparison)) | (binary(=obzenflow_infra) & test(=web::endpoints::studio::tests::stream::many_stage_pipeline_metrics_and_studio_settle_owned_journals))"
+filter = "(binary_id(obzenflow::it_examples) & (test(/^examples::prometheus_demo::.*prometheus_example_5k_completes_/) | test(=examples::prometheus_demo::prometheus_5k_typed_try_map_errors_are_unknown_only) | test(=examples::prometheus_demo::prometheus_demo_host_preserves_data_errors_and_delivery_receipts))) | (binary_id(obzenflow::it_replay) & test(=replay::verification::scale::five_figure_run_verifies_with_streaming_comparison)) | (binary(=obzenflow_infra) & test(=web::endpoints::studio::tests::stream::many_stage_pipeline_metrics_and_studio_settle_owned_journals))"
 priority = 80
 test-group = "expensive-journal-proofs"
 # Repeating a minute-long failure delays feedback and cannot qualify the fix.
@@ -58,7 +58,7 @@ store-failure-output = true
 # Preserve their existing watchdog while Criterion owns performance acceptance.
 # Include the typed 5k case explicitly; its name does not share the other prefix.
 [[profile.ci-fast.overrides]]
-filter = "binary(=prometheus_example_test) & (test(prometheus_example_5k_completes_) | test(=prometheus_5k_typed_try_map_errors_are_unknown_only))"
+filter = "binary_id(obzenflow::it_examples) & (test(/^examples::prometheus_demo::.*prometheus_example_5k_completes_/) | test(=examples::prometheus_demo::prometheus_5k_typed_try_map_errors_are_unknown_only))"
 slow-timeout = { period = "300s", terminate-after = 2 }
 
 # Temporary 145h merge budgets, authorised 2026-09-27. Reassess these exact
@@ -66,13 +66,13 @@ slow-timeout = { period = "300s", terminate-after = 2 }
 # This three-configuration archive proof passed its assertions at 65.90s in CI,
 # after the former 60s deadline. Keep all 1,000-input cases and export checks.
 [[profile.ci-fast.overrides]]
-filter = "binary(=prometheus_example_test) & test(=prometheus_demo_host_preserves_data_errors_and_delivery_receipts)"
+filter = "binary_id(obzenflow::it_examples) & test(=examples::prometheus_demo::prometheus_demo_host_preserves_data_errors_and_delivery_receipts)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 # Replay's outer limit covers live execution, replay preparation/execution and
 # comparison. Criterion owns the comparison's performance acceptance.
 [[profile.ci-fast.overrides]]
-filter = "binary(=replay_verification_scale_test) & test(=five_figure_run_verifies_with_streaming_comparison)"
+filter = "binary_id(obzenflow::it_replay) & test(=replay::verification::scale::five_figure_run_verifies_with_streaming_comparison)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The composed test keeps all four cases and every journal/Studio assertion.
@@ -81,25 +81,25 @@ filter = "binary(=obzenflow_infra) & test(=web::endpoints::studio::tests::stream
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 [[profile.ci-fast.overrides]]
-filter = "binary(/metrics/)"
+filter = "kind(test) & ((test(/^[a-z0-9_]*metrics[a-z0-9_]*::/) & not package(obzenflow)) | (package(obzenflow) & test(/^(metrics::(stage|exporter|stateful)|middleware::circuit_breaker_metrics)::/)))"
 test-group = "metrics-exporter-port"
 
 [[profile.ci-full.overrides]]
-filter = "binary(/metrics/)"
+filter = "kind(test) & ((test(/^[a-z0-9_]*metrics[a-z0-9_]*::/) & not package(obzenflow)) | (package(obzenflow) & test(/^(metrics::(stage|exporter|stateful)|middleware::circuit_breaker_metrics)::/)))"
 test-group = "metrics-exporter-port"
 
 # Scale tests do five-figure event runs; 52s observed on shared runners
 # against the 60s default is a retry tax, not a regression signal.
 [[profile.ci-fast.overrides]]
-filter = "binary(/scale_test/)"
+filter = "kind(test) & (test(/^[a-z0-9_]*scale_test::/) | (package(obzenflow) & test(/^replay::verification::scale::/)))"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 [[profile.ci-fast.overrides]]
-filter = "binary(/^(basic_streaming|advanced_tests|cycle_unified_guard_test|dropped_events_test|placeholder_handlers_lifecycle_test|stage_metrics_test|circuit_breaker_metrics_e2e_test|stateless_simple_test|stateful_patterns_test|stateful_primitives_test)$/)"
+filter = "kind(test) & (test(/^(stateless_simple_test|stateful_patterns_test|stateful_primitives_test)::/) | (package(obzenflow) & test(/^(pipeline::(basic_streaming|dsl_pipeline|cycle_unified_guard)|metrics::(dropped_events|stage)|stages::placeholder_handlers_lifecycle|middleware::circuit_breaker_metrics)::/)))"
 test-group = "disk-journal-paths"
 
 [[profile.ci-full.overrides]]
-filter = "binary(/^(basic_streaming|advanced_tests|cycle_unified_guard_test|dropped_events_test|placeholder_handlers_lifecycle_test|stage_metrics_test|circuit_breaker_metrics_e2e_test|stateless_simple_test|stateful_patterns_test|stateful_primitives_test)$/)"
+filter = "kind(test) & (test(/^(stateless_simple_test|stateful_patterns_test|stateful_primitives_test)::/) | (package(obzenflow) & test(/^(pipeline::(basic_streaming|dsl_pipeline|cycle_unified_guard)|metrics::(dropped_events|stage)|stages::placeholder_handlers_lifecycle|middleware::circuit_breaker_metrics)::/)))"
 test-group = "disk-journal-paths"
 
 [test-groups.expensive-journal-proofs]

@@ -2,19 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "../../../tests/replay_testkit"]
-mod replay_testkit {
-    mod bootstrap;
-    mod count_deliveries;
-    mod journal;
-    mod manifest;
-    mod reattaching_source;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{
-        bootstrap::*, count_deliveries::*, reattaching_source::*, run_dir::*, stage_journal::*,
-    };
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -47,7 +35,7 @@ use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, Re
 use obzenflow_runtime::effects::{Command, EffectError, Effects, Port, SinkRedeliverySafety};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
-use obzenflow_runtime::runtime_config::{AppTable, ResolvedRuntimeConfig};
+use obzenflow_runtime::runtime_config::{AppTable, CandidateSet, ResolvedRuntimeConfig};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
@@ -311,8 +299,10 @@ fn context(table: serde_json::Value) -> FlowBuildContext {
     let serde_json::Value::Object(table) = table else {
         panic!("[app] is a table");
     };
+    let mut candidates = CandidateSet::default();
+    replay_testkit::admit_unsynced(&mut candidates);
     FlowBuildContext::new(Arc::new(
-        ResolvedRuntimeConfig::builtin_defaults().with_app(AppTable::new("obzenflow.toml", table)),
+        ResolvedRuntimeConfig::new(candidates).with_app(AppTable::new("obzenflow.toml", table)),
     ))
 }
 

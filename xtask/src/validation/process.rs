@@ -81,12 +81,33 @@ pub(super) fn command(
     policy: &Policy,
     program: impl AsRef<std::ffi::OsStr>,
 ) -> Command {
+    command_with(
+        root,
+        policy,
+        program,
+        std::env::vars_os().map(|(name, _)| name),
+    )
+}
+
+const AMBIENT_PREFIXES: [&str; 4] = [
+    "NEXTEST_",
+    "CARGO_PROFILE_",
+    "CARGO_PKG_",
+    "CARGO_MANIFEST_",
+];
+
+pub(super) fn command_with(
+    root: &Path,
+    policy: &Policy,
+    program: impl AsRef<std::ffi::OsStr>,
+    ambient: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Command {
     let mut command = Command::new(program);
     command.current_dir(root);
-    // Ambient Nextest options must not narrow or relax the declared plan.
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("NEXTEST_")
-            || name.to_string_lossy().starts_with("CARGO_PROFILE_")
+    for name in ambient {
+        if AMBIENT_PREFIXES
+            .iter()
+            .any(|prefix| name.to_string_lossy().starts_with(prefix))
         {
             command.env_remove(name);
         }
@@ -95,12 +116,23 @@ pub(super) fn command(
         .env_remove("CARGO_BUILD_TARGET")
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env("CARGO_TARGET_DIR", root.join("target"))
+        .env(
+            "CARGO_TARGET_DIR",
+            root.join(
+                policy
+                    .environment
+                    .target_dir
+                    .as_deref()
+                    .unwrap_or(Path::new("target")),
+            ),
+        )
         .env("CARGO_INCREMENTAL", "0")
-        .env("CARGO_PROFILE_DEV_DEBUG", "0")
-        .env("CARGO_PROFILE_TEST_DEBUG", "0")
         .env("CARGO_TERM_COLOR", "never")
-        .env("CARGO_BUILD_JOBS", policy.build_jobs.to_string())
+        .env(
+            "CARGO_BUILD_JOBS",
+            policy.environment.build_jobs.to_string(),
+        )
+        .env("RUST_TEST_THREADS", policy.test_threads.to_string())
         .env("TOKIO_WORKER_THREADS", policy.tokio_workers.to_string())
         .env("NEXTEST_USER_CONFIG_FILE", "none");
     command

@@ -9,6 +9,7 @@ repository.workspace = true
 keywords = ["durable-execution", "event-sourcing", "workflow", "streaming", "replay"]
 publish = true
 autobins = false
+autotests = false
 
 # Fail closed on shipped artifact types. Tests, examples, and repository-only tooling
 # remain in Git and CI rather than in the crates.io source archive.
@@ -29,15 +30,15 @@ path = "src/bin/obzenflow.rs"
 required-features = ["cli"]
 
 [[test]]
-name = "obzenflow_cli_test"
-path = "tests/obzenflow_cli_test.rs"
+name = "cli"
+path = "tests/cli.rs"
 required-features = ["cli"]
 
 # FLOWIP-134i B4: re-executes itself as each run and drives the CLI binary.
 # FLOWIP-084l: its HTTP rows host ingress in each run.
 [[test]]
-name = "durable_execution_contract_test"
-path = "tests/durable_execution_contract_test.rs"
+name = "durable_execution_contract"
+path = "tests/durable_execution_contract.rs"
 required-features = ["cli", "web-host"]
 
 [workspace]
@@ -232,6 +233,14 @@ test-support = [
     "obzenflow_infra/test-support",
 ]
 
+[profile.dev]
+debug = 0
+
+# For debugger sessions: `cargo test --profile dev-with-debug`.
+[profile.dev-with-debug]
+inherits = "dev"
+debug = true
+
 [profile.release]
 lto = true
 codegen-units = 1
@@ -302,116 +311,91 @@ path = "examples/hn_ai_digest_demo/main.rs"
 required-features = ["http", "ai", "postgres"]
 
 [[test]]
-name = "hn_ai_digest_effect_replay_journal_test"
-path = "tests/hn_ai_digest_effect_replay_journal_test.rs"
+name = "hn_ai_digest_effect_replay"
+path = "tests/hn_ai_digest_effect_replay.rs"
 required-features = ["http", "ai", "postgres", "test-support"]
 
 [[test]]
-name = "standalone_ai_effect_replay_test"
-path = "tests/standalone_ai_effect_replay_test.rs"
+name = "standalone_ai_effect_replay"
+path = "tests/standalone_ai_effect_replay.rs"
 required-features = ["ai"]
 
 [[test]]
-name = "stateful_metrics_integration_test"
-path = "tests/stateful_metrics_integration_test.rs"
+name = "it_ai"
+path = "tests/it/it_ai.rs"
+
+[[test]]
+name = "it_backpressure"
+path = "tests/it/it_backpressure.rs"
+
+[[test]]
+name = "it_config"
+path = "tests/it/it_config.rs"
+
+[[test]]
+name = "it_contracts"
+path = "tests/it/it_contracts.rs"
+
+[[test]]
+name = "it_dsl"
+path = "tests/it/it_dsl.rs"
+
+[[test]]
+name = "it_effects"
+path = "tests/it/it_effects.rs"
+
+[[test]]
+name = "it_examples"
+path = "tests/it/it_examples.rs"
+
+[[test]]
+name = "it_journal"
+path = "tests/it/it_journal.rs"
+
+[[test]]
+name = "it_metrics"
+path = "tests/it/it_metrics.rs"
+
+[[test]]
+name = "it_middleware"
+path = "tests/it/it_middleware.rs"
+
+[[test]]
+name = "it_packages"
+path = "tests/it/it_packages.rs"
+
+[[test]]
+name = "it_pipeline"
+path = "tests/it/it_pipeline.rs"
+
+[[test]]
+name = "it_replay"
+path = "tests/it/it_replay.rs"
+
+[[test]]
+name = "it_stages"
+path = "tests/it/it_stages.rs"
+
+[[test]]
+name = "it_web"
+path = "tests/it/it_web.rs"
+
+[[test]]
+name = "test_support"
+path = "tests/test_support/main.rs"
 required-features = ["test-support"]
 
 [[test]]
-name = "metrics_exporter_integration_test"
-path = "tests/metrics_exporter_integration_test.rs"
-required-features = ["test-support"]
+name = "e2e_postgres"
+path = "tests/e2e_postgres/main.rs"
+required-features = ["e2e", "postgres"]
 
 [[test]]
-name = "rate_limiter_integration_test"
-path = "tests/rate_limiter_integration_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "source_rate_limiter_interruption_test"
-path = "tests/source_rate_limiter_interruption_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "source_polling_contract_test"
-path = "tests/source_polling_contract_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "divergence_mid_flight_abort_test"
-path = "tests/divergence_mid_flight_abort_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "cycle_unified_guard_test"
-path = "tests/cycle_unified_guard_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "cycle_convergence_eof_gating_test"
-path = "tests/cycle_convergence_eof_gating_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "stateful_emit_per_window_test"
-path = "tests/stateful_emit_per_window_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "deterministic_fan_in_replay_test"
-path = "tests/deterministic_fan_in_replay_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "effectful_fan_in_envelope_test"
-path = "tests/effectful_fan_in_envelope_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "join_phase_transition_replay_test"
-path = "tests/join_phase_transition_replay_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "join_error_passthrough_identity_test"
-path = "tests/join_error_passthrough_identity_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "replay_truncated_eof_fidelity_test"
-path = "tests/replay_truncated_eof_fidelity_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "csv_sink_termination_contract_test"
-path = "tests/csv_sink_termination_contract_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "lineage_policy_flow_test"
-path = "tests/lineage_policy_flow_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "public_sink_author_fixture_test"
-path = "tests/public_sink_author_fixture_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "postgres_sink_application_conformance_test"
-path = "tests/postgres_sink_application_conformance_test.rs"
+name = "postgres_sink_application_conformance"
+path = "tests/postgres_sink_application_conformance.rs"
 required-features = ["postgres", "test-support"]
 
 [[test]]
-name = "postgres_payments_e2e_test"
-path = "tests/postgres_payments_e2e_test.rs"
-required-features = ["postgres", "e2e"]
-
-[[test]]
-name = "postgres_sink_inventory_consumer_test"
-path = "tests/postgres_sink_inventory_consumer_test.rs"
-required-features = ["postgres", "e2e"]
-
-[[test]]
-name = "postgres_public_consumer_test"
-path = "tests/postgres_public_consumer_test.rs"
+name = "postgres_public_consumer"
+path = "tests/postgres_public_consumer.rs"
 required-features = ["postgres"]

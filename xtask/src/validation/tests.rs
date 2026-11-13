@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use std::process::Command;
+use std::{collections::BTreeMap, ffi::OsString, process::Command};
 
 #[cfg(unix)]
 mod leaks;
@@ -254,7 +254,8 @@ fn native_entry_preserves_failures_continues_lanes_and_certifies_only_executed_s
             options,
             policy,
             None,
-            |root, policy, lane, _, output, _| {
+            |root, policy, context| {
+                let (lane, output) = (context.lane, context.directory);
                 completed.push(lane);
                 let mut expected = BTreeSet::from([plan::TestId {
                     binary: "fixture".into(),
@@ -306,6 +307,7 @@ fn native_entry_preserves_failures_continues_lanes_and_certifies_only_executed_s
                 assert!(status.success());
                 evaluate_nextest(output, &expected, status.success())
             },
+            ample,
         );
         assert_eq!(
             completed,
@@ -479,7 +481,8 @@ fn dependency_preparation_preserves_failures_without_suppressing_independent_exe
             Options::parse(&arguments).unwrap(),
             policy,
             Some(&summary_path),
-            |root, policy, lane, _, output, _| {
+            |root, policy, context| {
+                let (lane, output) = (context.lane, context.directory);
                 assert_eq!(
                     preparation_calls.get(),
                     usize::from(preparation_required),
@@ -520,6 +523,7 @@ fn dependency_preparation_preserves_failures_without_suppressing_independent_exe
                     Err(error("locked dependency unavailable during preparation"))
                 }
             },
+            ample,
         );
         let preparation_failed = preparation_required && !preparation_succeeds;
         assert_eq!(result.is_err(), preparation_failed, "{name}: {result:?}");
@@ -536,7 +540,7 @@ fn dependency_preparation_preserves_failures_without_suppressing_independent_exe
             .unwrap();
         let report: Value =
             serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
-        assert_eq!(report["version"], 4, "{name}");
+        assert_eq!(report["version"], 5, "{name}");
         assert_eq!(
             report["outcome"]["status"],
             if preparation_failed {
@@ -601,7 +605,12 @@ fn dependency_preparation_preserves_failures_without_suppressing_independent_exe
 #[test]
 fn default_and_explicit_performance_report_only_their_requested_scope() {
     for (arguments, scope, expected) in [
-        (vec![], "correctness", Lane::correctness()),
+        (vec![], "default", vec![Lane::Default]),
+        (
+            vec!["--correctness".into()],
+            "correctness",
+            Lane::correctness(),
+        ),
         (
             vec!["--lane".into(), "performance".into()],
             "performance",
@@ -629,10 +638,11 @@ fn default_and_explicit_performance_report_only_their_requested_scope() {
             Options::parse(&arguments).unwrap(),
             policy,
             Some(&summary_path),
-            |_, _, lane, _, _, _| {
-                executed.push(lane);
+            |_, _, context| {
+                executed.push(context.lane);
                 Ok(())
             },
+            ample,
         )
         .unwrap();
         assert_eq!(executed, expected);
@@ -643,7 +653,7 @@ fn default_and_explicit_performance_report_only_their_requested_scope() {
             .unwrap();
         let report: Value =
             serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
-        assert_eq!(report["version"], 4);
+        assert_eq!(report["version"], 5);
         assert_eq!(report["requested_scope"], scope);
         let unrequested: Vec<Lane> =
             serde_json::from_value(report["not_requested"].clone()).unwrap();
@@ -701,4 +711,209 @@ fn incomplete_obligations_dominate_failures_and_keep_their_class() {
         .into_result()
         .unwrap_err()
         .is::<CheckFailed>());
+}
+
+fn ample(_: &Path) -> Result<u64> {
+    Ok(u64::MAX)
+}
+
+fn latest_report(root: &Path) -> Value {
+    let run = fs::read_dir(root.join("target/test-runs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .unwrap();
+    serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap()
+}
+
+fn environment_of(command: &Command) -> BTreeMap<String, Option<String>> {
+    command
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect()
+}
+
+fn run_default_lane_with_free_space(free: u64) -> (Result<()>, Vec<Lane>, Value) {
+    let fixture = fixture();
+    let root = fixture.path().canonicalize().unwrap();
+    let policy = Policy::read(&root).unwrap();
+    let mut executed = Vec::new();
+    let result = run_native(
+        &root,
+        Options::parse(&[]).unwrap(),
+        policy,
+        None,
+        |_, _, context| {
+            executed.push(context.lane);
+            Ok(())
+        },
+        |_| Ok(free),
+    );
+    (result, executed, latest_report(&root))
+}
+
+#[test]
+fn lane_under_floor_reported_incomplete() {
+    let (result, executed, report) = run_default_lane_with_free_space(3_200_000_000);
+    assert!(result.is_err());
+    assert!(executed.is_empty());
+    assert_eq!(report["lanes"][0]["outcome"]["status"], "incomplete");
+    assert_eq!(
+        report["lanes"][0]["outcome"]["detail"],
+        "3.2 GB free, under the 5 GB floor"
+    );
+}
+
+#[test]
+fn lane_over_floor_starts() {
+    let (result, executed, report) = run_default_lane_with_free_space(6 * disk::GIGABYTE);
+    result.unwrap();
+    assert_eq!(executed, [Lane::Default]);
+    assert_eq!(report["lanes"][0]["outcome"]["status"], "passed");
+}
+
+struct LaneRun {
+    _fixture: tempfile::TempDir,
+    result: Result<()>,
+    built: Vec<PathBuf>,
+    expected: PathBuf,
+}
+
+fn run_test_support_lane(outcome: fn() -> Result<()>) -> LaneRun {
+    let fixture = fixture();
+    let root = fixture.path().canonicalize().unwrap();
+    let mut policy = Policy::read(&root).unwrap();
+    policy.environment.target_dir = None;
+    let mut built = Vec::new();
+    let result = run_native(
+        &root,
+        Options::parse(&["--lane".into(), "test-support".into()]).unwrap(),
+        policy,
+        None,
+        |_, _, context| {
+            fs::create_dir_all(context.build.path().join("debug"))?;
+            built.push(context.build.path().to_owned());
+            outcome()
+        },
+        ample,
+    );
+    LaneRun {
+        _fixture: fixture,
+        result,
+        built,
+        expected: root.join("target/lanes/test-support"),
+    }
+}
+
+#[test]
+fn passed_lane_directory_removed() {
+    let run = run_test_support_lane(|| Ok(()));
+    run.result.unwrap();
+    assert_eq!(run.built, std::slice::from_ref(&run.expected));
+    assert!(!run.expected.exists());
+}
+
+#[test]
+fn failed_lane_directory_kept() {
+    let run = run_test_support_lane(|| Err(failed("rejected")));
+    assert!(run.result.is_err());
+    assert_eq!(run.built, std::slice::from_ref(&run.expected));
+    assert!(run.expected.join("debug").is_dir());
+}
+
+#[test]
+fn lane_command_sets_rust_test_threads() {
+    let fixture = fixture();
+    let policy = Policy::read(fixture.path()).unwrap();
+    let environment = environment_of(&process::command(fixture.path(), &policy, "cargo"));
+    assert_eq!(
+        environment["RUST_TEST_THREADS"],
+        Some(policy.test_threads.to_string())
+    );
+}
+
+#[test]
+fn lane_command_omits_debug_overrides() {
+    let fixture = fixture();
+    let policy = Policy::read(fixture.path()).unwrap();
+    let ambient = ["CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"].map(OsString::from);
+    let environment = environment_of(&process::command_with(
+        fixture.path(),
+        &policy,
+        "cargo",
+        ambient,
+    ));
+    for name in ["CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"] {
+        assert_eq!(environment.get(name), Some(&None), "{name}");
+    }
+}
+
+#[test]
+fn lane_command_omits_package_variables() {
+    let fixture = fixture();
+    let policy = Policy::read(fixture.path()).unwrap();
+    let ambient = [
+        "CARGO_PKG_NAME",
+        "CARGO_PKG_VERSION_MAJOR",
+        "CARGO_MANIFEST_DIR",
+        "CARGO_HOME",
+        "PATH",
+    ]
+    .map(OsString::from);
+    let environment = environment_of(&process::command_with(
+        fixture.path(),
+        &policy,
+        "cargo",
+        ambient,
+    ));
+    for name in [
+        "CARGO_PKG_NAME",
+        "CARGO_PKG_VERSION_MAJOR",
+        "CARGO_MANIFEST_DIR",
+    ] {
+        assert_eq!(environment.get(name), Some(&None), "{name}");
+    }
+    for name in ["CARGO_HOME", "PATH"] {
+        assert!(!environment.contains_key(name), "{name}");
+    }
+}
+
+#[test]
+fn test_program_step_caps_build_jobs() {
+    let fixture = fixture();
+    let mut policy = Policy::read(fixture.path()).unwrap();
+    policy.environment.build_jobs = policy.test_program_build_jobs + 6;
+    let mut command = process::command(fixture.path(), &policy, "cargo");
+    cap_test_program_jobs(&mut command, &policy);
+    assert_eq!(
+        environment_of(&command)["CARGO_BUILD_JOBS"],
+        Some(policy.test_program_build_jobs.to_string())
+    );
+}
+
+#[test]
+fn library_step_keeps_machine_jobs() {
+    let fixture = fixture();
+    let mut policy = Policy::read(fixture.path()).unwrap();
+    policy.environment.build_jobs = policy.test_program_build_jobs + 6;
+    let commands = library_build_commands(
+        || process::command(fixture.path(), &policy, "cargo"),
+        &Lane::Default.build_selection(&[]),
+    );
+    for command in commands {
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            environment_of(&command)["CARGO_BUILD_JOBS"],
+            Some(policy.environment.build_jobs.to_string())
+        );
+        assert!(!args.iter().any(|arg| arg == "--tests"), "{args:?}");
+    }
 }

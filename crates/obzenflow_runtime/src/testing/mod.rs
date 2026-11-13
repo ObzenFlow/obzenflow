@@ -9,6 +9,11 @@
 //! `#[tokio::test(start_paused = true)]`. A probe sees only committed records, so
 //! before asserting that something did not happen, finish the producers involved
 //! or read a completed journal prefix.
+//!
+//! A test that writes disk journals and isn't about durability sets `sync = "off"`
+//! under `[journal]` in its config file, or passes
+//! [`JournalSync::Off`](crate::runtime_config::JournalSync::Off) to a journal it
+//! builds itself.
 
 #[cfg(test)]
 pub(crate) mod causal_fixture;

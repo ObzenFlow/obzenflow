@@ -34,14 +34,14 @@ async fn periodic_capture_reduces_representative_storage_without_changing_protec
                 DiskJournal::<ChainEvent>::with_owner(
                     directory.path().join(format!("dense-{stage}.log")),
                     JournalOwner::stage(stage),
-                    JournalSync::BeforeAck,
+                    JournalSync::Off,
                 )
                 .unwrap(),
             );
             let journal = DiskJournal::<ChainEvent>::with_owner(
                 directory.path().join(format!("sparse-{stage}.log")),
                 JournalOwner::stage(stage),
-                JournalSync::BeforeAck,
+                JournalSync::Off,
             )
             .unwrap();
             journal
@@ -175,7 +175,7 @@ async fn representative_stream_preserves_every_record_on_cold_warm_addressed_and
     let journal = DiskJournal::<ChainEvent>::with_owner(
         path,
         JournalOwner::stage(StageId::new()),
-        JournalSync::BeforeAck,
+        JournalSync::Off,
     )
     .unwrap();
     let tail = journal.read_last_n(16).await.unwrap();

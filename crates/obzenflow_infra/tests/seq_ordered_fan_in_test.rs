@@ -2,16 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "../../../tests/replay_testkit"]
-mod replay_testkit {
-    mod bootstrap;
-    mod count_deliveries;
-    mod journal;
-    mod manifest;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{bootstrap::*, count_deliveries::*, manifest::*, run_dir::*, stage_journal::*};
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use obzenflow_adapters::sources::ChannelSource;
@@ -480,7 +471,7 @@ fn end_of_input_flow(
 
 async fn start(flow: FlowDefinition) -> Result<FlowHandle> {
     let handle = flow
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     let mut rx = handle.state_receiver();

@@ -1,0 +1,1188 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+#[path = "../../../examples/aml_overnight_monitoring/support.rs"]
+pub mod support;
+
+use chrono::NaiveDateTime;
+use obzenflow::application::{
+    verify_call_logs, verify_run_dirs, ApplicationError, CallLogCheck, CallLogVerdict,
+    FlowApplication, LogLevel, VerifyOptions, VerifyOutcome,
+};
+use obzenflow::journal::read::{
+    open_disk_run, read_config_changes, ChainPayload, ExecutionPayload, FlowControlPayload,
+    RunJournalKind, RunRecordData,
+};
+use obzenflow::journal::{EffectOutcomePayload, JournalRecord};
+use obzenflow_core::contracts::{ContractEvidenceDetails, ContractPhase};
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::{ContractResult, StageId, WriterId};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use support::domain::AMLWORLD_TIME;
+use support::vendors::VendorStats;
+
+const PLANTED: [(u64, &[&str]); 13] = [
+    (2800016, &["first_payment_large_cash"]),
+    (2800018, &["first_payment_large_cash"]),
+    (2800028, &[]),
+    (2800037, &["format_switch"]),
+    (2800079, &[]),
+    (2800096, &["fan_out_large_payment"]),
+    (2800105, &[]),
+    (2800113, &["thin_history_large_transfer"]),
+    (2800117, &["format_switch", "thin_history_large_transfer"]),
+    (2800182, &["thin_history_large_transfer"]),
+    (2800215, &[]),
+    (2800216, &[]),
+    (2800224, &["format_switch", "fan_out_large_payment"]),
+];
+
+const WHOLE_DAY: [(&str, &[&str]); 4] = [
+    ("day:2022/09/05:12/80890E60D", &["fan_in"]),
+    ("day:2022/09/05:12/80B74F97B", &["fan_in"]),
+    ("day:2022/09/05:48/81F0A0001", &["fan_out"]),
+    ("day:2022/09/05:48/81F0A0003", &["fan_out", "fan_in"]),
+];
+
+const BAD_NIGHT_ROWS: [(u64, u64, u64); 3] =
+    [(2800047, 46, 48), (2800107, 106, 108), (2800177, 176, 178)];
+
+const ENGINE_RULES: &str = "sim-2026.10";
+const WHOLE_DAY_RULES: &str = "aml-daily-profile-v1";
+
+const REPORTING_CURRENCY: &str = "US Dollar";
+const BEFORE_THE_FIRST_YUAN_RATE: [u64; 3] = [2800007, 2800020, 2800045];
+const BOOKED_AS_A_RATE_TAKES_EFFECT: (u64, &str) = (2800011, "2022-09-05T01:00:00");
+const CORRECTED_RATE: (&str, &str) = (
+    "Euro,2022-09-05T13:00:00,0.9916\n",
+    "Euro,2022-09-05T13:00:00,0.9930\n",
+);
+
+fn example_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/aml_overnight_monitoring")
+}
+
+fn shipped_rates() -> PathBuf {
+    example_dir().join("fixtures/simulated-treasury-rates.csv")
+}
+
+struct Rate {
+    currency: String,
+    effective_at: NaiveDateTime,
+    usd_per_unit: String,
+}
+
+fn rates() -> Vec<Rate> {
+    std::fs::read_to_string(shipped_rates())
+        .expect("rates are readable")
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let row: Vec<&str> = line.split(',').collect();
+            Rate {
+                currency: row[0].to_owned(),
+                effective_at: row[1].parse().expect("effective_at column"),
+                usd_per_unit: row[2].to_owned(),
+            }
+        })
+        .collect()
+}
+
+fn decimal(text: &str) -> (u128, u32) {
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let places = u32::try_from(fraction.len()).expect("few decimal places");
+    let units = format!("{whole}{fraction}")
+        .parse()
+        .expect("a plain decimal");
+    (units, places)
+}
+
+fn decimal_value(text: &str) -> (u128, u32) {
+    let (units, places) = decimal(text);
+    (units * 10u128.pow(8 - places), 8)
+}
+
+fn booked_cents(amount: &str) -> u128 {
+    let (units, places) = decimal(amount);
+    units * 10u128.pow(2 - places)
+}
+
+fn cents_half_up(amount: &str, rate: &str) -> u128 {
+    let (amount, amount_places) = decimal(amount);
+    let (rate, rate_places) = decimal(rate);
+    let divisor = 10u128.pow(amount_places + rate_places - 2);
+    let product = amount * rate;
+    product / divisor + u128::from(product % divisor * 2 >= divisor)
+}
+
+fn usd(cents: u128) -> String {
+    format!("{}.{:02}", cents / 100, cents % 100)
+}
+
+fn rate_in_force<'a>(rates: &'a [Rate], currency: &str, booked: NaiveDateTime) -> Option<&'a Rate> {
+    rates
+        .iter()
+        .filter(|rate| rate.currency == currency && rate.effective_at <= booked)
+        .max_by_key(|rate| rate.effective_at)
+}
+
+fn booked_at(row: &[String]) -> NaiveDateTime {
+    NaiveDateTime::parse_from_str(&row[1], AMLWORLD_TIME).expect("timestamp column")
+}
+
+fn iso(time: NaiveDateTime) -> String {
+    time.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+fn fixture_rows() -> Vec<Vec<String>> {
+    std::fs::read_to_string(example_dir().join("fixtures/transactions.csv"))
+        .expect("fixture is readable")
+        .lines()
+        .skip(1)
+        .map(|line| line.split(',').map(str::to_owned).collect())
+        .collect()
+}
+
+fn fixture_txn_ids() -> BTreeSet<u64> {
+    fixture_rows()
+        .iter()
+        .map(|row| row[0].parse().expect("txn_id column"))
+        .collect()
+}
+
+fn shipped_table(file: &str) -> toml::Table {
+    std::fs::read_to_string(example_dir().join(file))
+        .expect("shipped configuration is readable")
+        .parse()
+        .expect("shipped configuration parses")
+}
+
+fn fixture_config(dir: &Path, fx_rates: &Path) -> PathBuf {
+    shipped_config("obzenflow.toml", dir, fx_rates)
+}
+
+fn shipped_config(file: &str, dir: &Path, fx_rates: &Path) -> PathBuf {
+    let example = example_dir();
+    let mut config = shipped_table(file);
+    let backpressure = &config["runtime"]["backpressure"];
+    assert_eq!(backpressure["flow"]["mode"].as_str(), Some("enforce"));
+    let window = backpressure["flow"]["window"].as_integer().expect("window");
+    assert!(
+        usize::try_from(window).expect("a positive window") < fixture_rows().len(),
+        "the window holds the transactions source mid-file"
+    );
+    assert_eq!(
+        backpressure["stages"]["daily_profile"]["edges"]["alerts"]["mode"].as_str(),
+        Some("track")
+    );
+
+    let app = config
+        .get_mut("app")
+        .and_then(toml::Value::as_table_mut)
+        .expect("[app] table");
+    assert_eq!(
+        app.get("risk_engine").and_then(toml::Value::as_str),
+        Some("simulated"),
+        "the shipped configuration names the simulated risk engine"
+    );
+    let transactions = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        app.get("transactions")
+            .and_then(toml::Value::as_str)
+            .expect("the configuration names its transactions"),
+    );
+    for (key, path) in [
+        (
+            "account_history",
+            example.join("fixtures/account-history.csv"),
+        ),
+        ("transactions", transactions),
+        ("fx_rates", fx_rates.to_path_buf()),
+        ("risk_ledger", dir.join("risk-calls.jsonl")),
+        ("case_ledger", dir.join("case-calls.jsonl")),
+        ("cleared_register", dir.join("cleared.csv")),
+        ("unscored_register", dir.join("unscored.csv")),
+        ("case_register", dir.join("cases.csv")),
+        ("unopened_register", dir.join("unopened-alerts.csv")),
+    ] {
+        app.insert(
+            key.to_owned(),
+            toml::Value::String(path.display().to_string()),
+        );
+    }
+    config.insert(
+        "journal".to_owned(),
+        toml::Value::Table(toml::Table::from_iter([(
+            "sync".to_owned(),
+            toml::Value::String("off".to_owned()),
+        )])),
+    );
+    let path = dir.join(file);
+    std::fs::write(
+        &path,
+        toml::to_string(&config).expect("configuration serializes"),
+    )
+    .expect("configuration is written");
+    path
+}
+
+fn with_risk_engine(config: &Path, risk_engine: &str) -> PathBuf {
+    let mut table: toml::Table = std::fs::read_to_string(config)
+        .expect("configuration is readable")
+        .parse()
+        .expect("configuration parses");
+    table
+        .get_mut("app")
+        .and_then(toml::Value::as_table_mut)
+        .expect("[app] table")
+        .insert(
+            "risk_engine".to_owned(),
+            toml::Value::String(risk_engine.to_owned()),
+        );
+    let path = config.with_file_name(format!("{risk_engine}.toml"));
+    std::fs::write(
+        &path,
+        toml::to_string(&table).expect("configuration serializes"),
+    )
+    .expect("configuration is written");
+    path
+}
+
+fn run(config: &Path, journal_root: &Path, replay_from: Option<&Path>, stats: Arc<VendorStats>) {
+    try_run(config, journal_root, replay_from, stats).expect("the flow completes");
+}
+
+fn try_run(
+    config: &Path,
+    journal_root: &Path,
+    replay_from: Option<&Path>,
+    stats: Arc<VendorStats>,
+) -> Result<(), ApplicationError> {
+    let mut args = vec![
+        OsString::from("aml_overnight_monitoring"),
+        OsString::from("--config"),
+        config.as_os_str().to_os_string(),
+    ];
+    if let Some(archive) = replay_from {
+        args.push(OsString::from("--replay-from"));
+        args.push(archive.as_os_str().to_os_string());
+    }
+    FlowApplication::builder()
+        .with_log_level(LogLevel::Error)
+        .with_cli_args(args)
+        .run_blocking(support::flow::assemble_flow(
+            journal_root.to_path_buf(),
+            stats,
+        ))
+}
+
+fn runs(journal_root: &Path) -> Vec<PathBuf> {
+    let mut runs: Vec<_> = std::fs::read_dir(journal_root.join("flows"))
+        .expect("flows directory")
+        .map(|entry| entry.expect("run entry").path())
+        .filter(|path| path.join("run_manifest.json").exists())
+        .collect();
+    runs.sort();
+    runs
+}
+
+struct Archive {
+    rows: Vec<(String, JournalRecord<ChainPayload>)>,
+    error_rows: Vec<(String, JournalRecord<ChainPayload>)>,
+    stage_ids: BTreeMap<String, StageId>,
+}
+
+impl Archive {
+    fn read(run: &Path) -> Self {
+        tokio::runtime::Runtime::new()
+            .expect("a reader runtime")
+            .block_on(async {
+                let mut snapshot = open_disk_run(run).await.expect("the archive opens");
+                let mut archive = Self {
+                    rows: Vec::new(),
+                    error_rows: Vec::new(),
+                    stage_ids: BTreeMap::new(),
+                };
+                while let Some(record) = snapshot.next().await.expect("the archive reads") {
+                    let Some(stage) = record.journal.stage else {
+                        continue;
+                    };
+                    archive.stage_ids.insert(stage.key.clone(), stage.id);
+                    match (record.journal.kind, record.record) {
+                        (RunJournalKind::Data, RunRecordData::Chain(row)) => {
+                            archive.rows.push((stage.key, *row));
+                        }
+                        (RunJournalKind::Error, RunRecordData::Chain(row)) => {
+                            archive.error_rows.push((stage.key, *row));
+                        }
+                        _ => {}
+                    }
+                }
+                archive
+            })
+    }
+
+    fn rows<'a>(
+        &'a self,
+        stage: &'a str,
+    ) -> impl Iterator<Item = &'a JournalRecord<ChainPayload>> + 'a {
+        self.rows
+            .iter()
+            .filter(move |(key, _)| key == stage)
+            .map(|(_, row)| row)
+    }
+
+    fn errors(&self, stage: &str) -> usize {
+        self.error_rows
+            .iter()
+            .filter(|(key, _)| key == stage)
+            .count()
+    }
+
+    fn facts(&self, stage: &str, event_type: &str) -> Vec<serde_json::Value> {
+        self.rows(stage)
+            .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
+            .filter(|row| row.event_type() == event_type)
+            .map(JournalRecord::payload)
+            .collect()
+    }
+
+    fn keyed_facts(
+        &self,
+        stage: &str,
+        event_type: &str,
+    ) -> Vec<(serde_json::Value, Option<String>)> {
+        self.rows(stage)
+            .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
+            .filter(|row| row.event_type() == event_type)
+            .map(|row| {
+                let key = row
+                    .envelope
+                    .provenance
+                    .event
+                    .effect_provenance
+                    .as_ref()
+                    .and_then(|provenance| provenance.idempotency_key.as_ref())
+                    .map(|key| key.0.clone());
+                (row.payload(), key)
+            })
+            .collect()
+    }
+
+    fn effect_failures(&self, stage: &str) -> Vec<(String, String)> {
+        self.rows(stage)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) => {
+                    match &record.outcome {
+                        EffectOutcomePayload::Failed {
+                            cause: Some(cause), ..
+                        } => Some((cause.source.to_string(), cause.code.to_string())),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn all_facts(&self, event_type: &str) -> usize {
+        self.rows
+            .iter()
+            .filter(|(_, row)| {
+                matches!(row.payload, ChainPayload::Fact(_)) && row.event_type() == event_type
+            })
+            .count()
+    }
+
+    fn natural_eof_from(&self, stage: &str, author: &str) -> usize {
+        let author = self.stage_ids[author];
+        self.rows(stage)
+            .position(|row| {
+                matches!(&row.payload, ChainPayload::FlowControl(FlowControlPayload::Eof {
+                    kind: EofKind::Natural,
+                    writer_id: Some(WriterId::Stage(writer)),
+                    ..
+                }) if *writer == author)
+            })
+            .unwrap_or_else(|| panic!("{stage} passes on {author}'s natural EOF"))
+    }
+
+    fn passing_verdicts(&self) -> BTreeMap<String, usize> {
+        let names: BTreeMap<StageId, &str> = self
+            .stage_ids
+            .iter()
+            .map(|(name, id)| (*id, name.as_str()))
+            .collect();
+        let mut verdicts = BTreeMap::new();
+        for (_, row) in &self.rows {
+            if let ChainPayload::Execution(ExecutionPayload::ContractStatus {
+                upstream,
+                reader,
+                pass: true,
+                ..
+            }) = &row.payload
+            {
+                *verdicts
+                    .entry(format!("{} -> {}", names[upstream], names[reader]))
+                    .or_insert(0) += 1;
+            }
+        }
+        verdicts
+    }
+}
+
+fn txn_id(verdict: &serde_json::Value) -> u64 {
+    verdict["txn_id"]
+        .as_u64()
+        .or_else(|| verdict["subject"]["transaction"].as_u64())
+        .expect("a transaction verdict")
+}
+
+fn alert_id(fact: &serde_json::Value) -> &str {
+    fact["alert_id"].as_str().expect("alert_id")
+}
+
+fn reasons(fact: &serde_json::Value) -> Vec<&str> {
+    fact["reasons"]
+        .as_array()
+        .expect("reasons")
+        .iter()
+        .map(|reason| reason.as_str().expect("reason code"))
+        .collect()
+}
+
+fn line_count(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .expect("the call log is readable")
+        .lines()
+        .count()
+}
+
+fn decided_keys(path: &Path) -> usize {
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(path)
+        .expect("the call log is readable")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+        .collect();
+    for line in &lines {
+        assert_eq!(line["result"], "decided", "{line}");
+        assert!(line.get("response").is_some(), "{line}");
+    }
+    let keys: BTreeSet<&str> = lines
+        .iter()
+        .map(|line| line["key"].as_str().expect("each line names its key"))
+        .collect();
+    assert_eq!(keys.len(), lines.len(), "one decided line per key");
+    keys.len()
+}
+
+fn divergences(baseline: &Path, candidate: &Path) -> BTreeMap<String, u64> {
+    let outcome =
+        verify_run_dirs(baseline, candidate, &VerifyOptions::default()).expect("verification runs");
+    let VerifyOutcome::Completed { report, .. } = outcome else {
+        panic!("verification completes")
+    };
+    report
+        .stages
+        .iter()
+        .map(|(stage, stage_report)| (stage.clone(), stage_report.divergence_count))
+        .filter(|(_, count)| *count > 0)
+        .collect()
+}
+
+#[test]
+fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_system() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = fixture_config(dir.path(), &shipped_rates());
+    let journal_root = dir.path().join("journals");
+
+    let live = Arc::new(VendorStats::default());
+    run(&config, &journal_root, None, live.clone());
+    assert_eq!(live.engines_built(), 1);
+    assert_eq!(live.case_systems_built(), 1);
+
+    let baseline = runs(&journal_root).pop().expect("the live run's archive");
+    let archive = Archive::read(&baseline);
+    assert!(
+        archive.error_rows.is_empty(),
+        "the default night sends nothing to an error journal"
+    );
+    assert_eq!(archive.all_facts("aml.score_unavailable"), 0);
+    assert_eq!(archive.all_facts("aml.case_unavailable"), 0);
+
+    let cleared = archive.facts("score", "aml.transaction_cleared");
+    let flagged = archive.facts("score", "aml.alert_raised");
+    let verdicts: Vec<u64> = cleared.iter().chain(&flagged).map(txn_id).collect();
+    let decided: BTreeSet<u64> = verdicts.iter().copied().collect();
+    assert_eq!(verdicts.len(), decided.len(), "each transaction ends once");
+    assert_eq!(decided, fixture_txn_ids());
+    for event_type in ["aml.transaction_cleared", "aml.alert_raised"] {
+        for (verdict, key) in archive.keyed_facts("score", event_type) {
+            assert_eq!(
+                key,
+                Some(format!("aml-score:{}", txn_id(&verdict))),
+                "each score record carries its transaction's key"
+            );
+        }
+    }
+
+    let flags: BTreeMap<u64, Vec<&str>> = flagged
+        .iter()
+        .map(|alert| (txn_id(alert), reasons(alert)))
+        .collect();
+    for (txn, expected) in PLANTED {
+        assert!(decided.contains(&txn), "planted {txn} has a verdict");
+        assert_eq!(
+            flags.get(&txn).cloned().unwrap_or_default(),
+            expected.to_vec(),
+            "planted {txn}"
+        );
+    }
+    let planted_flags: BTreeSet<u64> = PLANTED
+        .iter()
+        .filter(|(_, reasons)| !reasons.is_empty())
+        .map(|(txn, _)| *txn)
+        .collect();
+    assert_eq!(
+        flags.keys().copied().collect::<BTreeSet<_>>(),
+        planted_flags
+    );
+    for verdict in cleared.iter().chain(&flagged) {
+        assert_eq!(verdict["rules_version"], ENGINE_RULES);
+    }
+    for alert in &flagged {
+        assert_eq!(alert_id(alert), format!("txn:{}", txn_id(alert)));
+    }
+
+    let whole_day = archive.facts("daily_profile", "aml.alert_raised");
+    assert_eq!(
+        whole_day
+            .iter()
+            .map(|alert| (alert_id(alert), reasons(alert)))
+            .collect::<Vec<_>>(),
+        WHOLE_DAY
+            .iter()
+            .map(|(id, reasons)| (*id, reasons.to_vec()))
+            .collect::<Vec<_>>()
+    );
+    for alert in &whole_day {
+        assert_eq!(alert["subject"]["day"], "2022/09/05");
+        assert_eq!(alert["rules_version"], WHOLE_DAY_RULES);
+    }
+
+    let totals = archive.facts("day_totals", "aml.day_totals");
+    assert_eq!(totals.len(), 1, "the day's totals are journaled once");
+    let totals = &totals[0];
+    let transactions = archive.facts("transactions", "aml.transaction").len();
+    assert_eq!(transactions, fixture_rows().len());
+    assert_eq!(totals["transactions"].as_u64(), Some(transactions as u64));
+    let mut fields = totals
+        .as_object()
+        .expect("day totals are an object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    fields.sort();
+    assert_eq!(
+        fields,
+        [
+            "by_format",
+            "labelled_laundering",
+            "paid_usd",
+            "transactions",
+            "unpriced"
+        ]
+    );
+
+    let rates = rates();
+    let rows = fixture_rows();
+    let booked: BTreeMap<u64, &Vec<String>> = rows
+        .iter()
+        .map(|row| (row[0].parse().expect("txn_id column"), row))
+        .collect();
+    let priced = archive.facts("price", "aml.transaction_priced");
+    assert_eq!(
+        priced.len(),
+        transactions,
+        "one priced fact per transaction"
+    );
+    let mut paid_cents = 0;
+    let mut unpriced = Vec::new();
+    let mut effective = BTreeMap::new();
+    for fact in &priced {
+        let transaction = &fact["transaction"];
+        let txn = transaction["txn_id"].as_u64().expect("txn_id");
+        let row = booked[&txn];
+        let paid = &transaction["paid"];
+        assert_eq!(paid["currency"], row[9].as_str());
+        assert_eq!(
+            decimal_value(paid["amount"].as_str().expect("an exact amount")),
+            decimal_value(&row[8]),
+            "{txn} keeps its booked amount"
+        );
+        assert_eq!(transaction["timestamp"], row[1].as_str());
+        let value = &fact["value"];
+        if row[9] == REPORTING_CURRENCY {
+            let cents = booked_cents(&row[8]);
+            assert_eq!(value["as_booked"], usd(cents).as_str(), "{txn}");
+            paid_cents += cents;
+            continue;
+        }
+        match rate_in_force(&rates, &row[9], booked_at(row)) {
+            Some(rate) => {
+                let converted = &value["converted"];
+                assert_eq!(
+                    converted["rate"]["effective_at"],
+                    iso(rate.effective_at).as_str(),
+                    "{txn} takes the latest rate at or before its booking time"
+                );
+                assert_eq!(
+                    converted["rate"]["usd_per_unit"],
+                    rate.usd_per_unit.as_str()
+                );
+                let cents = cents_half_up(&row[8], &rate.usd_per_unit);
+                assert_eq!(
+                    converted["usd"],
+                    usd(cents).as_str(),
+                    "{txn} rounds once, half up, to the cent"
+                );
+                effective.insert(txn, iso(rate.effective_at));
+                paid_cents += cents;
+            }
+            None => {
+                assert_eq!(*value, "unpriced", "{txn} has no rate in force");
+                unpriced.push(txn);
+            }
+        }
+    }
+    assert_eq!(unpriced, BEFORE_THE_FIRST_YUAN_RATE);
+    let (on_the_hour, its_rate) = BOOKED_AS_A_RATE_TAKES_EFFECT;
+    assert_eq!(effective[&on_the_hour], its_rate);
+    assert_eq!(totals["unpriced"].as_u64(), Some(unpriced.len() as u64));
+    assert_eq!(
+        totals["paid_usd"],
+        usd(paid_cents).as_str(),
+        "the day's total is the sum of the rounded payments"
+    );
+    assert_eq!(
+        totals["by_format"]
+            .as_object()
+            .expect("by_format")
+            .values()
+            .map(|count| count.as_u64().expect("a count"))
+            .sum::<u64>(),
+        transactions as u64
+    );
+    let labelled = fixture_rows()
+        .iter()
+        .filter(|row| row.last().map(String::as_str) == Some("1"))
+        .count();
+    assert_eq!(
+        totals["labelled_laundering"].as_u64(),
+        Some(labelled as u64)
+    );
+
+    let boundary = archive.natural_eof_from("alerts", "score");
+    let merged: Vec<(usize, String)> = archive
+        .rows("alerts")
+        .enumerate()
+        .filter(|(_, row)| row.event_type() == "aml.alert_raised")
+        .map(|(position, row)| (position, alert_id(&row.payload()).to_owned()))
+        .collect();
+    assert_eq!(merged.len(), planted_flags.len() + WHOLE_DAY.len());
+    for (position, id) in &merged {
+        if id.starts_with("txn:") {
+            assert!(*position < boundary, "{id} precedes score's natural EOF");
+        } else {
+            assert!(*position > boundary, "{id} follows score's natural EOF");
+        }
+    }
+
+    let cases = archive.facts("open_case", "aml.case_opened");
+    let opened: Vec<(u64, &str)> = cases
+        .iter()
+        .map(|case| {
+            (
+                case["case_number"].as_u64().expect("case number"),
+                alert_id(case),
+            )
+        })
+        .collect();
+    let expected_ids: Vec<String> = planted_flags
+        .iter()
+        .map(|txn| format!("txn:{txn}"))
+        .chain(WHOLE_DAY.iter().map(|(id, _)| (*id).to_owned()))
+        .collect();
+    assert_eq!(
+        opened,
+        expected_ids
+            .iter()
+            .zip(1..)
+            .map(|(id, number)| (number, id.as_str()))
+            .collect::<Vec<_>>(),
+        "per-transaction cases open first, whole-day cases after them"
+    );
+    let raised: BTreeMap<&str, &serde_json::Value> = flagged
+        .iter()
+        .chain(&whole_day)
+        .map(|alert| (alert_id(alert), alert))
+        .collect();
+    for case in &cases {
+        let alert = raised[alert_id(case)];
+        assert_eq!(reasons(case), reasons(alert));
+        assert_eq!(case["rules_version"], alert["rules_version"]);
+    }
+    for (case, key) in archive.keyed_facts("open_case", "aml.case_opened") {
+        assert_eq!(
+            key,
+            Some(format!("aml-case:{}", alert_id(&case))),
+            "each case record carries its alert's key"
+        );
+    }
+
+    let risk_log = dir.path().join("risk-calls.jsonl");
+    let case_log = dir.path().join("case-calls.jsonl");
+    let risk_calls = line_count(&risk_log);
+    let case_calls = line_count(&case_log);
+    assert_eq!(risk_calls, fixture_rows().len());
+    assert_eq!(case_calls, expected_ids.len());
+    assert_eq!(decided_keys(&risk_log), risk_calls);
+    assert_eq!(decided_keys(&case_log), case_calls);
+    let check = verify_call_logs(
+        std::slice::from_ref(&baseline),
+        &[risk_log.clone(), case_log.clone()],
+    )
+    .expect("the lineage check runs");
+    let CallLogCheck::Judged { logs, .. } = &check else {
+        panic!("the fresh run names one lineage: {check:?}");
+    };
+    assert!(
+        logs.iter()
+            .all(|log| log.verdict == CallLogVerdict::Passed && log.replayed_by_resumes == 0),
+        "the fresh run's logs pass with no repeats: {logs:?}"
+    );
+    assert_eq!(check.exit_code(), 0);
+
+    let replay = Arc::new(VendorStats::default());
+    run(&config, &journal_root, Some(&baseline), replay.clone());
+    assert_eq!(
+        replay.engines_built(),
+        0,
+        "strict replay builds no risk engine"
+    );
+    assert_eq!(
+        replay.case_systems_built(),
+        0,
+        "strict replay builds no case system"
+    );
+    assert_eq!(line_count(&dir.path().join("risk-calls.jsonl")), risk_calls);
+    assert_eq!(line_count(&dir.path().join("case-calls.jsonl")), case_calls);
+
+    let candidate = runs(&journal_root).pop().expect("the replay's archive");
+    assert_ne!(candidate, baseline);
+    let outcome = verify_run_dirs(&baseline, &candidate, &VerifyOptions::default())
+        .expect("verification runs");
+    assert_eq!(outcome.exit_code(), 0);
+}
+
+#[test]
+fn the_outage_stub_refuses_every_score_and_a_replay_naming_the_simulated_engine_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let simulated = fixture_config(dir.path(), &shipped_rates());
+    let outage = with_risk_engine(&simulated, "outage");
+    let journal_root = dir.path().join("journals");
+    let risk_ledger = dir.path().join("risk-calls.jsonl");
+    let case_ledger = dir.path().join("case-calls.jsonl");
+
+    let live = Arc::new(VendorStats::default());
+    run(&outage, &journal_root, None, live.clone());
+    assert_eq!(
+        live.engines_built(),
+        0,
+        "the outage stub replaces the engine"
+    );
+    assert!(!risk_ledger.exists(), "the simulated engine never runs");
+
+    let baseline = runs(&journal_root).pop().expect("the outage run's archive");
+    let archive = Archive::read(&baseline);
+    let unscored = archive.facts("score", "aml.score_unavailable");
+    assert_eq!(
+        unscored.len(),
+        fixture_rows().len(),
+        "each transaction ends once"
+    );
+    assert_eq!(
+        unscored.iter().map(txn_id).collect::<BTreeSet<_>>(),
+        fixture_txn_ids()
+    );
+    for fact in &unscored {
+        assert_eq!(fact["reason"], "the risk engine is unavailable");
+    }
+    assert!(archive.facts("score", "aml.transaction_cleared").is_empty());
+    assert!(archive.facts("score", "aml.alert_raised").is_empty());
+    let failures = archive.effect_failures("score");
+    assert_eq!(failures.len(), fixture_rows().len());
+    assert!(failures
+        .iter()
+        .all(|(source, code)| source == "risk_engine" && code == "unavailable"));
+    assert_eq!(
+        archive.errors("score"),
+        0,
+        "a failed call's record commits without the mark"
+    );
+
+    let case_calls = line_count(&case_ledger);
+    assert_eq!(
+        case_calls,
+        WHOLE_DAY.len(),
+        "only the whole-day alerts reach the case system"
+    );
+
+    let replay = Arc::new(VendorStats::default());
+    run(&outage, &journal_root, Some(&baseline), replay.clone());
+    assert_eq!(replay.engines_built(), 0);
+    assert_eq!(
+        replay.case_systems_built(),
+        0,
+        "strict replay builds no case system"
+    );
+    assert_eq!(line_count(&case_ledger), case_calls);
+    let candidate = runs(&journal_root).pop().expect("the replay's archive");
+    assert_ne!(candidate, baseline);
+    let outcome = verify_run_dirs(&baseline, &candidate, &VerifyOptions::default())
+        .expect("verification runs");
+    assert_eq!(outcome.exit_code(), 0);
+
+    let refused = Arc::new(VendorStats::default());
+    assert!(
+        try_run(&simulated, &journal_root, Some(&baseline), refused.clone()).is_err(),
+        "a replay naming the simulated engine is refused"
+    );
+    assert_eq!(refused.engines_built(), 0, "the refusal precedes any call");
+    assert_eq!(refused.case_systems_built(), 0);
+    assert!(!risk_ledger.exists());
+    assert_eq!(line_count(&case_ledger), case_calls);
+    let refused_run = runs(&journal_root).pop().expect("the refused replay's run");
+    assert_ne!(refused_run, candidate);
+    let changes = read_config_changes(&refused_run).expect("the refused run's manifest reads");
+    assert_eq!(
+        changes
+            .iter()
+            .map(|compared| compared.changes.keys())
+            .collect::<Vec<_>>(),
+        [vec!["app.risk_engine"]]
+    );
+}
+
+#[test]
+fn each_variant_configuration_differs_from_the_default_in_one_setting() {
+    let default = shipped_table("obzenflow.toml");
+    for (file, key, value) in [
+        (
+            "obzenflow.bad-night.toml",
+            "transactions",
+            "examples/aml_overnight_monitoring/fixtures/bad-night-transactions.csv",
+        ),
+        (
+            "obzenflow.unreadable-replies.toml",
+            "case_system",
+            "unreadable_replies",
+        ),
+    ] {
+        let mut variant = shipped_table(file);
+        let app = variant
+            .get_mut("app")
+            .and_then(toml::Value::as_table_mut)
+            .expect("[app] table");
+        assert_eq!(
+            app.insert(key.to_owned(), default["app"][key].clone()),
+            Some(toml::Value::String(value.to_owned())),
+            "{file}"
+        );
+        assert_eq!(variant, default, "{file} differs only in app.{key}");
+    }
+}
+
+#[test]
+fn a_bad_night_completes_and_its_source_journals_each_unreadable_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = shipped_config("obzenflow.bad-night.toml", dir.path(), &shipped_rates());
+    let journal_root = dir.path().join("journals");
+    run(
+        &config,
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let archive = Archive::read(&runs(&journal_root).pop().expect("the bad night's archive"));
+
+    let rejected: Vec<(String, String)> = archive
+        .error_rows
+        .iter()
+        .filter(|(stage, _)| stage == "transactions")
+        .map(|(_, row)| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(rejected)) => {
+                (format!("{:?}", rejected.kind), rejected.detail.clone())
+            }
+            other => panic!("a rejected row, not {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        rejected,
+        BAD_NIGHT_ROWS
+            .iter()
+            .map(|(_, record, line)| (
+                "Validation".to_owned(),
+                format!("record {record}: invalid record (line {line})")
+            ))
+            .collect::<Vec<_>>()
+    );
+    for (stage, _) in &archive.error_rows {
+        assert_eq!(stage, "transactions", "only the source rejects a record");
+    }
+
+    let unreadable: BTreeSet<u64> = BAD_NIGHT_ROWS.iter().map(|(txn, _, _)| *txn).collect();
+    let read: BTreeSet<u64> = archive
+        .facts("transactions", "aml.transaction")
+        .iter()
+        .map(txn_id)
+        .collect();
+    assert_eq!(
+        read,
+        fixture_txn_ids()
+            .difference(&unreadable)
+            .copied()
+            .collect::<BTreeSet<_>>()
+    );
+    let verdicts = archive.facts("score", "aml.transaction_cleared").len()
+        + archive.facts("score", "aml.alert_raised").len();
+    assert_eq!(verdicts, read.len(), "every row read is scored once");
+    let totals = archive.facts("day_totals", "aml.day_totals");
+    assert_eq!(totals[0]["transactions"].as_u64(), Some(read.len() as u64));
+}
+
+#[test]
+fn unreadable_case_replies_complete_and_open_case_journals_each_failed_alert() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = shipped_config(
+        "obzenflow.unreadable-replies.toml",
+        dir.path(),
+        &shipped_rates(),
+    );
+    let journal_root = dir.path().join("journals");
+    run(
+        &config,
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let baseline = runs(&journal_root).pop().expect("the run's archive");
+    let archive = Archive::read(&baseline);
+
+    let failed: Vec<(String, String, String)> = archive
+        .error_rows
+        .iter()
+        .filter(|(stage, _)| stage == "open_case")
+        .map(|(_, row)| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => (
+                format!("{:?}", failure.kind),
+                failure.detail.clone(),
+                alert_id(&failure.input.payload).to_owned(),
+            ),
+            other => panic!("a failed alert, not {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        failed,
+        WHOLE_DAY
+            .iter()
+            .map(|(id, _)| (
+                "PermanentFailure".to_owned(),
+                "the case system's reply has no case number".to_owned(),
+                (*id).to_owned()
+            ))
+            .collect::<Vec<_>>()
+    );
+    for (stage, _) in &archive.error_rows {
+        assert_eq!(stage, "open_case", "only open_case fails an alert");
+    }
+    assert!(archive
+        .facts("open_case", "aml.case_unavailable")
+        .is_empty());
+    let opened: Vec<String> = archive
+        .facts("open_case", "aml.case_opened")
+        .iter()
+        .map(|case| alert_id(case).to_owned())
+        .collect();
+    assert!(opened.iter().all(|id| id.starts_with("txn:")));
+    assert_eq!(
+        opened.len(),
+        PLANTED
+            .iter()
+            .filter(|(_, reasons)| !reasons.is_empty())
+            .count()
+    );
+
+    let simulated = shipped_config("obzenflow.toml", dir.path(), &shipped_rates());
+    let refused = Arc::new(VendorStats::default());
+    assert!(
+        try_run(&simulated, &journal_root, Some(&baseline), refused.clone()).is_err(),
+        "a replay naming the readable case system is refused"
+    );
+    assert_eq!(
+        refused.case_systems_built(),
+        0,
+        "the refusal precedes any call"
+    );
+}
+
+#[test]
+fn a_corrected_rate_in_a_fresh_run_diverges_only_where_it_priced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let journal_root = dir.path().join("journals");
+    let first = dir.path().join("first");
+    let corrected = dir.path().join("corrected");
+    std::fs::create_dir_all(&first).expect("first run directory");
+    std::fs::create_dir_all(&corrected).expect("corrected run directory");
+
+    run(
+        &fixture_config(&first, &shipped_rates()),
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let baseline = runs(&journal_root).pop().expect("the first run's archive");
+
+    let (original, replacement) = CORRECTED_RATE;
+    let shipped = std::fs::read_to_string(shipped_rates()).expect("rates are readable");
+    assert!(shipped.contains(original));
+    let corrected_rates = corrected.join("rates.csv");
+    std::fs::write(&corrected_rates, shipped.replace(original, replacement))
+        .expect("corrected rates are written");
+    run(
+        &fixture_config(&corrected, &corrected_rates),
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let fresh = runs(&journal_root)
+        .pop()
+        .expect("the corrected run's archive");
+    assert_ne!(fresh, baseline);
+
+    let rates = rates();
+    let priced_from_it = fixture_rows()
+        .iter()
+        .filter(|row| {
+            rate_in_force(&rates, &row[9], booked_at(row)).is_some_and(|rate| {
+                original.starts_with(&format!("{},{},", rate.currency, iso(rate.effective_at)))
+            })
+        })
+        .count() as u64;
+    assert!(priced_from_it > 0, "the corrected rate prices a payment");
+    assert_eq!(
+        divergences(&baseline, &fresh),
+        BTreeMap::from([
+            ("day_totals".to_owned(), 1),
+            ("fx_rates".to_owned(), 1),
+            ("price".to_owned(), priced_from_it),
+        ])
+    );
+}
+
+#[test]
+fn every_edge_records_one_passing_contract_verdict() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = fixture_config(dir.path(), &shipped_rates());
+    let journal_root = dir.path().join("journals");
+    run(
+        &config,
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let archive = Archive::read(&runs(&journal_root).pop().expect("the run's archive"));
+
+    let edges = [
+        "account_history -> profile",
+        "transactions -> profile",
+        "fx_rates -> price",
+        "transactions -> price",
+        "transactions -> daily_profile",
+        "price -> day_totals",
+        "profile -> score",
+        "score -> cleared",
+        "score -> unscored",
+        "score -> alerts",
+        "daily_profile -> alerts",
+        "alerts -> open_case",
+        "open_case -> case_register",
+        "open_case -> unopened_alerts",
+        "day_totals -> totals_report",
+    ];
+    assert_eq!(
+        archive.passing_verdicts(),
+        edges
+            .iter()
+            .map(|edge| (edge.to_string(), 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+
+    let edges_from_sources = &edges[..5];
+    let names: BTreeMap<StageId, &str> = archive
+        .stage_ids
+        .iter()
+        .map(|(name, id)| (*id, name.as_str()))
+        .collect();
+    let mut source_transport: BTreeMap<String, Vec<(Option<u64>, u64)>> = BTreeMap::new();
+    for (_, row) in &archive.rows {
+        assert_ne!(row.event_type(), "runtime.source.contract_declared");
+        let ChainPayload::Execution(ExecutionPayload::ContractResult {
+            upstream,
+            reader,
+            contract_name,
+            phase,
+            result,
+            ..
+        }) = &row.payload
+        else {
+            continue;
+        };
+        assert_ne!(contract_name.as_str(), "SourceContract");
+        let edge = format!("{} -> {}", names[upstream], names[reader]);
+        if *phase != ContractPhase::Final || !edges_from_sources.contains(&edge.as_str()) {
+            continue;
+        }
+        let ContractEvidenceDetails::Transport {
+            advertised_writer_seq,
+            consumed_count,
+        } = result.details()
+        else {
+            continue;
+        };
+        assert!(matches!(**result, ContractResult::Passed(_)), "{edge}");
+        source_transport
+            .entry(edge)
+            .or_default()
+            .push((advertised_writer_seq.map(|seq| seq.0), consumed_count.0));
+    }
+    assert_eq!(
+        source_transport
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        edges_from_sources.iter().copied().collect()
+    );
+    for (edge, counts) in &source_transport {
+        for (advertised, consumed) in counts {
+            assert_eq!(*advertised, Some(*consumed), "{edge}");
+        }
+    }
+    assert_eq!(
+        source_transport["account_history -> profile"],
+        [(Some(91), 91)]
+    );
+}

@@ -13,21 +13,7 @@
 //! source's protected resumed-live fact, the manifest resume config, and the
 //! live tail.
 
-#[path = "../../../tests/replay_testkit"]
-mod replay_testkit {
-    mod bootstrap;
-    mod delivered_order;
-    mod journal;
-    mod manifest;
-    mod ordered_stage_journal;
-    mod prefix_stable;
-    mod reattaching_source;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{
-        bootstrap::*, prefix_stable::*, reattaching_source::*, run_dir::*, stage_journal::*,
-    };
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -264,7 +250,7 @@ async fn run_until_delivered_with_observer(
         delivered.clone(),
         observer_calls,
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;

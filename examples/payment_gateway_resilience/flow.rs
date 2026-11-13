@@ -9,13 +9,15 @@ use super::domain::{
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
-use super::gateway::{simulated_processor, AuthorizePayment};
+use super::gateway::{simulated_processor, AuthorizePayment, PaymentGatewayPort};
 use super::validation;
+use obzenflow::effects::Port;
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry, sink_delivery_observer};
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -29,17 +31,35 @@ const FIRST_RECOVERY_PAUSE: Duration = Duration::from_millis(5_250);
 
 pub(super) const DEMO_JOURNAL_ROOT: &str = "target/payment-gateway-logs";
 
-pub(super) const DEMO_GATEWAY_CALLS: &str = "target/gateway-calls.jsonl";
+/// The system behind the payment gateway port, chosen by `processor` in the config's `[app]`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Processor {
+    Simulated,
+}
+
+/// The `[app]` table of this example's obzenflow.toml.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaymentSettings {
+    processor: Processor,
+    processor_calls: PathBuf,
+}
 
 pub fn build_flow() -> FlowDefinition {
-    assemble_flow(
-        fixtures::scripted_web_orders(),
-        fixtures::scripted_store_orders(),
-        Some(FIRST_RECOVERY_PAUSE),
-        AUTHORIZE_CALLS_PER_SECOND,
-        PathBuf::from(DEMO_JOURNAL_ROOT),
-        PathBuf::from(DEMO_GATEWAY_CALLS),
-    )
+    FlowDefinition::materialize_with(move |_runtime_config, settings: PaymentSettings| {
+        let port = match settings.processor {
+            Processor::Simulated => simulated_processor(&settings.processor_calls),
+        };
+        Ok(assemble_flow(
+            fixtures::scripted_web_orders(),
+            fixtures::scripted_store_orders(),
+            Some(FIRST_RECOVERY_PAUSE),
+            AUTHORIZE_CALLS_PER_SECOND,
+            PathBuf::from(DEMO_JOURNAL_ROOT),
+            port,
+        ))
+    })
 }
 
 pub fn assemble_flow(
@@ -48,10 +68,9 @@ pub fn assemble_flow(
     first_recovery_pause: Option<Duration>,
     authorize_calls_per_second: f64,
     journal_root: PathBuf,
-    processor_calls: PathBuf,
+    port: Port<dyn PaymentGatewayPort>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let port = simulated_processor(&processor_calls);
         let authorize = AuthorizePayment::new(port);
         let authorize = match first_recovery_pause {
             Some(pause) => authorize.with_first_recovery_pause(pause),

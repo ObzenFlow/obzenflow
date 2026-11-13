@@ -1,0 +1,634 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! FLOWIP-115b/115h: a named composition proof for the *built-in* circuit
+//! breaker across all three live-I/O surfaces, with effect-bound recovery.
+//!
+//! A single flow places the built-in breaker on a source poll, on a declared
+//! effect, and on a sink delivery, with a fan-out transform in between so one
+//! source input fans out to several effect attempts and several sink deliveries
+//! (fan-out) that converge on one sink stage (fan-in). Every derived effect
+//! cursor fails once with a typed timeout, then succeeds on its retry.
+//!
+//! The proof:
+//!   - the built-in breaker binds and composes on source, effect, and sink in
+//!     one flow (it would fail to build otherwise);
+//!   - all six logical effect cursors keep independent retry state and produce
+//!     one scheduled and one succeeded evidence row apiece;
+//!   - fan-in delivers exactly six outputs in deterministic order;
+//!   - strict replay of the same archive reproduces the identical domain outputs
+//!     without re-executing effects; source and sink policies remain suppressed,
+//!     while effect-history settlement rows retain their archived identities.
+
+use crate::replay_testkit;
+
+use async_trait::async_trait;
+use obzenflow_adapters::middleware::{circuit_breaker, retry, MiddlewareFactory};
+use obzenflow_core::{
+    event::chain_event::ChainEvent,
+    event::payloads::delivery_payload::DeliveryMethod,
+    event::payloads::execution_payload::{
+        CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload, RecoveryFact,
+    },
+    event::ChainPayload,
+    StageOutputs, TypedPayload,
+};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::{EffectCursor, EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::runtime_config::RETRY_MAX_ATTEMPTS_KEY;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler, TypedTransformHandler,
+};
+use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CompInput {
+    value: u64,
+}
+
+impl TypedPayload for CompInput {
+    const EVENT_TYPE: &'static str = "cb_composition.input";
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CompOutput {
+    value: u64,
+    effect_value: u64,
+}
+
+impl TypedPayload for CompOutput {
+    const EVENT_TYPE: &'static str = "cb_composition.output";
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CompEffectValue {
+    effect_value: u64,
+}
+
+impl TypedPayload for CompEffectValue {
+    const EVENT_TYPE: &'static str = "cb_composition.effect_value";
+}
+
+/// Finite source emitting values 1..=3, one event per poll.
+#[derive(Clone, Debug)]
+struct CompSource {
+    next_value: u64,
+    calls: Arc<AtomicUsize>,
+}
+
+impl CompSource {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            next_value: 1,
+            calls,
+        }
+    }
+}
+
+impl TypedFiniteSourceHandler for CompSource {
+    type Output = CompInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.next_value > 3 {
+            return Ok(None);
+        }
+        let value = self.next_value;
+        self.next_value += 1;
+        Ok(Some(vec![CompInput { value }]))
+    }
+}
+
+/// One input fans out to two derived inputs, so each source event produces two
+/// downstream effect attempts and two sink deliveries.
+#[derive(Clone, Debug)]
+struct FanOutTransform;
+
+impl FanOutTransform {
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl TypedTransformHandler for FanOutTransform {
+    type Input = CompInput;
+    type Output = StageOutputs<CompInput>;
+
+    fn process(&self, input: CompInput) -> Result<StageOutputs<CompInput>, HandlerError> {
+        Ok(StageOutputs::many([
+            CompInput {
+                value: input.value * 10 + 1,
+            },
+            CompInput {
+                value: input.value * 10 + 2,
+            },
+        ]))
+    }
+}
+
+/// Each derived logical effect fails once with a typed, retryable timeout and
+/// then succeeds. Calls are counted by canonical input so the proof verifies
+/// that every fan-out sibling owns an independent recovery session.
+struct FlakyService {
+    calls: Arc<Mutex<BTreeMap<u64, usize>>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct RetryOnce {
+    value: u64,
+}
+
+#[obzenflow::port(system = "flaky-service")]
+impl FlakyService {
+    #[effect(type = "cb_composition.retry_once", exactly_once)]
+    fn retry_once(&self, request: &RetryOnce) -> Result<CompEffectValue, EffectError> {
+        let call = {
+            let mut calls = self.calls.lock().expect("calls lock poisoned");
+            let call = calls.entry(request.value).or_default();
+            *call += 1;
+            *call
+        };
+        if call == 1 {
+            Err(EffectError::Timeout(format!(
+                "simulated timeout for {}",
+                request.value
+            )))
+        } else {
+            Ok(CompEffectValue {
+                effect_value: request.value + 900,
+            })
+        }
+    }
+}
+
+/// Performs the retry-once effect and emits the recovered outcome.
+#[obzenflow::command]
+#[derive(Clone, Debug)]
+struct RetryTransform {
+    #[port]
+    service: Port<FlakyService>,
+}
+
+impl RetryTransform {
+    fn new(calls: Arc<Mutex<BTreeMap<u64, usize>>>) -> Self {
+        Self {
+            service: Port::to(FlakyService { calls }),
+        }
+    }
+}
+
+#[async_trait]
+impl EffectfulTransformHandler for RetryTransform {
+    type Input = CompInput;
+    type Output = obzenflow_core::stage_fact_set![CompOutput, CompEffectValue];
+
+    async fn process(
+        &self,
+        input: CompInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        let effect_value = fx
+            .call(RetryOnce { value: input.value })
+            .await
+            .map_err(|e| HandlerError::Timeout(e.to_string()))?;
+
+        fx.emit(CompOutput {
+            value: input.value,
+            effect_value: effect_value.effect_value,
+        })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(fx.complete()?)
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "cb-composition-retry-v1"
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CollectSink {
+    outputs: Arc<Mutex<Vec<CompOutput>>>,
+}
+
+#[async_trait]
+impl InlineSink for CollectSink {
+    type Input = CompOutput;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::Custom("Memory".to_string()))
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(&mut self, output: CompOutput) -> Result<(), SinkWriteFailure> {
+        self.outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .push(output);
+        Ok(())
+    }
+}
+
+fn build_retry_flow(
+    journal_base: PathBuf,
+    source_calls: Arc<AtomicUsize>,
+    calls: Arc<Mutex<BTreeMap<u64, usize>>>,
+    outputs: Arc<Mutex<Vec<CompOutput>>>,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source_breaker = circuit_breaker().consecutive_failures(5);
+        let effect_resilience = (
+            circuit_breaker().consecutive_failures(2),
+            retry()
+                .fixed_delay(Duration::from_millis(1))
+                .max_attempts(2),
+        );
+        let sink_breaker = circuit_breaker().consecutive_failures(5);
+        let source_handler = CompSource::new(source_calls);
+        let fan_out_handler = FanOutTransform::new();
+        let effectful_handler = RetryTransform::new(calls);
+        let collector_handler = CollectSink { outputs };
+
+        Ok(flow! {
+            name: "circuit_breaker_composition",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                // Source breaker stays closed; the scripted source never fails.
+                inputs = source!(CompInput with {source_breaker} => source_handler);
+                fan_out = transform!(CompInput -> CompInput => fan_out_handler);
+                effectful = effectful_transform!(
+                    CompInput -> { CompOutput, CompEffectValue } with { effect_resilience.0, effect_resilience.1 } => effectful_handler);
+                collector = sink!(CompOutput with {sink_breaker} => collector_handler);
+            },
+
+            topology: {
+                inputs |> fan_out;
+                fan_out |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
+}
+
+fn latest_run_dir(base: &Path) -> PathBuf {
+    let flows_dir = base.join("flows");
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&flows_dir)
+        .expect("flows directory should exist")
+        .map(|entry| entry.expect("flow dir entry").path())
+        .filter(|path| path.join("run_manifest.json").exists())
+        .collect();
+    entries.sort();
+    entries
+        .pop()
+        .expect("a run should have produced an archive")
+}
+
+async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("run_manifest.json"))
+            .expect("run_manifest.json should be readable"),
+    )
+    .expect("run_manifest.json should parse");
+    let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
+        .as_str()
+        .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(stage_journal))
+        .await
+        .into_iter()
+        .map(|envelope| envelope.authored())
+        .collect()
+}
+
+/// Count circuit-breaker observability rows (any variant) in a stage journal.
+async fn circuit_breaker_events_in_stage(run_dir: &Path, stage_key: &str) -> usize {
+    read_stage_events(run_dir, stage_key)
+        .await
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.payload,
+                ChainPayload::Execution(
+                    ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::Recovery(_)
+                )
+            )
+        })
+        .count()
+}
+
+fn circuit_breaker_event_ids(events: &[ChainEvent]) -> Vec<obzenflow_core::EventId> {
+    let mut ids = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload,
+                ChainPayload::Execution(
+                    ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::Recovery(_)
+                )
+            )
+        })
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
+fn data_event_count(events: &[ChainEvent], event_type: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| event.consumes_data_credit() && event.event_type() == event_type)
+        .count()
+}
+
+fn expected_outputs() -> Vec<CompOutput> {
+    [11, 12, 21, 22, 31, 32]
+        .into_iter()
+        .map(|value| CompOutput {
+            value,
+            effect_value: value + 900,
+        })
+        .collect()
+}
+
+fn expected_calls() -> BTreeMap<u64, usize> {
+    [11, 12, 21, 22, 31, 32]
+        .into_iter()
+        .map(|value| (value, 2))
+        .collect()
+}
+
+fn assert_retry_is_independent_configuration() {
+    let factory = retry()
+        .fixed_delay(Duration::from_millis(1))
+        .max_attempts(2);
+    let snapshot = factory
+        .config_snapshot()
+        .expect("retry exposes its own configuration");
+    assert_eq!(snapshot["retry"][RETRY_MAX_ATTEMPTS_KEY], 2);
+    assert!(snapshot.get("breaker").is_none());
+}
+
+fn assert_topology_records_resolved_retry(topology: &obzenflow_topology::Topology) {
+    let retry_attachments: Vec<_> = topology
+        .stages()
+        .filter_map(|stage| stage.middleware.as_ref())
+        .flat_map(|middleware| &middleware.attachments)
+        .filter(|attachment| attachment.family() == obzenflow_topology::MiddlewareFamily::Retry)
+        .collect();
+    assert_eq!(
+        retry_attachments.len(),
+        1,
+        "one retry definition protects the declared effect"
+    );
+    assert!(matches!(
+        retry_attachments[0].operation,
+        obzenflow_topology::MiddlewareOperation::Effect { .. }
+    ));
+    let settings = retry_attachments[0].details.settings();
+    let active = |key: &str| match &settings.settings()[key] {
+        obzenflow_topology::MiddlewareSettingInfo::Active { setting, display } => {
+            (setting.value.clone(), display.as_str())
+        }
+        other => panic!("{key} must be active, got {other:?}"),
+    };
+    assert_eq!(
+        active("middleware.retry.kind"),
+        (
+            obzenflow_topology::SettingValueInfo::Text("fixed".into()),
+            "Fixed"
+        )
+    );
+    assert_eq!(
+        active("middleware.retry.max_attempts"),
+        (obzenflow_topology::SettingValueInfo::U64(2), "2")
+    );
+    assert_eq!(
+        active("middleware.retry.fixed_delay_ms"),
+        (obzenflow_topology::SettingValueInfo::U64(1), "1 ms")
+    );
+    assert_eq!(
+        active("middleware.retry.on_refusal"),
+        (
+            obzenflow_topology::SettingValueInfo::Text("wait".into()),
+            "Wait"
+        )
+    );
+    assert_eq!(
+        active("middleware.retry.max_outage_wait_ms"),
+        (
+            obzenflow_topology::SettingValueInfo::U64(120_000),
+            "120000 ms"
+        )
+    );
+    assert_eq!(settings.summary(), None);
+}
+
+fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
+    let mut cursors: HashMap<EffectCursor, (usize, usize)> = HashMap::new();
+    let mut health: HashMap<EffectCursor, Vec<(u32, CircuitBreakerHealthClassification)>> =
+        HashMap::new();
+    let mut retry_rows = 0;
+
+    for event in events {
+        if let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+            CircuitBreakerFact::AttemptSettled {
+                cursor,
+                attempt,
+                health_classification,
+                ..
+            },
+        )) = &event.payload
+        {
+            health
+                .entry(cursor.clone())
+                .or_default()
+                .push((*attempt, *health_classification));
+        }
+        let ChainPayload::Execution(ExecutionPayload::Recovery(retry_event)) = &event.payload
+        else {
+            continue;
+        };
+        match retry_event {
+            RecoveryFact::RetryScheduled {
+                cursor,
+                next_attempt,
+                delay_ms,
+            } => {
+                retry_rows += 1;
+                assert_eq!(*next_attempt, 2);
+                assert_eq!(*delay_ms, 1);
+                cursors.entry(cursor.clone()).or_default().0 += 1;
+            }
+            RecoveryFact::RetrySucceeded {
+                cursor,
+                total_attempts,
+            } => {
+                retry_rows += 1;
+                assert_eq!(*total_attempts, 2);
+                cursors.entry(cursor.clone()).or_default().1 += 1;
+            }
+            RecoveryFact::RetryExhausted { .. } | RecoveryFact::RetryStoppedNonRetryable { .. } => {
+                panic!("every derived cursor should recover on attempt two")
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        retry_rows, 12,
+        "six cursors should emit two retry rows each"
+    );
+    assert_eq!(cursors.len(), 6, "fan-out should create six effect cursors");
+    assert!(
+        cursors.values().all(|counts| *counts == (1, 1)),
+        "each cursor should have exactly one scheduled and one succeeded row: {cursors:?}"
+    );
+    assert_eq!(health.len(), cursors.len());
+    for cursor in cursors.keys() {
+        assert_eq!(
+            health
+                .get(cursor)
+                .expect("each recovery has breaker settlement evidence"),
+            &[
+                (1, CircuitBreakerHealthClassification::TransientFailure),
+                (2, CircuitBreakerHealthClassification::Success),
+            ],
+            "each cursor must settle the timeout and recovered physical call exactly once"
+        );
+    }
+}
+
+#[tokio::test]
+async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+    assert_retry_is_independent_configuration();
+
+    // --- Live run ---------------------------------------------------------
+    let live_source_calls = Arc::new(AtomicUsize::new(0));
+    let live_calls = Arc::new(Mutex::new(BTreeMap::new()));
+    let live_outputs = Arc::new(Mutex::new(Vec::new()));
+    let live_handle = build_retry_flow(
+        journal_base.clone(),
+        live_source_calls.clone(),
+        live_calls.clone(),
+        live_outputs.clone(),
+    )
+    .build(replay_testkit::unsynced_context())
+    .await
+    .expect("live composition flow should build");
+    let topology = live_handle
+        .topology()
+        .expect("built flow carries its emitted topology");
+    assert_topology_records_resolved_retry(&topology);
+    live_handle
+        .run()
+        .await
+        .expect("live composition flow should complete");
+
+    let live_domain_outputs = live_outputs.lock().expect("outputs lock poisoned").clone();
+    assert_eq!(
+        live_domain_outputs,
+        expected_outputs(),
+        "fan-in should deliver all six recovered outputs in deterministic order"
+    );
+    assert_eq!(
+        *live_calls.lock().expect("calls lock poisoned"),
+        expected_calls(),
+        "every derived logical invocation should make exactly two physical calls"
+    );
+    assert_eq!(
+        live_source_calls.load(Ordering::SeqCst),
+        4,
+        "the live finite source performs three data polls and one EOF poll"
+    );
+
+    let live_run = latest_run_dir(&journal_base);
+    assert_eq!(
+        data_event_count(
+            &read_stage_events(&live_run, "inputs").await,
+            &CompInput::event_type_name(),
+        ),
+        3,
+        "the finite source should journal exactly three inputs"
+    );
+    assert_eq!(
+        data_event_count(
+            &read_stage_events(&live_run, "fan_out").await,
+            &CompInput::event_type_name(),
+        ),
+        6,
+        "fan-out should journal exactly two derived siblings per source input"
+    );
+    let live_effect_events = read_stage_events(&live_run, "effectful").await;
+    assert_retry_evidence_per_cursor(&live_effect_events);
+    let live_effect_breaker_ids = circuit_breaker_event_ids(&live_effect_events);
+
+    // --- Strict replay of the same archive --------------------------------
+    let replay_source_calls = Arc::new(AtomicUsize::new(0));
+    let replay_calls = Arc::new(Mutex::new(BTreeMap::new()));
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    replay_testkit::unsynced_application()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            live_run.as_os_str().to_os_string(),
+            OsString::from("--verify"),
+        ])
+        .run_async(build_retry_flow(
+            journal_base.clone(),
+            replay_source_calls.clone(),
+            replay_calls.clone(),
+            replay_outputs.clone(),
+        ))
+        .await
+        .expect("strict replay should complete");
+
+    // Effects are not re-executed; domain outputs are reproduced from the archive.
+    assert!(
+        replay_calls.lock().expect("calls lock poisoned").is_empty(),
+        "strict replay must not execute effects or move breaker state"
+    );
+    assert_eq!(
+        replay_source_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must not perform a live source poll, timeout, policy pass, or idle backoff"
+    );
+    assert_eq!(
+        replay_outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .clone(),
+        live_domain_outputs,
+        "strict replay must reproduce the identical output order through the composed breakers"
+    );
+
+    // Source and sink policy still remain suppressed during strict replay.
+    // Effect-history hits rematerialise their archived terminal evidence under
+    // FLOWIP-128g, but do not execute policy or author new identities.
+    let replay_run = latest_run_dir(&journal_base);
+    for stage in ["inputs", "collector"] {
+        let replay_breaker_events = circuit_breaker_events_in_stage(&replay_run, stage).await;
+        assert_eq!(
+            replay_breaker_events, 0,
+            "strict replay must not emit fresh circuit-breaker rows on the '{stage}' stage"
+        );
+    }
+    let replay_effect_events = read_stage_events(&replay_run, "effectful").await;
+    assert_eq!(
+        circuit_breaker_event_ids(&replay_effect_events),
+        live_effect_breaker_ids,
+        "strict replay must rematerialise effect settlement evidence byte-for-byte without fresh policy work"
+    );
+}

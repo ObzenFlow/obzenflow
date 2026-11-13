@@ -2475,7 +2475,7 @@ async fn postgres_tls_uses_native_root_loader_in_an_isolated_process() {
     if std::env::var_os(CHILD).is_none() {
         let current = std::env::current_exe().expect("locate integration-test executable");
         let status = Command::new(current)
-            .arg("postgres_tls_uses_native_root_loader_in_an_isolated_process")
+            .arg("postgres_sink_driver_test::postgres_tls_uses_native_root_loader_in_an_isolated_process")
             .arg("--exact")
             .arg("--nocapture")
             .env(CHILD, "1")

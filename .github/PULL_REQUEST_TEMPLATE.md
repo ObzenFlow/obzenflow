@@ -3,7 +3,7 @@
 - [ ] I read `CONTRIBUTING.md`
 - [ ] All commits are signed off (DCO): `git commit -s`
 - [ ] I ran: `cargo fmt --all`
-- [ ] I ran: `cargo test --workspace`
+- [ ] I ran: `cargo xtask test`
 
 ## Summary
 

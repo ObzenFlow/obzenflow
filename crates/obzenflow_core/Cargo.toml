@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = true
+autotests = false
 # Fail closed on shipped artifact types. Tests and repository-only files remain
 # in Git and CI rather than in the crates.io source archive.
 include = [
@@ -43,3 +44,7 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

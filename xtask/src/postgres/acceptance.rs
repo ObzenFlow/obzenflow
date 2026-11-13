@@ -78,7 +78,8 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,test-support",
             "--test",
-            "postgres_sink_driver_test",
+            "it_postgres_test_support",
+            "postgres_sink_driver_test::",
         ],
     },
     CommandSpec {
@@ -92,7 +93,8 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,test-support",
             "--test",
-            "postgres_sink_conformance_test",
+            "it_postgres_test_support",
+            "postgres_sink_conformance_test::",
         ],
     },
     CommandSpec {
@@ -106,7 +108,7 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,test-support",
             "--test",
-            "postgres_sink_application_conformance_test",
+            "postgres_sink_application_conformance",
         ],
     },
     CommandSpec {
@@ -120,7 +122,8 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,e2e",
             "--test",
-            "postgres_payments_e2e_test",
+            "e2e_postgres",
+            "payments::",
         ],
     },
     CommandSpec {
@@ -148,7 +151,7 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "http,ai,postgres,test-support,e2e",
             "--test",
-            "hn_ai_digest_effect_replay_journal_test",
+            "hn_ai_digest_effect_replay",
             "postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt",
             "--",
             "--exact",
@@ -165,7 +168,8 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,e2e",
             "--test",
-            "postgres_sink_inventory_consumer_test",
+            "e2e_postgres",
+            "inventory_consumer::",
         ],
     },
     CommandSpec {
@@ -179,19 +183,7 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres",
             "--test",
-            "postgres_public_consumer_test",
-        ],
-    },
-    CommandSpec {
-        id: "postgres-package-boundary",
-        label: "PostgreSQL package boundary test",
-        cargo_args: &[
-            "test",
-            "--locked",
-            "-p",
-            "obzenflow",
-            "--test",
-            "postgres_connector_package_boundary_test",
+            "postgres_public_consumer",
         ],
     },
 ];

@@ -493,7 +493,7 @@ pub(super) fn run(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
     let plan = write_plan(root, &run_id, directory)?;
     // Two Cargo processes share the declared compilation budget, never target
     // directories. Join both before any benchmark process can start.
-    let jobs = (tools.build_jobs / 2).max(1);
+    let jobs = (tools.environment.build_jobs / 2).max(1);
     let report = |kind: &str, name: &str, result: Result<()>| {
         if let Err(failure) = result {
             eprintln!("validation: {kind} {name} recorded as not passed: {failure}");

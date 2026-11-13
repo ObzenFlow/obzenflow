@@ -391,5 +391,4 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     );
 }
 
-#[path = "support/liveness_observations.rs"]
-mod liveness_observations;
+use crate::liveness_observations;

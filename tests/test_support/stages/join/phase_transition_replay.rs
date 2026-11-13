@@ -1,0 +1,541 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! FLOWIP-095d Phase 4 (final tick): join phase transitions reproduce under
+//! replay, proven at the flow level.
+//!
+//! Two shapes:
+//! - A hydrating join (FiniteEof reference mode) is a structural deterministic
+//!   orderer: the reference side is consumed to its authored EOF before the
+//!   stream side enriches. The forwarded reference EOF's position in the
+//!   join's own journal IS the Hydrating -> Enriching boundary, and it must
+//!   reproduce under replay with no merge machinery.
+//! - A live join (Live reference mode) with an effectful descendant is marked
+//!   by the build-time enablement walk and runs the canonical cross-side
+//!   merge (`dispatch_live_canonical`), so its delivered order, EOF-relative
+//!   positions, and the effect cursors below all reproduce under replay.
+
+use crate::replay_testkit;
+
+use async_trait::async_trait;
+use obzenflow::stages::joins;
+use obzenflow_core::TypedPayload;
+use obzenflow_dsl::{effectful_transform, flow, join, sink, source, FlowDefinition};
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler,
+};
+use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+static JOIN_REPLAY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RefItem {
+    key: String,
+    label: String,
+}
+
+impl TypedPayload for RefItem {
+    const EVENT_TYPE: &'static str = "join_replay.ref";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StreamItem {
+    key: String,
+    value: u64,
+}
+
+impl TypedPayload for StreamItem {
+    const EVENT_TYPE: &'static str = "join_replay.stream";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JoinedItem {
+    key: String,
+    label: String,
+    value: u64,
+}
+
+impl TypedPayload for JoinedItem {
+    const EVENT_TYPE: &'static str = "join_replay.joined";
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct JoinEffectValue {
+    effect_value: u64,
+}
+
+impl TypedPayload for JoinEffectValue {
+    const EVENT_TYPE: &'static str = "join_replay.effect_value";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FinalOutput {
+    key: String,
+    value: u64,
+    effect_value: u64,
+}
+
+impl TypedPayload for FinalOutput {
+    const EVENT_TYPE: &'static str = "join_replay.output";
+}
+
+/// Reference source: three catalog rows, keys r1..r3.
+#[derive(Clone, Debug)]
+struct RefSource {
+    next_index: usize,
+}
+
+impl RefSource {
+    fn new() -> Self {
+        Self { next_index: 0 }
+    }
+}
+
+impl TypedFiniteSourceHandler for RefSource {
+    type Output = RefItem;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        if self.next_index >= 3 {
+            return Ok(None);
+        }
+        self.next_index += 1;
+        Ok(Some(vec![RefItem {
+            key: format!("r{}", self.next_index),
+            label: format!("label-{}", self.next_index),
+        }]))
+    }
+}
+
+/// Stream source: five rows whose keys cycle the three catalog keys in an
+/// order that keeps every key's catalog row ahead of its first stream use
+/// under the canonical alternation (reference first on the ordinal tie), so
+/// the live inner join emits all five.
+#[derive(Clone, Debug)]
+struct StreamSource {
+    next_index: usize,
+}
+
+impl StreamSource {
+    fn new() -> Self {
+        Self { next_index: 0 }
+    }
+}
+
+impl TypedFiniteSourceHandler for StreamSource {
+    type Output = StreamItem;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        if self.next_index >= 5 {
+            return Ok(None);
+        }
+        self.next_index += 1;
+        let key = format!("r{}", ((self.next_index - 1) % 3) + 1);
+        Ok(Some(vec![StreamItem {
+            key,
+            value: self.next_index as u64,
+        }]))
+    }
+}
+
+struct CallCounter {
+    calls: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct Counting {
+    value: u64,
+}
+
+#[obzenflow::port(system = "call-counter")]
+impl CallCounter {
+    #[effect(type = "join_replay.counting", exactly_once)]
+    fn count(&self, request: &Counting) -> Result<JoinEffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(JoinEffectValue {
+            effect_value: request.value + 100,
+        })
+    }
+}
+
+#[obzenflow::command]
+#[derive(Clone, Debug)]
+struct EffectfulTail {
+    #[port]
+    counter: Port<CallCounter>,
+}
+
+impl EffectfulTail {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            counter: Port::to(CallCounter { calls }),
+        }
+    }
+}
+
+#[async_trait]
+impl EffectfulTransformHandler for EffectfulTail {
+    type Input = JoinedItem;
+    type Output = obzenflow_core::stage_fact_set![FinalOutput, JoinEffectValue];
+
+    async fn process(
+        &self,
+        input: JoinedItem,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        let effect_value = fx
+            .call(Counting { value: input.value })
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+        fx.emit(FinalOutput {
+            key: input.key,
+            value: input.value,
+            effect_value: effect_value.effect_value,
+        })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(fx.complete()?)
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "join-replay-effectful-v1"
+    }
+}
+
+#[derive(Debug)]
+struct DropSink<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> Clone for DropSink<T> {
+    fn clone(&self) -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<T> DropSink<T> {
+    fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+#[async_trait]
+impl<T> InlineSink for DropSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
+        .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
+        Ok(())
+    }
+}
+
+fn join_fn(reference: RefItem, stream: StreamItem) -> JoinedItem {
+    JoinedItem {
+        key: stream.key,
+        label: reference.label,
+        value: stream.value,
+    }
+}
+
+/// Hydrating join (FiniteEof): the structural orderer, no merge machinery.
+fn build_hydrating_flow(journal_base: PathBuf) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let reference_source = RefSource::new();
+        let stream_source = StreamSource::new();
+        let joined = joins::inner(
+            |r: &RefItem| r.key.clone(),
+            |s: &StreamItem| s.key.clone(),
+            join_fn,
+        );
+        let collector = DropSink::<JoinedItem>::new();
+
+        Ok(flow! {
+            name: "join_phase_transition_hydrating",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                ref_src = source!(RefItem => reference_source);
+                stream_src = source!(StreamItem => stream_source);
+                joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joined);
+                collector = sink!(JoinedItem => collector);
+            },
+
+            topology: {
+                (ref_src, stream_src) |> joined;
+                joined |> collector;
+            }
+        })
+    })
+}
+
+/// Live join with an effectful descendant: the enablement walk marks the join
+/// and it runs the canonical cross-side merge.
+fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let reference_source = RefSource::new();
+        let stream_source = StreamSource::new();
+        let joined = joins::inner_live(
+            |r: &RefItem| r.key.clone(),
+            |s: &StreamItem| s.key.clone(),
+            join_fn,
+        );
+        let effectful = EffectfulTail::new(calls);
+        let collector = DropSink::<FinalOutput>::new();
+
+        Ok(flow! {
+            name: "join_phase_transition_live",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                ref_src = source!(RefItem => reference_source);
+                stream_src = source!(StreamItem => stream_source);
+                joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joined);
+                effectful = effectful_transform!(
+                    JoinedItem -> { FinalOutput, JoinEffectValue } => effectful);
+                collector = sink!(FinalOutput => collector);
+            },
+
+            topology: {
+                (ref_src, stream_src) |> joined;
+                joined |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
+}
+
+async fn run_live(flow: FlowDefinition) {
+    replay_testkit::unsynced_application()
+        .with_cli_args(["obzenflow"])
+        .run_async(flow)
+        .await
+        .expect("live flow should complete");
+}
+
+async fn run_replay(archive: &Path, flow: FlowDefinition) {
+    replay_testkit::unsynced_application()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive.as_os_str().to_os_string(),
+        ])
+        .run_async(flow)
+        .await
+        .expect("replay flow should complete");
+}
+
+/// FLOWIP-095d success criterion 2, hydrating shape: the forwarded reference
+/// EOF (the Hydrating -> Enriching boundary) sits before every joined output
+/// in the join's journal, and its position reproduces under replay and
+/// replay-of-replay.
+#[tokio::test]
+async fn hydrating_join_phase_transition_reproduces_under_replay() {
+    let _guard = JOIN_REPLAY_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    run_live(build_hydrating_flow(journal_base.clone())).await;
+    let live_run = replay_testkit::latest_run_dir(&journal_base);
+
+    let live_signature =
+        replay_testkit::transport_row_signature(&live_run, "joined", &["ref_src", "stream_src"])
+            .await;
+
+    // The phase boundary: the reference EOF must precede every joined output.
+    let ref_eof_position = live_signature
+        .iter()
+        .position(|row| row == "eof:ref_src")
+        .expect("the join must forward the reference side's authored EOF");
+    let first_data_position = live_signature
+        .iter()
+        .position(|row| row.starts_with("data:"))
+        .expect("the join must emit joined outputs");
+    assert!(
+        ref_eof_position < first_data_position,
+        "hydration completes before enrichment: reference EOF at {ref_eof_position} must \
+         precede the first joined output at {first_data_position} in {live_signature:?}"
+    );
+
+    // Output order is witnessed payload-aware (the signature alone cannot
+    // distinguish a permutation of same-typed outputs).
+    let live_projection =
+        replay_testkit::project_delivered_order(&live_run, "joined", &["stream_src"]).await;
+    assert_eq!(
+        live_projection.consumption_sequence().len(),
+        5,
+        "every stream row must be witnessed by a joined output"
+    );
+
+    // Replay: the phase-transition point and output order reproduce.
+    run_replay(&live_run, build_hydrating_flow(journal_base.clone())).await;
+    let replay_run = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(live_run, replay_run);
+
+    let replay_signature =
+        replay_testkit::transport_row_signature(&replay_run, "joined", &["ref_src", "stream_src"])
+            .await;
+    assert_eq!(
+        live_signature, replay_signature,
+        "the join's transport-row signature (data and EOF positions) must reproduce"
+    );
+    replay_testkit::assert_same_delivered_order(&live_run, &replay_run, "joined", &["stream_src"])
+        .await;
+
+    // Replay of the replay: the archive is deterministic by construction.
+    run_replay(&replay_run, build_hydrating_flow(journal_base.clone())).await;
+    let second_replay_run = replay_testkit::latest_run_dir(&journal_base);
+    let second_signature = replay_testkit::transport_row_signature(
+        &second_replay_run,
+        "joined",
+        &["ref_src", "stream_src"],
+    )
+    .await;
+    assert_eq!(replay_signature, second_signature);
+}
+
+/// FLOWIP-095d success criterion 2, live shape: an ordered live join (marked
+/// by the enablement walk through its effectful descendant) reproduces its
+/// merged delivery order and EOF-relative positions under replay, with the
+/// recorded effect outcomes returned and zero re-execution.
+///
+/// This join is source-fed, so it runs the seq-ordered merge (FLOWIP-120n
+/// F18): the live interleaving follows admission order, so how many stream
+/// rows find their catalog row is arrival-dependent. The assertions are
+/// therefore self-consistent (effects executed == joined outputs recorded)
+/// and reproduction-based, never a fixed alternation count.
+#[tokio::test]
+async fn live_join_canonical_merge_reproduces_under_replay() {
+    let _guard = JOIN_REPLAY_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    run_live(build_live_flow(journal_base.clone(), live_calls.clone())).await;
+    let live_run = replay_testkit::latest_run_dir(&journal_base);
+
+    let live_joined = replay_testkit::read_stage_envelopes(&live_run, "joined")
+        .await
+        .iter()
+        .filter(|envelope| JoinedItem::from_event(&envelope.authored()).is_some())
+        .count();
+    assert_eq!(
+        live_calls.load(Ordering::SeqCst),
+        live_joined,
+        "every joined output charged its effect live"
+    );
+
+    let live_signature =
+        replay_testkit::transport_row_signature(&live_run, "joined", &["ref_src", "stream_src"])
+            .await;
+    let live_projection =
+        replay_testkit::project_delivered_order(&live_run, "joined", &["stream_src"]).await;
+    assert_eq!(live_projection.consumption_sequence().len(), live_joined);
+
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    run_replay(
+        &live_run,
+        build_live_flow(journal_base.clone(), replay_calls.clone()),
+    )
+    .await;
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "replay must return recorded outcomes without executing the effect"
+    );
+    let replay_run = replay_testkit::latest_run_dir(&journal_base);
+
+    let replay_signature =
+        replay_testkit::transport_row_signature(&replay_run, "joined", &["ref_src", "stream_src"])
+            .await;
+    assert_eq!(
+        live_signature, replay_signature,
+        "the live join's merged delivery order and EOF positions must reproduce"
+    );
+    replay_testkit::assert_same_delivered_order(&live_run, &replay_run, "joined", &["stream_src"])
+        .await;
+}
+
+/// FLOWIP-095m: the same live join with NO effect below it. 095d would leave it
+/// availability-scheduled; 095m marks it because a live join observes its own
+/// interleaving, so it runs the canonical cross-side dispatch.
+fn build_live_flow_no_effect(journal_base: PathBuf) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let reference_source = RefSource::new();
+        let stream_source = StreamSource::new();
+        let joined = joins::inner_live(
+            |r: &RefItem| r.key.clone(),
+            |s: &StreamItem| s.key.clone(),
+            join_fn,
+        );
+        let collector = DropSink::<JoinedItem>::new();
+
+        Ok(flow! {
+            name: "join_phase_transition_live_no_effect",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                ref_src = source!(RefItem => reference_source);
+                stream_src = source!(StreamItem => stream_source);
+                joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joined);
+                collector = sink!(JoinedItem => collector);
+            },
+
+            topology: {
+                (ref_src, stream_src) |> joined;
+                joined |> collector;
+            }
+        })
+    })
+}
+
+/// FLOWIP-095m: a live join with no effect below it is marked on its own and
+/// reaches `dispatch_live_canonical`, so its merged delivery order reproduces
+/// under replay. The classification and marking are pinned by the DSL unit test
+/// `live_join_fan_in_is_marked_without_effect`; this is the end-to-end witness.
+#[tokio::test]
+async fn live_join_without_effect_reproduces_under_replay() {
+    let _guard = JOIN_REPLAY_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    run_live(build_live_flow_no_effect(journal_base.clone())).await;
+    let live_run = replay_testkit::latest_run_dir(&journal_base);
+    let live_signature =
+        replay_testkit::transport_row_signature(&live_run, "joined", &["ref_src", "stream_src"])
+            .await;
+    let live_projection =
+        replay_testkit::project_delivered_order(&live_run, "joined", &["stream_src"]).await;
+    assert!(
+        !live_projection.consumption_sequence().is_empty(),
+        "the live join must deliver stream rows"
+    );
+
+    run_replay(&live_run, build_live_flow_no_effect(journal_base.clone())).await;
+    let replay_run = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(live_run, replay_run);
+    let replay_signature =
+        replay_testkit::transport_row_signature(&replay_run, "joined", &["ref_src", "stream_src"])
+            .await;
+    assert_eq!(
+        live_signature, replay_signature,
+        "a no-effect live join's merged delivery order must reproduce under replay"
+    );
+    replay_testkit::assert_same_delivered_order(&live_run, &replay_run, "joined", &["stream_src"])
+        .await;
+}

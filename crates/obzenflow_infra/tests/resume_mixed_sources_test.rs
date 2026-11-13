@@ -21,23 +21,7 @@
 //! its watermark and before its first live record, and an interrupted infinite
 //! direct handler refuses at admission until it is rebuilt as a connector.
 
-#[path = "../../../tests/replay_testkit"]
-mod replay_testkit {
-    mod bootstrap;
-    mod count_deliveries;
-    mod delivered_order;
-    mod journal;
-    mod manifest;
-    mod ordered_stage_journal;
-    mod prefix_stable;
-    mod reattaching_source;
-    mod run_dir;
-    mod stage_journal;
-    pub use self::{
-        bootstrap::*, count_deliveries::*, journal::*, manifest::*, prefix_stable::*,
-        reattaching_source::*, run_dir::*, stage_journal::*,
-    };
-}
+use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -388,7 +372,7 @@ async fn run_until_delivered(
         calls.clone(),
         delivered.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -800,7 +784,7 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
         Arc::new(AtomicUsize::new(0)),
         delivered.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -842,7 +826,7 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
             resumed_polls.clone(),
             Arc::new(AtomicU64::new(0)),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .err()
         .ok_or_else(|| anyhow!("an unfinished Refuse source must refuse the resume"))?
@@ -990,7 +974,7 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
         Arc::new(AtomicUsize::new(0)),
         delivered.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -1013,7 +997,7 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
             resumed_polls.clone(),
             Arc::new(AtomicU64::new(0)),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .err()
         .ok_or_else(|| anyhow!("an interrupted infinite direct handler must refuse"))?
@@ -1060,7 +1044,7 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
             Arc::new(AtomicU64::new(0)),
             None,
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .err()
         .ok_or_else(|| anyhow!("an undeclared sink must refuse the resume"))?
@@ -1096,7 +1080,7 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
             delivered.clone(),
             Some(SinkRedeliverySafety::SafeToRepeat),
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("the rebuilt flow must resume the refused archive: {e:?}"))?;
         let facts = handle.archive_flow_evidence();
@@ -1192,7 +1176,7 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
     let (sender, ticks) = tokio::sync::mpsc::channel(8);
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_channel_flow(journal_base.clone(), ticks, delivered.clone())
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -1215,7 +1199,7 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
             replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
         );
         let handle = build_channel_flow(journal_base.clone(), ticks, delivered.clone())
-            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+            .build(replay_testkit::unsynced_context())
             .await
             .map_err(|e| anyhow!("resume flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -1353,7 +1337,7 @@ async fn record_interrupted_csv_run(journal_base: &Path, input: &Path) -> Result
         3.0,
         delivered.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -1389,7 +1373,7 @@ async fn resume_csv_run(
         100.0,
         Arc::new(AtomicUsize::new(0)),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
     let outcome = tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
@@ -1784,7 +1768,7 @@ async fn run_lazy_orders(
             delay: Duration::ZERO,
         },
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -1909,7 +1893,7 @@ async fn record_interrupted(
     deliveries: usize,
 ) -> Result<PathBuf> {
     let handle = flow
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(replay_testkit::unsynced_context())
         .await
         .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -1933,10 +1917,7 @@ async fn refused_at_admission(
     let bootstrap = install_bootstrap_config(
         replay_testkit::bootstrap_with_archive(resume_bootstrap(archive)).await,
     );
-    let failure = flow
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await
-        .err();
+    let failure = flow.build(replay_testkit::unsynced_context()).await.err();
     drop(bootstrap);
     let failure = failure.ok_or_else(|| anyhow!("the resume must refuse at admission"))?;
     assert_eq!(
@@ -2215,7 +2196,7 @@ async fn a_failed_seek_refuses_before_live_input() -> Result<()> {
             delay: Duration::ZERO,
         },
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
     tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
@@ -2342,7 +2323,7 @@ async fn a_changed_decoder_output_type_fails_at_re_admission() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
     tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
@@ -2435,7 +2416,7 @@ async fn a_csv_source_that_never_pinned_starts_on_resume() -> Result<()> {
         100.0,
         Arc::new(AtomicUsize::new(0)),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(replay_testkit::unsynced_context())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     let failed = tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())

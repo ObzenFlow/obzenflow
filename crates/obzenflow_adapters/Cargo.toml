@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = true
+autotests = false
 # Fail closed on shipped artifact types. Tests and repository-only files remain
 # in Git and CI rather than in the crates.io source archive.
 include = [
@@ -53,13 +54,12 @@ tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 
 [[test]]
-name = "postgres_sink_conformance_test"
-path = "tests/postgres_sink_conformance_test.rs"
-required-features = ["postgres", "test-support"]
+name = "it"
+path = "tests/it.rs"
 
 [[test]]
-name = "postgres_sink_driver_test"
-path = "tests/postgres_sink_driver_test.rs"
+name = "it_postgres_test_support"
+path = "tests/it_postgres_test_support.rs"
 required-features = ["postgres", "test-support"]
 
 [lints]

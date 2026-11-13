@@ -4,6 +4,7 @@
 
 //! Repository validation owns selection and acceptance, never test execution.
 pub(crate) mod dependencies;
+mod disk;
 mod launcher;
 mod performance;
 mod plan;
@@ -16,14 +17,15 @@ pub(crate) mod source;
 mod tests;
 
 use crate::{error, Result};
-use plan::{Lane, Options, Policy};
+use plan::{BuildDirectory, Incremental, Lane, Options, Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -98,7 +100,7 @@ fn help() -> String {
         .iter()
         .map(|lane| format!("\n  {:<width$}  {}", lane.name(), lane.description()))
         .collect();
-    format!("cargo xtask test [--lane <lane>]...\n\nWithout --lane, runs the seven correctness lanes CI requires. Repeat --lane to\nrun only the lanes you name.\n\nLanes: {}{rows}\n\nEach run writes target/test-runs/<run-id>/report.json and fails if any requested\ntest fails or doesn't run.", lanes.join(", "))
+    format!("cargo xtask test [--correctness | --lane <lane>...]\n\nWithout options, runs the default lane. --correctness runs the seven correctness\nlanes CI requires. Repeat --lane to run only the lanes you name.\n\nLanes: {}{rows}\n\nEach run writes target/test-runs/<run-id>/report.json and fails if any requested\ntest fails or doesn't run. A lane doesn't start when its disk has less free space\nthan minimum_free_gigabytes in .config/validation.toml. Lanes other than default,\njournal-fixtures and performance build in target/lanes/<lane>, removed when the\nlane passes, unless CARGO_TARGET_DIR is set. When target holds more than\nbuild_directory_gigabytes, a run first removes superseded incremental sessions,\nthen the lane directories it doesn't need, then the rest of the incremental state.\nA lane builds its libraries, unit tests and examples first, then its test programs,\nat most test_program_build_jobs at a time.", lanes.join(", "))
 }
 
 const STAGES: [&str; 5] = ["plan", "build", "qualify", "measure", "assemble"];
@@ -175,9 +177,13 @@ pub(crate) fn run_performance(root: &Path, args: &[String]) -> Result<()> {
             }
             Ok(())
         }
-        ("build", Some(group)) => {
-            performance::build_stage(root, &tools, &directory, group, tools.build_jobs)
-        }
+        ("build", Some(group)) => performance::build_stage(
+            root,
+            &tools,
+            &directory,
+            group,
+            tools.environment.build_jobs,
+        ),
         ("qualify", Some(shard)) => performance::qualify_stage(root, &tools, &directory, shard),
         ("measure", Some(shard)) => performance::measure_stage(root, &tools, &directory, shard),
         ("assemble", None) => performance::assemble_stage(&directory),
@@ -206,6 +212,7 @@ struct LaneResult {
     lane: Lane,
     outcome: Outcome,
     elapsed_seconds: f64,
+    incremental: bool,
 }
 
 #[derive(Serialize)]
@@ -217,6 +224,8 @@ struct RunReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     final_source: Option<source::SourceIdentity>,
     platform: String,
+    build_jobs: usize,
+    build_directory: disk::BuildDirectoryRecord,
     requested_scope: String,
     not_requested: Vec<Lane>,
     policy: Value,
@@ -224,6 +233,52 @@ struct RunReport {
     dependency_preparation: Option<Outcome>,
     lanes: Vec<LaneResult>,
     outcome: Outcome,
+}
+
+struct LaneContext<'a> {
+    lane: Lane,
+    production: &'a [String],
+    directory: &'a Path,
+    build: &'a BuildDirectory,
+    incremental: Incremental,
+    launcher: &'a launcher::Launcher,
+}
+
+impl LaneContext<'_> {
+    fn command(
+        &self,
+        root: &Path,
+        policy: &Policy,
+        program: impl AsRef<std::ffi::OsStr>,
+    ) -> Command {
+        let mut command = process::command(root, policy, program);
+        command
+            .env("CARGO_TARGET_DIR", self.build.path())
+            .env("CARGO_INCREMENTAL", self.incremental.token());
+        command
+    }
+
+    fn test_program_command(&self, root: &Path, policy: &Policy) -> Command {
+        let mut command = self.command(root, policy, "cargo");
+        cap_test_program_jobs(&mut command, policy);
+        command
+    }
+}
+
+fn cap_test_program_jobs(command: &mut Command, policy: &Policy) {
+    command.env("CARGO_BUILD_JOBS", policy.test_program_jobs().to_string());
+}
+
+fn library_build_commands(mut base: impl FnMut() -> Command, selection: &[String]) -> [Command; 2] {
+    let mut units = base();
+    units
+        .args(["test", "--no-run", "--locked", "--lib", "--bins"])
+        .args(selection);
+    let mut examples = base();
+    examples
+        .args(["build", "--locked", "--examples"])
+        .args(selection);
+    [units, examples]
 }
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
@@ -234,7 +289,14 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     let options = Options::parse(args)?;
     let policy = Policy::read(root)?;
     let summary_path = std::env::var_os("GITHUB_STEP_SUMMARY").map(std::path::PathBuf::from);
-    run_native(root, options, policy, summary_path.as_deref(), run_lane)
+    run_native(
+        root,
+        options,
+        policy,
+        summary_path.as_deref(),
+        run_lane,
+        disk::free_bytes,
+    )
 }
 
 fn run_native(
@@ -242,7 +304,8 @@ fn run_native(
     options: Options,
     policy: Policy,
     summary_path: Option<&Path>,
-    execute_lane: impl FnMut(&Path, &Policy, Lane, &[String], &Path, &launcher::Launcher) -> Result<()>,
+    execute_lane: impl FnMut(&Path, &Policy, &LaneContext) -> Result<()>,
+    free_bytes: impl Fn(&Path) -> Result<u64>,
 ) -> Result<()> {
     run_native_with_preparation(
         root,
@@ -251,6 +314,7 @@ fn run_native(
         summary_path,
         execute_lane,
         dependencies::prepare,
+        free_bytes,
     )
 }
 
@@ -259,23 +323,41 @@ fn run_native_with_preparation(
     options: Options,
     policy: Policy,
     summary_path: Option<&Path>,
-    mut execute_lane: impl FnMut(
-        &Path,
-        &Policy,
-        Lane,
-        &[String],
-        &Path,
-        &launcher::Launcher,
-    ) -> Result<()>,
+    mut execute_lane: impl FnMut(&Path, &Policy, &LaneContext) -> Result<()>,
     mut prepare: impl FnMut(&Path, &Policy, &Path) -> Result<()>,
+    free_bytes: impl Fn(&Path) -> Result<u64>,
 ) -> Result<()> {
     let _lock = process::lock(root)?;
     let _signals = process::SignalGuard::install()?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let directory = root.join("target/test-runs").join(&run_id);
     fs::create_dir(&directory)?;
+    let configured = policy.environment.target_dir.as_deref();
+    let build_directory = match configured {
+        Some(target) => disk::measure(&root.join(target)),
+        None => {
+            let unrequested: Vec<PathBuf> = Lane::ALL
+                .into_iter()
+                .filter(|lane| !options.lanes.contains(lane))
+                .filter_map(|lane| match lane.build_directory(root, None) {
+                    BuildDirectory::Lane(path) => Some(path),
+                    BuildDirectory::Shared(_) | BuildDirectory::Configured(_) => None,
+                })
+                .collect();
+            disk::trim(
+                &root.join("target"),
+                &unrequested,
+                policy
+                    .build_directory_gigabytes
+                    .saturating_mul(disk::GIGABYTE),
+            )
+        }
+    };
+    for line in disk::trim_lines(&build_directory, policy.build_directory_gigabytes) {
+        eprintln!("validation: {line}");
+    }
     let mut report = RunReport {
-        version: 4,
+        version: 5,
         run_id,
         started_at_unix_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -283,6 +365,8 @@ fn run_native_with_preparation(
         source: source::identity(root)?,
         final_source: None,
         platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        build_jobs: policy.environment.build_jobs,
+        build_directory,
         requested_scope: options.scope().into(),
         not_requested: Lane::ALL
             .into_iter()
@@ -306,6 +390,8 @@ fn run_native_with_preparation(
                 lane: *lane,
                 outcome: Outcome::Pending,
                 elapsed_seconds: 0.0,
+                incremental: lane.incremental(policy.environment.incremental.as_deref())
+                    == Incremental::Enabled,
             })
             .collect(),
         outcome: Outcome::Running,
@@ -376,15 +462,39 @@ fn run_native_with_preparation(
         if process::was_interrupted() {
             break;
         }
+        let build = lane.build_directory(root, configured);
+        let refusal = match free_bytes(build.path()) {
+            Ok(free) => disk::floor_refusal(free, policy.minimum_free_gigabytes),
+            Err(failure) => Some(format!("free space unknown: {failure}")),
+        };
+        if let Some(detail) = refusal {
+            eprintln!("validation: {} not started: {detail}", lane.name());
+            report.lanes[index].outcome = Outcome::Incomplete(detail);
+            save(&directory, &report)?;
+            continue;
+        }
         report.lanes[index].outcome = Outcome::Running;
         save(&directory, &report)?;
         let phase = directory.join(lane.name());
         fs::create_dir(&phase)?;
         let started = Instant::now();
-        let result = execute_lane(root, &policy, lane, &production, &phase, &launcher);
+        let context = LaneContext {
+            lane,
+            production: &production,
+            directory: &phase,
+            build: &build,
+            incremental: lane.incremental(policy.environment.incremental.as_deref()),
+            launcher: &launcher,
+        };
+        let result = execute_lane(root, &policy, &context);
         report.lanes[index].elapsed_seconds = started.elapsed().as_secs_f64();
         if let Err(failure) = &result {
             eprintln!("validation: {} did not pass: {failure}", lane.name());
+        }
+        if let (Ok(()), BuildDirectory::Lane(path)) = (&result, &build) {
+            if let Err(failure) = disk::remove_directory(path) {
+                eprintln!("validation: could not remove {}: {failure}", path.display());
+            }
         }
         report.lanes[index].outcome = Outcome::of(&result);
         save(&directory, &report)?;
@@ -452,9 +562,11 @@ fn native_policy(policy: &Policy) -> Value {
     json!({"profile":policy.profile,"nextest":policy.nextest,"rust":policy.rust,"retries":0,"fail_fast":false,
         "leak_timeout":{"period":plan::LEAK_WAIT,"result":"fail"},
         "status_level":"leak","final_status_level":"fail",
-        "build_jobs":policy.build_jobs,"nextest_processes":policy.test_threads,"tokio_default_workers":policy.tokio_workers,
+        "nextest_processes":policy.test_threads,"tokio_default_workers":policy.tokio_workers,
         "explicit_tokio_workers":"retained as authored, including the four-worker Studio proof; source identity pins overrides",
-        "cargo_incremental":false,"dev_debug":0,"test_debug":0})
+        "minimum_free_gigabytes":policy.minimum_free_gigabytes,
+        "build_directory_gigabytes":policy.build_directory_gigabytes,
+        "test_program_build_jobs":policy.test_program_build_jobs})
 }
 
 fn save(directory: &Path, report: &RunReport) -> Result<()> {
@@ -493,21 +605,15 @@ fn summary(report: &RunReport, path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn run_lane(
-    root: &Path,
-    policy: &Policy,
-    lane: Lane,
-    production: &[String],
-    directory: &Path,
-    launcher: &launcher::Launcher,
-) -> Result<()> {
-    match lane {
+fn run_lane(root: &Path, policy: &Policy, context: &LaneContext) -> Result<()> {
+    let directory = context.directory;
+    match context.lane {
         Lane::Default | Lane::ProductionFeatures | Lane::TestSupport | Lane::JournalFixtures => {
-            nextest(root, policy, lane, production, directory, launcher)
+            nextest(root, policy, context)
         }
         Lane::Doctest => {
             let status = process::execute(
-                process::command(root, policy, "cargo").args([
+                context.command(root, policy, "cargo").args([
                     "test",
                     "--workspace",
                     "--doc",
@@ -527,7 +633,8 @@ fn run_lane(
             let invocation = uuid::Uuid::new_v4().to_string();
             let source = source::identity(root)?;
             let execution = process::execute(
-                process::command(root, policy, launcher.path())
+                context
+                    .command(root, policy, context.launcher.path())
                     .arg("__postgres-test")
                     .arg(directory)
                     .arg(&invocation)
@@ -545,7 +652,7 @@ fn run_lane(
             );
             postgres_acceptance(execution, evidence)
         }
-        Lane::Benchmarks => performance::smoke(root, policy, directory),
+        Lane::Benchmarks => performance::smoke(root, policy, directory, context.build.path()),
         Lane::Performance => performance::run(root, policy, directory),
     }
 }
@@ -581,14 +688,14 @@ pub(super) fn postgres_acceptance(
     }
 }
 
-fn nextest(
-    root: &Path,
-    policy: &Policy,
-    lane: Lane,
-    production: &[String],
-    directory: &Path,
-    launcher: &launcher::Launcher,
-) -> Result<()> {
+fn nextest(root: &Path, policy: &Policy, context: &LaneContext) -> Result<()> {
+    let LaneContext {
+        lane,
+        production,
+        directory,
+        launcher,
+        ..
+    } = *context;
     let version = process::capture(
         root,
         policy,
@@ -634,15 +741,34 @@ fn nextest(
         "none".into(),
     ];
     common.extend(selection);
-    let inventory = list(root, policy, lane, directory, &common, None, "inventory")?;
+    let libraries = library_build_commands(
+        || context.command(root, policy, "cargo"),
+        &lane.build_selection(production),
+    );
+    for (label, mut command) in ["library-build", "example-build"]
+        .into_iter()
+        .zip(libraries)
+    {
+        let status = process::execute(
+            &mut command,
+            directory,
+            label,
+            Duration::from_secs(policy.command_watchdog_seconds),
+        )?;
+        if !status.success() {
+            return Err(failed(format!(
+                "{label} did not complete; see compiler diagnostics"
+            )));
+        }
+    }
+    let inventory = list(root, policy, context, &common, None, "inventory")?;
     let expensive_ids = if lane == Lane::JournalFixtures {
         BTreeSet::new()
     } else {
         list(
             root,
             policy,
-            lane,
-            directory,
+            context,
             &common,
             Some(&expensive),
             "expensive-inventory",
@@ -691,8 +817,7 @@ fn nextest(
         let selected = list(
             root,
             policy,
-            lane,
-            directory,
+            context,
             &common,
             Some(&filter),
             "runnable-inventory",
@@ -707,7 +832,7 @@ fn nextest(
     }
     // One Nextest scheduler executes the disjoint selections with the configured
     // expensive-test group, preserving four total process slots and two proofs.
-    let mut command = process::command(root, policy, "cargo");
+    let mut command = context.test_program_command(root, policy);
     command.env("OBZENFLOW_TEST_ARTIFACTS", &case_artifacts);
     command
         .args(["nextest", "run"])
@@ -759,13 +884,12 @@ fn evaluate_nextest(
 fn list(
     root: &Path,
     policy: &Policy,
-    lane: Lane,
-    directory: &Path,
+    context: &LaneContext,
     common: &[String],
     filter: Option<&str>,
     label: &str,
 ) -> Result<plan::Inventory> {
-    let mut command = process::command(root, policy, "cargo");
+    let mut command = context.test_program_command(root, policy);
     command
         .args(["nextest", "list", "--message-format", "json"])
         .args(common);
@@ -774,7 +898,7 @@ fn list(
     }
     let status = process::execute(
         &mut command,
-        directory,
+        context.directory,
         label,
         Duration::from_secs(policy.command_watchdog_seconds),
     )?;
@@ -783,6 +907,11 @@ fn list(
             "{label} did not complete; see compiler/Nextest diagnostics"
         )));
     }
-    let raw = fs::read_to_string(directory.join(format!("{label}.stdout.log")))?;
-    plan::inventory(&serde_json::from_str(&raw)?, lane, policy, filter.is_some())
+    let raw = fs::read_to_string(context.directory.join(format!("{label}.stdout.log")))?;
+    plan::inventory(
+        &serde_json::from_str(&raw)?,
+        context.lane,
+        policy,
+        filter.is_some(),
+    )
 }

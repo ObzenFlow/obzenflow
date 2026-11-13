@@ -1,0 +1,328 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use obzenflow_adapters::middleware::source_poll_observer;
+use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::SourceDiagnosticReason;
+use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::stages::common::handlers::{
+    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncInfiniteSourceHandler,
+};
+use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
+use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
+
+/// File-local payload for the async-infinite source stage test. The JSON
+/// shape matches what `TestAsyncInfiniteSource` emits; the type
+/// fingerprints the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AsyncInfiniteEvent {
+    n: u64,
+}
+
+impl TypedPayload for AsyncInfiniteEvent {
+    const EVENT_TYPE: &'static str = "async_infinite_source.event";
+}
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+use tokio::sync::{mpsc, Mutex as TokioMutex, Notify};
+
+fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
+    let suffix = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_millis(0))
+        .as_nanos();
+    std::path::PathBuf::from("target").join(format!("{prefix}_{suffix}"))
+}
+
+async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
+    let mut rx = handle.state_receiver();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(*rx.borrow(), PipelineState::Running) {
+                return Ok(());
+            }
+            rx.changed()
+                .await
+                .map_err(|_| anyhow!("pipeline state channel closed"))?;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timeout waiting for pipeline to reach Running"))?
+}
+
+#[derive(Debug)]
+struct TestAsyncInfiniteSource {
+    rx: TokioMutex<mpsc::UnboundedReceiver<u64>>,
+    drain_calls: Arc<AtomicU64>,
+    poll_entered: Arc<Notify>,
+    max_batch_size: usize,
+}
+
+impl TestAsyncInfiniteSource {
+    fn new(
+        rx: mpsc::UnboundedReceiver<u64>,
+        drain_calls: Arc<AtomicU64>,
+        max_batch_size: usize,
+    ) -> Self {
+        Self {
+            rx: TokioMutex::new(rx),
+            drain_calls,
+            poll_entered: Arc::new(Notify::new()),
+            max_batch_size,
+        }
+    }
+}
+
+#[async_trait]
+impl TypedAsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
+    type Output = AsyncInfiniteEvent;
+
+    async fn next(&mut self) -> std::result::Result<Vec<Self::Output>, SourceError> {
+        let mut rx = self.rx.lock().await;
+        self.poll_entered.notify_one();
+
+        let first = rx.recv().await.ok_or(SourceError::Transport(
+            SourceDiagnosticReason::InputClosed.into(),
+        ))?;
+
+        let mut out = vec![AsyncInfiniteEvent { n: first }];
+
+        while out.len() < self.max_batch_size {
+            match rx.try_recv() {
+                Ok(n) => out.push(AsyncInfiniteEvent { n }),
+                Err(_) => break,
+            }
+        }
+
+        Ok(out)
+    }
+
+    async fn drain(&mut self) -> std::result::Result<(), SourceError> {
+        self.drain_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CollectSink {
+    events: Arc<Mutex<Vec<ChainEvent>>>,
+    event_ready: Arc<Notify>,
+}
+
+impl CollectSink {
+    fn new(events: Arc<Mutex<Vec<ChainEvent>>>, event_ready: Arc<Notify>) -> Self {
+        Self {
+            events,
+            event_ready,
+        }
+    }
+}
+
+#[async_trait]
+impl InlineSink for CollectSink {
+    type Input = AsyncInfiniteEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
+    }
+
+    async fn write(&mut self, event: AsyncInfiniteEvent) -> Result<(), SinkWriteFailure> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(event.to_event(WriterId::from(StageId::new())));
+        self.event_ready.notify_waiters();
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CountSourcePollObserver {
+    calls: Arc<AtomicU64>,
+}
+
+impl SourcePollObserver for CountSourcePollObserver {
+    fn after_source_poll(&self, _ctx: &SourcePollObserverContext<'_>, outputs: &[ChainEvent]) {
+        self.calls.fetch_add(
+            outputs
+                .iter()
+                .filter(|event| event.consumes_data_credit())
+                .count() as u64,
+            Ordering::Relaxed,
+        );
+    }
+}
+
+async fn wait_for_data_event_count(
+    events: &Arc<Mutex<Vec<ChainEvent>>>,
+    event_ready: &Notify,
+    expected: usize,
+) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let observed = events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.consumes_data_credit())
+                .count();
+            if observed >= expected {
+                return Ok(());
+            }
+            event_ready.notified().await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timeout waiting for {expected} data events"))?
+}
+
+#[tokio::test]
+async fn async_infinite_source_graceful_stop_interrupts_blocked_next_and_calls_drain() -> Result<()>
+{
+    let (_tx, rx) = mpsc::unbounded_channel();
+    let drain_calls = Arc::new(AtomicU64::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let event_ready = Arc::new(Notify::new());
+    let journal_root = unique_journal_dir("async_infinite_source_stop");
+    let drain_calls_for_flow = Arc::clone(&drain_calls);
+    let events_for_flow = Arc::clone(&events);
+    let event_ready_for_flow = Arc::clone(&event_ready);
+    let source = TestAsyncInfiniteSource::new(rx, drain_calls_for_flow, 32);
+    let poll_entered = source.poll_entered.clone();
+
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let sink = CollectSink::new(events_for_flow, event_ready_for_flow);
+
+        Ok(flow! {
+            name: "async_infinite_source_stop_test",
+            journals: disk_journals(journal_root),
+
+            stages: {
+                source = async_infinite_source!(AsyncInfiniteEvent => source);
+                sink = sink!(AsyncInfiniteEvent => sink);
+            },
+
+            topology: {
+                source |> sink;
+            }
+        })
+    })
+    .build(crate::replay_testkit::unsynced_context())
+    .await
+    .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
+
+    handle.start().await?;
+    wait_for_running(&handle).await?;
+
+    tokio::time::timeout(Duration::from_secs(5), poll_entered.notified())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for the source to enter next()"))?;
+    handle.stop_graceful(Duration::from_secs(5)).await?;
+
+    tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+
+    assert_eq!(
+        drain_calls.load(Ordering::Relaxed),
+        1,
+        "expected async infinite source drain() to be called once"
+    );
+
+    let data_events: Vec<ChainEvent> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.consumes_data_credit())
+        .cloned()
+        .collect();
+    assert!(
+        data_events.is_empty(),
+        "expected no data events when the source never receives submissions"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Result<()> {
+    let (tx, rx) = mpsc::channel(2);
+    tx.try_send(AsyncInfiniteEvent { n: 1 })?;
+    tx.try_send(AsyncInfiniteEvent { n: 2 })?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let event_ready = Arc::new(Notify::new());
+    let observer_calls = Arc::new(AtomicU64::new(0));
+    let journal_root = unique_journal_dir("async_infinite_source_middleware");
+    let events_for_flow = Arc::clone(&events);
+    let event_ready_for_flow = Arc::clone(&event_ready);
+    let observer_calls_for_flow = Arc::clone(&observer_calls);
+
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = obzenflow::stages::sources::ChannelSource::new(rx);
+        let sink = CollectSink::new(events_for_flow, event_ready_for_flow);
+
+        Ok(flow! {
+            name: "async_infinite_source_middleware_test",
+            journals: disk_journals(journal_root),
+
+            stages: {
+                source = async_infinite_source!(AsyncInfiniteEvent with { source_poll_observer(
+                        "count_source_poll_data",
+                        CountSourcePollObserver { calls: observer_calls_for_flow }
+                    ) } => source);
+                sink = sink!(AsyncInfiniteEvent => sink);
+            },
+
+            topology: {
+                source |> sink;
+            }
+        })
+    })
+    .build(crate::replay_testkit::unsynced_context())
+    .await
+    .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
+
+    assert_eq!(tx.capacity(), 0, "materialisation must not consume input");
+    assert!(
+        !tx.is_closed(),
+        "materialisation must not close the receiver"
+    );
+    handle.start().await?;
+    wait_for_running(&handle).await?;
+
+    wait_for_data_event_count(&events, &event_ready, 2).await?;
+
+    handle.stop_graceful(Duration::from_secs(5)).await?;
+
+    tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+
+    let data_events: Vec<ChainEvent> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.consumes_data_credit())
+        .cloned()
+        .collect();
+    assert_eq!(data_events.len(), 2);
+
+    assert_eq!(
+        observer_calls.load(Ordering::Relaxed),
+        data_events.len() as u64,
+        "the source-poll observer sees every live data event"
+    );
+
+    assert!(tx.is_closed(), "orderly cleanup releases the receiver");
+
+    Ok(())
+}

@@ -1,0 +1,545 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! FLOWIP-095j golden path: record a gateway-shaped run, strict-replay it,
+//! and let the verifier certify the reconstruction from the journals.
+//!
+//! The fixture is the tutorial shape: a source, a multi-type validation
+//! stage, an effectful authorization stage whose effect succeeds, declines,
+//! or fails per order, and three sinks, one of which converges cancellations
+//! from two producers. That converging delivery sink is deliberately outside
+//! the order-certified region (FLOWIP-095d leaves it availability-driven),
+//! and its projection carries no positionally compared rows, so the vacuous
+//! certification rule must let the headline verdict through.
+//!
+//! The suite also proves replay closure as the user sees it: a replay of the
+//! replay verifies against both its parent and, after the parent directory is
+//! deleted, against generation zero, because lineage is proven from the
+//! effect-lane namespace in the journals rather than from manifest chains.
+
+use crate::replay_testkit;
+
+use async_trait::async_trait;
+use obzenflow_core::TypedPayload;
+use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
+use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_infra::verify::{verify_run_dirs, RefusalReason, VerifyOptions, VerifyOutcome};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
+};
+use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Domain facts, gateway-shaped
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OrderPlaced {
+    order_id: u64,
+    amount: u64,
+}
+
+impl TypedPayload for OrderPlaced {
+    const EVENT_TYPE: &'static str = "replay_verification.order_placed";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ValidatedOrder {
+    order_id: u64,
+    amount: u64,
+}
+
+impl TypedPayload for ValidatedOrder {
+    const EVENT_TYPE: &'static str = "replay_verification.validated";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AuthGrant {
+    order_id: u64,
+    auth_code: u64,
+}
+
+impl TypedPayload for AuthGrant {
+    const EVENT_TYPE: &'static str = "replay_verification.auth_grant";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OrderAuthorized {
+    order_id: u64,
+    auth_code: u64,
+}
+
+impl TypedPayload for OrderAuthorized {
+    const EVENT_TYPE: &'static str = "replay_verification.authorized";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AuthorizationUnavailable {
+    order_id: u64,
+    reason: String,
+}
+
+impl TypedPayload for AuthorizationUnavailable {
+    const EVENT_TYPE: &'static str = "replay_verification.unavailable";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OrderCancelled {
+    order_id: u64,
+    origin: String,
+}
+
+impl TypedPayload for OrderCancelled {
+    const EVENT_TYPE: &'static str = "replay_verification.cancelled";
+}
+
+// ---------------------------------------------------------------------------
+// Fixture flow: six orders covering authorized, unavailable, and cancelled
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct OrderSource {
+    next: u64,
+}
+
+impl OrderSource {
+    fn new() -> Self {
+        Self { next: 1 }
+    }
+}
+
+impl TypedFiniteSourceHandler for OrderSource {
+    type Output = OrderPlaced;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        if self.next > 6 {
+            return Ok(None);
+        }
+        let order_id = self.next;
+        self.next += 1;
+        let amount = if order_id == 5 { 700 } else { 100 * order_id };
+        Ok(Some(vec![OrderPlaced { order_id, amount }]))
+    }
+}
+
+#[obzenflow::command]
+#[derive(Clone, Debug)]
+struct ValidateOrder;
+
+#[async_trait]
+impl EffectfulTransformHandler for ValidateOrder {
+    type Input = OrderPlaced;
+    type Output = obzenflow_core::stage_fact_set![ValidatedOrder, OrderCancelled];
+
+    async fn process(
+        &self,
+        order: OrderPlaced,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        if order.order_id.is_multiple_of(3) {
+            fx.emit(OrderCancelled {
+                order_id: order.order_id,
+                origin: "validation".to_string(),
+            })
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+            return Ok(fx.complete()?);
+        }
+        fx.emit(ValidatedOrder {
+            order_id: order.order_id,
+            amount: order.amount,
+        })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(fx.complete()?)
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "replay-verification-validate-v1"
+    }
+}
+
+struct Gateway {
+    calls: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AuthorizeRequest {
+    order_id: u64,
+    amount: u64,
+}
+
+#[obzenflow::port(system = "gateway")]
+impl Gateway {
+    #[effect(type = "replay_verification.authorize", exactly_once)]
+    fn authorize(&self, request: &AuthorizeRequest) -> Result<AuthGrant, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if request.order_id.is_multiple_of(2) {
+            return Err(EffectError::Execution(
+                "gateway_timeout_simulated".to_string(),
+            ));
+        }
+        Ok(AuthGrant {
+            order_id: request.order_id,
+            auth_code: request.order_id + 9000,
+        })
+    }
+}
+
+#[obzenflow::command]
+#[derive(Clone, Debug)]
+struct AuthorizePayment {
+    #[port]
+    gateway: Port<Gateway>,
+}
+
+impl AuthorizePayment {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            gateway: Port::to(Gateway { calls }),
+        }
+    }
+}
+
+#[async_trait]
+impl EffectfulTransformHandler for AuthorizePayment {
+    type Input = ValidatedOrder;
+    type Output = obzenflow_core::stage_fact_set![
+        OrderAuthorized,
+        AuthorizationUnavailable,
+        OrderCancelled,
+        AuthGrant
+    ];
+
+    async fn process(
+        &self,
+        order: ValidatedOrder,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        let outcome = fx
+            .call(AuthorizeRequest {
+                order_id: order.order_id,
+                amount: order.amount,
+            })
+            .await;
+
+        match outcome {
+            Ok(_grant) if order.amount > 500 => {
+                fx.emit(OrderCancelled {
+                    order_id: order.order_id,
+                    origin: "declined".to_string(),
+                })
+                .await
+                .map_err(|e| HandlerError::Other(e.to_string()))?;
+            }
+            Ok(grant) => {
+                fx.emit(OrderAuthorized {
+                    order_id: order.order_id,
+                    auth_code: grant.auth_code,
+                })
+                .await
+                .map_err(|e| HandlerError::Other(e.to_string()))?;
+            }
+            Err(err) => {
+                fx.emit(AuthorizationUnavailable {
+                    order_id: order.order_id,
+                    reason: err.semantic_reason().into_owned(),
+                })
+                .await
+                .map_err(|e| HandlerError::Other(e.to_string()))?;
+            }
+        }
+        Ok(fx.complete()?)
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "replay-verification-authorize-v1"
+    }
+}
+
+fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let orders_handler = OrderSource::new();
+        let validate_handler = ValidateOrder;
+        let authorize_handler = AuthorizePayment::new(calls);
+        let paid_orders_handler = replay_testkit::Discard::<OrderAuthorized>::default();
+        let cancelled_orders_handler = replay_testkit::Discard::<OrderCancelled>::default();
+        let manual_review_handler = replay_testkit::Discard::<AuthorizationUnavailable>::default();
+
+        Ok(flow! {
+            name: "replay_verification_golden_path",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                orders = source!(OrderPlaced => orders_handler);
+                validate = effectful_transform!(
+                    OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_handler);
+                authorize = effectful_transform!(
+                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } => authorize_handler);
+                paid_orders = sink!(OrderAuthorized => paid_orders_handler);
+                cancelled_orders = sink!(OrderCancelled => cancelled_orders_handler);
+                manual_review = sink!(AuthorizationUnavailable => manual_review_handler);
+            },
+
+            topology: {
+                orders |> validate;
+                validate |> authorize;
+                authorize |> paid_orders;
+                authorize |> manual_review;
+                validate |> cancelled_orders;
+                authorize |> cancelled_orders;
+            }
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn latest_run_dir(base: &Path) -> PathBuf {
+    let flows_dir = base.join("flows");
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&flows_dir)
+        .expect("flows directory should exist")
+        .map(|entry| entry.expect("flow dir entry").path())
+        .filter(|path| path.join("run_manifest.json").exists())
+        .collect();
+    entries.sort();
+    entries.pop().expect("run should have produced an archive")
+}
+
+async fn run_flow(journal_base: &Path, replay_from: Option<&Path>) -> Arc<AtomicUsize> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut args = vec![OsString::from("obzenflow")];
+    if let Some(archive) = replay_from {
+        args.push(OsString::from("--replay-from"));
+        args.push(archive.as_os_str().to_os_string());
+    }
+    replay_testkit::unsynced_application()
+        .with_cli_args(args)
+        .run_async(build_flow(journal_base.to_path_buf(), calls.clone()))
+        .await
+        .expect("flow should complete");
+    calls
+}
+
+#[tokio::test]
+async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+    let dir = tempfile::Builder::new()
+        .prefix("monitoring-replay-")
+        .tempdir_in(root)
+        .unwrap();
+    let mut modes = vec!["disabled"];
+    if cfg!(all(feature = "prometheus", feature = "web-host")) {
+        modes.push("prometheus");
+    }
+    let mut first_live: Option<PathBuf> = None;
+    for mode in modes {
+        let journal_base = dir.path().join(mode);
+        std::fs::create_dir_all(&journal_base).unwrap();
+        let config = journal_base.join("obzenflow.toml");
+        // Keep the configured port occupied so every hosted run must select an
+        // ephemeral port through the CLI, including the shared-baseline replay.
+        let configured_port_owner =
+            (mode == "prometheus").then(|| std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap());
+        let port = configured_port_owner
+            .as_ref()
+            .map_or(9090, |listener| listener.local_addr().unwrap().port());
+        std::fs::write(
+            &config,
+            format!(
+                "[journal]\nsync = \"off\"\n\n\
+             [server]\nenabled = {}\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\n\
+             [metrics]\nenabled = {}\n",
+                mode == "prometheus",
+                mode == "prometheus"
+            ),
+        )
+        .unwrap();
+        let mut live: Option<OsString> = None;
+        for replay in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut args = vec![
+                OsString::from("monitoring-replay"),
+                OsString::from("--server-port"),
+                OsString::from("0"),
+            ];
+            if replay {
+                args.extend([
+                    OsString::from("--replay-from"),
+                    live.as_ref().unwrap().clone(),
+                    OsString::from("--verify"),
+                ]);
+            }
+            FlowApplication::builder()
+                .with_config_file(&config)
+                .with_cli_args(args)
+                .run_async(build_flow(journal_base.clone(), calls.clone()))
+                .await
+                .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), if replay { 0 } else { 4 });
+            let archive = latest_run_dir(&journal_base);
+            if replay {
+                let baseline = PathBuf::from(live.as_ref().unwrap());
+                assert_certified_match(
+                    &verify_run_dirs(&baseline, &archive, &VerifyOptions::default()).unwrap(),
+                );
+            } else {
+                if first_live.is_none() {
+                    first_live = Some(archive.clone());
+                }
+                live = Some(archive.into_os_string());
+            }
+        }
+
+        // Failure facts carry the recorded flow ID inside their payload. Compare
+        // reporting modes against one recorded namespace, while the loop above
+        // separately proves every mode's live run and its own replay.
+        let baseline = first_live.as_ref().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        FlowApplication::builder()
+            .with_config_file(&config)
+            .with_cli_args([
+                OsString::from("reporting-shared-baseline"),
+                OsString::from("--server-port"),
+                OsString::from("0"),
+                OsString::from("--replay-from"),
+                baseline.as_os_str().to_owned(),
+                OsString::from("--verify"),
+            ])
+            .run_async(build_flow(journal_base.clone(), calls.clone()))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_certified_match(
+            &verify_run_dirs(
+                baseline,
+                &latest_run_dir(&journal_base),
+                &VerifyOptions::default(),
+            )
+            .unwrap(),
+        );
+    }
+}
+
+fn assert_certified_match(outcome: &VerifyOutcome) -> &obzenflow_infra::verify::VerificationReport {
+    assert_eq!(
+        outcome.exit_code(),
+        0,
+        "expected a fully certified match: {}\n{outcome:#?}",
+        obzenflow_infra::verify::render_verdict(outcome)
+    );
+    let VerifyOutcome::Completed { report, .. } = outcome else {
+        panic!("expected a completed verification");
+    };
+    report
+}
+
+// ---------------------------------------------------------------------------
+// The golden path
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_verification_certifies_the_reconstruction_and_replay_closure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    // Record the baseline live.
+    let live_calls = run_flow(&journal_base, None).await;
+    assert_eq!(
+        live_calls.load(Ordering::SeqCst),
+        4,
+        "orders 1, 2, 4, 5 reach the gateway"
+    );
+    let baseline = latest_run_dir(&journal_base);
+
+    // Strict replay: zero effect executions.
+    let replay_calls = run_flow(&journal_base, Some(&baseline)).await;
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must not execute the gateway effect"
+    );
+    let candidate = latest_run_dir(&journal_base);
+    assert_ne!(baseline, candidate);
+
+    // The verdict, from the journals.
+    let outcome = verify_run_dirs(&baseline, &candidate, &VerifyOptions::default())
+        .expect("verification should run");
+    let report = assert_certified_match(&outcome);
+
+    assert_eq!(report.report_version, 2);
+    assert_eq!(report.mode, "whole_run");
+    assert_eq!(
+        report.identity_mode, "lineage",
+        "a replay candidate asserts its lineage"
+    );
+    assert_eq!(report.totals.divergences, 0);
+
+    // The certified region really compared rows (projection discipline: the
+    // candidate's rows all carry replay_context, the baseline's none, and the
+    // effect lane carries identity, yet nothing diverges).
+    assert!(report.stages["validate"].order_certified);
+    assert!(report.stages["validate"].positional_rows_baseline > 0);
+    assert!(report.stages["authorize"].order_certified);
+    assert!(report.stages["authorize"].positional_rows_baseline > 0);
+
+    // The converging delivery sink sits outside the certified region and is
+    // vacuously certified: it must not block the headline verdict.
+    let sink = &report.stages["cancelled_orders"];
+    assert!(!sink.order_certified);
+    assert!(
+        sink.vacuous,
+        "delivery-only sink fan-in is vacuously certified"
+    );
+    assert_eq!(sink.status, "matched");
+
+    // The sidecar report is the receipt, inside the candidate run directory,
+    // and the verifier wrote nothing into either run's journals.
+    let report_path = candidate
+        .join("verification")
+        .join(format!("{}.json", report.baseline.flow_id));
+    assert!(report_path.exists(), "report sidecar should exist");
+
+    // Replay closure: replay the replay, verify against the parent.
+    let gen2_calls = run_flow(&journal_base, Some(&candidate)).await;
+    assert_eq!(gen2_calls.load(Ordering::SeqCst), 0);
+    let gen2 = latest_run_dir(&journal_base);
+    assert_ne!(gen2, candidate);
+
+    let outcome = verify_run_dirs(&candidate, &gen2, &VerifyOptions::default())
+        .expect("replay-of-replay verification should run");
+    assert_certified_match(&outcome);
+
+    // Deleted-generation lineage: remove the intermediate replay and verify
+    // generation two against generation zero. Lineage is proven from the
+    // effect-lane namespace in the journals, never from manifest chains.
+    std::fs::remove_dir_all(&candidate).expect("delete the intermediate generation");
+    let outcome = verify_run_dirs(&baseline, &gen2, &VerifyOptions::default())
+        .expect("deleted-generation verification should run");
+    let report = assert_certified_match(&outcome);
+    assert_eq!(report.identity_mode, "lineage");
+}
+
+#[tokio::test]
+async fn verification_refuses_an_unavailable_archive() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = temp.path().join("no-such-run");
+    let outcome = verify_run_dirs(&missing, &missing, &VerifyOptions::default())
+        .expect("refusals are outcomes, not errors");
+    assert_eq!(outcome.exit_code(), 3);
+    assert!(matches!(
+        outcome,
+        VerifyOutcome::Refused(RefusalReason::ArchiveUnavailable { .. })
+    ));
+}

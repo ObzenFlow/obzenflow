@@ -8,8 +8,6 @@ publish = false
 
 [dependencies]
 libc = { workspace = true }
-obzenflow_core = { workspace = true }
-obzenflow_infra = { workspace = true, features = ["test-support"] }
 ring = { workspace = true }
 roxmltree = "=0.21.1"
 serde = { workspace = true }

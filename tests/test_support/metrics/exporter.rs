@@ -1,0 +1,1247 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! Metrics exporter integration tests
+//!
+//! These tests validate end-to-end wiring for:
+//! - Middleware metrics (circuit breaker, rate limiter) flowing through MetricsAggregator
+//! - Contract verification metrics flowing through MetricsAggregator
+//! - Prometheus `/metrics` rendering with joinable, ID-first label sets
+
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
+use obzenflow_adapters::monitoring::MetricsReadModel;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::SourceDiagnosticReason;
+use obzenflow_core::TypedPayload;
+use obzenflow_core::{StageId, StageOutputs};
+use obzenflow_dsl::{sink, source, test_flow, transform};
+use obzenflow_infra::journal::disk_journals;
+#[cfg(feature = "test-support")]
+use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::id_conversions::StageIdExt;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
+};
+use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::testing::MetricsBarrier;
+use serde::{Deserialize, Serialize};
+
+/// File-local payload for the metrics exporter integration test. The JSON
+/// shape matches what `BurstSource` emits; the type fingerprints the
+/// stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MetricEvent {
+    index: u64,
+}
+
+impl TypedPayload for MetricEvent {
+    const EVENT_TYPE: &'static str = "metric.sample";
+}
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+use tokio::time::{sleep, Duration};
+
+#[derive(Clone, Debug)]
+struct BurstSource {
+    total: usize,
+    current: usize,
+}
+
+impl BurstSource {
+    fn new(total: usize) -> Self {
+        Self { total, current: 0 }
+    }
+}
+
+impl TypedFiniteSourceHandler for BurstSource {
+    type Output = MetricEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        if self.current >= self.total {
+            return Ok(None);
+        }
+
+        let idx = self.current;
+        self.current += 1;
+
+        Ok(Some(vec![MetricEvent { index: idx as u64 }]))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ErrorAfterFirstSource {
+    current: usize,
+}
+
+impl ErrorAfterFirstSource {
+    fn new() -> Self {
+        Self { current: 0 }
+    }
+}
+
+impl TypedFiniteSourceHandler for ErrorAfterFirstSource {
+    type Output = MetricEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        match self.current {
+            0 => {
+                self.current = 1;
+                Ok(Some(vec![MetricEvent { index: 0 }]))
+            }
+            1 => {
+                self.current = 2;
+                Err(SourceError::Timeout(
+                    SourceDiagnosticReason::TimedOut.into(),
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PassthroughTransform;
+
+impl TypedTransformHandler for PassthroughTransform {
+    type Input = MetricEvent;
+    type Output = MetricEvent;
+
+    fn process(&self, event: MetricEvent) -> std::result::Result<MetricEvent, HandlerError> {
+        Ok(event)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DropTransform;
+
+impl TypedTransformHandler for DropTransform {
+    type Input = MetricEvent;
+    type Output = StageOutputs<MetricEvent>;
+
+    fn process(
+        &self,
+        _event: MetricEvent,
+    ) -> std::result::Result<StageOutputs<MetricEvent>, HandlerError> {
+        Ok(StageOutputs::none())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CountingSink {
+    count: Arc<Mutex<u64>>,
+}
+
+impl CountingSink {
+    fn new() -> (Self, Arc<Mutex<u64>>) {
+        let count = Arc::new(Mutex::new(0));
+        (
+            Self {
+                count: count.clone(),
+            },
+            count,
+        )
+    }
+}
+
+#[async_trait]
+impl InlineSink for CountingSink {
+    type Input = MetricEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::Custom("count".to_string()))
+    }
+
+    async fn write(&mut self, _event: MetricEvent) -> Result<(), SinkWriteFailure> {
+        if let Ok(mut count) = self.count.lock() {
+            *count += 1;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SleepingSink {
+    sleep_per_event: Duration,
+}
+
+impl SleepingSink {
+    fn new(sleep_per_event: Duration) -> Self {
+        Self { sleep_per_event }
+    }
+}
+
+#[async_trait]
+impl InlineSink for SleepingSink {
+    type Input = MetricEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::Custom("sleep".to_string()))
+    }
+
+    async fn write(&mut self, _event: MetricEvent) -> Result<(), SinkWriteFailure> {
+        sleep(self.sleep_per_event).await;
+        Ok(())
+    }
+}
+
+fn render_metrics_checked(
+    exporter: &Arc<MetricsReadModel>,
+    debug_patterns: &[String],
+    predicate: impl Fn(&str) -> bool,
+) -> Result<String> {
+    let snapshot = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&exporter.snapshot())
+        .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
+
+    if predicate(&snapshot) {
+        return Ok(snapshot);
+    }
+
+    let excerpt = filter_metrics_lines(&snapshot, debug_patterns, 120);
+    Err(anyhow!(
+        "metrics snapshot did not include expected lines (snapshot length={}).\nFiltered excerpt:\n{}",
+        snapshot.len(),
+        if excerpt.is_empty() {
+            "(no matching lines)"
+        } else {
+            excerpt.as_str()
+        }
+    ))
+}
+
+fn filter_metrics_lines(metrics_text: &str, patterns: &[String], max_lines: usize) -> String {
+    if patterns.is_empty() || max_lines == 0 {
+        return String::new();
+    }
+
+    let mut out = Vec::new();
+    for line in metrics_text.lines() {
+        if patterns.iter().any(|p| !p.is_empty() && line.contains(p)) {
+            out.push(line);
+            if out.len() >= max_lines {
+                break;
+            }
+        }
+    }
+
+    out.join("\n")
+}
+
+fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
+    let suffix = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_millis(0))
+        .as_nanos();
+    std::path::PathBuf::from("target").join(format!("{prefix}_{suffix}"))
+}
+
+async fn run_with_metrics_barrier(
+    test_handle: obzenflow_runtime::testing::FlowTestHarness,
+    timeout: Duration,
+    metrics_model: Arc<obzenflow_adapters::monitoring::MetricsReadModel>,
+) -> Result<Arc<MetricsReadModel>> {
+    let exporter = metrics_model.clone();
+
+    let metrics_barrier = MetricsBarrier::try_on_flow(&test_handle)
+        .await
+        .map_err(|e| anyhow!("Failed to construct MetricsBarrier: {e}"))?;
+
+    match tokio::time::timeout(timeout, test_handle.into_inner().run()).await {
+        Ok(run_result) => run_result.map_err(|e| anyhow!("Failed to run flow: {e:?}"))?,
+        Err(_) => {
+            return Err(anyhow!(
+                "flow did not complete within {timeout:?} (timeout)"
+            ))
+        }
+    }
+
+    metrics_barrier
+        .wait_for_drained()
+        .await
+        .map_err(|e| anyhow!("MetricsBarrier wait failed: {e}"))?;
+
+    Ok(exporter)
+}
+
+fn stage_id_with_middleware(
+    topology: &obzenflow_topology::Topology,
+    middleware_name: &str,
+) -> Result<StageId> {
+    topology
+        .stages()
+        .find(|stage| {
+            stage.middleware.as_ref().is_some_and(|m| {
+                m.attachments
+                    .iter()
+                    .any(|attachment| attachment.label == middleware_name)
+            })
+        })
+        .map(|stage| StageIdExt::from_topology_id(stage.id))
+        .ok_or_else(|| anyhow!("no stage found with middleware '{middleware_name}'"))
+}
+
+fn metric_line_value(
+    metrics_text: &str,
+    metric_name: &str,
+    required_substrings: &[String],
+) -> Option<f64> {
+    metrics_text.lines().find_map(|line| {
+        if !line.starts_with(metric_name) {
+            return None;
+        }
+        if !required_substrings.iter().all(|s| line.contains(s)) {
+            return None;
+        }
+        line.split_whitespace()
+            .last()
+            .and_then(|v| v.parse::<f64>().ok())
+    })
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
+    let source = BurstSource::new(10);
+    let transform = PassthroughTransform;
+    let (sink, _count) = CountingSink::new();
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_barrier_paused_time_smoke",
+        journals: memory_journals(),
+
+        stages: {
+            src = source!(MetricEvent => source);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let exporter = metrics_model.clone();
+
+    let metrics_barrier = MetricsBarrier::try_on_flow(&test_handle)
+        .await
+        .map_err(|e| anyhow!("Failed to construct MetricsBarrier: {e}"))?;
+
+    test_handle
+        .into_inner()
+        .run()
+        .await
+        .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?;
+
+    metrics_barrier
+        .wait_for_drained()
+        .await
+        .map_err(|e| anyhow!("MetricsBarrier wait failed: {e}"))?;
+
+    let snapshot = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&exporter.snapshot())
+        .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
+    assert!(
+        snapshot.contains("obzenflow_events_total"),
+        "expected rendered metrics to include obzenflow_events_total"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
+    let timeout_flow = Duration::from_secs(30);
+    let source = BurstSource::new(50);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
+
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_flow_id_labels",
+        journals: disk_journals(unique_journal_dir("metrics_flow_id_labels")),
+
+        stages: {
+            src = source!(MetricEvent with {
+                // No summaries/threshold crossings required; utilization is derived from bucket state.
+                rate_limit(10_000.0).burst_capacity(10_000.0),
+                circuit_breaker().consecutive_failures(10)
+            } => source);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
+
+    let debug_patterns = vec![
+        "stage_id=\"".to_string(),
+        "flow_id=\"".to_string(),
+        "obzenflow_events_total".to_string(),
+    ];
+
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        text.contains("obzenflow_events_total") && text.contains("stage_id=\"")
+    })?;
+
+    let stage_lines: Vec<&str> = metrics_text
+        .lines()
+        .filter(|line| !line.starts_with('#') && line.contains("stage_id=\""))
+        .collect();
+    assert!(
+        !stage_lines.is_empty(),
+        "expected at least one stage-scoped metric line"
+    );
+
+    for line in stage_lines {
+        assert!(
+            line.contains("flow_id=\""),
+            "missing flow_id label on stage-scoped metric: {line}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
+    let timeout_flow = Duration::from_secs(30);
+
+    let per_event = Duration::from_millis(10);
+    let total_events: usize = 100;
+    let source = BurstSource::new(total_events);
+    let transform = PassthroughTransform;
+    let sink = SleepingSink::new(per_event);
+
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_processing_time_sum",
+        journals: disk_journals(unique_journal_dir("metrics_processing_time_sum")),
+
+        stages: {
+            src = source!(MetricEvent => source);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
+
+    let flow_label = "flow=\"metrics_processing_time_sum\"".to_string();
+    let stage_label = "stage=\"snk\"".to_string();
+    let debug_patterns = vec![
+        "obzenflow_processing_time_seconds_sum".to_string(),
+        flow_label.clone(),
+        stage_label.clone(),
+    ];
+
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        text.contains("obzenflow_processing_time_seconds_sum") && text.contains(&stage_label)
+    })?;
+
+    let sum_s = metric_line_value(
+        &metrics_text,
+        "obzenflow_processing_time_seconds_sum{",
+        &[flow_label.clone(), stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing processing_time_seconds_sum for {stage_label}"))?;
+
+    // Expect: 100 events * 10ms = 1s of handler time (plus overhead).
+    assert!(sum_s >= 0.5, "expected sum >= 0.5s, got {sum_s}");
+    assert!(sum_s < 10.0, "expected sum < 10s, got {sum_s}");
+
+    // Histogram buckets should be cumulative and end at _count.
+    let count = metric_line_value(
+        &metrics_text,
+        "obzenflow_processing_time_seconds_count{",
+        &[flow_label.clone(), stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing processing_time_seconds_count for {stage_label}"))?
+        as u64;
+
+    let expected_buckets = [
+        "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "+Inf",
+    ];
+
+    let mut prev: u64 = 0;
+    for le in expected_buckets {
+        let le_label = format!("le=\"{le}\"");
+        let bucket_count = metric_line_value(
+            &metrics_text,
+            "obzenflow_processing_time_seconds_bucket{",
+            &[flow_label.clone(), stage_label.clone(), le_label],
+        )
+        .ok_or_else(|| {
+            anyhow!("missing processing_time_seconds_bucket for {stage_label}, le={le}")
+        })? as u64;
+        assert!(
+            bucket_count >= prev,
+            "expected cumulative buckets; le={le} count={bucket_count} < prev={prev}"
+        );
+        prev = bucket_count;
+    }
+
+    assert_eq!(
+        prev, count,
+        "expected +Inf bucket count to equal _count ({prev} != {count})"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
+    // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
+    let timeout_flow = Duration::from_secs(30);
+    let source = BurstSource::new(1001);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
+
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_cb_exporter",
+        journals: disk_journals(unique_journal_dir("metrics_cb_exporter")),
+
+        stages: {
+            // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
+            // Use 1001 so the summary is not emitted on the final stage output.
+            src = source!(MetricEvent with {
+                circuit_breaker().consecutive_failures(10)
+            } => source);
+            // Drop downstream data outputs to keep journaling light; the circuit breaker
+            // still observes successful source polling and emits a summary at 1000.
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let topology = test_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
+
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
+
+    let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
+    let flow_label = "flow=\"metrics_cb_exporter\"".to_string();
+    let debug_patterns = vec![
+        "obzenflow_circuit_breaker".to_string(),
+        "obzenflow_circuit_breaker_requests_total".to_string(),
+        "obzenflow_circuit_breaker_rejections_total".to_string(),
+        flow_label.clone(),
+        cb_stage_label.clone(),
+    ];
+
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        text.contains("obzenflow_circuit_breaker_requests_total")
+            && text.contains("obzenflow_circuit_breaker_rejections_total")
+            && text.contains(&cb_stage_label)
+    })?;
+
+    // Counters must exist and be stage_id joinable.
+    assert!(
+        metrics_text.lines().any(|l| {
+            l.starts_with("obzenflow_circuit_breaker_requests_total{")
+                && l.contains(&flow_label)
+                && l.contains(&cb_stage_label)
+        }),
+        "expected circuit breaker requests counter with flow + stage_id labels"
+    );
+
+    assert!(
+        metrics_text.lines().any(|l| {
+            l.starts_with("obzenflow_circuit_breaker_rejections_total{")
+                && l.contains(&flow_label)
+                && l.contains(&cb_stage_label)
+        }),
+        "expected circuit breaker rejections counter with flow + stage_id labels"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
+    // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
+    let timeout_flow = Duration::from_secs(30);
+    let source = ErrorAfterFirstSource::new();
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
+
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_cb_cumulative",
+        journals: disk_journals(unique_journal_dir("metrics_cb_cumulative")),
+
+        stages: {
+            // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
+            // First poll succeeds, second poll fails (Timeout), opening the breaker.
+            src = source!(MetricEvent with {
+                circuit_breaker()
+                    .consecutive_failures(1)
+                    .open_for(Duration::from_millis(1))
+            } => source);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let topology = test_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
+
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
+
+    let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
+    let flow_label = "flow=\"metrics_cb_cumulative\"".to_string();
+    let debug_patterns = vec![
+        "obzenflow_circuit_breaker_opened_total".to_string(),
+        "obzenflow_circuit_breaker_successes_total".to_string(),
+        "obzenflow_circuit_breaker_failures_total".to_string(),
+        "obzenflow_circuit_breaker_slow_total".to_string(),
+        "obzenflow_circuit_breaker_time_in_state_seconds_total".to_string(),
+        flow_label.clone(),
+        cb_stage_label.clone(),
+    ];
+
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        text.contains("obzenflow_circuit_breaker_opened_total")
+            && text.contains("obzenflow_circuit_breaker_successes_total")
+            && text.contains("obzenflow_circuit_breaker_failures_total")
+            && text.contains("obzenflow_circuit_breaker_slow_total")
+            && text.contains("obzenflow_circuit_breaker_time_in_state_seconds_total")
+            && text.contains(&flow_label)
+            && text.contains(&cb_stage_label)
+    })?;
+
+    let opened_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_circuit_breaker_opened_total{",
+        &[flow_label.clone(), cb_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing circuit_breaker_opened_total for {cb_stage_label}"))?;
+    assert!(
+        (opened_total - 1.0).abs() < f64::EPSILON,
+        "expected circuit_breaker_opened_total=1, got {opened_total}"
+    );
+
+    let successes_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_circuit_breaker_successes_total{",
+        &[flow_label.clone(), cb_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing circuit_breaker_successes_total for {cb_stage_label}"))?;
+    assert!(
+        (successes_total - 2.0).abs() < f64::EPSILON,
+        "expected circuit_breaker_successes_total=2 for successful source attempts, got {successes_total}"
+    );
+
+    let failures_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_circuit_breaker_failures_total{",
+        &[flow_label.clone(), cb_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing circuit_breaker_failures_total for {cb_stage_label}"))?;
+    assert!(
+        (failures_total - 1.0).abs() < f64::EPSILON,
+        "expected circuit_breaker_failures_total=1, got {failures_total}"
+    );
+
+    let slow_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_circuit_breaker_slow_total{",
+        &[flow_label.clone(), cb_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing circuit_breaker_slow_total for {cb_stage_label}"))?;
+    assert!(
+        slow_total.abs() < f64::EPSILON,
+        "expected fast source calls to leave circuit_breaker_slow_total=0, got {slow_total}"
+    );
+
+    assert!(
+        !metrics_text
+            .lines()
+            .any(|line| line.starts_with("obzenflow_circuit_breaker_state_transitions_total{")),
+        "latest-value reporting must not invent historical transition totals"
+    );
+
+    for state in ["closed", "open", "half_open"] {
+        let state_label = format!("state=\"{state}\"");
+        assert!(
+            metrics_text.lines().any(|l| {
+                l.starts_with("obzenflow_circuit_breaker_time_in_state_seconds_total{")
+                    && l.contains(&flow_label)
+                    && l.contains(&cb_stage_label)
+                    && l.contains(&state_label)
+            }),
+            "missing circuit_breaker_time_in_state_seconds_total series for {state_label}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
+    let timeout_flow = Duration::from_secs(30);
+    let source = ErrorAfterFirstSource::new();
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
+
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_source_rate_based_cb",
+        journals: disk_journals(unique_journal_dir("metrics_source_rate_based_cb")),
+
+        stages: {
+            src = source!(MetricEvent with {
+                circuit_breaker()
+                    .count_window(2)
+                    .minimum_calls(2)
+                    .failure_rate_threshold(0.5)
+                    .open_for(Duration::from_millis(1))
+            } => source);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let topology = test_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
+
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
+
+    let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
+    let flow_label = "flow=\"metrics_source_rate_based_cb\"".to_string();
+    let debug_patterns = vec![
+        "obzenflow_circuit_breaker_opened_total".to_string(),
+        flow_label.clone(),
+        cb_stage_label.clone(),
+    ];
+
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        text.contains("obzenflow_circuit_breaker_opened_total")
+            && text.contains(&flow_label)
+            && text.contains(&cb_stage_label)
+    })?;
+
+    let opened_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_circuit_breaker_opened_total{",
+        &[flow_label.clone(), cb_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing circuit_breaker_opened_total for {cb_stage_label}"))?;
+    assert!(
+        (opened_total - 1.0).abs() < f64::EPSILON,
+        "expected source rate-based circuit_breaker_opened_total=1, got {opened_total}"
+    );
+
+    assert!(
+        !metrics_text
+            .lines()
+            .any(|line| line.starts_with("obzenflow_circuit_breaker_state_transitions_total{")),
+        "latest-value reporting must not invent historical transition totals"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
+    // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
+    let timeout_flow = Duration::from_secs(30);
+    let total_events: usize = 250;
+    let source = BurstSource::new(total_events);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
+
+    // Configure the limiter to produce at least one delayed event while keeping
+    // the end-to-end run comfortably inside CI timing variance.
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_rl_exporter",
+        journals: disk_journals(unique_journal_dir("metrics_rl_exporter")),
+
+        stages: {
+            src = source!(MetricEvent with {
+                // Force deterministic backpressure: small burst + low rate so at least
+                // one event must block while still allowing the run to complete
+                // within the metrics wait window on slower CI hosts.
+                rate_limit(200.0).burst_capacity(1.0)
+            } => source);
+            // Drop downstream data outputs to keep journaling light; rate limiting
+            // metrics are emitted from the source stage.
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let topology = test_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let rl_stage_id = stage_id_with_middleware(&topology, "rate_limiter")?;
+
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
+
+    let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
+    let flow_label = "flow=\"metrics_rl_exporter\"".to_string();
+    let debug_patterns = vec![
+        "obzenflow_rate_limiter".to_string(),
+        "obzenflow_rate_limiter_events_total".to_string(),
+        "obzenflow_rate_limiter_delayed_total".to_string(),
+        "obzenflow_rate_limiter_tokens_consumed_total".to_string(),
+        "obzenflow_rate_limiter_delay_seconds_total".to_string(),
+        "obzenflow_rate_limiter_utilization".to_string(),
+        "obzenflow_rate_limiter_bucket_tokens".to_string(),
+        "obzenflow_rate_limiter_bucket_capacity".to_string(),
+        flow_label.clone(),
+        rl_stage_label.clone(),
+    ];
+
+    let expected_events_total = total_events as f64;
+    let join_labels = vec![flow_label.clone(), rl_stage_label.clone()];
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        let events_total =
+            metric_line_value(text, "obzenflow_rate_limiter_events_total{", &join_labels);
+        let events_total_ok = events_total
+            .map(|v| (v - expected_events_total).abs() < f64::EPSILON)
+            .unwrap_or(false);
+
+        events_total_ok
+            && text.contains("obzenflow_rate_limiter_delayed_total")
+            && text.contains("obzenflow_rate_limiter_tokens_consumed_total")
+            && text.contains("obzenflow_rate_limiter_delay_seconds_total")
+            && text.contains("obzenflow_rate_limiter_utilization")
+            && text.contains("obzenflow_rate_limiter_bucket_tokens")
+            && text.contains("obzenflow_rate_limiter_bucket_capacity")
+    })?;
+
+    // Counters must exist and be stage_id joinable.
+    let events_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_events_total{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_events_total for {rl_stage_label}"))?;
+    assert!(
+        (events_total - total_events as f64).abs() < f64::EPSILON,
+        "expected rate_limiter_events_total={total_events}, got {events_total}"
+    );
+
+    let delayed_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_delayed_total{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_delayed_total for {rl_stage_label}"))?;
+    assert!(
+        delayed_total >= 1.0,
+        "expected at least one delayed event, got {delayed_total}"
+    );
+
+    let tokens_consumed_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_tokens_consumed_total{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_tokens_consumed_total for {rl_stage_label}"))?;
+    assert!(
+        (tokens_consumed_total - total_events as f64).abs() < f64::EPSILON,
+        "expected tokens_consumed_total={total_events}, got {tokens_consumed_total}"
+    );
+
+    let delay_seconds_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_delay_seconds_total{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_delay_seconds_total for {rl_stage_label}"))?;
+    assert!(
+        delay_seconds_total > 0.0,
+        "expected delay_seconds_total > 0 when delays occur, got {delay_seconds_total}"
+    );
+
+    // Gauges must exist and be stage_id joinable.
+    let utilization = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_utilization{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_utilization for {rl_stage_label}"))?;
+    assert!(
+        (0.0..=1.0).contains(&utilization),
+        "expected utilization in [0,1], got {utilization}"
+    );
+
+    let bucket_capacity = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_bucket_capacity{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_bucket_capacity for {rl_stage_label}"))?;
+    assert!(
+        (bucket_capacity - 1.0).abs() < f64::EPSILON,
+        "expected bucket_capacity=1.0, got {bucket_capacity}"
+    );
+
+    let bucket_tokens = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_bucket_tokens{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_bucket_tokens for {rl_stage_label}"))?;
+    assert!(
+        (0.0..=bucket_capacity).contains(&bucket_tokens),
+        "expected bucket_tokens in [0,capacity], got {bucket_tokens} (capacity={bucket_capacity})"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
+    // This regression test exercises the pre-fix failure mode:
+    // Summary events are emitted periodically (>=1000 or 10s). For short runs,
+    // Summary-based counters undercount or stay at 0. Wide-event RuntimeContext
+    // snapshots must carry cumulative CB counters so the last event has truth.
+    let timeout_flow = Duration::from_secs(30);
+    let total_events: usize = 500;
+    let source = BurstSource::new(total_events);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
+
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_cb_no_summary",
+        journals: disk_journals(unique_journal_dir("metrics_cb_no_summary")),
+
+        stages: {
+            src = source!(MetricEvent with {
+                circuit_breaker().consecutive_failures(10)
+            } => source);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let topology = test_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
+
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
+
+    let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
+    let flow_label = "flow=\"metrics_cb_no_summary\"".to_string();
+    let debug_patterns = vec![
+        "obzenflow_circuit_breaker_requests_total".to_string(),
+        "obzenflow_circuit_breaker_successes_total".to_string(),
+        "obzenflow_circuit_breaker_failures_total".to_string(),
+        flow_label.clone(),
+        cb_stage_label.clone(),
+    ];
+
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        text.contains("obzenflow_circuit_breaker_requests_total")
+            && text.contains(&flow_label)
+            && text.contains(&cb_stage_label)
+    })?;
+
+    let requests_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_circuit_breaker_requests_total{",
+        &[flow_label.clone(), cb_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing circuit_breaker_requests_total for {cb_stage_label}"))?;
+    let expected_requests = total_events + 1;
+    assert!(
+        (requests_total - expected_requests as f64).abs() < f64::EPSILON,
+        "expected circuit_breaker_requests_total={} including the terminal source poll, got {requests_total}",
+        expected_requests
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
+    // Same regression class as CB: WindowUtilization events are periodic.
+    // Wide-event RuntimeContext snapshots must carry cumulative RL counters, and
+    // utilization must be derivable from bucket state even when no summaries emit.
+    let timeout_flow = Duration::from_secs(30);
+    let total_events: usize = 200;
+    let source = BurstSource::new(total_events);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
+
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_rl_no_summary",
+        journals: disk_journals(unique_journal_dir("metrics_rl_no_summary")),
+
+        stages: {
+            src = source!(MetricEvent with {
+                // High rate + high burst ensures no time-based (10s) or count-based (1000)
+                // WindowUtilization summary is *not* required for correct totals or utilization.
+                rate_limit(10_000.0).burst_capacity(10_000.0)
+            } => source);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let topology = test_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let rl_stage_id = stage_id_with_middleware(&topology, "rate_limiter")?;
+
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
+
+    let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
+    let flow_label = "flow=\"metrics_rl_no_summary\"".to_string();
+    let debug_patterns = vec![
+        "obzenflow_rate_limiter_events_total".to_string(),
+        "obzenflow_rate_limiter_utilization".to_string(),
+        "obzenflow_rate_limiter_bucket_tokens".to_string(),
+        "obzenflow_rate_limiter_bucket_capacity".to_string(),
+        flow_label.clone(),
+        rl_stage_label.clone(),
+    ];
+
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        text.contains("obzenflow_rate_limiter_events_total")
+            && text.contains("obzenflow_rate_limiter_utilization")
+            && text.contains("obzenflow_rate_limiter_bucket_tokens")
+            && text.contains("obzenflow_rate_limiter_bucket_capacity")
+            && text.contains(&flow_label)
+            && text.contains(&rl_stage_label)
+    })?;
+
+    let events_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_events_total{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_events_total for {rl_stage_label}"))?;
+    assert!(
+        (events_total - total_events as f64).abs() < f64::EPSILON,
+        "expected rate_limiter_events_total={total_events}, got {events_total}"
+    );
+
+    let utilization = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_utilization{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_utilization for {rl_stage_label}"))?;
+    assert!(
+        (0.0..=1.0).contains(&utilization),
+        "expected utilization in [0,1], got {utilization}"
+    );
+
+    let capacity = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_bucket_capacity{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_bucket_capacity for {rl_stage_label}"))?;
+    assert!(
+        capacity > 0.0,
+        "expected bucket_capacity > 0, got {capacity}"
+    );
+
+    let tokens = metric_line_value(
+        &metrics_text,
+        "obzenflow_rate_limiter_bucket_tokens{",
+        &[flow_label.clone(), rl_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing rate_limiter_bucket_tokens for {rl_stage_label}"))?;
+    assert!(
+        (0.0..=capacity).contains(&tokens),
+        "expected bucket_tokens in [0,capacity], got {tokens} (capacity={capacity})"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context =
+        crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
+    // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
+    let timeout_flow = Duration::from_secs(30);
+    let source = BurstSource::new(10);
+    let (sink, _count) = CountingSink::new();
+
+    let test_handle = test_flow! {
+        build_context: metrics_context,
+        name: "metrics_contracts_exporter",
+        journals: disk_journals(unique_journal_dir("metrics_contracts_exporter")),
+
+        stages: {
+            src = source!(MetricEvent => source);
+            snk = sink!(MetricEvent => sink);
+        },
+
+        topology: {
+            src |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let contract_attachments = test_handle
+        .contract_attachments()
+        .expect("FlowHandle should expose contract attachments for joinability");
+    assert!(
+        !contract_attachments.is_empty(),
+        "expected at least one contract attachment"
+    );
+
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
+
+    let debug_patterns = vec![
+        "obzenflow_contract_reader_seq".to_string(),
+        "obzenflow_contract_violations_total".to_string(),
+        "obzenflow_contract_overrides_total".to_string(),
+        "flow=\"metrics_contracts_exporter\"".to_string(),
+    ];
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        text.contains("obzenflow_contract_reader_seq")
+            && text.contains("flow=\"metrics_contracts_exporter\"")
+    })?;
+
+    // Each attached contract exposes its latest reader position with joinable labels.
+    for ((upstream, downstream), contracts) in contract_attachments.iter() {
+        for contract in contracts {
+            let upstream_label = format!("upstream_stage_id=\"{upstream}\"");
+            let downstream_label = format!("downstream_stage_id=\"{downstream}\"");
+            let contract_label = format!("contract=\"{contract}\"");
+
+            assert!(
+                metrics_text.lines().any(|l| {
+                    l.starts_with("obzenflow_contract_reader_seq{")
+                        && l.contains("flow=\"metrics_contracts_exporter\"")
+                        && l.contains(&upstream_label)
+                        && l.contains(&downstream_label)
+                        && l.contains(&contract_label)
+                }),
+                "missing contract reader-position series for {upstream_label} {downstream_label} {contract_label}"
+            );
+        }
+    }
+
+    Ok(())
+}

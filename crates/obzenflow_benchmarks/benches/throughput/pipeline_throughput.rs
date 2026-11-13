@@ -354,7 +354,7 @@ fn bench_effect_bookkeeping(c: &mut Criterion, rt: &Runtime) {
                 let handle = rt.block_on(build_effectful(directory.path(), inputs, settled.clone()));
                 let started = Instant::now();
                 rt.block_on(async {
-                    tokio::time::timeout(Duration::from_secs(60), async {
+                    tokio::time::timeout(Duration::from_secs(180), async {
                         handle.start().await.unwrap();
                         handle.wait_for_completion().await.unwrap();
                     }).await.expect("timeout invalidates the effect bookkeeping sample");

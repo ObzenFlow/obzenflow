@@ -237,5 +237,4 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
     );
 }
 
-#[path = "support/liveness_observations.rs"]
-mod liveness_observations;
+use crate::liveness_observations;
