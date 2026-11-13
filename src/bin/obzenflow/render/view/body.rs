@@ -9,7 +9,7 @@
 
 use super::{Context, JournalNumber};
 use obzenflow::journal::read::*;
-use obzenflow_core::event::types::{DurationMs, JournalIndex, JournalPath, SeqNo};
+use obzenflow_core::event::types::{JournalIndex, JournalPath, SeqNo};
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{
     EffectAttemptOrdinal, EffectAttemptStarted, EffectFailureCause, EffectOutcomePayload,
@@ -58,8 +58,6 @@ pub(in crate::render) struct ProgressView<'a> {
     eof_seen: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     advertised_writer_seq: Option<SeqNo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stalled_ms: Option<DurationMs>,
 }
 
 #[derive(Serialize)]
@@ -182,7 +180,6 @@ impl<'a> BodyView<'a> {
                     reader_index,
                     advertised_writer_seq,
                     advertised_vector_clock: _,
-                    stalled_since,
                 }) => Self::ConsumptionProgress(ProgressView {
                     input: InputView::from_reader(reader_path, *reader_index, context),
                     scope,
@@ -191,7 +188,6 @@ impl<'a> BodyView<'a> {
                     reader_seq: *reader_seq,
                     eof_seen: *eof_seen,
                     advertised_writer_seq: *advertised_writer_seq,
-                    stalled_ms: *stalled_since,
                 }),
                 ChainPayload::Execution(ExecutionPayload::EffectRecord(effect)) => {
                     Self::EffectOutcome(effect.into())

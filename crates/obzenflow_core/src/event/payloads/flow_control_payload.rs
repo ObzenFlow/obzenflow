@@ -7,7 +7,7 @@
 use std::fmt;
 
 use crate::event::types::{
-    Count, DurationMs, JournalIndex, JournalPath, ReaderGeneration, SeqNo, ViolationCause,
+    Count, JournalIndex, JournalPath, ReaderGeneration, SeqNo, ViolationCause,
 };
 use crate::event::vector_clock::VectorClock;
 use crate::event::vocabulary;
@@ -229,8 +229,6 @@ pub enum FlowControlPayload {
         advertised_writer_seq: Option<SeqNo>,
         #[serde(skip_serializing_if = "Option::is_none")]
         advertised_vector_clock: Option<VectorClock>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        stalled_since: Option<DurationMs>,
     },
 
     /// Subscriber detected a gap in upstream sequence
@@ -260,13 +258,6 @@ pub enum FlowControlPayload {
         advertised_vector_clock: Option<VectorClock>,
         #[serde(skip_serializing_if = "Option::is_none")]
         failure_reason: Option<ViolationCause>,
-    },
-
-    /// Subscriber stalled beyond threshold
-    #[serde(rename = "reader_stalled")]
-    ReaderStalled {
-        upstream: StageId,
-        stalled_since: DurationMs,
     },
 
     /// Subscriber detected an at-least-once violation
@@ -315,7 +306,6 @@ impl FlowControlPayload {
             Self::ConsumptionGap { .. } => vocabulary::subscription::GAP_DETECTED,
             Self::ProductionFinal { .. } => vocabulary::source::PRODUCTION_FINALIZED,
             Self::ConsumptionFinal { .. } => vocabulary::subscription::CONSUMPTION_FINALIZED,
-            Self::ReaderStalled { .. } => vocabulary::subscription::STALL_DETECTED,
             Self::AtLeastOnceViolation { .. } => vocabulary::subscription::AT_LEAST_ONCE_VIOLATED,
             Self::InputSelection { .. } => vocabulary::subscription::INPUT_SELECTED,
         }
@@ -340,7 +330,7 @@ impl FlowControlPayload {
     /// participates in transport order: it is delivered to downstream
     /// subscriptions and takes per-reader ordinals in the canonical
     /// deterministic merge. Production and subscription reports (progress, gaps,
-    /// finals, stalls, at-least-once violations) are observability
+    /// finals, at-least-once violations) are observability
     /// emitted at wall-clock-gated times, so its journal positions are not a
     /// function of stream content; they are excluded from `TransportOnly`
     /// delivery so per-reader ordinals stay a pure function of the per-input
@@ -356,7 +346,6 @@ impl FlowControlPayload {
             | Self::ConsumptionGap { .. }
             | Self::ConsumptionFinal { .. }
             | Self::ProductionFinal { .. }
-            | Self::ReaderStalled { .. }
             | Self::AtLeastOnceViolation { .. }
             | Self::InputSelection { .. } => true,
             Self::Eof { .. }

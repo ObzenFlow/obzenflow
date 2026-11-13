@@ -12,7 +12,7 @@ use obzenflow_core::event::payloads::system_payload::{
     ContractName, ContractResultStatusLabel, SystemFeedRole,
 };
 use obzenflow_core::event::types::{
-    Count, DurationMs, JournalIndex, JournalPath, SeqNo, ViolationCause as EventViolationCause,
+    Count, JournalIndex, JournalPath, SeqNo, ViolationCause as EventViolationCause,
 };
 use obzenflow_core::event::{
     ChainEventFactory, ConsumptionFinalEventParams, ConsumptionProgressEventParams, JournalEvent,
@@ -89,7 +89,6 @@ fn merge_edge_status(
     match (&*status, &edge) {
         (ContractStatus::Violated { .. }, _) | (_, ContractStatus::Healthy) => {}
         (_, ContractStatus::Violated { .. }) | (ContractStatus::Healthy, _) => *status = edge,
-        (ContractStatus::ProgressEmitted, ContractStatus::Stalled(_)) => *status = edge,
         _ => {}
     }
 }
@@ -512,10 +511,8 @@ where
             return ContractStatus::Healthy;
         };
 
-        let now = Instant::now();
         let mut status = ContractStatus::Healthy;
 
-        // Check each reader for progress/stalls
         for (index, progress) in reader_progress.iter_mut().enumerate() {
             if progress.final_emitted {
                 continue;
@@ -523,9 +520,7 @@ where
 
             // Diagnostics-only checks are used by stages that intentionally defer
             // authoritative EOF verification (e.g. sinks that flush receipts before
-            // running final contract checks). Once a reader has reached terminal EOF,
-            // stall detection is meaningless and can produce a spurious
-            // `reader_stalled` failure during shutdown.
+            // running final contract checks).
             if mode == ContractCheckMode::DiagnosticsOnly && self.state.is_reader_eof(index) {
                 continue;
             }
@@ -540,10 +535,8 @@ where
             self.check_progress_contracts_for_reader(progress, index, &mut edge_status)
                 .await;
 
-            let should_emit_progress = self.should_emit_progress(progress, index, now);
-
-            if should_emit_progress {
-                self.emit_progress_for_reader(progress, index, now, &mut edge_status)
+            if self.should_emit_progress(progress, index) {
+                self.emit_progress_for_reader(progress, index, &mut edge_status)
                     .await;
 
                 // Check for EOF contract validation
@@ -554,9 +547,6 @@ where
                     self.verify_eof_contracts_for_reader(progress, index, &mut edge_status)
                         .await;
                 }
-            } else {
-                self.check_stall_for_reader(progress, index, now, &mut edge_status)
-                    .await;
             }
             merge_edge_status(&mut status, edge_status, &self.advisory_contract_upstreams);
         }
@@ -777,7 +767,6 @@ where
         &mut self,
         progress: &mut ReaderProgress,
         index: usize,
-        now: Instant,
         status: &mut ContractStatus,
     ) {
         let Some(tracker) = &self.contract_tracker else {
@@ -788,10 +777,6 @@ where
         let progress_vector_clock = progress.last_vector_clock.clone();
 
         // Emit progress event
-        let stalled_duration = progress
-            .stalled_since
-            .map(|s| DurationMs(now.duration_since(s).as_millis() as u64));
-
         let progress_event =
             tracker.with_owner_context(ChainEventFactory::consumption_progress_event(
                 tracker.writer_id,
@@ -807,7 +792,6 @@ where
                     reader_index: JournalIndex(index as u64),
                     advertised_writer_seq: progress.advertised_writer_seq,
                     advertised_vector_clock: progress.advertised_vector_clock.clone(),
-                    stalled_since: stalled_duration,
                 },
             ));
 
@@ -820,9 +804,6 @@ where
         {
             Ok(_) => {
                 progress.last_progress_seq = progress_seq;
-                progress.last_progress_instant = Some(now);
-                progress.stalled_since = None;
-                progress.consecutive_stall_checks = 0;
 
                 if matches!(status, ContractStatus::Healthy) {
                     *status = ContractStatus::ProgressEmitted;
@@ -1201,99 +1182,7 @@ where
         }
     }
 
-    async fn check_stall_for_reader(
-        &mut self,
-        progress: &mut ReaderProgress,
-        index: usize,
-        now: Instant,
-        status: &mut ContractStatus,
-    ) {
-        let Some(tracker) = &self.contract_tracker else {
-            return;
-        };
-
-        // Check for stalls
-        let Some(last) = progress.last_read_instant else {
-            return;
-        };
-
-        let elapsed = now.duration_since(last).as_millis() as u64;
-
-        if elapsed >= tracker.config.stall_threshold.0 {
-            progress.consecutive_stall_checks += 1;
-
-            if progress.consecutive_stall_checks >= tracker.config.stall_checks_before_emit
-                && progress.stalled_since.is_none()
-            {
-                if tracker.config.stall_cooloff.0 > 0 {
-                    if let Some(last_emitted) = progress.last_stall_emitted_instant {
-                        let cooloff_elapsed = now.duration_since(last_emitted).as_millis() as u64;
-                        if cooloff_elapsed < tracker.config.stall_cooloff.0 {
-                            if !matches!(status, ContractStatus::Violated { .. }) {
-                                *status = ContractStatus::Stalled(progress.stage_id);
-                            }
-                            return;
-                        }
-                    }
-                }
-
-                let stall_since_candidate = Some(last);
-                let stalled_duration = DurationMs(elapsed);
-
-                let stalled_event =
-                    tracker.with_owner_context(ChainEventFactory::reader_stalled_event(
-                        tracker.writer_id,
-                        progress.stage_id,
-                        stalled_duration,
-                    ));
-
-                let stalled_append_ok = match crate::supervised_base::publication::append(
-                    &tracker.journal,
-                    stalled_event,
-                    Default::default(),
-                )
-                .await
-                {
-                    Ok(_) => true,
-                    Err(e) => {
-                        tracing::error!(
-                            owner = %self.owner_label,
-                            upstream = ?progress.stage_id,
-                            reader_index = index,
-                            error = %e,
-                            "Failed to append stalled event; skipping state update"
-                        );
-                        false
-                    }
-                };
-
-                // IMPORTANT: A stall is a liveness signal, not a transport contract violation.
-                //
-                // Historically we emitted `ExecutionPayload::ContractStatus { pass: false, reason:
-                // reader_stalled }` here. PipelineSupervisor treats *any* ContractStatus failure
-                // as a gating contract violation and aborts the flow (including during drain),
-                // which has proven wildly non-actionable for long/variable-latency stages
-                // (AI calls, network jitter) and creates nondeterministic demo failures.
-                //
-                // We still emit `FlowControlPayload::ReaderStalled` into the stage journal for
-                // observability, and we still return `ContractStatus::Stalled` to allow stage
-                // supervisors to log warnings, but we must not poison the global contract barrier.
-
-                if !matches!(status, ContractStatus::Violated { .. }) {
-                    *status = ContractStatus::Stalled(progress.stage_id);
-                }
-
-                if stalled_append_ok {
-                    progress.stalled_since = stall_since_candidate;
-                    progress.last_stall_emitted_instant = Some(now);
-                }
-            }
-        } else {
-            progress.consecutive_stall_checks = 0;
-        }
-    }
-
-    fn should_emit_progress(&self, progress: &ReaderProgress, index: usize, now: Instant) -> bool {
+    fn should_emit_progress(&self, progress: &ReaderProgress, index: usize) -> bool {
         let Some(tracker) = &self.contract_tracker else {
             return false;
         };
@@ -1302,14 +1191,8 @@ where
             .progress_seq(progress)
             .0
             .saturating_sub(progress.last_progress_seq.0);
-        let time_elapsed = progress
-            .last_progress_instant
-            .map(|t| now.duration_since(t).as_millis() as u64)
-            .unwrap_or(0);
 
-        delta_events >= tracker.config.progress_min_events.0
-            || time_elapsed >= tracker.config.progress_max_interval.0
-            || self.state.is_reader_eof(index)
+        delta_events >= tracker.config.progress_min_events.0 || self.state.is_reader_eof(index)
     }
 
     /// Track that this stage has emitted an output event
@@ -1320,45 +1203,6 @@ where
                 "Tracked output event, total: {}",
                 tracker.output_events_written.0
             );
-        }
-    }
-
-    /// Hint to FSM about whether contract check might be useful.
-    ///
-    /// Uses per-reader timestamps from FSM-owned contract state to decide if
-    /// enough time has passed since the last check.
-    pub fn should_check_contracts(&self, reader_progress: &[ReaderProgress]) -> bool {
-        if let Some(tracker) = &self.contract_tracker {
-            let now = Instant::now();
-
-            // Check if enough time has passed since last check
-            for progress in reader_progress {
-                let Some(last) = progress.last_progress_instant else {
-                    return true;
-                };
-
-                let elapsed = now.duration_since(last).as_millis() as u64;
-                if elapsed >= tracker.config.progress_max_interval.0 / 2 {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Convenience method that combines `should_check_contracts` and
-    /// `check_contracts` into a single call.
-    ///
-    /// Returns `None` when the check interval has not elapsed yet (no work
-    /// done). Returns `Some(result)` when a check was performed.
-    pub async fn maybe_check_contracts(
-        &mut self,
-        reader_progress: &mut [ReaderProgress],
-    ) -> Option<ContractStatus> {
-        if self.should_check_contracts(reader_progress) {
-            Some(self.check_contracts(reader_progress).await)
-        } else {
-            None
         }
     }
 
@@ -1380,7 +1224,7 @@ where
         };
 
         let now = Instant::now();
-        let tick_ms = (tracker.config.progress_max_interval.0 / 2).max(1);
+        let tick_ms = tracker.config.check_interval.0.max(1);
 
         let due = match last_contract_check {
             Some(last) => now.duration_since(*last).as_millis() as u64 >= tick_ms,
@@ -1405,7 +1249,7 @@ where
         };
 
         let now = Instant::now();
-        let tick_ms = (tracker.config.progress_max_interval.0 / 2).max(1);
+        let tick_ms = tracker.config.check_interval.0.max(1);
 
         let due = match last_contract_check {
             Some(last) => now.duration_since(*last).as_millis() as u64 >= tick_ms,

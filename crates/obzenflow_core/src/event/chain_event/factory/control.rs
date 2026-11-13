@@ -137,7 +137,6 @@ impl ChainEventFactory {
             reader_index,
             advertised_writer_seq,
             advertised_vector_clock,
-            stalled_since,
         } = params;
         Self::framework_event(
             writer_id,
@@ -153,7 +152,6 @@ impl ChainEventFactory {
                 reader_index,
                 advertised_writer_seq,
                 advertised_vector_clock,
-                stalled_since,
             }),
         )
     }
@@ -207,21 +205,6 @@ impl ChainEventFactory {
                 advertised_writer_seq,
                 advertised_vector_clock,
                 failure_reason,
-            }),
-        )
-    }
-
-    /// Create a reader stalled event
-    pub fn reader_stalled_event(
-        writer_id: WriterId,
-        upstream: crate::StageId,
-        stalled_since: crate::event::types::DurationMs,
-    ) -> ChainEvent {
-        Self::framework_event(
-            writer_id,
-            ChainPayload::FlowControl(FlowControlPayload::ReaderStalled {
-                upstream,
-                stalled_since,
             }),
         )
     }

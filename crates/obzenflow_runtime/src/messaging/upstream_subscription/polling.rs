@@ -20,7 +20,6 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::{StageId, WriterId};
 use std::any::Any;
 use std::io;
-use tokio::time::Instant;
 
 /// Outcome of one read-side step on a single reader (FLOWIP-095d D8 split).
 ///
@@ -29,7 +28,7 @@ use tokio::time::Instant;
 /// classification) can never drift between them.
 enum ReadStep<T: JournalEvent> {
     /// A deliverable transport head, classified at read time.
-    Head { head: HeldHead<T>, is_data: bool },
+    Head { head: HeldHead<T> },
     /// A row consumed from the journal and filtered read-side: it never
     /// becomes a head, takes no ordinal, and is not delivered.
     Filtered {
@@ -147,7 +146,6 @@ where
                 is_drain,
                 catch_up,
             },
-            is_data,
         })
     }
 
@@ -270,28 +268,6 @@ where
         false
     }
 
-    /// Read-side stall-attribution timestamp (FLOWIP-095d D8 split).
-    ///
-    /// Acquiring a head proves the upstream is alive, so the read instant is
-    /// stamped at acquisition. A reader whose head is held while the merge
-    /// waits on a sibling stays Healthy; stall detection keeps pointing at the
-    /// actually-quiet upstream.
-    fn note_read_instant(
-        &self,
-        reader_progress: &mut Option<&mut [ReaderProgress]>,
-        reader_index: usize,
-        is_data: bool,
-    ) {
-        if !is_data || self.contract_tracker.is_none() {
-            return;
-        }
-        if let Some(progress_slice) = reader_progress.as_deref_mut() {
-            if let Some(progress) = progress_slice.get_mut(reader_index) {
-                progress.last_read_instant = Some(Instant::now());
-            }
-        }
-    }
-
     // ------------------------------------------------------------------
     // Availability-driven round-robin (the default policy)
     // ------------------------------------------------------------------
@@ -355,13 +331,10 @@ where
                         break;
                     }
                 }
-                Ok(ReadStep::Head { head, .. }) => {
-                    // Advance for fairness, then run the shared delivery-side
-                    // accounting (the FLOWIP-095d read/delivery split;
-                    // round-robin reads and delivers in the same poll, so the
-                    // read instant stamps at delivery).
+                Ok(ReadStep::Head { head }) => {
+                    // Advance for fairness, then run the shared delivery-side accounting.
                     self.state.next_reader_index();
-                    return self.deliver_from_reader(index, head, fsm_state, reader_progress, true);
+                    return self.deliver_from_reader(index, head, fsm_state, reader_progress);
                 }
             }
         }
@@ -401,7 +374,6 @@ where
         head: HeldHead<T>,
         fsm_state: &str,
         reader_progress: Option<&mut [ReaderProgress]>,
-        set_read_instant: bool,
     ) -> PollResult<T> {
         let HeldHead {
             envelope,
@@ -503,7 +475,6 @@ where
                     progress,
                     contract_chain_event,
                     &envelope,
-                    set_read_instant,
                 ));
             }
         }
@@ -636,7 +607,6 @@ where
         progress: &mut ReaderProgress,
         contract_chain_event: Option<&ChainEvent>,
         envelope: &DeliveredRecord<T::Payload>,
-        set_read_instant: bool,
     ) -> SeqNo {
         if let Some(chain_event) = contract_chain_event {
             if chain_event.consumes_data_credit() && self.uses_receipt_watermark() {
@@ -652,9 +622,6 @@ where
                 && self.event_authored_by_upstream(chain_event, stage_id)
             {
                 progress.reader_seq.0 += 1;
-                if set_read_instant {
-                    progress.last_read_instant = Some(Instant::now());
-                }
                 if self.uses_receipt_watermark() {
                     progress.track_pending_receipt(
                         envelope.commitment(),
@@ -909,12 +876,9 @@ where
     pub(super) async fn poll_kahn_merge(
         &mut self,
         fsm_state: &str,
-        mut reader_progress: Option<&mut [ReaderProgress]>,
+        reader_progress: Option<&mut [ReaderProgress]>,
     ) -> PollResult<T> {
-        match self
-            .ensure_merge_candidate(fsm_state, &mut reader_progress)
-            .await
-        {
+        match self.ensure_merge_candidate(fsm_state).await {
             Err(e) => PollResult::Error(e),
             Ok(MergeCandidateStatus::CursorAdvanced {
                 upstream,
@@ -941,14 +905,13 @@ where
     pub async fn ensure_merge_candidate(
         &mut self,
         fsm_state: &str,
-        reader_progress: &mut Option<&mut [ReaderProgress]>,
     ) -> std::result::Result<MergeCandidateStatus, Box<dyn std::error::Error + Send + Sync>> {
         for index in 0..self.readers.len() {
             if self.state.is_reader_eof(index) || self.held_heads[index].is_some() {
                 continue;
             }
             if let Some((upstream, completed_data_rows)) =
-                self.acquire_head(index, fsm_state, reader_progress).await?
+                self.acquire_head(index, fsm_state).await?
             {
                 self.merge_candidate_index = None;
                 self.last_merge_wait = None;
@@ -999,7 +962,6 @@ where
         &mut self,
         index: usize,
         fsm_state: &str,
-        reader_progress: &mut Option<&mut [ReaderProgress]>,
     ) -> std::result::Result<Option<(StageId, u64)>, Box<dyn std::error::Error + Send + Sync>> {
         match self.read_transport_step(index).await {
             Err(e) => {
@@ -1016,8 +978,7 @@ where
                 completed_data_rows,
             }) => Ok(Some((upstream, completed_data_rows))),
             Ok(ReadStep::Empty) => Ok(None),
-            Ok(ReadStep::Head { head, is_data }) => {
-                self.note_read_instant(reader_progress, index, is_data);
+            Ok(ReadStep::Head { head }) => {
                 tracing::debug!(
                     owner = %self.owner_label,
                     reader_index = index,
@@ -1129,6 +1090,6 @@ where
         let Some(head) = self.held_heads.get_mut(index).and_then(|slot| slot.take()) else {
             return PollResult::NoEvents;
         };
-        self.deliver_from_reader(index, head, fsm_state, reader_progress, false)
+        self.deliver_from_reader(index, head, fsm_state, reader_progress)
     }
 }

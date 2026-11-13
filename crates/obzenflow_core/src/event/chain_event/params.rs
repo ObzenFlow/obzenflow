@@ -6,9 +6,7 @@ use crate::event::payloads::effect_payload::EffectCursor;
 use crate::event::payloads::execution_payload::{
     CircuitBreakerHealthClassification, CircuitBreakerOpenTrigger,
 };
-use crate::event::types::{
-    Count, DurationMs, EventId, JournalIndex, JournalPath, SeqNo, ViolationCause,
-};
+use crate::event::types::{Count, EventId, JournalIndex, JournalPath, SeqNo, ViolationCause};
 use crate::event::vector_clock::VectorClock;
 use crate::StageKey;
 
@@ -25,7 +23,6 @@ pub struct ConsumptionProgressEventParams {
     pub reader_index: JournalIndex,
     pub advertised_writer_seq: Option<SeqNo>,
     pub advertised_vector_clock: Option<VectorClock>,
-    pub stalled_since: Option<DurationMs>,
 }
 
 #[derive(Debug, Clone)]

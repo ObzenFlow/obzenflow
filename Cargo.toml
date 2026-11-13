@@ -325,10 +325,6 @@ name = "it_ai"
 path = "tests/it/it_ai.rs"
 
 [[test]]
-name = "it_backpressure"
-path = "tests/it/it_backpressure.rs"
-
-[[test]]
 name = "it_config"
 path = "tests/it/it_config.rs"
 

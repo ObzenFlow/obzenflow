@@ -686,11 +686,7 @@ async fn dispatch_live_canonical<
 ) -> LiveDirective {
     {
         if let Some(subscription) = sup.reference_subscription.as_mut() {
-            let mut progress = Some(&mut ctx.reference_contract_state[..]);
-            match subscription
-                .ensure_merge_candidate(state_name, &mut progress)
-                .await
-            {
+            match subscription.ensure_merge_candidate(state_name).await {
                 Err(e) => {
                     return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
                         "Reference subscription error: {e}"
@@ -716,11 +712,7 @@ async fn dispatch_live_canonical<
             }
         }
         if let Some(subscription) = sup.stream_subscription.as_mut() {
-            let mut progress = Some(&mut ctx.stream_contract_state[..]);
-            match subscription
-                .ensure_merge_candidate(state_name, &mut progress)
-                .await
-            {
+            match subscription.ensure_merge_candidate(state_name).await {
                 Err(e) => {
                     return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
                         "Stream subscription error: {e}"
@@ -1027,20 +1019,12 @@ async fn follow_recorded<
         )));
     };
     let ensured = {
-        let (subscription, mut progress) = match side {
-            JoinSide::Reference => (
-                sup.reference_subscription.as_mut(),
-                Some(&mut ctx.reference_contract_state[..]),
-            ),
-            JoinSide::Stream => (
-                sup.stream_subscription.as_mut(),
-                Some(&mut ctx.stream_contract_state[..]),
-            ),
+        let subscription = match side {
+            JoinSide::Reference => sup.reference_subscription.as_mut(),
+            JoinSide::Stream => sup.stream_subscription.as_mut(),
         };
         let subscription = subscription.expect("named side is subscribed");
-        subscription
-            .ensure_named_head(index, state_name, &mut progress)
-            .await
+        subscription.ensure_named_head(index, state_name).await
     };
     match ensured {
         Err(e) => {
@@ -1132,22 +1116,14 @@ async fn select_and_record<
         let held_before = held(sup);
         for side in [JoinSide::Reference, JoinSide::Stream] {
             let acquired = {
-                let (subscription, mut progress) = match side {
-                    JoinSide::Reference => (
-                        sup.reference_subscription.as_mut(),
-                        Some(&mut ctx.reference_contract_state[..]),
-                    ),
-                    JoinSide::Stream => (
-                        sup.stream_subscription.as_mut(),
-                        Some(&mut ctx.stream_contract_state[..]),
-                    ),
+                let subscription = match side {
+                    JoinSide::Reference => sup.reference_subscription.as_mut(),
+                    JoinSide::Stream => sup.stream_subscription.as_mut(),
                 };
                 let Some(subscription) = subscription else {
                     continue;
                 };
-                subscription
-                    .acquire_available_heads(state_name, &mut progress)
-                    .await
+                subscription.acquire_available_heads(state_name).await
             };
             match acquired {
                 Err(e) => {

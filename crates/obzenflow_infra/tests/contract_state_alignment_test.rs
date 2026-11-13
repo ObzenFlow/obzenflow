@@ -5,7 +5,7 @@
 use obzenflow_runtime::runtime_config::JournalSync;
 use std::sync::Arc;
 
-use obzenflow_core::event::types::{Count, DurationMs, SeqNo, ViolationCause};
+use obzenflow_core::event::types::{Count, SeqNo, ViolationCause};
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, StageId, WriterId};
@@ -83,13 +83,7 @@ async fn build_subscription_with_contracts(
     .await
     .expect("failed to create subscription");
 
-    let config = ContractConfig {
-        progress_min_events: Count(1),
-        progress_max_interval: DurationMs(1_000),
-        stall_threshold: DurationMs(5_000),
-        stall_cooloff: DurationMs(0),
-        stall_checks_before_emit: 1,
-    };
+    let config = ContractConfig::default();
 
     subscription = subscription.with_contracts(ContractsWiring {
         writer_id,
