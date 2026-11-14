@@ -44,6 +44,23 @@ cargo run -p obzenflow --features cli --bin obzenflow -- \
 The feeds are fixed lists, which cannot continue a partial read, so a run
 killed before they finish refuses to resume. Replay it instead.
 
+To kill a run while a call is in flight, run the night on which the processor
+takes five minutes to answer one payment, and kill it while it waits:
+
+```sh
+rm -f target/gateway-calls.jsonl
+cargo run -p obzenflow --example payment_gateway_resilience -- \
+  --config examples/payment_gateway_resilience/obzenflow.slow-answer.toml
+```
+
+Resume it with the same config. The processor answers the repeated call at once:
+
+```sh
+cargo run -p obzenflow --example payment_gateway_resilience -- \
+  --config examples/payment_gateway_resilience/obzenflow.slow-answer.toml \
+  --resume-from <archive>
+```
+
 Inspect the same run, including framework evidence and sink lifecycle audits:
 
 ```sh
