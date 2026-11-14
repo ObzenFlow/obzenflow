@@ -234,7 +234,7 @@ where
     /// across runs.
     ///
     /// Reader-telemetry flow control (consumption progress, gaps, finals,
-    /// stalls, at-least-once violations) is filtered here for the same reason
+    /// at-least-once violations) is filtered here for the same reason
     /// observability events are: those rows are emitted at wall-clock-gated
     /// times, so their journal positions are not a function of stream content.
     /// Admitting them to delivery would make per-reader delivered ordinals

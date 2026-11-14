@@ -479,7 +479,7 @@ where
         }
     }
 
-    /// Check contracts and emit progress/stall/final events as needed.
+    /// Check contracts and emit progress and final events as needed.
     ///
     /// This is a separate method that the FSM calls when it decides
     /// contract checking is appropriate (e.g., after idle cycles).
