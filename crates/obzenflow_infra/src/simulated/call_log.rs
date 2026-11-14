@@ -149,6 +149,16 @@ where
         self.call(key, flow_id, decide)
     }
 
+    /// Whether `key` has a decided response, so its next call is answered from
+    /// memory and logged as `replayed`.
+    pub fn is_decided(&self, key: &IdempotencyKey) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .decided
+            .contains_key(&key.0)
+    }
+
     fn call<F: Serialize>(
         &self,
         key: &IdempotencyKey,
@@ -403,6 +413,19 @@ mod tests {
                 line("decided", "aml-score:10", resumed),
             ]
         );
+    }
+
+    #[test]
+    fn is_decided_after_reopen_returns_true() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("risk.jsonl");
+        CallLog::open(&path)
+            .expect("the log opens")
+            .answer(&key("aml-score:9"), FlowId::new(), |_| flagged())
+            .unwrap();
+
+        let reopened = CallLog::<Verdict>::open(&path).expect("the log reopens");
+        assert!(reopened.is_decided(&key("aml-score:9")));
     }
 
     #[test]

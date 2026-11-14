@@ -227,7 +227,7 @@ where
     pub(super) async fn poll_recorded(
         &mut self,
         fsm_state: &str,
-        mut reader_progress: Option<&mut [ReaderProgress]>,
+        reader_progress: Option<&mut [ReaderProgress]>,
     ) -> PollResult<T> {
         let step = self
             .recorded
@@ -255,10 +255,7 @@ where
                 "names an input this stage does not read",
             ));
         };
-        match self
-            .ensure_named_head(index, fsm_state, &mut reader_progress)
-            .await
-        {
+        match self.ensure_named_head(index, fsm_state).await {
             Err(error) => return PollResult::Error(error),
             Ok(NamedHead::CursorAdvanced {
                 upstream,
@@ -312,12 +309,9 @@ where
     async fn poll_record_live(
         &mut self,
         fsm_state: &str,
-        mut reader_progress: Option<&mut [ReaderProgress]>,
+        reader_progress: Option<&mut [ReaderProgress]>,
     ) -> PollResult<T> {
-        match self
-            .acquire_available_heads(fsm_state, &mut reader_progress)
-            .await
-        {
+        match self.acquire_available_heads(fsm_state).await {
             Err(error) => return PollResult::Error(error),
             Ok(Some((upstream, completed_data_rows))) => {
                 return PollResult::CursorAdvanced {
@@ -368,7 +362,6 @@ where
     pub(crate) async fn acquire_available_heads(
         &mut self,
         fsm_state: &str,
-        reader_progress: &mut Option<&mut [ReaderProgress]>,
     ) -> Result<Option<(StageId, u64)>, BoxError> {
         loop {
             let held_before = self.held_head_count();
@@ -376,8 +369,7 @@ where
                 if self.state.is_reader_eof(index) || self.held_heads[index].is_some() {
                     continue;
                 }
-                if let Some(advanced) = self.acquire_head(index, fsm_state, reader_progress).await?
-                {
+                if let Some(advanced) = self.acquire_head(index, fsm_state).await? {
                     self.merge_candidate_index = None;
                     return Ok(Some(advanced));
                 }
@@ -392,14 +384,13 @@ where
         &mut self,
         index: usize,
         fsm_state: &str,
-        reader_progress: &mut Option<&mut [ReaderProgress]>,
     ) -> Result<NamedHead, BoxError> {
         if self.held_heads[index].is_none() {
             if self.state.is_reader_eof(index) {
                 return Ok(NamedHead::Exhausted);
             }
             if let Some((upstream, completed_data_rows)) =
-                self.acquire_head(index, fsm_state, reader_progress).await?
+                self.acquire_head(index, fsm_state).await?
             {
                 return Ok(NamedHead::CursorAdvanced {
                     upstream,
@@ -455,7 +446,7 @@ where
         let Some(head) = self.held_heads.get_mut(index).and_then(Option::take) else {
             return PollResult::NoEvents;
         };
-        self.deliver_from_reader(index, head, fsm_state, reader_progress, false)
+        self.deliver_from_reader(index, head, fsm_state, reader_progress)
     }
 
     pub(crate) fn reader_for_input(&self, input: &SelectedInput) -> Option<usize> {

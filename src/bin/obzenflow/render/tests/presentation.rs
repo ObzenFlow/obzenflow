@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow_core::event::types::{DurationMs, JournalIndex, JournalPath, SeqNo};
+use obzenflow_core::event::types::{JournalIndex, JournalPath, SeqNo};
 use obzenflow_core::event::vector_clock::VectorClock;
 
 fn progress() -> RunRecord {
@@ -26,7 +26,6 @@ fn progress() -> RunRecord {
             reader_index: JournalIndex(99),
             advertised_writer_seq: None,
             advertised_vector_clock: Some(watermark(7)),
-            stalled_since: None,
         });
         row.envelope.provenance.event.event_kind = row.payload.kind();
         row.envelope.provenance.event.event_type = row
@@ -173,7 +172,6 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
         consumed_count,
         eof_seen,
         advertised_writer_seq,
-        stalled_since,
         ..
     } = progress_payload(&mut record)
     {
@@ -181,7 +179,6 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
         *consumed_count = obzenflow_core::event::types::Count(u64::MAX);
         *eof_seen = true;
         *advertised_writer_seq = Some(SeqNo(0));
-        *stalled_since = Some(DurationMs(u64::MAX));
     }
     renderer.width = 40;
     let text = render_record(&mut renderer, &record);
@@ -189,7 +186,6 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
     assert_eq!(payload["reader_seq"], u64::MAX);
     assert_eq!(payload["eof_seen"], true);
     assert_eq!(payload["advertised_writer_seq"], 0);
-    assert_eq!(payload["stalled_ms"], u64::MAX);
     assert_eq!(
         payload,
         json!({
@@ -197,7 +193,7 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
             "reader_seq": u64::MAX, "eof_seen": true,
             "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
             "consumed_count": u64::MAX, "receipts": null,
-            "advertised_writer_seq": 0, "stalled_ms": u64::MAX,
+            "advertised_writer_seq": 0,
         })
     );
 }

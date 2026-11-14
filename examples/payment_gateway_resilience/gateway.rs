@@ -22,6 +22,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const SCRIPTED_OUTAGE_TIMEOUTS: u32 = 4;
+const SCRIPTED_SLOW_ANSWER: &str = "web-10483";
+const SCRIPTED_SLOW_ANSWER_DELAY: Duration = Duration::from_secs(300);
 
 #[obzenflow::port]
 #[async_trait]
@@ -236,6 +238,43 @@ impl PaymentGatewayPort for SimulatedProcessor {
 pub fn simulated_processor(calls: &Path) -> Port<dyn PaymentGatewayPort> {
     let calls = calls.to_path_buf();
     Port::deferred(move || SimulatedProcessor::open(&calls).map_err(processor_unavailable))
+}
+
+pub struct SlowAnswerProcessor {
+    processor: SimulatedProcessor,
+}
+
+#[obzenflow::system("simulated-processor")]
+#[async_trait]
+impl PaymentGatewayPort for SlowAnswerProcessor {
+    async fn authorize(
+        &self,
+        request: &AuthorizeRequest,
+        key: &IdempotencyKey,
+        ctx: &EffectContext,
+    ) -> Result<AuthorizePaymentOutcome, EffectError> {
+        let deciding = !self.processor.calls.is_decided(key);
+        let outcome = self.processor.authorize(request, key, ctx).await?;
+        if deciding && request.order_id == SCRIPTED_SLOW_ANSWER {
+            println!(
+                "⏳ Oh no, this is taking a long time. The processor has decided order {} (customer {}, amount: ${:.2}) and its answer is on the way. Wouldn't it be terrible if the power went out right now, or if you typed pkill -9 payment_gateway?",
+                request.order_id,
+                request.customer_id,
+                request.amount_cents as f64 / 100.0
+            );
+            ctx.sleep(SCRIPTED_SLOW_ANSWER_DELAY).await;
+        }
+        Ok(outcome)
+    }
+}
+
+pub fn slow_answer_processor(calls: &Path) -> Port<dyn PaymentGatewayPort> {
+    let calls = calls.to_path_buf();
+    Port::deferred(move || {
+        SimulatedProcessor::open(&calls)
+            .map(|processor| SlowAnswerProcessor { processor })
+            .map_err(processor_unavailable)
+    })
 }
 
 fn processor_unavailable(error: CallLogError) -> EffectPortResolutionError {

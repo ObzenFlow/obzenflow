@@ -133,7 +133,6 @@ impl CycleGuard {
             | FlowControlPayload::ConsumptionGap { .. }
             | FlowControlPayload::ConsumptionFinal { .. }
             | FlowControlPayload::ProductionFinal { .. }
-            | FlowControlPayload::ReaderStalled { .. }
             | FlowControlPayload::AtLeastOnceViolation { .. }
             | FlowControlPayload::InputSelection { .. } => {
                 unreachable!(

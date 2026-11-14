@@ -77,10 +77,6 @@ fn stream_and_subscription_wire_names_match_the_contract() {
             "runtime.subscription.consumption_finalized",
         ),
         (
-            json!({"flow_control_type":"reader_stalled", "upstream":stage, "stalled_since":10}),
-            "runtime.subscription.stall_detected",
-        ),
-        (
             json!({"flow_control_type":"at_least_once_violation", "upstream":stage, "reason":{"violation_type":"gap_detected", "details":{"from":1, "to":3}}, "reader_seq":1}),
             "runtime.subscription.at_least_once_violated",
         ),

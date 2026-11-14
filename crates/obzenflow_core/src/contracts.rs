@@ -1102,7 +1102,6 @@ mod tests {
                 reader_index: crate::event::types::JournalIndex(0),
                 advertised_writer_seq: None,
                 advertised_vector_clock: None,
-                stalled_since: None,
             },
         );
         contract.observe(&progress);
@@ -1159,7 +1158,6 @@ mod tests {
                 reader_index: crate::event::types::JournalIndex(0),
                 advertised_writer_seq: None,
                 advertised_vector_clock: None,
-                stalled_since: None,
             },
         );
         contract.observe(&progress);
@@ -1199,7 +1197,6 @@ mod tests {
                 reader_index: crate::event::types::JournalIndex(0),
                 advertised_writer_seq: None,
                 advertised_vector_clock: None,
-                stalled_since: None,
             },
         );
         contract.observe(&progress);

@@ -9,7 +9,9 @@ use super::domain::{
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
-use super::gateway::{simulated_processor, AuthorizePayment, PaymentGatewayPort};
+use super::gateway::{
+    simulated_processor, slow_answer_processor, AuthorizePayment, PaymentGatewayPort,
+};
 use super::validation;
 use obzenflow::effects::Port;
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform, FlowDefinition};
@@ -33,9 +35,10 @@ pub(super) const DEMO_JOURNAL_ROOT: &str = "target/payment-gateway-logs";
 
 /// The system behind the payment gateway port, chosen by `processor` in the config's `[app]`.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Processor {
     Simulated,
+    SlowAnswer,
 }
 
 /// The `[app]` table of this example's obzenflow.toml.
@@ -50,6 +53,7 @@ pub fn build_flow() -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: PaymentSettings| {
         let port = match settings.processor {
             Processor::Simulated => simulated_processor(&settings.processor_calls),
+            Processor::SlowAnswer => slow_answer_processor(&settings.processor_calls),
         };
         Ok(assemble_flow(
             fixtures::scripted_web_orders(),

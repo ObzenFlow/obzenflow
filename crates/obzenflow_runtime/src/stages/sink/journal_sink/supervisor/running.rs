@@ -145,35 +145,19 @@ pub(super) async fn dispatch_running<
                     )
                     .await
                 {
-                    match status {
-                        crate::messaging::upstream_subscription::ContractStatus::Stalled(
-                            upstream,
-                        ) => {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                upstream = ?upstream,
-                                "Upstream stalled detected during sink processing"
-                            );
-                        }
-                        crate::messaging::upstream_subscription::ContractStatus::Violated {
-                            upstream,
-                            cause,
-                        } => {
-                            tracing::error!(
-                                stage_name = %ctx.stage_name,
-                                upstream = ?upstream,
-                                cause = ?cause,
-                                "Contract violation detected during sink processing"
-                            );
-
-                            crate::messaging::upstream_subscription::ContractStatus::Violated {
-                                upstream,
-                                cause,
-                            }
-                            .into_result()?;
-                        }
-                        _ => {}
+                    if let crate::messaging::upstream_subscription::ContractStatus::Violated {
+                        upstream,
+                        cause,
+                    } = &status
+                    {
+                        tracing::error!(
+                            stage_name = %ctx.stage_name,
+                            upstream = ?upstream,
+                            cause = ?cause,
+                            "Contract violation detected during sink processing"
+                        );
                     }
+                    status.into_result()?;
                 }
             }
 
@@ -212,33 +196,19 @@ pub(super) async fn dispatch_running<
                 )
                 .await
             {
-                match status {
-                    crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream) => {
-                        tracing::warn!(
-                            stage_name = %ctx.stage_name,
-                            upstream = ?upstream,
-                            "Upstream stalled detected during sink processing"
-                        );
-                    }
-                    crate::messaging::upstream_subscription::ContractStatus::Violated {
-                        upstream,
-                        cause,
-                    } => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            upstream = ?upstream,
-                            cause = ?cause,
-                            "Contract violation detected during sink processing"
-                        );
-
-                        crate::messaging::upstream_subscription::ContractStatus::Violated {
-                            upstream,
-                            cause,
-                        }
-                        .into_result()?;
-                    }
-                    _ => {}
+                if let crate::messaging::upstream_subscription::ContractStatus::Violated {
+                    upstream,
+                    cause,
+                } = &status
+                {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        upstream = ?upstream,
+                        cause = ?cause,
+                        "Contract violation detected during sink processing"
+                    );
                 }
+                status.into_result()?;
             }
 
             tracing::trace!(

@@ -19,7 +19,6 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventId, EventType, JournalRecord, StageId, WriterId};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use tokio::time::Instant;
 
 use crate::pipeline::config::CycleGuardConfig;
 
@@ -205,8 +204,6 @@ pub enum MergeCandidateStatus {
 pub enum ContractStatus {
     /// All contracts are healthy
     Healthy,
-    /// An upstream is stalled
-    Stalled(StageId),
     /// Contract violation detected (event-level cause for system events)
     Violated {
         upstream: StageId,
@@ -234,11 +231,11 @@ impl std::fmt::Display for ContractFailure {
 impl std::error::Error for ContractFailure {}
 
 impl ContractStatus {
-    /// Stalls remain advisory. Only an effective contract violation fails a child.
+    /// Only an effective contract violation fails a child.
     pub fn into_result(self) -> Result<(), ContractFailure> {
         match self {
             Self::Violated { upstream, cause } => Err(ContractFailure { upstream, cause }),
-            Self::Healthy | Self::Stalled(_) | Self::ProgressEmitted => Ok(()),
+            Self::Healthy | Self::ProgressEmitted => Ok(()),
         }
     }
 }
@@ -580,21 +577,14 @@ pub struct ReaderProgress {
         HashMap<obzenflow_core::event::JournalCommitRef, PendingReceiptMeta>,
     pub(crate) committed_out_of_order: BTreeMap<SeqNo, PendingReceiptMeta>,
 
-    /// Progress timing
+    /// Position of the last progress record
     pub last_progress_seq: SeqNo,
-    pub last_progress_instant: Option<Instant>,
-    pub last_read_instant: Option<Instant>,
 
     /// Last reader_seq for which we emitted a mid-flight ContractResult heartbeat.
     ///
     /// This is used to avoid emitting redundant pending contract results on
     /// every wall-clock tick when no new data has been consumed on the edge.
     pub last_contract_result_seq: SeqNo,
-
-    /// Stall detection
-    pub stalled_since: Option<Instant>,
-    pub consecutive_stall_checks: u32,
-    pub last_stall_emitted_instant: Option<Instant>,
 
     /// Contract status
     pub final_emitted: bool,
@@ -618,12 +608,7 @@ impl ReaderProgress {
             pending_receipts: HashMap::new(),
             committed_out_of_order: BTreeMap::new(),
             last_progress_seq: SeqNo(0),
-            last_progress_instant: None,
-            last_read_instant: None,
             last_contract_result_seq: SeqNo(0),
-            stalled_since: None,
-            consecutive_stall_checks: 0,
-            last_stall_emitted_instant: None,
             final_emitted: false,
             contract_violated: false,
         }
@@ -737,20 +722,15 @@ pub struct ContractsWiring {
 #[derive(Clone)]
 pub struct ContractConfig {
     pub progress_min_events: Count,
-    pub progress_max_interval: DurationMs,
-    pub stall_threshold: DurationMs,
-    pub stall_cooloff: DurationMs,
-    pub stall_checks_before_emit: u32,
+    /// How often a stage's tick runs the contract check.
+    pub check_interval: DurationMs,
 }
 
 impl Default for ContractConfig {
     fn default() -> Self {
         Self {
             progress_min_events: Count(1),
-            progress_max_interval: DurationMs(1000),
-            stall_threshold: DurationMs(30000),
-            stall_cooloff: DurationMs(30000),
-            stall_checks_before_emit: 3,
+            check_interval: DurationMs(500),
         }
     }
 }

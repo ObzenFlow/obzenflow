@@ -285,33 +285,19 @@ pub(super) async fn dispatch_enriching<
                 )
                 .await
             {
-                match status {
-                    crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream) => {
-                        tracing::warn!(
-                            stage_name = %ctx.stage_name,
-                            upstream = ?upstream,
-                            "Stream upstream stalled during join enriching"
-                        );
-                    }
-                    crate::messaging::upstream_subscription::ContractStatus::Violated {
-                        upstream,
-                        cause,
-                    } => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            upstream = ?upstream,
-                            cause = ?cause,
-                            "Stream contract violation during join enriching"
-                        );
-
-                        crate::messaging::upstream_subscription::ContractStatus::Violated {
-                            upstream,
-                            cause,
-                        }
-                        .into_result()?;
-                    }
-                    _ => {}
+                if let crate::messaging::upstream_subscription::ContractStatus::Violated {
+                    upstream,
+                    cause,
+                } = &status
+                {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        upstream = ?upstream,
+                        cause = ?cause,
+                        "Stream contract violation during join enriching"
+                    );
                 }
+                status.into_result()?;
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

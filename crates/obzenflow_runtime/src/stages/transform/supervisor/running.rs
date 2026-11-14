@@ -236,35 +236,19 @@ async fn dispatch_running_inner<
                         )
                         .await
                     {
-                        match status {
-                            crate::messaging::upstream_subscription::ContractStatus::Stalled(
-                                upstream,
-                            ) => {
-                                tracing::warn!(
-                                    stage_name = %ctx.stage_name,
-                                    upstream = ?upstream,
-                                    "Upstream stalled detected during active processing"
-                                );
-                            }
-                            crate::messaging::upstream_subscription::ContractStatus::Violated {
-                                upstream,
-                                cause,
-                            } => {
-                                tracing::error!(
-                                    stage_name = %ctx.stage_name,
-                                    upstream = ?upstream,
-                                    cause = ?cause,
-                                    "Contract violation detected during active processing"
-                                );
-
-                                crate::messaging::upstream_subscription::ContractStatus::Violated {
-                                    upstream,
-                                    cause,
-                                }
-                                .into_result()?;
-                            }
-                            _ => {}
+                        if let crate::messaging::upstream_subscription::ContractStatus::Violated {
+                            upstream,
+                            cause,
+                        } = &status
+                        {
+                            tracing::error!(
+                                stage_name = %ctx.stage_name,
+                                upstream = ?upstream,
+                                cause = ?cause,
+                                "Contract violation detected during active processing"
+                            );
                         }
+                        status.into_result()?;
                     }
                 }
 
@@ -752,35 +736,19 @@ async fn dispatch_running_inner<
                     )
                     .await
                 {
-                    match status {
-                        crate::messaging::upstream_subscription::ContractStatus::Stalled(
-                            upstream,
-                        ) => {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                upstream = ?upstream,
-                                "Upstream stalled detected during active processing"
-                            );
-                        }
-                        crate::messaging::upstream_subscription::ContractStatus::Violated {
-                            upstream,
-                            cause,
-                        } => {
-                            tracing::error!(
-                                stage_name = %ctx.stage_name,
-                                upstream = ?upstream,
-                                cause = ?cause,
-                                "Contract violation detected during active processing"
-                            );
-
-                            crate::messaging::upstream_subscription::ContractStatus::Violated {
-                                upstream,
-                                cause,
-                            }
-                            .into_result()?;
-                        }
-                        _ => {}
+                    if let crate::messaging::upstream_subscription::ContractStatus::Violated {
+                        upstream,
+                        cause,
+                    } = &status
+                    {
+                        tracing::error!(
+                            stage_name = %ctx.stage_name,
+                            upstream = ?upstream,
+                            cause = ?cause,
+                            "Contract violation detected during active processing"
+                        );
                     }
+                    status.into_result()?;
                 }
             }
 
@@ -824,33 +792,19 @@ async fn dispatch_running_inner<
             };
 
             if let Some(status) = maybe_contract_check {
-                match status {
-                    crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream) => {
-                        tracing::warn!(
-                            stage_name = %ctx.stage_name,
-                            upstream = ?upstream,
-                            "Upstream stalled detected during active processing"
-                        );
-                    }
-                    crate::messaging::upstream_subscription::ContractStatus::Violated {
-                        upstream,
-                        cause,
-                    } => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            upstream = ?upstream,
-                            cause = ?cause,
-                            "Contract violation detected during active processing"
-                        );
-
-                        crate::messaging::upstream_subscription::ContractStatus::Violated {
-                            upstream,
-                            cause,
-                        }
-                        .into_result()?;
-                    }
-                    _ => {}
+                if let crate::messaging::upstream_subscription::ContractStatus::Violated {
+                    upstream,
+                    cause,
+                } = &status
+                {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        upstream = ?upstream,
+                        cause = ?cause,
+                        "Contract violation detected during active processing"
+                    );
                 }
+                status.into_result()?;
             }
 
             tracing::trace!(stage_name = %ctx.stage_name, "No events available, sleeping");

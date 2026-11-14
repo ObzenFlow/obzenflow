@@ -20,9 +20,7 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
 use obzenflow_core::event::status::processing_status::ErrorKind;
-use obzenflow_core::event::types::{
-    Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
-};
+use obzenflow_core::event::types::{Count, SeqNo, ViolationCause as EventViolationCause};
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::vocabulary;
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
@@ -40,7 +38,6 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::time::Instant;
 
 #[path = "pending_read_tests.rs"]
 mod pending_read;
@@ -521,7 +518,6 @@ async fn progress_append_failure_does_not_advance_progress_state() {
     assert!(matches!(status, ContractStatus::Healthy), "{status:?}");
 
     assert_eq!(reader_progress[0].last_progress_seq, SeqNo(0));
-    assert!(reader_progress[0].last_progress_instant.is_none());
 }
 
 #[tokio::test]
@@ -663,84 +659,14 @@ async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
     assert!(!reader_progress[0].final_emitted);
     assert!(!reader_progress[0].contract_violated);
 
-    let events = contract_journal.read_causally_ordered().await.unwrap();
     assert!(
-        !events.iter().any(|env| matches!(
-            &env.payload,
-            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
-        )),
-        "diagnostics-only checks must not emit final contract evidence"
+        contract_journal
+            .read_causally_ordered()
+            .await
+            .unwrap()
+            .is_empty(),
+        "diagnostics-only checks leave an ended reader's records to the authoritative check"
     );
-}
-
-#[tokio::test]
-async fn diagnostics_only_eof_check_does_not_emit_stall() {
-    let upstream_stage = StageId::new();
-    let upstream_owner = JournalOwner::stage(upstream_stage);
-    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
-    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
-
-    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
-        .await
-        .unwrap();
-
-    let contract_stage = StageId::new();
-    let contract_owner = JournalOwner::stage(contract_stage);
-    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
-
-    let reader_stage = StageId::new();
-
-    let evidence_journal = contract_journal.clone();
-
-    let config = ContractConfig {
-        progress_min_events: Count(100),
-        progress_max_interval: DurationMs(10_000),
-        stall_threshold: DurationMs(100),
-        stall_cooloff: DurationMs(0),
-        stall_checks_before_emit: 1,
-    };
-
-    subscription = subscription.with_contracts(ContractsWiring {
-        writer_id: WriterId::from(contract_stage),
-        contract_journal: contract_journal.clone(),
-        config,
-        reader_stage: Some(reader_stage),
-        control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: true,
-        cycle_guard_config: None,
-    });
-
-    subscription.state.mark_reader_eof(0);
-
-    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].reader_seq = SeqNo(1);
-    reader_progress[0].receipted_seq = SeqNo(1);
-    reader_progress[0].advertised_writer_seq = Some(SeqNo(1));
-    reader_progress[0].last_read_instant =
-        Some(Instant::now() - std::time::Duration::from_millis(250));
-
-    let status = subscription
-        .check_contracts_diagnostics_only(&mut reader_progress)
-        .await;
-
-    assert!(
-        matches!(status, ContractStatus::Healthy),
-        "EOF readers must not be stall-checked in diagnostics-only mode"
-    );
-    assert_eq!(reader_progress[0].consecutive_stall_checks, 0);
-    assert!(reader_progress[0].stalled_since.is_none());
-    assert!(!reader_progress[0].contract_violated);
-
-    assert!(contract_journal
-        .read_causally_ordered()
-        .await
-        .expect("read contract journal")
-        .is_empty());
-    assert!(evidence_journal
-        .read_causally_ordered()
-        .await
-        .expect("read stage journal")
-        .is_empty());
 }
 
 #[tokio::test]
@@ -1324,63 +1250,7 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
 }
 
 #[tokio::test]
-async fn stall_append_failure_does_not_set_stalled_since() {
-    let upstream_stage = StageId::new();
-    let upstream_owner = JournalOwner::stage(upstream_stage);
-    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
-    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
-
-    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
-        .await
-        .unwrap();
-
-    let contract_stage = StageId::new();
-    let contract_owner = JournalOwner::stage(contract_stage);
-    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(ControlledJournal::new(
-        contract_owner,
-        Arc::new(|event: &ChainEvent, _call| {
-            matches!(
-                &event.payload,
-                ChainPayload::FlowControl(FlowControlPayload::ReaderStalled { .. })
-            )
-        }),
-    ));
-
-    let config = ContractConfig {
-        progress_min_events: Count(100),
-        progress_max_interval: DurationMs(10_000),
-        stall_threshold: DurationMs(100),
-        stall_cooloff: DurationMs(0),
-        stall_checks_before_emit: 1,
-    };
-
-    subscription = subscription.with_contracts(ContractsWiring {
-        writer_id: WriterId::from(contract_stage),
-        contract_journal,
-        config,
-        reader_stage: None,
-        control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
-        cycle_guard_config: None,
-    });
-
-    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].last_read_instant =
-        Some(Instant::now() - std::time::Duration::from_millis(250));
-    reader_progress[0].last_progress_seq = reader_progress[0].reader_seq;
-
-    let status = subscription.check_contracts(&mut reader_progress).await;
-    assert!(
-        matches!(status, ContractStatus::Stalled(s) if s == upstream_stage),
-        "expected stall status even when append fails"
-    );
-
-    assert!(reader_progress[0].stalled_since.is_none());
-    assert!(!reader_progress[0].contract_violated);
-}
-
-#[tokio::test]
-async fn stall_cooloff_suppresses_repeat_stalled_emission() {
+async fn reader_idle_appends_nothing() {
     tokio::time::pause();
 
     let upstream_stage = StageId::new();
@@ -1396,131 +1266,48 @@ async fn stall_cooloff_suppresses_repeat_stalled_emission() {
     let contract_owner = JournalOwner::stage(contract_stage);
     let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
 
-    let config = ContractConfig {
-        progress_min_events: Count(100),
-        progress_max_interval: DurationMs(500),
-        stall_threshold: DurationMs(100),
-        stall_cooloff: DurationMs(1_000),
-        stall_checks_before_emit: 1,
-    };
-
     subscription = subscription.with_contracts(ContractsWiring {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
-        config,
-        reader_stage: None,
+        config: ContractConfig::default(),
+        reader_stage: Some(contract_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
 
-    let owner = contract_flow_context(contract_stage);
-    subscription = subscription.with_contract_flow_context(owner.clone());
-
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].last_read_instant = Some(Instant::now());
-    reader_progress[0].last_progress_instant = Some(Instant::now());
-    reader_progress[0].last_progress_seq = reader_progress[0].reader_seq;
+    reader_progress[0].reader_seq = SeqNo(1);
+    reader_progress[0].receipted_seq = SeqNo(1);
 
-    // Stall emitted on first check (should_emit_progress is false, stall_threshold exceeded).
-    tokio::time::advance(std::time::Duration::from_millis(200)).await;
     let status = subscription.check_contracts(&mut reader_progress).await;
     assert!(
-        matches!(status, ContractStatus::Stalled(s) if s == upstream_stage),
-        "expected initial stalled status"
+        matches!(status, ContractStatus::ProgressEmitted),
+        "{status:?}"
     );
-
-    // Progress emission clears stalled_since (time_elapsed >= progress_max_interval).
-    tokio::time::advance(std::time::Duration::from_millis(400)).await;
-    assert!(matches!(
-        subscription.check_contracts(&mut reader_progress).await,
-        ContractStatus::ProgressEmitted
-    ));
-
-    // Still stalled, but within cooloff window, so do not emit ReaderStalled again.
-    tokio::time::advance(std::time::Duration::from_millis(50)).await;
-    let status = subscription.check_contracts(&mut reader_progress).await;
-    assert!(
-        matches!(status, ContractStatus::Stalled(s) if s == upstream_stage),
-        "expected stalled status during cooloff"
-    );
-
-    let envelopes = contract_journal
+    let written = contract_journal
         .read_causally_ordered()
         .await
         .expect("read contract journal");
-    for env in &envelopes {
-        assert_contract_owner(&env.authored(), &owner);
-    }
-    let stalled_count = envelopes
-        .iter()
-        .filter(|e| {
-            matches!(
-                &e.payload,
-                ChainPayload::FlowControl(FlowControlPayload::ReaderStalled { .. })
-            )
-        })
-        .count();
-    assert_eq!(
-        stalled_count, 1,
-        "expected ReaderStalled to be emitted once within cooloff"
-    );
-}
-
-#[tokio::test]
-async fn idle_reader_without_any_reads_does_not_emit_stall() {
-    tokio::time::pause();
-
-    let upstream_stage = StageId::new();
-    let upstream_owner = JournalOwner::stage(upstream_stage);
-    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
-    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
-
-    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
-        .await
-        .unwrap();
-
-    let contract_stage = StageId::new();
-    let contract_owner = JournalOwner::stage(contract_stage);
-    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
-
-    let config = ContractConfig {
-        progress_min_events: Count(100),
-        progress_max_interval: DurationMs(10_000),
-        stall_threshold: DurationMs(100),
-        stall_cooloff: DurationMs(0),
-        stall_checks_before_emit: 1,
-    };
-
-    subscription = subscription.with_contracts(ContractsWiring {
-        writer_id: WriterId::from(contract_stage),
-        contract_journal: contract_journal.clone(),
-        config,
-        reader_stage: None,
-        control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
-        cycle_guard_config: None,
-    });
-
-    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    assert!(written.iter().any(|envelope| matches!(
+        &envelope.payload,
+        ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress { .. })
+    )));
 
     for _ in 0..4 {
-        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
         let status = subscription.check_contracts(&mut reader_progress).await;
-        assert!(
-            matches!(status, ContractStatus::Healthy),
-            "idle reader should stay healthy before any reads"
-        );
+        assert!(matches!(status, ContractStatus::Healthy), "{status:?}");
     }
 
-    assert!(reader_progress[0].last_read_instant.is_none());
-    assert!(reader_progress[0].stalled_since.is_none());
-    assert!(!reader_progress[0].contract_violated);
-    assert!(contract_journal
-        .read_causally_ordered()
-        .await
-        .expect("read contract journal")
-        .is_empty());
+    assert_eq!(
+        contract_journal
+            .read_causally_ordered()
+            .await
+            .expect("read contract journal")
+            .len(),
+        written.len()
+    );
 }
 
 #[tokio::test]
@@ -1578,10 +1365,7 @@ async fn multi_reader_progress_isolated_under_partial_append_failure() {
     assert!(matches!(status, ContractStatus::ProgressEmitted));
 
     assert_eq!(reader_progress[0].last_progress_seq, SeqNo(0));
-    assert!(reader_progress[0].last_progress_instant.is_none());
-
     assert_eq!(reader_progress[1].last_progress_seq, SeqNo(1));
-    assert!(reader_progress[1].last_progress_instant.is_some());
 }
 
 async fn build_upstream_with_seq_divergence(
@@ -3396,7 +3180,6 @@ fn merge_consumption_progress(writer: StageId, seq: u64) -> ChainEvent {
             reader_index: obzenflow_core::event::types::JournalIndex(0),
             advertised_writer_seq: None,
             advertised_vector_clock: None,
-            stalled_since: None,
         },
     )
 }
@@ -3844,8 +3627,8 @@ async fn canonical_merge_contract_read_accounting_fires_at_delivery_not_at_hold(
 
     let mut progress = [ReaderProgress::new(stage_a), ReaderProgress::new(stage_b)];
 
-    // A quiet: B's head is held, the read-side instant stamps, and the
-    // delivery-side accounting (reader_seq) must not move.
+    // A quiet: B's head is held, and the delivery-side accounting
+    // (reader_seq) must not move.
     match subscription
         .poll_next_with_state("test_fsm", Some(&mut progress[..]))
         .await
@@ -3854,10 +3637,6 @@ async fn canonical_merge_contract_read_accounting_fires_at_delivery_not_at_hold(
         other => panic!("expected NoEvents while A is quiet, got {other:?}"),
     }
     assert_eq!(progress[1].reader_seq, SeqNo(0));
-    assert!(
-        progress[1].last_read_instant.is_some(),
-        "read instant stamps at head acquisition so the held edge stays healthy"
-    );
 
     // A seals: its EOF delivers first (ordinal tie, stage key), then B's data
     // delivers and the delivery-side accounting advances.

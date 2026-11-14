@@ -46,7 +46,6 @@ use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::{EventId, ReaderGeneration, StageId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use tokio::time::Instant;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReaderFrontier {
@@ -176,7 +175,6 @@ fn record_receipt(
 
     let previous_seq = reader_progress[index].receipted_seq;
     if reader_progress[index].mark_receipted(subject.input) {
-        reader_progress[index].last_read_instant = Some(Instant::now());
         if reader_progress[index].receipted_seq != previous_seq {
             if let (Some(event_id), Some(vector_clock)) = (
                 reader_progress[index].last_receipted_event_id,
