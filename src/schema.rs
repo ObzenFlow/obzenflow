@@ -2,25 +2,19 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Typed application payloads, stage output carriers, and effect outcome facts.
+//! Typed application payloads, outcome lists and fact sets.
 //!
 //! For an application with `ValidatedOrder`, `InvalidOrder`, and `OrderCancelled`
-//! payloads:
+//! payloads, a transform's `Output` lists the outcomes it may return:
 //!
 //! ```rust,ignore
-//! use obzenflow::schema::StageOutputFacts;
+//! use obzenflow::schema::outcome;
 //!
-//! #[derive(Debug, Clone, StageOutputFacts)]
-//! enum ValidationOutput {
-//!     Valid(ValidatedOrder),
-//!     Invalid { invalid: InvalidOrder, cancelled: OrderCancelled },
-//! }
+//! type Output = outcome![ValidatedOrder | (InvalidOrder, OrderCancelled)];
 //! ```
 //!
-//! `EffectOutcomeFacts` is written the same way. If the dependency is renamed to
-//! `of`, add `#[stage_output(schema = of::schema)]` or
-//! `#[effect_outcome(schema = of::schema)]`.
-//! Declare fact sets with [`stage_fact_set!`].
+//! `process` returns exactly one of them, built with `outcome(...)`, and a port's
+//! answer is written the same way. Declare fact sets with [`stage_fact_set!`].
 
 pub use obzenflow_core::event::schema::{
     DeclaredStageFactSet, EffectOutcomeFacts, Member, OneFactStageOutput, StageFactSet,

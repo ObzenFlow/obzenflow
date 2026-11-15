@@ -210,7 +210,7 @@
 //! types and their owner implementations:
 //!
 //! - [`prelude`] supplies the common flow, macro, error, and schema vocabulary.
-//! - [`schema`] defines typed payloads and fact carriers.
+//! - [`schema`] defines typed payloads, outcome lists, and fact sets.
 //! - [`flow`] defines flows, stage declarations, and construction settings.
 //! - [`stages`] groups sources, transforms, stateful handlers, joins, and sinks.
 //! - [`effects`] describes replay-safe external operations.
