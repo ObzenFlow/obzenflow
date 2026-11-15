@@ -62,7 +62,15 @@
             "failures_total": 0,
             "errors_by_kind": {},
             "data_outputs_by_event_type": [],
-            "data_inputs_by_upstream_event_type": []
+            "data_inputs_by_upstream_event_type": [],
+            "retry": {
+              "scheduled_total": 18446744073709551615,
+              "calls_by_outcome": {
+                "succeeded": 9007199254740993,
+                "attempt_limit": 1
+              },
+              "backoff_ms_total": 15479
+            }
           }
         },
         "composite_activations": []

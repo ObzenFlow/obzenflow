@@ -510,7 +510,7 @@ pub(super) fn metrics_settled<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) ->
         ctx.metrics_deadline = None;
         Ok(change(
             S::PublishingFinalMarker,
-            vec![A::Host(H::CloseMailbox), A::PublishFinalMarker],
+            vec![A::Host(Box::new(H::CloseMailbox)), A::PublishFinalMarker],
         ))
     })
 }

@@ -766,6 +766,7 @@ struct EffectRecoveryController {
     cancellation_state: RecoveryCancellationState,
     physical_calls: u32,
     calls_since_wait: u32,
+    retries_scheduled: u32,
     terminal_decision: Option<RecoveryTerminalDecision>,
     completion: Option<RecoveryCompletion>,
 }
@@ -783,9 +784,14 @@ impl EffectRecoveryController {
             cancellation_state: RecoveryCancellationState::Idle,
             physical_calls: 0,
             calls_since_wait: 0,
+            retries_scheduled: 0,
             terminal_decision: None,
             completion: None,
         }
+    }
+
+    fn retried_or_waited(&self) -> bool {
+        self.physical_calls > 1 || self.retries_scheduled > 0
     }
 
     fn start_over_after_wait(&mut self) {
@@ -902,7 +908,8 @@ impl EffectRecoveryController {
         self.physical_calls
     }
 
-    fn next_attempt(&self) -> u32 {
+    fn schedule_retry(&mut self) -> u32 {
+        self.retries_scheduled = self.retries_scheduled.saturating_add(1);
         self.physical_calls.saturating_add(1)
     }
 
@@ -1386,13 +1393,7 @@ impl EffectResilienceMiddleware {
         };
         let delay = wake.saturating_duration_since(now);
         if !delay.is_zero() {
-            ctx.write_control_event(ChainEventFactory::retry_scheduled(
-                self.writer_id,
-                identity.cursor.clone(),
-                recovery.next_attempt(),
-                duration_ms(delay),
-                CausalInput::of(event),
-            ));
+            self.write_retry_scheduled(recovery, identity, delay, event, ctx);
             if scope
                 .progress
                 .commit(ctx.take_control_events())
@@ -1473,7 +1474,7 @@ impl EffectResilienceMiddleware {
             return AfterCall::Terminal(self.physical_terminal(recovery, identity, event, ctx));
         };
         let Err(error) = result else {
-            if recovery.physical_calls() > 1 {
+            if recovery.retried_or_waited() {
                 ctx.write_control_event(ChainEventFactory::retry_succeeded(
                     self.writer_id,
                     identity.cursor.clone(),
@@ -1484,7 +1485,7 @@ impl EffectResilienceMiddleware {
             return AfterCall::Terminal(self.physical_terminal(recovery, identity, event, ctx));
         };
         if call.outcome != PhysicalCallOutcome::Failed || !calls.repeats(error) {
-            if recovery.physical_calls() > 1 {
+            if recovery.retried_or_waited() {
                 ctx.write_control_event(ChainEventFactory::retry_stopped_non_retryable(
                     self.writer_id,
                     identity.cursor.clone(),
@@ -1532,17 +1533,29 @@ impl EffectResilienceMiddleware {
                 ctx,
             ));
         }
-        ctx.write_control_event(ChainEventFactory::retry_scheduled(
-            self.writer_id,
-            identity.cursor.clone(),
-            recovery.next_attempt(),
-            duration_ms(delay),
-            CausalInput::of(event),
-        ));
+        self.write_retry_scheduled(recovery, identity, delay, event, ctx);
         AfterCall::Backoff {
             delay,
             breaker: breaker_during_backoff,
         }
+    }
+
+    fn write_retry_scheduled(
+        &self,
+        recovery: &mut EffectRecoveryController,
+        identity: &EffectIdentity,
+        delay: Duration,
+        event: &ChainEvent,
+        ctx: &mut crate::middleware::MiddlewareContext,
+    ) {
+        let next_attempt = recovery.schedule_retry();
+        ctx.write_control_event(ChainEventFactory::retry_scheduled(
+            self.writer_id,
+            identity.cursor.clone(),
+            next_attempt,
+            duration_ms(delay),
+            CausalInput::of(event),
+        ));
     }
 
     fn admission_rejected(

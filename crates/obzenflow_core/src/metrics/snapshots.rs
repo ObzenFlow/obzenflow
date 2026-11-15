@@ -15,6 +15,7 @@ use crate::event::observability::{
 use crate::event::payloads::system_payload::{
     ContractName, ContractResultStatusLabel, SystemFeedRole,
 };
+use crate::event::provenance::RetryAccounting;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::SinkOperationPhase;
 use crate::id::{FlowId, StageId, StageKey};
@@ -207,6 +208,10 @@ pub struct AppMetricsSnapshot {
     ///
     /// Keyed by stage ID.
     pub ai_chunking_metrics: HashMap<StageId, AiChunkingMetricsSnapshot>,
+
+    /// Retry facts each stage committed, for every stage the topology gives a retry and
+    /// any other stage that committed one.
+    pub retry_metrics: HashMap<StageId, RetryAccounting>,
 
     /// Flow-level metrics (if journey events are implemented)
     pub flow_metrics: Option<FlowMetricsSnapshot>,
@@ -609,6 +614,7 @@ impl Default for AppMetricsSnapshot {
             http_surface_metrics: Vec::new(),
             http_pull_metrics: HashMap::new(),
             ai_chunking_metrics: HashMap::new(),
+            retry_metrics: HashMap::new(),
             flow_metrics: None,
             stage_metadata: HashMap::new(),
             stage_first_event_time: HashMap::new(),

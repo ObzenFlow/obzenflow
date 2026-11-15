@@ -273,6 +273,12 @@ async fn context(
     .unwrap();
     (ctx, system, exports)
 }
+fn move_watermark(ctx: &mut Context) {
+    ctx.metrics_store.causal_watermark.clocks.insert(
+        obzenflow_core::event::CausalCoordinate::new(JournalId::new().into()),
+        1,
+    );
+}
 async fn until(mut condition: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while !condition() {
@@ -1011,40 +1017,35 @@ pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(
 
     let (mut ctx, pipeline, exports) = context(&mut *factory, vec![], vec![]).await;
     ctx.export_interval = Duration::from_secs(60);
+    move_watermark(&mut ctx);
     let export_journal = ObservedJournal::new(ctx.journals.export.clone());
-    ctx.journals.export = export_journal.clone();
+    let gate = Arc::new(Gate::default());
+    *export_journal.append_gate.lock().unwrap() = Some(gate.clone());
+    ctx.journals.export = export_journal;
     let journals = ctx.journals.clone();
     let (task, control) = run(ctx);
+    tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(exports.0.lock().unwrap().len(), 1);
+    assert_eq!(journals.export.committed_position().await.unwrap(), 0);
+    gate.release.notify_one();
     wait_for_exports(journals.export.as_ref(), 1).await;
     for volume in [1, 100, 1000] {
         let baseline = exports.0.lock().unwrap().len();
-        let gate = Arc::new(Gate::default());
-        *export_journal.append_gate.lock().unwrap() = Some(gate.clone());
-        control.send(Event::ExportMetrics).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
-            .await
-            .unwrap();
-        // A visible snapshot precedes its receipt. Hold the append here so
-        // the test cannot mistake the callback for journal settlement.
-        assert_eq!(exports.0.lock().unwrap().len(), baseline + 1);
-        assert_eq!(
-            journals.export.committed_position().await.unwrap(),
-            baseline as u64
-        );
-        gate.release.notify_one();
-        for _ in 1..volume {
+        for _ in 0..volume {
             control.send(Event::ExportMetrics).await.unwrap();
         }
-        wait_for_exports(journals.export.as_ref(), baseline + volume).await;
-        assert_eq!(exports.0.lock().unwrap().len(), baseline + volume);
+        until(|| exports.0.lock().unwrap().len() == baseline + volume).await;
+        assert_eq!(
+            journals.export.committed_position().await.unwrap(),
+            1,
+            "an unchanged watermark appends no snapshot record"
+        );
         assert_eq!(
             journals.coordination.committed_position().await.unwrap(),
             2,
-            "accepted exports settle in the export journal without extending coordination history"
-        );
-        assert_eq!(
-            journals.export.committed_position().await.unwrap(),
-            (baseline + volume) as u64
+            "accepted exports never extend coordination history"
         );
     }
     pipeline
@@ -1058,6 +1059,11 @@ pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        journals.export.committed_position().await.unwrap(),
+        2,
+        "the final export records its snapshot"
+    );
     assert_eq!(journals.coordination.committed_position().await.unwrap(), 4);
     let end = journals
         .coordination
@@ -1077,6 +1083,7 @@ pub async fn metrics_drain_during_export_settles_before_final_refresh(
 ) {
     let (mut ctx, _, exports) = context(&mut *factory, vec![], vec![]).await;
     ctx.export_interval = Duration::from_secs(60);
+    move_watermark(&mut ctx);
     let export_journal = ObservedJournal::new(ctx.journals.export.clone());
     let gate = Arc::new(Gate::default());
     *export_journal.append_gate.lock().unwrap() = Some(gate.clone());

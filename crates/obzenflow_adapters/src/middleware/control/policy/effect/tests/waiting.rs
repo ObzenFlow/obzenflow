@@ -175,6 +175,29 @@ async fn call_refused_open_waits_until_reopen() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn waited_call_success_writes_retry_succeeded() {
+    let boundary = waiting_boundary(breaker(10_000), quick_retry());
+    open_breaker(&boundary, 1).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let waited = call(
+        &boundary,
+        2,
+        scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+    )
+    .await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        waited.recovery(|fact| match fact {
+            RecoveryFact::RetrySucceeded { total_attempts, .. } => Some(*total_attempts),
+            _ => None,
+        }),
+        [1]
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn refused_call_default_setting_waits() {
     let boundary = waiting_boundary(breaker(50), retry().fixed_delay(Duration::from_millis(1)));
     open_breaker(&boundary, 1).await;

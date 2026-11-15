@@ -1238,6 +1238,119 @@ async fn atomic_group_accounts_every_member_in_its_owned_history() {
     );
 }
 
+fn retry_group(stage: StageId) -> Vec<super::output_committer::AtomicCommitEntry> {
+    use super::output_committer::{AtomicCommitEntry, CommitOptions, StageAppendIntent};
+    use obzenflow_core::event::payloads::effect_payload::EffectCursor;
+    use obzenflow_core::event::payloads::execution_payload::{RecoveryFact, RetryStopReason};
+
+    let cursor = EffectCursor::new("flow", "stage", 1, 0);
+    [
+        RecoveryFact::RetryScheduled {
+            cursor: cursor.clone(),
+            next_attempt: 2,
+            delay_ms: 250,
+        },
+        RecoveryFact::RetryScheduled {
+            cursor: cursor.clone(),
+            next_attempt: 3,
+            delay_ms: 250,
+        },
+        RecoveryFact::RetryExhausted {
+            cursor: cursor.clone(),
+            total_attempts: 3,
+            reason: RetryStopReason::AttemptLimit,
+        },
+        RecoveryFact::RecoveryCompleted {
+            cursor,
+            total_attempts: 3,
+            backoff_elapsed_ms: 500,
+            recovery_elapsed_ms: 900,
+        },
+    ]
+    .into_iter()
+    .map(|fact| AtomicCommitEntry {
+        event: ChainEventFactory::execution_event(stage.into(), ExecutionPayload::Recovery(fact)),
+        options: CommitOptions::default(),
+        intent: StageAppendIntent::FrameworkObservability,
+    })
+    .collect()
+}
+
+#[tokio::test]
+async fn recovery_group_commit_carries_cumulative_counts() {
+    use super::output_committer::OutputCommitter;
+    use obzenflow_core::event::payloads::execution_payload::RetryStopReason;
+    use obzenflow_core::event::provenance::RetryCallOutcome;
+
+    for scope in [
+        MiddlewareExecutionScope::LiveEffectBoundary,
+        MiddlewareExecutionScope::StrictReplayHandler,
+    ] {
+        let (stage, writer) = make_writer_with_window(NonZeroU64::new(2).unwrap());
+        let journal = Arc::new(CreditCheckingJournal::new(
+            JournalOwner::stage(stage),
+            writer,
+            2,
+        ));
+        let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let committer = OutputCommitter {
+            data_journal: &data_journal,
+            flow_context: None,
+            instrumentation: Some(&instrumentation),
+            heartbeat_state: None,
+            output_contract: None,
+            backpressure_writer: None,
+            observer_scope: scope,
+        };
+        committer
+            .commit_atomic_group("retry-progress", retry_group(stage), None)
+            .await
+            .unwrap();
+
+        let rows = journal.appended();
+        let retry = |row: &ChainEvent| row.runtime.as_ref().unwrap().accounting.retry.clone();
+        assert_eq!(
+            rows.iter()
+                .map(|row| retry(row).scheduled_total)
+                .collect::<Vec<_>>(),
+            [1, 2, 2, 2],
+            "{scope:?}"
+        );
+        let whole = retry(rows.last().unwrap());
+        assert_eq!(
+            whole.calls(RetryCallOutcome::GaveUp(RetryStopReason::AttemptLimit)),
+            1
+        );
+        assert_eq!(whole.backoff_ms_total, 500);
+        assert_eq!(instrumentation.snapshot().accounting.retry, whole);
+    }
+}
+
+#[tokio::test]
+async fn failed_recovery_append_counts_nothing() {
+    use super::output_committer::OutputCommitter;
+
+    let stage = StageId::new();
+    let journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(NoopJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let committer = OutputCommitter {
+        data_journal: &journal,
+        flow_context: None,
+        instrumentation: Some(&instrumentation),
+        heartbeat_state: None,
+        output_contract: None,
+        backpressure_writer: None,
+        observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
+    };
+    committer
+        .commit_atomic_group("retry-progress", retry_group(stage), None)
+        .await
+        .expect_err("this journal refuses a multi-row group");
+    assert!(instrumentation.snapshot().accounting.retry.is_empty());
+}
+
 #[tokio::test]
 async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
     use crate::execution::{RuntimeExecution, RuntimeMode};

@@ -56,6 +56,7 @@ pub struct MetricsAggregatorBuilder {
 
     export_interval: std::time::Duration,
     pipeline_writer: Option<obzenflow_core::event::WriterId>,
+    retry_stages: Vec<StageId>,
 }
 
 impl MetricsAggregatorBuilder {
@@ -77,11 +78,17 @@ impl MetricsAggregatorBuilder {
             export_interval: std::time::Duration::from_millis(
                 crate::runtime_config::schema::DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
             ),
+            retry_stages: Vec::new(),
         }
     }
 
     pub(crate) fn with_pipeline_writer(mut self, writer: obzenflow_core::event::WriterId) -> Self {
         self.pipeline_writer = Some(writer);
+        self
+    }
+
+    pub(crate) fn with_retry_stages(mut self, stages: Vec<StageId>) -> Self {
+        self.retry_stages = stages;
         self
     }
 
@@ -144,6 +151,9 @@ impl MetricsAggregatorBuilder {
         .map_err(BuilderError::Other)?;
 
         metrics_context.pipeline_writer = self.pipeline_writer;
+        metrics_context
+            .metrics_store
+            .seed_retry_stages(self.retry_stages);
 
         Ok(PreparedMetricsAggregator {
             context: metrics_context,

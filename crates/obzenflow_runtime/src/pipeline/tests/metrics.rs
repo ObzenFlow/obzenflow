@@ -51,6 +51,67 @@ impl MetricsSnapshotExporter for RecordingSnapshots {
 }
 
 #[test]
+fn topology_retry_attachment_seeds_stage() {
+    use crate::metrics::MetricsStore;
+    use crate::pipeline::metrics::retry_stages;
+    use obzenflow_core::event::provenance::RetryAccounting;
+    use obzenflow_topology::{
+        MiddlewareAttachmentInfo, MiddlewareAttachmentKey, MiddlewareAuthoredSite,
+        MiddlewareDetailsInfo, MiddlewareInfo, MiddlewareOperation,
+    };
+
+    let attachment = |key: u8, details: MiddlewareDetailsInfo| {
+        MiddlewareInfo::try_new(vec![MiddlewareAttachmentInfo {
+            key: MiddlewareAttachmentKey::from_bytes([key; 16]),
+            label: "payments".into(),
+            authored_site: MiddlewareAuthoredSite::Effect {
+                effect_type: "payment.authorize".into(),
+            },
+            operation: MiddlewareOperation::Effect {
+                effect_type: "payment.authorize".into(),
+            },
+            details,
+        }])
+        .unwrap()
+    };
+    let ids: Vec<_> = (1_u128..=3)
+        .map(|value| obzenflow_topology::StageId::from_bytes(value.to_be_bytes()))
+        .collect();
+    let topology = Topology::new_unvalidated(
+        vec![
+            StageInfo::new(ids[0], "authorize_payment", TopologyStageType::Transform)
+                .with_middleware(attachment(
+                    1,
+                    MiddlewareDetailsInfo::Retry(Default::default()),
+                )),
+            StageInfo::new(ids[1], "allocate_stock", TopologyStageType::Transform).with_middleware(
+                attachment(2, MiddlewareDetailsInfo::CircuitBreaker(Default::default())),
+            ),
+            StageInfo::new(ids[2], "validate_order", TopologyStageType::Transform),
+        ],
+        vec![
+            DirectedEdge::new(ids[2], ids[0], EdgeKind::Forward),
+            DirectedEdge::new(ids[0], ids[1], EdgeKind::Forward),
+        ],
+    )
+    .unwrap();
+    let stages: Vec<StageId> = ids
+        .iter()
+        .map(|id| StageId::from_topology_id(*id))
+        .collect();
+
+    let mut store = MetricsStore::default();
+    store.seed_retry_stages(retry_stages(&topology));
+
+    assert_eq!(
+        store.stage_metrics[&stages[0]].retry,
+        Some(RetryAccounting::default())
+    );
+    assert!(!store.stage_metrics.contains_key(&stages[1]));
+    assert!(!store.stage_metrics.contains_key(&stages[2]));
+}
+
+#[test]
 fn runtime_boundary_is_the_named_multi_port_cut_even_when_not_collapsible() {
     let ids: Vec<_> = (1_u128..=6)
         .map(|value| obzenflow_topology::StageId::from_bytes(value.to_be_bytes()))

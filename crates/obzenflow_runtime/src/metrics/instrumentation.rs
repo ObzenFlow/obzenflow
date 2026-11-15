@@ -16,8 +16,10 @@ use hdrhistogram::Histogram;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::observability::{EffectCircuitBreakerContext, EffectRateLimiterContext};
-use obzenflow_core::event::payloads::execution_payload::CircuitState;
-use obzenflow_core::event::provenance::{EventTypeCountContext, UpstreamEventTypeCountContext};
+use obzenflow_core::event::payloads::execution_payload::{CircuitState, RecoveryFact};
+use obzenflow_core::event::provenance::{
+    EventTypeCountContext, RetryAccounting, UpstreamEventTypeCountContext,
+};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, JournalEvent};
@@ -137,6 +139,8 @@ pub struct StageInstrumentation {
         >,
     >,
 
+    retry: RwLock<RetryAccounting>,
+
     // Configuration
     config: InstrumentationConfig,
 
@@ -231,6 +235,8 @@ impl StageInstrumentation {
             data_reader_seq_by_upstream_event_type: RwLock::new(HashMap::new()),
 
             errors_by_kind: RwLock::new(std::collections::HashMap::new()),
+
+            retry: RwLock::new(RetryAccounting::default()),
 
             config,
 
@@ -356,6 +362,7 @@ impl StageInstrumentation {
                     });
                     counts
                 },
+                retry: self.retry.read().unwrap().clone(),
             },
         }
     }
@@ -805,6 +812,10 @@ impl StageInstrumentation {
             .entry(kind)
             .or_insert_with(|| AtomicU64::new(0))
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_recovery_fact(&self, fact: &RecoveryFact) {
+        self.retry.write().unwrap().record(fact);
     }
 }
 

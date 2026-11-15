@@ -113,6 +113,7 @@ pub(super) enum Layout {
     Origin,
     Runtime,
     Accounting,
+    RetryAccounting,
     OutputCount,
     InputCount,
     Observation,
@@ -259,6 +260,16 @@ impl Layout {
                             "data_inputs_by_upstream_event_type",
                             K::List(&K::Struct(S::InputCount)),
                         ),
+                        field("retry", K::Struct(S::RetryAccounting)),
+                    ]
+                }
+            }
+            S::RetryAccounting => {
+                const {
+                    &[
+                        field("scheduled_total", K::Unsigned),
+                        field("calls_by_outcome", K::Value),
+                        field("backoff_ms_total", K::Unsigned),
                     ]
                 }
             }

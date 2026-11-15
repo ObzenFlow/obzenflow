@@ -6,6 +6,7 @@
 
 use crate::monitoring::read_model::MetricsReadView;
 use obzenflow_core::event::observability::{HttpPullState, WaitReason};
+use obzenflow_core::event::provenance::RetryCallOutcome;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{SinkOperationPhase, SinkWritePhase};
 use obzenflow_core::metrics::{
@@ -1259,6 +1260,8 @@ impl PrometheusProjection {
             }
             writeln!(output)?;
         }
+
+        render_retry_metrics(output, snapshot)?;
 
         // Backpressure metrics (FLOWIP-086k)
         let has_backpressure_metrics = !snapshot.backpressure_window.is_empty()
@@ -2761,6 +2764,71 @@ impl<'a> ContractMetricLabels<'a> {
     }
 }
 
+fn render_retry_metrics(output: &mut String, snapshot: &AppMetricsSnapshot) -> std::fmt::Result {
+    let mut stages: Vec<_> = snapshot
+        .retry_metrics
+        .iter()
+        .filter_map(|(stage_id, retry)| {
+            snapshot
+                .stage_metadata
+                .get(stage_id)
+                .map(|metadata| (format_stage_labels(stage_id, metadata), retry))
+        })
+        .collect();
+    if stages.is_empty() {
+        return Ok(());
+    }
+    stages.sort_by(|left, right| left.0.cmp(&right.0));
+
+    writeln!(
+        output,
+        "# HELP obzenflow_retry_scheduled_total Retries and breaker waits the stage's retry policy scheduled"
+    )?;
+    writeln!(output, "# TYPE obzenflow_retry_scheduled_total counter")?;
+    for (labels, retry) in &stages {
+        writeln!(
+            output,
+            "obzenflow_retry_scheduled_total{{{labels}}} {}",
+            retry.scheduled_total
+        )?;
+    }
+    writeln!(output)?;
+
+    writeln!(
+        output,
+        "# HELP obzenflow_retry_calls_total Calls that retried, waited or gave up, by how they ended"
+    )?;
+    writeln!(output, "# TYPE obzenflow_retry_calls_total counter")?;
+    for (labels, retry) in &stages {
+        for outcome in RetryCallOutcome::ALL {
+            writeln!(
+                output,
+                "obzenflow_retry_calls_total{{{labels},outcome=\"{}\"}} {}",
+                outcome.as_str(),
+                retry.calls(outcome)
+            )?;
+        }
+    }
+    writeln!(output)?;
+
+    writeln!(
+        output,
+        "# HELP obzenflow_retry_backoff_seconds_total Time the stage's calls spent waiting to retry"
+    )?;
+    writeln!(
+        output,
+        "# TYPE obzenflow_retry_backoff_seconds_total counter"
+    )?;
+    for (labels, retry) in &stages {
+        writeln!(
+            output,
+            "obzenflow_retry_backoff_seconds_total{{{labels}}} {}",
+            retry.backoff_ms_total as f64 / 1000.0
+        )?;
+    }
+    writeln!(output)
+}
+
 fn escape_label(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -2957,6 +3025,84 @@ mod tests {
             escape_label(&stage_id.to_string())
         );
         assert!(output.contains(&expected));
+    }
+
+    fn retry_view(
+        retry: obzenflow_core::event::provenance::RetryAccounting,
+    ) -> (StageId, MetricsReadView) {
+        let stage_id = StageId::new();
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.stage_metadata.insert(
+            stage_id,
+            StageMetadata {
+                name: "authorize_payment".to_string(),
+                flow_name: "payment_gateway_resilience_demo".to_string(),
+                stage_type: obzenflow_core::event::context::StageType::Transform,
+                reference_mode: None,
+                flow_id: None,
+            },
+        );
+        snapshot.retry_metrics.insert(stage_id, retry);
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+        (stage_id, view)
+    }
+
+    fn retry_series(output: &str) -> Vec<&str> {
+        output
+            .lines()
+            .filter(|line| line.starts_with("obzenflow_retry_"))
+            .collect()
+    }
+
+    #[test]
+    fn retry_stage_without_facts_renders_zeros() {
+        let (stage_id, view) = retry_view(Default::default());
+        let output = PrometheusProjection::new().render(&view).unwrap();
+        let labels = format!(
+            "flow=\"payment_gateway_resilience_demo\",stage=\"authorize_payment\",stage_id=\"{}\"",
+            escape_label(&stage_id.to_string())
+        );
+        let outcomes = [
+            "succeeded",
+            "not_retryable",
+            "attempt_limit",
+            "attempt_start_window",
+            "circuit_no_longer_closed",
+            "outage_wait_limit",
+        ]
+        .map(|outcome| format!("obzenflow_retry_calls_total{{{labels},outcome=\"{outcome}\"}} 0"));
+        let expected: Vec<String> = [format!("obzenflow_retry_scheduled_total{{{labels}}} 0")]
+            .into_iter()
+            .chain(outcomes)
+            .chain([format!(
+                "obzenflow_retry_backoff_seconds_total{{{labels}}} 0"
+            )])
+            .collect();
+        assert_eq!(retry_series(&output), expected);
+    }
+
+    #[test]
+    fn retry_counts_render_per_outcome() {
+        use obzenflow_core::event::payloads::execution_payload::RetryStopReason;
+        use obzenflow_core::event::provenance::RetryAccounting;
+        let (_, view) = retry_view(RetryAccounting {
+            scheduled_total: 4,
+            calls_by_outcome: [
+                (RetryCallOutcome::Succeeded, 1),
+                (RetryCallOutcome::GaveUp(RetryStopReason::AttemptLimit), 1),
+            ]
+            .into(),
+            backoff_ms_total: 15_479,
+        });
+        let output = PrometheusProjection::new().render(&view).unwrap();
+        let values: Vec<&str> = retry_series(&output)
+            .into_iter()
+            .filter_map(|line| line.rsplit(' ').next())
+            .collect();
+        assert_eq!(values, ["4", "1", "0", "1", "0", "0", "0", "15.479"]);
     }
 
     #[test]

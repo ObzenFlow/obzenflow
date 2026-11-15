@@ -6,8 +6,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemPayload, WriterId};
-use obzenflow_core::id::{StageId, SystemId};
+use obzenflow_core::event::{
+    CausalCoordinate, ChainEventFactory, MetricsCoordinationEvent, SystemEvent, SystemPayload,
+    WriterId,
+};
+use obzenflow_core::id::{JournalId, StageId, SystemId};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::metrics::{
     AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter, StageMetadata,
@@ -131,6 +134,101 @@ async fn export_snapshot_sanity_from_metrics_store() {
         last.stage_metadata.contains_key(&stage_id),
         "expected stage metadata for stage"
     );
+}
+
+async fn snapshot_records(ctx: &MetricsAggregatorContext) -> Vec<u64> {
+    ctx.journals
+        .export
+        .read_causally_ordered()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| match &record.payload {
+            SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                watermark,
+            }) => watermark.clocks.values().copied().max(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn advance_watermark(ctx: &mut MetricsAggregatorContext, stage: &JournalId, sequence: u64) {
+    ctx.metrics_store
+        .causal_watermark
+        .clocks
+        .insert(CausalCoordinate::new((*stage).into()), sequence);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn export_unchanged_watermark_appends_nothing() {
+    let (stage_id, system_id) = (StageId::new(), SystemId::new());
+    let exporter = Arc::new(RecordingExporter::default());
+    let mut ctx = make_empty_context(
+        system_id,
+        make_system_journal(system_id),
+        exporter.clone(),
+        stage_id,
+    );
+
+    for _ in 0..3 {
+        MetricsAggregatorAction::ExportMetrics
+            .execute(&mut ctx)
+            .await
+            .unwrap();
+    }
+
+    assert!(snapshot_records(&ctx).await.is_empty());
+    assert_eq!(exporter.app_snapshots.lock().unwrap().len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn export_moved_watermark_appends_record() {
+    let (stage_id, system_id) = (StageId::new(), SystemId::new());
+    let mut ctx = make_empty_context(
+        system_id,
+        make_system_journal(system_id),
+        Arc::new(RecordingExporter::default()),
+        stage_id,
+    );
+
+    let journal = JournalId::new();
+    advance_watermark(&mut ctx, &journal, 1);
+    for _ in 0..2 {
+        MetricsAggregatorAction::ExportMetrics
+            .execute(&mut ctx)
+            .await
+            .unwrap();
+    }
+    advance_watermark(&mut ctx, &journal, 2);
+    MetricsAggregatorAction::ExportMetrics
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot_records(&ctx).await, [1, 2]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn final_export_unchanged_watermark_appends_record() {
+    let (stage_id, system_id) = (StageId::new(), SystemId::new());
+    let mut ctx = make_empty_context(
+        system_id,
+        make_system_journal(system_id),
+        Arc::new(RecordingExporter::default()),
+        stage_id,
+    );
+
+    advance_watermark(&mut ctx, &JournalId::new(), 1);
+    MetricsAggregatorAction::ExportMetrics
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+    MetricsAggregatorAction::ExportFinalMetrics
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot_records(&ctx).await, [1, 1]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
