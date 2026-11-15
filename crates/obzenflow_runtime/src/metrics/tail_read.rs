@@ -312,6 +312,7 @@ mod tests {
                 errors_total,
                 failures_total: 0,
                 errors_by_kind: by_kind.iter().cloned().collect(),
+                retry: Default::default(),
             },
         }
     }

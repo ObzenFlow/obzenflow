@@ -823,13 +823,24 @@ pub enum CircuitBreakerHealthClassification {
     NoObservation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetryStopReason {
     AttemptLimit,
     AttemptStartWindow,
     CircuitNoLongerClosed,
     OutageWaitLimit,
+}
+
+impl RetryStopReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AttemptLimit => "attempt_limit",
+            Self::AttemptStartWindow => "attempt_start_window",
+            Self::CircuitNoLongerClosed => "circuit_no_longer_closed",
+            Self::OutageWaitLimit => "outage_wait_limit",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

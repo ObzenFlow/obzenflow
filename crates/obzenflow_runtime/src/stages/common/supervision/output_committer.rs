@@ -821,6 +821,9 @@ impl OutputCommitter<'_> {
         event: &ChainEvent,
         options: CommitOptions,
     ) {
+        if let ChainPayload::Execution(ExecutionPayload::Recovery(fact)) = &event.payload {
+            snapshot.accounting.retry.record(fact);
+        }
         if !options.count_output || !event.consumes_data_credit() {
             return;
         }
@@ -868,6 +871,9 @@ impl OutputCommitter<'_> {
 
     fn account_committed(&self, written: &JournalRecord<ChainPayload>, options: CommitOptions) {
         if let Some(instrumentation) = self.instrumentation {
+            if let ChainPayload::Execution(ExecutionPayload::Recovery(fact)) = &written.payload {
+                instrumentation.record_recovery_fact(fact);
+            }
             if options.count_output && written.consumes_data_credit() {
                 let authored_here = self.flow_context.is_none_or(|flow_context| {
                     event_is_authored_by_stage(&written.authored(), flow_context)

@@ -62,7 +62,12 @@
             "failures_total": 0,
             "errors_by_kind": {},
             "data_outputs_by_event_type": [],
-            "data_inputs_by_upstream_event_type": []
+            "data_inputs_by_upstream_event_type": [],
+            "retry": {
+              "scheduled_total": 0,
+              "calls_by_outcome": {},
+              "backoff_ms_total": 0
+            }
           }
         },
         "composite_activations": []

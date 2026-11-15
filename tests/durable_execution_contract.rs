@@ -1150,11 +1150,17 @@ impl Sender {
     }
 
     async fn settle(&self, run: &Path, order_id: &str) -> Answer {
+        match self.resolve(run, order_id).await {
+            answer @ (Answer::Committed { .. } | Answer::Duplicate { .. }) => answer,
+            other => panic!("{order_id}: {other:?}"),
+        }
+    }
+
+    async fn resolve(&self, run: &Path, order_id: &str) -> Answer {
         for _ in 0..SETTLE_ATTEMPTS {
             match self.send(run, order_id).await {
                 Answer::Unknown => {}
-                answer @ (Answer::Committed { .. } | Answer::Duplicate { .. }) => return answer,
-                other => panic!("{order_id}: {other:?}"),
+                answer => return answer,
             }
         }
         panic!("{order_id}: unsettled after {SETTLE_ATTEMPTS} sends");
@@ -1578,10 +1584,6 @@ impl History {
         let name = self.name;
         let valid = self.valid();
         let answers = self.scenario.answers();
-        let http_refused_in = answers
-            .iter()
-            .find(|sent| sent.order_id == INVALID_HTTP_ORDER)
-            .map(|sent| sent.run.clone());
         let mut identities: BTreeMap<String, BTreeSet<EventId>> = BTreeMap::new();
         for (archive, ended) in &self.runs {
             let dir = archive.dir.display();
@@ -1681,13 +1683,18 @@ impl History {
                 "{name} {dir}: each rejected row is recorded at least once"
             );
             // The invalid HTTP order's refusal lives in the run that received it.
-            let refused = http_refused_in
-                .as_ref()
-                .is_some_and(|received| lineage.contains(received));
+            let sends: Vec<&Answer> = answers
+                .iter()
+                .filter(|sent| sent.order_id == INVALID_HTTP_ORDER && lineage.contains(&sent.run))
+                .map(|sent| &sent.answer)
+                .collect();
+            let rejected = sends
+                .iter()
+                .filter(|answer| matches!(answer, Answer::Rejected { .. }))
+                .count();
             let refusals: usize = along().map(Archive::http_rejections).sum();
-            assert_eq!(
-                refusals,
-                usize::from(refused),
+            assert!(
+                (rejected..=sends.len()).contains(&refusals),
                 "{name} {dir}: HTTP refusals along {lineage:?}"
             );
             // I12 (FLOWIP-122i): only hosted ingress reattaches, and each
@@ -2534,7 +2541,7 @@ async fn durable_execution_contract_over_http() {
         .await
         .is_empty());
     assert_eq!(
-        sender.send(&last, INVALID_HTTP_ORDER).await,
+        sender.resolve(&last, INVALID_HTTP_ORDER).await,
         Answer::Rejected {
             code: "validation_failed".into()
         }

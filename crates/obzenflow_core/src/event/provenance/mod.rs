@@ -145,5 +145,6 @@ pub use composite_activation_context::CompositeActivationContext;
 pub use flow_context::FlowContext;
 pub use replay_context::ReplayContext;
 pub use runtime_provenance::{
-    EventTypeCountContext, ExecutionAccounting, RuntimeProvenance, UpstreamEventTypeCountContext,
+    EventTypeCountContext, ExecutionAccounting, RetryAccounting, RetryCallOutcome,
+    RuntimeProvenance, UpstreamEventTypeCountContext,
 };

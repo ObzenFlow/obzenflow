@@ -20,7 +20,7 @@ pub enum StageMilestone {
 
 #[derive(Debug, Clone, Default)]
 pub struct StageSnapshot {
-    pub accounting: ExecutionAccounting,
+    pub accounting: Box<ExecutionAccounting>,
     pub causal_context: CausalFrontier,
 }
 
@@ -150,7 +150,7 @@ impl LifecycleResults {
         failure: Option<StageError>,
     ) {
         let snapshot = StageSnapshot {
-            accounting,
+            accounting: Box::new(accounting),
             causal_context: publication::capture(),
         };
         let observed = CURRENT.try_with(|owner| {

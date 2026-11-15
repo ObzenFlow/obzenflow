@@ -17,7 +17,7 @@ use obzenflow_core::event::observability::{MeasurementWindow, RuntimeObservabili
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, CircuitState, ExecutionPayload, HttpPullStateFact,
 };
-use obzenflow_core::event::provenance::RuntimeProvenance;
+use obzenflow_core::event::provenance::{RetryAccounting, RuntimeProvenance};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{CausalCoordinate, SinkOperationPhase, SystemPayload, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
@@ -96,6 +96,9 @@ pub enum MetricsAggregatorAction {
 
     /// Export metrics snapshot
     ExportMetrics,
+
+    /// Export the final snapshot and always record it.
+    ExportFinalMetrics,
 
     /// Publish drain complete event to journal
     PublishDrainComplete {
@@ -214,6 +217,8 @@ pub struct MetricsStore {
     pub(crate) throughput: super::throughput::ThroughputSampler,
     pub(crate) buffer: Arc<super::buffer::MetricsBuffer>,
     pub stage_metrics: std::collections::HashMap<StageId, StageMetrics>,
+    /// The authored composite of each composite member stage.
+    pub composite_members: HashMap<StageId, StageKey>,
     pub last_event_id: Option<EventId>,
     pub flow_start_time: Option<std::time::Instant>,
     pub first_event_time: Option<std::time::Instant>,
@@ -228,6 +233,8 @@ pub struct MetricsStore {
     /// freshness position, not evidence of complete physical coverage.
     pub stage_vector_clocks: HashMap<StageId, u64>,
     pub causal_watermark: obzenflow_core::event::vector_clock::VectorClock,
+    /// Watermark of the last snapshot record written.
+    pub recorded_watermark: obzenflow_core::event::vector_clock::VectorClock,
 
     /// Per-system vector clock watermark (FLOWIP-059c).
     ///
@@ -291,6 +298,8 @@ pub struct MetricsStore {
 #[derive(Clone, Default)]
 pub struct StageMetrics {
     pub errors_by_kind: HashMap<ErrorKind, u64>,
+    /// Present for a stage the topology gives a retry, or one that committed a retry fact.
+    pub retry: Option<RetryAccounting>,
     // Runtime context metrics (FLOWIP-056c / FLOWIP-059 Phase 6)
     pub last_in_flight: Option<u32>,
     pub last_failures_total: Option<u64>,
@@ -389,6 +398,17 @@ impl StageMetrics {
         for (kind, count) in &accounting.errors_by_kind {
             let current = self.errors_by_kind.entry(kind.clone()).or_insert(0);
             *current = (*current).max(*count);
+        }
+        if self.retry.is_some() || !accounting.retry.is_empty() {
+            let retry = self.retry.get_or_insert_with(RetryAccounting::default);
+            retry.scheduled_total = retry.scheduled_total.max(accounting.retry.scheduled_total);
+            retry.backoff_ms_total = retry
+                .backoff_ms_total
+                .max(accounting.retry.backoff_ms_total);
+            for (outcome, total) in &accounting.retry.calls_by_outcome {
+                let current = retry.calls_by_outcome.entry(*outcome).or_insert(0);
+                *current = (*current).max(*total);
+            }
         }
         for count in &accounting.data_outputs_by_event_type {
             let current = self
@@ -521,6 +541,77 @@ impl MetricsAggregatorResources {
             .refresh_measurements(&self.stage_metadata);
     }
 
+    async fn publish_snapshot(
+        &mut self,
+        now: tokio::time::Instant,
+    ) -> Result<(), obzenflow_fsm::FsmError> {
+        self.metrics_store.throughput.sample(
+            &self.metrics_store.observations,
+            &self.stage_metadata,
+            now,
+        );
+        let buffer_snapshot = self.metrics_store.buffer.snapshot();
+        for ((stage, kind), records) in buffer_snapshot.stage_records {
+            MetricsAggregatorAction::UpdateMetrics {
+                events: records,
+                journal_kind: kind,
+                journal_stage: stage,
+            }
+            .execute_resources(self)
+            .await?;
+        }
+        let oldest_first = buffer_snapshot.system_records.iter().rev();
+        for record in oldest_first {
+            self.fold_system_record(record)?;
+        }
+        self.refresh_measurements();
+        self.metrics_exporter
+            .publish_app_snapshot(self.build_app_metrics_snapshot());
+        Ok(())
+    }
+
+    async fn record_snapshot(&mut self) -> Result<(), obzenflow_fsm::FsmError> {
+        let watermark = self.metrics_store.causal_watermark.clone();
+        let export_event = obzenflow_core::event::SystemEvent::new(
+            WriterId::from(self.system_id),
+            SystemPayload::MetricsCoordination(
+                obzenflow_core::event::MetricsCoordinationEvent::Exported {
+                    watermark: watermark.clone(),
+                },
+            ),
+        );
+        crate::supervised_base::publication::append(
+            &self.journals.export,
+            export_event,
+            Default::default(),
+        )
+        .await
+        .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+        self.metrics_store.recorded_watermark = watermark;
+        Ok(())
+    }
+
+    fn schedule_next_export(&mut self, export_started: tokio::time::Instant) {
+        let completed = tokio::time::Instant::now();
+        let due = self.metrics_store.next_export_at.unwrap_or(export_started);
+        let remainder = completed.duration_since(due).as_nanos() % self.export_interval.as_nanos();
+        let until_next = self.export_interval
+            - std::time::Duration::new(
+                (remainder / 1_000_000_000) as u64,
+                (remainder % 1_000_000_000) as u32,
+            );
+        self.metrics_store.next_export_at = Some(if due > completed {
+            due
+        } else {
+            completed + until_next
+        });
+        self.metrics_store.last_export_completed = Some(completed);
+        tracing::debug!(
+            export_elapsed_us = completed.duration_since(export_started).as_micros(),
+            "Metrics export completed"
+        );
+    }
+
     /// Build an `AppMetricsSnapshot` from the current in-memory `metrics_store`.
     ///
     /// This logic was originally inlined in the `ExportMetrics` action and has
@@ -542,6 +633,8 @@ impl MetricsAggregatorResources {
         let mut total_events_processed_snapshot: u64 = 0;
         let mut total_event_loops = Some(0u64);
         let mut total_event_loops_with_work = Some(0u64);
+
+        snapshot.retry_metrics = store.retry_by_unit();
 
         // Convert stage metrics to snapshot format
         for (stage_id, metrics) in &store.stage_metrics {
@@ -892,6 +985,33 @@ impl MetricsAggregatorResources {
 }
 
 impl MetricsStore {
+    pub(crate) fn seed_retry_stages(&mut self, stages: impl IntoIterator<Item = StageId>) {
+        for stage in stages {
+            self.stage_metrics
+                .entry(stage)
+                .or_default()
+                .retry
+                .get_or_insert_with(RetryAccounting::default);
+        }
+    }
+
+    pub(crate) fn retry_by_unit(&self) -> HashMap<ControlUnit, RetryAccounting> {
+        let mut units: HashMap<ControlUnit, RetryAccounting> = HashMap::new();
+        for (stage, metrics) in &self.stage_metrics {
+            let Some(retry) = &metrics.retry else {
+                continue;
+            };
+            let unit = self
+                .composite_members
+                .get(stage)
+                .map_or(ControlUnit::Stage(*stage), |composite| {
+                    ControlUnit::Composite(composite.clone())
+                });
+            units.entry(unit).or_default().add_counts(retry);
+        }
+        units
+    }
+
     fn retain_accounting(
         &mut self,
         stage: StageId,
@@ -1557,72 +1677,17 @@ impl MetricsAggregatorAction {
 
                 MetricsAggregatorAction::ExportMetrics => {
                     let export_started = tokio::time::Instant::now();
-                    tracing::debug!("ExportMetrics action triggered");
-                    ctx.metrics_store.throughput.sample(
-                        &ctx.metrics_store.observations,
-                        &ctx.stage_metadata,
-                        export_started,
-                    );
-                    let buffer_snapshot = ctx.metrics_store.buffer.snapshot();
-                    for ((stage, kind), records) in buffer_snapshot.stage_records {
-                        MetricsAggregatorAction::UpdateMetrics {
-                            events: records,
-                            journal_kind: kind,
-                            journal_stage: stage,
-                        }
-                        .execute_resources(ctx)
-                        .await?;
+                    ctx.publish_snapshot(export_started).await?;
+                    if ctx.metrics_store.causal_watermark != ctx.metrics_store.recorded_watermark {
+                        ctx.record_snapshot().await?;
                     }
-                    // Older accounting carriers may precede a newer lifecycle value.
-                    // Applying oldest first leaves each lifecycle at its newest state.
-                    for record in buffer_snapshot.system_records.iter().rev() {
-                        ctx.fold_system_record(record)?;
-                    }
-                    ctx.refresh_measurements();
-                    ctx.metrics_exporter
-                        .publish_app_snapshot(ctx.build_app_metrics_snapshot());
-
-                    // FLOWIP-059c: Emit a metrics watermark event so SSE clients can "pull-on-push"
-                    // for `/metrics` refresh and deterministic freshness gating.
-                    let watermark = ctx.metrics_store.causal_watermark.clone();
-
-                    let export_event = obzenflow_core::event::SystemEvent::new(
-                        WriterId::from(ctx.system_id),
-                        SystemPayload::MetricsCoordination(
-                            obzenflow_core::event::MetricsCoordinationEvent::Exported { watermark },
-                        ),
-                    );
-
-                    crate::supervised_base::publication::append(
-                        &ctx.journals.export,
-                        export_event,
-                        Default::default(),
-                    )
-                    .await
-                    .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
-
-                    let completed = tokio::time::Instant::now();
-                    let due = ctx.metrics_store.next_export_at.unwrap_or(export_started);
-                    // Keep the monotonic schedule and skip missed slots, including
-                    // time spent publishing the export-coordination record.
-                    let remainder =
-                        completed.duration_since(due).as_nanos() % ctx.export_interval.as_nanos();
-                    let until_next = ctx.export_interval
-                        - std::time::Duration::new(
-                            (remainder / 1_000_000_000) as u64,
-                            (remainder % 1_000_000_000) as u32,
-                        );
-                    ctx.metrics_store.next_export_at = Some(if due > completed {
-                        due
-                    } else {
-                        completed + until_next
-                    });
-                    ctx.metrics_store.last_export_completed = Some(completed);
-                    tracing::debug!(
-                        export_elapsed_us = completed.duration_since(export_started).as_micros(),
-                        "Metrics export and coordination publication completed"
-                    );
+                    ctx.schedule_next_export(export_started);
                     Ok(())
+                }
+
+                MetricsAggregatorAction::ExportFinalMetrics => {
+                    ctx.publish_snapshot(tokio::time::Instant::now()).await?;
+                    ctx.record_snapshot().await
                 }
 
                 MetricsAggregatorAction::PublishDrainComplete { last_event_id } => {
@@ -1722,7 +1787,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
             on E::ExportMetrics => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::DrainingExport, actions: vec![A::ExportMetrics] }) }) };
             on E::FlowTerminal => |_state: &S, _event: &E, ctx: &mut MetricsAggregatorContext| {
                 let last_event_id = ctx.metrics_store.last_event_id;
-                Box::pin(async move { Ok(Transition { next_state: S::Finalizing, actions: vec![A::Host(H::CloseMailbox), A::Host(H::Cleanup), A::ExportMetrics, A::PublishDrainComplete { last_event_id }, A::PublishShutdown, A::Host(H::SettlePublications), A::Host(H::Emit(E::FinalizationCompleted))] }) })
+                Box::pin(async move { Ok(Transition { next_state: S::Finalizing, actions: vec![A::Host(H::CloseMailbox), A::Host(H::Cleanup), A::ExportFinalMetrics, A::PublishDrainComplete { last_event_id }, A::PublishShutdown, A::Host(H::SettlePublications), A::Host(H::Emit(E::FinalizationCompleted))] }) })
             };
             on E::Error => metrics_failed;
             on E::Cancel => metrics_cancelled;
@@ -1823,6 +1888,42 @@ mod tests {
     use obzenflow_core::metrics::StageMetadata;
     use obzenflow_core::JournalRecord;
     use std::marker::PhantomData;
+
+    #[test]
+    fn breaker_only_accounting_leaves_retry_absent() {
+        use obzenflow_core::event::provenance::ExecutionAccounting;
+        let mut metrics = StageMetrics::default();
+        metrics.merge_accounting(&ExecutionAccounting {
+            events_processed_total: 3,
+            ..Default::default()
+        });
+        assert!(metrics.retry.is_none());
+    }
+
+    #[test]
+    fn unattached_retry_facts_fold_by_maximum() {
+        use obzenflow_core::event::payloads::execution_payload::RetryStopReason;
+        use obzenflow_core::event::provenance::{ExecutionAccounting, RetryCallOutcome};
+        let gave_up = RetryCallOutcome::GaveUp(RetryStopReason::AttemptLimit);
+        let newer = RetryAccounting {
+            scheduled_total: 4,
+            calls_by_outcome: [(RetryCallOutcome::Succeeded, 1), (gave_up, 1)].into(),
+            backoff_ms_total: 15_479,
+        };
+        let older = RetryAccounting {
+            scheduled_total: 2,
+            calls_by_outcome: [(gave_up, 1)].into(),
+            backoff_ms_total: 500,
+        };
+        let mut metrics = StageMetrics::default();
+        for retry in [newer.clone(), older] {
+            metrics.merge_accounting(&ExecutionAccounting {
+                retry,
+                ..Default::default()
+            });
+        }
+        assert_eq!(metrics.retry, Some(newer));
+    }
 
     #[test]
     fn retained_timing_population_is_independent_of_accounting_and_empty_replaces_it() {
