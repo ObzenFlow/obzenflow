@@ -37,7 +37,7 @@ configured service.
 | `test-support` | Framework integration-test support. |
 
 Applications select the corresponding public features on `obzenflow`, such as
-`web-host`, `http-pull`, `ai`, `prometheus`, and `studio`.
+`web-host`, `http`, `ai`, `prometheus`, and `studio`.
 
 ## References
 

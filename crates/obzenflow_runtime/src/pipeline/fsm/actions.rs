@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineAction {
-    Host(Box<SupervisorAction<E>>),
+    Host(SupervisorAction<E>),
     Register,
     ObserveChildren,
     InitialiseStages,

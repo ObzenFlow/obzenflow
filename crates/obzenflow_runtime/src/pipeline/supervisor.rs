@@ -209,7 +209,7 @@ impl SelfSupervised for PipelineSupervisor {
     }
     fn supervisor_action(&self, action: &PipelineAction) -> Option<SupervisorAction<E>> {
         if let PipelineAction::Host(action) = action {
-            Some(action.as_ref().clone())
+            Some(action.clone())
         } else {
             None
         }

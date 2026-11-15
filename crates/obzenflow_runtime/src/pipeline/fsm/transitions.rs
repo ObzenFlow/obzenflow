@@ -87,7 +87,7 @@ fn observe(ctx: &mut C, stage: StageId, snapshot: &StageSnapshot) -> Result<(), 
     publication::incorporate(&snapshot.causal_context)
         .map_err(|error| FsmError::HandlerError(error.to_string()))?;
     ctx.stage_lifecycle_metrics
-        .insert(stage, snapshot.accounting.clone());
+        .insert(stage, (*snapshot.accounting).clone());
     Ok(())
 }
 
@@ -510,7 +510,7 @@ pub(super) fn metrics_settled<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) ->
         ctx.metrics_deadline = None;
         Ok(change(
             S::PublishingFinalMarker,
-            vec![A::Host(Box::new(H::CloseMailbox)), A::PublishFinalMarker],
+            vec![A::Host(H::CloseMailbox), A::PublishFinalMarker],
         ))
     })
 }

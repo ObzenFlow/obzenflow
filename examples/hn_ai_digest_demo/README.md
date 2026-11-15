@@ -8,14 +8,14 @@ Every run except a replay needs Ollama serving `llama3.1:8b`.
 ## Run against the mock
 
 ```sh
-cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
+cargo run -p obzenflow --example hn_ai_digest_demo --features "http ai postgres" -- \
   --config examples/hn_ai_digest_demo/obzenflow.toml
 ```
 
 ## Kill, resume and replay a live run
 
 ```sh
-cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
+cargo run -p obzenflow --example hn_ai_digest_demo --features "http ai postgres" -- \
   --config examples/hn_ai_digest_demo/obzenflow.live.toml
 ```
 
@@ -24,14 +24,14 @@ then can't resume, because the live feed can't be read again from where it
 stopped. Resume it with the archive path it printed:
 
 ```sh
-cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
+cargo run -p obzenflow --example hn_ai_digest_demo --features "http ai postgres" -- \
   --config examples/hn_ai_digest_demo/obzenflow.live.toml --resume-from <archive>
 ```
 
 Stop Ollama, then replay the resumed run with no AI configuration:
 
 ```sh
-cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
+cargo run -p obzenflow --example hn_ai_digest_demo --features "http ai postgres" -- \
   --config examples/hn_ai_digest_demo/obzenflow.replay.toml \
   --replay-from <resumed-archive> --verify
 ```

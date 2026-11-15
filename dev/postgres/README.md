@@ -35,7 +35,7 @@ PostgreSQL (its configured AI provider must also be available):
 
 ```console
 cargo xtask postgres run -- \
-  cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
+  cargo run -p obzenflow --example hn_ai_digest_demo --features "http ai postgres" -- \
   --config examples/hn_ai_digest_demo/obzenflow.postgres.toml
 ```
 
