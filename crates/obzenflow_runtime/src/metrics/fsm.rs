@@ -217,6 +217,8 @@ pub struct MetricsStore {
     pub(crate) throughput: super::throughput::ThroughputSampler,
     pub(crate) buffer: Arc<super::buffer::MetricsBuffer>,
     pub stage_metrics: std::collections::HashMap<StageId, StageMetrics>,
+    /// The authored composite of each composite member stage.
+    pub composite_members: HashMap<StageId, StageKey>,
     pub last_event_id: Option<EventId>,
     pub flow_start_time: Option<std::time::Instant>,
     pub first_event_time: Option<std::time::Instant>,
@@ -632,6 +634,8 @@ impl MetricsAggregatorResources {
         let mut total_event_loops = Some(0u64);
         let mut total_event_loops_with_work = Some(0u64);
 
+        snapshot.retry_metrics = store.retry_by_unit();
+
         // Convert stage metrics to snapshot format
         for (stage_id, metrics) in &store.stage_metrics {
             // Prefer wide-event snapshot counters when available
@@ -675,10 +679,6 @@ impl MetricsAggregatorResources {
                 snapshot
                     .error_counts_by_kind
                     .insert(*stage_id, metrics.errors_by_kind.clone());
-            }
-
-            if let Some(retry) = &metrics.retry {
-                snapshot.retry_metrics.insert(*stage_id, retry.clone());
             }
 
             // Add processing time histogram reconstructed from runtime_context percentiles.
@@ -993,6 +993,23 @@ impl MetricsStore {
                 .retry
                 .get_or_insert_with(RetryAccounting::default);
         }
+    }
+
+    pub(crate) fn retry_by_unit(&self) -> HashMap<ControlUnit, RetryAccounting> {
+        let mut units: HashMap<ControlUnit, RetryAccounting> = HashMap::new();
+        for (stage, metrics) in &self.stage_metrics {
+            let Some(retry) = &metrics.retry else {
+                continue;
+            };
+            let unit = self
+                .composite_members
+                .get(stage)
+                .map_or(ControlUnit::Stage(*stage), |composite| {
+                    ControlUnit::Composite(composite.clone())
+                });
+            units.entry(unit).or_default().add_counts(retry);
+        }
+        units
     }
 
     fn retain_accounting(

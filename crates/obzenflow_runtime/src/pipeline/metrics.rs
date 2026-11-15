@@ -8,7 +8,8 @@ use super::fsm::PipelineContext;
 use crate::id_conversions::StageIdExt;
 use crate::supervised_base::BuilderError;
 use obzenflow_core::metrics::FlowLifecycleMetricsSnapshot;
-use obzenflow_core::StageId;
+use obzenflow_core::{StageId, StageKey};
+use std::collections::HashMap;
 
 pub(super) async fn prepare_metrics(
     context: &PipelineContext,
@@ -58,7 +59,8 @@ pub(super) async fn prepare_metrics(
             .with_stage_metadata(metadata)
             .with_composite_boundaries(composite_boundaries_from_topology(&context.topology))
             .with_observation_export_interval(context.observation_export_interval)
-            .with_retry_stages(retry_stages(&context.topology));
+            .with_retry_stages(retry_stages(&context.topology))
+            .with_composite_members(composite_members(&context.topology));
     builder.prepare().await.map(Some)
 }
 
@@ -73,6 +75,21 @@ pub(crate) fn retry_stages(topology: &obzenflow_topology::Topology) -> Vec<Stage
             })
         })
         .map(|info| StageId::from_topology_id(info.id))
+        .collect()
+}
+
+pub(crate) fn composite_members(
+    topology: &obzenflow_topology::Topology,
+) -> HashMap<StageId, StageKey> {
+    topology
+        .stages()
+        .filter_map(|info| {
+            let membership = info.subgraph.as_ref()?;
+            Some((
+                StageId::from_topology_id(info.id),
+                StageKey::from(membership.binding.as_str()),
+            ))
+        })
         .collect()
 }
 

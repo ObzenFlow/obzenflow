@@ -209,9 +209,9 @@ pub struct AppMetricsSnapshot {
     /// Keyed by stage ID.
     pub ai_chunking_metrics: HashMap<StageId, AiChunkingMetricsSnapshot>,
 
-    /// Retry facts each stage committed, for every stage the topology gives a retry and
-    /// any other stage that committed one.
-    pub retry_metrics: HashMap<StageId, RetryAccounting>,
+    /// Retry facts committed per control unit, for every unit the topology gives a retry and
+    /// any other that committed one. A composite's members sum into the composite.
+    pub retry_metrics: HashMap<ControlUnit, RetryAccounting>,
 
     /// Flow-level metrics (if journey events are implemented)
     pub flow_metrics: Option<FlowMetricsSnapshot>,

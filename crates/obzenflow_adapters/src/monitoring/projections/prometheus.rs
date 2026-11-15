@@ -2765,27 +2765,24 @@ impl<'a> ContractMetricLabels<'a> {
 }
 
 fn render_retry_metrics(output: &mut String, snapshot: &AppMetricsSnapshot) -> std::fmt::Result {
-    let mut stages: Vec<_> = snapshot
+    let mut units: Vec<_> = snapshot
         .retry_metrics
         .iter()
-        .filter_map(|(stage_id, retry)| {
-            snapshot
-                .stage_metadata
-                .get(stage_id)
-                .map(|metadata| (format_stage_labels(stage_id, metadata), retry))
+        .filter_map(|(unit, retry)| {
+            format_unit_labels(unit, snapshot).map(|labels| (labels, retry))
         })
         .collect();
-    if stages.is_empty() {
+    if units.is_empty() {
         return Ok(());
     }
-    stages.sort_by(|left, right| left.0.cmp(&right.0));
+    units.sort_by(|left, right| left.0.cmp(&right.0));
 
     writeln!(
         output,
         "# HELP obzenflow_retry_scheduled_total Retries and breaker waits the stage's retry policy scheduled"
     )?;
     writeln!(output, "# TYPE obzenflow_retry_scheduled_total counter")?;
-    for (labels, retry) in &stages {
+    for (labels, retry) in &units {
         writeln!(
             output,
             "obzenflow_retry_scheduled_total{{{labels}}} {}",
@@ -2799,7 +2796,7 @@ fn render_retry_metrics(output: &mut String, snapshot: &AppMetricsSnapshot) -> s
         "# HELP obzenflow_retry_calls_total Calls that retried, waited or gave up, by how they ended"
     )?;
     writeln!(output, "# TYPE obzenflow_retry_calls_total counter")?;
-    for (labels, retry) in &stages {
+    for (labels, retry) in &units {
         for outcome in RetryCallOutcome::ALL {
             writeln!(
                 output,
@@ -2819,7 +2816,7 @@ fn render_retry_metrics(output: &mut String, snapshot: &AppMetricsSnapshot) -> s
         output,
         "# TYPE obzenflow_retry_backoff_seconds_total counter"
     )?;
-    for (labels, retry) in &stages {
+    for (labels, retry) in &units {
         writeln!(
             output,
             "obzenflow_retry_backoff_seconds_total{{{labels}}} {}",
@@ -3042,7 +3039,9 @@ mod tests {
                 flow_id: None,
             },
         );
-        snapshot.retry_metrics.insert(stage_id, retry);
+        snapshot
+            .retry_metrics
+            .insert(ControlUnit::Stage(stage_id), retry);
         let view = MetricsReadView {
             app: Some(std::sync::Arc::new(snapshot)),
             ..Default::default()
@@ -3057,14 +3056,7 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn retry_stage_without_facts_renders_zeros() {
-        let (stage_id, view) = retry_view(Default::default());
-        let output = PrometheusProjection::new().render(&view).unwrap();
-        let labels = format!(
-            "flow=\"payment_gateway_resilience_demo\",stage=\"authorize_payment\",stage_id=\"{}\"",
-            escape_label(&stage_id.to_string())
-        );
+    fn zero_retry_series(labels: &str) -> Vec<String> {
         let outcomes = [
             "succeeded",
             "not_retryable",
@@ -3074,14 +3066,51 @@ mod tests {
             "outage_wait_limit",
         ]
         .map(|outcome| format!("obzenflow_retry_calls_total{{{labels},outcome=\"{outcome}\"}} 0"));
-        let expected: Vec<String> = [format!("obzenflow_retry_scheduled_total{{{labels}}} 0")]
+        [format!("obzenflow_retry_scheduled_total{{{labels}}} 0")]
             .into_iter()
             .chain(outcomes)
             .chain([format!(
                 "obzenflow_retry_backoff_seconds_total{{{labels}}} 0"
             )])
-            .collect();
-        assert_eq!(retry_series(&output), expected);
+            .collect()
+    }
+
+    #[test]
+    fn retry_stage_without_facts_renders_zeros() {
+        let (stage_id, view) = retry_view(Default::default());
+        let output = PrometheusProjection::new().render(&view).unwrap();
+        let labels = format!(
+            "flow=\"payment_gateway_resilience_demo\",stage=\"authorize_payment\",stage_id=\"{}\"",
+            escape_label(&stage_id.to_string())
+        );
+        assert_eq!(retry_series(&output), zero_retry_series(&labels));
+    }
+
+    #[test]
+    fn composite_member_retries_render_one_series() {
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.stage_metadata.insert(
+            StageId::new(),
+            StageMetadata {
+                name: "digest__map".to_string(),
+                flow_name: "hn_ai_digest_demo".to_string(),
+                stage_type: obzenflow_core::event::context::StageType::Transform,
+                reference_mode: None,
+                flow_id: None,
+            },
+        );
+        snapshot
+            .retry_metrics
+            .insert(ControlUnit::Composite("digest".into()), Default::default());
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+        let output = PrometheusProjection::new().render(&view).unwrap();
+        assert_eq!(
+            retry_series(&output),
+            zero_retry_series("flow=\"hn_ai_digest_demo\",stage=\"digest\"")
+        );
     }
 
     #[test]

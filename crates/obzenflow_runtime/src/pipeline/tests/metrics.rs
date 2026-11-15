@@ -112,6 +112,82 @@ fn topology_retry_attachment_seeds_stage() {
 }
 
 #[test]
+fn composite_member_retries_sum_into_unit() {
+    use crate::metrics::MetricsStore;
+    use crate::pipeline::metrics::composite_members;
+    use obzenflow_core::event::payloads::execution_payload::RetryStopReason;
+    use obzenflow_core::event::provenance::{RetryAccounting, RetryCallOutcome};
+    use obzenflow_core::metrics::ControlUnit;
+    use obzenflow_topology::StageSubgraphMembership;
+
+    let ids: Vec<_> = (1_u128..=3)
+        .map(|value| obzenflow_topology::StageId::from_bytes(value.to_be_bytes()))
+        .collect();
+    let member = |id, name: &str, role: &str| {
+        StageInfo::new(id, name, TopologyStageType::Transform).with_subgraph(
+            StageSubgraphMembership::new(
+                "ai_map_reduce:digest",
+                "ai_map_reduce",
+                "digest",
+                role,
+                0,
+                false,
+                false,
+            ),
+        )
+    };
+    let topology = Topology::new_unvalidated(
+        vec![
+            member(ids[0], "digest__map", "map"),
+            member(ids[1], "digest__reduce", "reduce"),
+            StageInfo::new(ids[2], "authorize_payment", TopologyStageType::Transform),
+        ],
+        vec![
+            DirectedEdge::new(ids[0], ids[1], EdgeKind::Forward),
+            DirectedEdge::new(ids[1], ids[2], EdgeKind::Forward),
+        ],
+    )
+    .unwrap();
+    let [map, reduce, other] = [ids[0], ids[1], ids[2]].map(StageId::from_topology_id);
+    let retry = |scheduled_total, outcome: RetryCallOutcome, backoff_ms_total| RetryAccounting {
+        scheduled_total,
+        calls_by_outcome: [(outcome, 1)].into(),
+        backoff_ms_total,
+    };
+    let gave_up = RetryCallOutcome::GaveUp(RetryStopReason::AttemptLimit);
+
+    let mut store = MetricsStore {
+        composite_members: composite_members(&topology),
+        ..MetricsStore::default()
+    };
+    for (stage, accounting) in [
+        (map, retry(2, gave_up, 500)),
+        (reduce, retry(1, RetryCallOutcome::Succeeded, 250)),
+        (other, retry(1, RetryCallOutcome::Succeeded, 250)),
+    ] {
+        store.stage_metrics.entry(stage).or_default().retry = Some(accounting);
+    }
+
+    assert_eq!(
+        store.retry_by_unit(),
+        HashMap::from([
+            (
+                ControlUnit::Composite("digest".into()),
+                RetryAccounting {
+                    scheduled_total: 3,
+                    calls_by_outcome: [(RetryCallOutcome::Succeeded, 1), (gave_up, 1)].into(),
+                    backoff_ms_total: 750,
+                },
+            ),
+            (
+                ControlUnit::Stage(other),
+                retry(1, RetryCallOutcome::Succeeded, 250)
+            ),
+        ])
+    );
+}
+
+#[test]
 fn runtime_boundary_is_the_named_multi_port_cut_even_when_not_collapsible() {
     let ids: Vec<_> = (1_u128..=6)
         .map(|value| obzenflow_topology::StageId::from_bytes(value.to_be_bytes()))

@@ -74,6 +74,16 @@ impl RetryAccounting {
         self.scheduled_total == 0 && self.calls_by_outcome.is_empty() && self.backoff_ms_total == 0
     }
 
+    /// Adds `other`'s counts to these.
+    pub fn add_counts(&mut self, other: &Self) {
+        self.scheduled_total = self.scheduled_total.saturating_add(other.scheduled_total);
+        self.backoff_ms_total = self.backoff_ms_total.saturating_add(other.backoff_ms_total);
+        for (outcome, total) in &other.calls_by_outcome {
+            let current = self.calls_by_outcome.entry(*outcome).or_insert(0);
+            *current = current.saturating_add(*total);
+        }
+    }
+
     fn count_call(&mut self, outcome: RetryCallOutcome) {
         let total = self.calls_by_outcome.entry(outcome).or_insert(0);
         *total = total.saturating_add(1);
