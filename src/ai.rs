@@ -5,7 +5,7 @@
 //! AI facade for ObzenFlow
 //!
 //! An `ai!` stage runs an AI role, domain logic around one model call. The
-//! role prepares each request and interprets each outcome; the handler value
+//! role prepares each request and interprets each call's outcome; the handler value
 //! chooses the stage's shape, and configuration chooses its model.
 //!
 //! ```ignore
@@ -22,9 +22,9 @@
 //!     fn interpret(
 //!         &self,
 //!         ticket: TicketRaised,
-//!         outcome: AiOutcome<ChatCompletionReply>,
+//!         call: AiOutcome<ChatCompletionReply>,
 //!     ) -> Result<TicketSummarized, HandlerError> {
-//!         let reply = outcome.replied()?;
+//!         let reply = call.replied()?;
 //!         Ok(TicketSummarized::new(ticket.id, reply.text()))
 //!     }
 //! }

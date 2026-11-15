@@ -4,6 +4,7 @@
 
 use super::domain::*;
 use super::money::{Balance, UsdCents};
+use obzenflow::schema::outcome;
 use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
 use std::collections::BTreeMap;
 
@@ -69,7 +70,7 @@ impl Assess {
 pub struct Assessment {
     balances: BTreeMap<AccountId, Balance>,
     unpaid: BTreeMap<PaymentKey, Attempt>,
-    decided: Vec<Assessed>,
+    decided: Vec<outcome![BalanceMoved | FeeCharged | RetryReturned]>,
 }
 
 impl Assessment {
@@ -93,7 +94,7 @@ impl Assessment {
             EntryKind::Debit => balance_before.debited(amount),
         };
         self.balances.insert(entry.account.clone(), balance);
-        self.decided.push(Assessed::Moved(BalanceMoved {
+        self.decided.push(outcome(BalanceMoved {
             account: entry.account.clone(),
             owner: entry.owner.clone(),
             kind,
@@ -108,7 +109,7 @@ impl Assessment {
 impl TypedStatefulHandler for Assess {
     type State = Assessment;
     type Input = PostedEntry;
-    type Output = Assessed;
+    type Output = outcome![BalanceMoved | FeeCharged | RetryReturned];
 
     fn initial_state(&self) -> Self::State {
         Assessment::default()
@@ -137,7 +138,7 @@ impl TypedStatefulHandler for Assess {
         }
         match self.fee_rule.fee(attempt) {
             Some(fee) => {
-                state.decided.push(Assessed::FeeCharged(FeeCharged {
+                state.decided.push(outcome(FeeCharged {
                     account: entry.account.clone(),
                     company_id: originator.company_id.clone(),
                     company_name: originator.company_name.clone(),
@@ -150,7 +151,7 @@ impl TypedStatefulHandler for Assess {
                 let note = Some(format!("NSF fee: {}", originator.company_name));
                 state.post(&entry, EntryKind::Debit, fee, note);
             }
-            None => state.decided.push(Assessed::RetryReturned(RetryReturned {
+            None => state.decided.push(outcome(RetryReturned {
                 account: entry.account.clone(),
                 company_id: originator.company_id.clone(),
                 company_name: originator.company_name.clone(),

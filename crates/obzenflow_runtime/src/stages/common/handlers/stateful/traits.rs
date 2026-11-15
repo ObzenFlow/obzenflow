@@ -11,9 +11,9 @@ use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use async_trait::async_trait;
 use obzenflow_core::event::observability::ObservationRecorder;
-use obzenflow_core::event::schema::{TypedFact, TypedPayload};
+use obzenflow_core::event::schema::{DecodeCommitted, TypedFact, TypedPayload};
 use obzenflow_core::event::ChainPayload;
-use obzenflow_core::{ChainEvent, JournalRecord, OneFactStageOutput, WriterId};
+use obzenflow_core::{ChainEvent, JournalRecord, WriterId};
 use std::{fmt, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy)]
@@ -323,20 +323,18 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
     }
 }
 
-/// Mealy-split effectful stateful surface (FLOWIP-120b): `decide` performs
-/// effects and emits facts, `apply` folds each committed fact into state.
+/// Mealy-split effectful stateful surface: `decide` performs effects and
+/// emits facts, `apply` folds each committed fact into state.
 ///
-/// `Output` is the stage's per-fact enum, one variant per committed fact type;
-/// deriving `EffectOutcomeFacts` on it generates exactly this shape. An effect
-/// outcome carrier never reaches `apply` (FLOWIP-120m): the carrier is the
-/// transient value `fx.call` returns, and a multi-fact product outcome folds
-/// as its individual member facts, one `apply` call per fact in ordinal
-/// (field) order.
+/// `Output` is the set of facts `decide` may emit, one fact or
+/// `stage_fact_set![...]`, and `apply` receives each committed fact as a value
+/// of it, one call per fact in commit order. An effect's answer never reaches
+/// `apply` whole: a multi-fact answer folds as its member facts.
 ///
-/// This surface is input-driven only (FLOWIP-120z): `decide` is the sole
-/// fact-authoring position. There is no periodic-emission or drain-emission
-/// hook; a wall-clock trigger is not a function of the journal, and a
-/// mutable-state emission position would evolve state without a fact.
+/// This surface is input-driven only: `decide` is the sole fact-authoring
+/// position. There is no periodic-emission or drain-emission hook; a
+/// wall-clock trigger is not a function of the journal, and a mutable-state
+/// emission position would evolve state without a fact.
 ///
 /// A `decide` invocation is not transactional. Every fact whose commit
 /// completes through `fx` remains durable even if `decide` later returns an
@@ -353,59 +351,34 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// it so Rust can check `decide` before the handler is erased. The command's
 /// ports allow the effects the stage performs, and the row never restates them.
 ///
-/// Unlike an effectful transform's zero-sized fact-set witness, stateful
-/// `Output` is inhabited because [`EffectfulStatefulHandler::apply`] receives
-/// each committed fact. A one-fact stage can use its [`TypedPayload`] type
-/// directly:
+/// A one-fact stage uses its [`TypedPayload`] type directly:
 ///
 /// ```ignore
 /// type Output = PaymentAuthorized;
 /// ```
 ///
-/// For a multi-fact arrow, derive [`obzenflow_core::StageOutputFacts`] on a
-/// per-fact sum. Each variant must contain exactly one fact so the carrier
-/// implements [`obzenflow_core::OneFactStageOutput`]:
+/// A stage with several facts lists them with `stage_fact_set![...]` and tells
+/// them apart in `apply` with `fold!`, whose arms are the facts' own patterns:
 ///
 /// ```ignore
-/// #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
-/// #[stage_output(schema = obzenflow_core::event::schema)]
-/// enum PaymentStateFact {
-///     Authorized(PaymentAuthorized),
-///     Declined(PaymentDeclined),
-///     Cancelled(OrderCancelled),
-/// }
-///
 /// #[async_trait::async_trait]
 /// impl obzenflow_runtime::stages::common::handlers::EffectfulStatefulHandler
 ///     for PaymentStatefulHandler
 /// {
 ///     type State = PaymentState;
 ///     type Input = ValidatedOrder;
-///     type Output = PaymentStateFact;
+///     type Output =
+///         obzenflow_core::stage_fact_set![PaymentAuthorized, PaymentDeclined, OrderCancelled];
 ///
-///     // `initial_state`, `decide`, and `apply` follow.
-///     # fn initial_state(&self) -> Self::State { unimplemented!() }
-///     # async fn decide(
-///     #     &mut self,
-///     #     _state: &Self::State,
-///     #     _input: &Self::Input,
-///     #     _fx: &mut obzenflow_runtime::effects::Effects<
-///     #         Self::Output,
-///     #         Self::AllowedEffects,
-///     #     >,
-///     # ) -> Result<
-///     #     obzenflow_runtime::effects::StageCompletion<Self::Output>,
-///     #     obzenflow_runtime::stages::common::handler_error::HandlerError,
-///     # > {
-///     #     unimplemented!()
-///     # }
-///     # fn apply(
-///     #     &mut self,
-///     #     _state: &mut Self::State,
-///     #     _fact: Self::Output,
-///     # ) -> Result<(), obzenflow_runtime::stages::common::handler_error::HandlerError> {
-///     #     unimplemented!()
-///     # }
+///     // `initial_state` and `decide` follow.
+///
+///     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
+///         obzenflow_core::fold!(match fact {
+///             PaymentAuthorized { .. } => { state.authorized += 1 }
+///             PaymentDeclined { .. } | OrderCancelled { .. } => {}
+///         });
+///         Ok(())
+///     }
 /// }
 /// ```
 ///
@@ -423,7 +396,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 pub trait EffectfulStatefulHandler: crate::effects::Command + Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: obzenflow_core::OneFactStageOutput + Send + Sync + 'static;
+    type Output: obzenflow_core::EffectfulStageOutput + Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
 
@@ -435,7 +408,7 @@ pub trait EffectfulStatefulHandler: crate::effects::Command + Send + Sync {
     ) -> std::result::Result<crate::effects::StageCompletion<Self::Output>, HandlerError>;
 
     /// Fold one committed fact into state. Called once per committed `Data`
-    /// fact in commit order; carriers never appear here.
+    /// fact in commit order.
     ///
     /// The fact is already durable when this method is called. Returning an
     /// error therefore contradicts the state-fold contract: the adapter wraps
@@ -499,6 +472,7 @@ impl<H: fmt::Debug> fmt::Debug for EffectfulStatefulHandlerAdapter<H> {
 impl<H> UnifiedStatefulHandler for EffectfulStatefulHandlerAdapter<H>
 where
     H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H::Output: DecodeCommitted,
 {
     fn effect_history_scan() -> EffectHistoryScan {
         EffectHistoryScan::Actions { pass_through: None }
@@ -606,21 +580,24 @@ where
 
 fn decode_effectful_stateful_fact<Output>(event: &ChainEvent) -> Result<Output, HandlerError>
 where
-    Output: OneFactStageOutput,
+    Output: DecodeCommitted,
 {
     let fact = TypedFact::from_event(event).ok_or_else(|| {
         HandlerError::ContractViolation(format!(
-            "one_fact_stage_output: committed event `{}` was not a Data event",
+            "effectful_stateful_output: committed event `{}` was not a Data event",
             event.id
         ))
     })?;
-    let event_type = fact.event_type.clone();
-    Output::try_from_facts(&[fact]).map_err(|error| {
+    Output::decode_committed(&fact).map_err(|error| {
+        let declared = Output::member_fact_types()
+            .iter()
+            .map(|fact| fact.event_type.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         HandlerError::ContractViolation(format!(
-            "one_fact_stage_output: committed event `{}` of type `{event_type}` could not be \
-             reconstructed as `{}` from one fact: {error}",
-            event.id,
-            std::any::type_name::<Output>(),
+            "effectful_stateful_output: committed event `{}` of type `{}` is not one of the \
+             `Output`'s facts ({declared}): {error}",
+            event.id, fact.event_type,
         ))
     })
 }
@@ -676,16 +653,14 @@ mod tests {
         const EVENT_TYPE: &'static str = "stateful.second";
     }
 
-    #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
-    struct DishonestProductOutput {
-        first: FirstOutput,
-        second: SecondOutput,
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct UndeclaredOutput {
+        value: u32,
     }
 
-    // Manual implementations are trusted semantic assertions. This fixture
-    // deliberately violates the trait law to prove the runtime safety net.
-    impl OneFactStageOutput for DishonestProductOutput {}
+    impl TypedPayload for UndeclaredOutput {
+        const EVENT_TYPE: &'static str = "stateful.undeclared";
+    }
 
     #[test]
     fn effectful_stateful_fact_decoder_accepts_scalar_fact() {
@@ -705,22 +680,42 @@ mod tests {
     }
 
     #[test]
-    fn effectful_stateful_fact_decoder_rejects_false_one_fact_assertion() {
+    fn effectful_stateful_set_decodes_committed_fact() {
         let event = obzenflow_core::event::ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),
-            FirstOutput::event_type_name(),
-            FirstOutput::payload_schema_version(),
-            serde_json::json!({ "value": 1 }),
+            SecondOutput::event_type_name(),
+            SecondOutput::payload_schema_version(),
+            serde_json::json!({ "value": 2 }),
         );
 
-        let error = decode_effectful_stateful_fact::<DishonestProductOutput>(&event)
-            .expect_err("a two-field product cannot reconstruct from one committed fact");
+        let fact: obzenflow_core::stage_fact_set![FirstOutput, SecondOutput] =
+            decode_effectful_stateful_fact(&event).expect("listed fact decodes");
+
+        assert_eq!(fact, SecondOutput { value: 2 }.into());
+    }
+
+    #[test]
+    fn undeclared_committed_fact_lists_output_facts() {
+        let event = obzenflow_core::event::ChainEventFactory::data_event(
+            WriterId::from(obzenflow_core::StageId::new()),
+            UndeclaredOutput::event_type_name(),
+            UndeclaredOutput::payload_schema_version(),
+            serde_json::json!({ "value": 3 }),
+        );
+
+        let error = decode_effectful_stateful_fact::<
+            obzenflow_core::stage_fact_set![FirstOutput, SecondOutput],
+        >(&event)
+        .expect_err("an unlisted fact does not decode");
 
         assert!(error.is_contract_violation());
         let message = error.to_string();
-        assert!(message.contains("one_fact_stage_output"));
-        assert!(message.contains("stateful.first"));
-        assert!(message.contains("stateful.second"));
+        assert!(message.contains("effectful_stateful_output"), "{message}");
+        assert!(message.contains("stateful.undeclared"), "{message}");
+        assert!(
+            message.contains("(stateful.first, stateful.second)"),
+            "{message}"
+        );
     }
 
     #[crate::effects::command(effects = crate::effects)]

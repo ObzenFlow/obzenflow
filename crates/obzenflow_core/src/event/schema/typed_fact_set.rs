@@ -123,9 +123,8 @@ pub enum TypedFactSetError {
     UnexpectedFact { event_type: EventType },
 }
 
-/// Build the `MissingFact` error for an empty recorded group, naming every
-/// declared member type. `#[doc(hidden)]`: an `effect_outcome!` expansion
-/// detail (FLOWIP-120m).
+/// Build the `MissingFact` error for a recorded group that matches no
+/// outcome, naming every declared member type.
 #[doc(hidden)]
 pub fn missing_fact_group_error(declared: &[TypedFactType]) -> TypedFactSetError {
     TypedFactSetError::MissingFact {
@@ -139,41 +138,11 @@ pub fn missing_fact_group_error(declared: &[TypedFactType]) -> TypedFactSetError
     }
 }
 
-/// Classify a multi-fact group decoded as a sum carrier, whose cardinality is
-/// exactly one fact: a repeat of the first fact's type is `DuplicateFact`,
-/// and a second declared-but-different member is `UnexpectedFact` (mixed sum
-/// variants). `#[doc(hidden)]`: an `effect_outcome!` expansion detail
-/// (FLOWIP-120m).
-#[doc(hidden)]
-pub fn sum_group_arity_error(first: &TypedFact, rest: &[TypedFact]) -> TypedFactSetError {
-    if rest
-        .iter()
-        .any(|fact| fact.descriptor() == first.descriptor())
-    {
-        TypedFactSetError::DuplicateFact {
-            event_type: first.event_type.clone(),
-        }
-    } else {
-        TypedFactSetError::UnexpectedFact {
-            event_type: rest
-                .first()
-                .map(|fact| fact.event_type.clone())
-                .unwrap_or_else(|| first.event_type.clone()),
-        }
-    }
-}
-
-/// A typed marshalling bridge for code paths that still produce a typed value
-/// before it is converted into `Data` facts.
-///
-/// The blanket `TypedPayload -> TypedFactSet` implementation keeps scalar
-/// stateful outputs working while FLOWIP-120b moves effectful authoring to
-/// explicit `fx.emit` calls and flat output contracts.
+/// A typed marshalling bridge between a value and the `Data` facts it lowers
+/// to: one fact, an `outcome![...]` list or `StageOutputs<T>`.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not lower to named facts",
-    note = "a closed set of named facts is written as an enum or named-field struct with \
-            #[derive(EffectOutcomeFacts)]; a single fact is its `TypedPayload` type directly \
-            (FLOWIP-120m)"
+    note = "write one fact, or `outcome![A | (B, C)]` for exactly one of several outcomes"
 )]
 pub trait TypedFactSet: Send + Sync + 'static {
     fn fact_types() -> Vec<TypedFactType>;
@@ -223,12 +192,11 @@ where
 
 /// Decode exactly one `T` fact from a group, ignoring facts of other types.
 ///
-/// Carrier-internal building block (FLOWIP-120m): a multi-member carrier's
-/// `try_from_facts` scans the whole group for undeclared facts itself, then
-/// decodes each declared member with this helper, which must therefore
-/// tolerate the sibling members it is not looking for. Whole-group exactness
-/// is the carrier's job, not this helper's; use the strict scalar decode
-/// through `TypedFactSet::try_from_facts` everywhere else.
+/// A multi-fact outcome's `try_from_facts` scans the whole group for
+/// undeclared facts itself, then decodes each member with this helper, which
+/// therefore tolerates the sibling members it is not looking for. Use the
+/// strict scalar decode through `TypedFactSet::try_from_facts` everywhere
+/// else.
 #[doc(hidden)]
 pub fn decode_member_fact<T>(facts: &[TypedFact]) -> Result<T, TypedFactSetError>
 where

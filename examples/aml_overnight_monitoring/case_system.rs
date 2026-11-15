@@ -49,7 +49,7 @@ pub struct CaseAnswer {
 
 #[obzenflow::port]
 #[async_trait]
-pub trait CaseSystemPort: Send + Sync {
+pub trait CaseSystemPort {
     #[effect(type = "aml.open_case", exactly_once)]
     async fn open(
         &self,

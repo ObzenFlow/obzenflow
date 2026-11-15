@@ -45,7 +45,7 @@ pub fn build_flow() -> FlowDefinition {
 
         let updates = sources::ValuesSource::new(domain::carrier_updates());
         let locate = perform(DepotLookup::for_update).through(Port::to(SimulatedDepots));
-        let notify = NotifyCustomer::new(Port::to(SimulatedMessaging));
+        let notify = NotifyCustomer::through(Port::to(SimulatedMessaging));
         let emails = ConsoleSink::new(domain::format_email);
         let texts = ConsoleSink::new(domain::format_sms);
 

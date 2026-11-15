@@ -65,9 +65,9 @@ impl AiRole<Chunk<BuildOnlyItem>> for SumMap {
     fn interpret(
         &self,
         chunk: Chunk<BuildOnlyItem>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<BuildOnlyPartial, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         Ok(BuildOnlyPartial {
             value: chunk.iter().map(|item| item.value).sum(),
         })
@@ -94,9 +94,9 @@ impl AiRole<Partials<BuildOnlyItem, BuildOnlyPartial>> for SumReduce {
     fn interpret(
         &self,
         input: Partials<BuildOnlyItem, BuildOnlyPartial>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<BuildOnlyOut, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         Ok(BuildOnlyOut {
             total: input.partials().iter().map(|partial| partial.value).sum(),
         })
@@ -677,9 +677,9 @@ impl AiRole<BuildOnlyItem> for TagOne {
     fn interpret(
         &self,
         item: BuildOnlyItem,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<BuildOnlyPartial, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         Ok(BuildOnlyPartial { value: item.value })
     }
 }
@@ -820,9 +820,9 @@ impl AiRole<Chunk<BuildOnlyItem>> for SumMapExceptThree {
     fn interpret(
         &self,
         chunk: Chunk<BuildOnlyItem>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<BuildOnlyPartial, HandlerError> {
-        SumMap.interpret(chunk, outcome)
+        SumMap.interpret(chunk, call)
     }
 }
 

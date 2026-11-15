@@ -91,6 +91,7 @@ pub use obzenflow_runtime::stages::stateful::{
     TopNSnapshot, TopNState, TopNTyped, WrapperState,
 };
 
+pub use obzenflow_core::fold;
 pub use obzenflow_runtime::stages::common::handlers::{
     EffectfulStatefulHandler, StatefulEmission, StatefulOutputContext, StatefulTerminationKind,
     TerminalValidation, TypedStatefulHandler,

@@ -180,11 +180,8 @@ impl<Input> EffectfulStatefulInputMatchesArrow<Input> for Input {}
 #[diagnostic::on_unimplemented(
     message = "the stage arrow declares an output fact missing from the handler's `Output`",
     label = "this arrow output contract is not contained in the handler's `Output` set",
-    note = "the stage arrow is canonical: make the handler's `Output` carrier or witness \
-            expose the same complete flat fact set, or change the arrow first if the stage \
-            contract is wrong; use `stage_fact_set![...]` only for an effectful-transform \
-            witness, and a `StageOutputFacts` carrier where values are returned or applied \
-            (FLOWIP-120z B9)"
+    note = "an effectful handler's `Output` is `stage_fact_set![...]`, and a returned value's \
+            is `outcome![...]`"
 )]
 pub trait ArrowOutputsAreDeclaredByHandler<HandlerMembers, Proof>:
     proof_sealed::DeclaredSubsetOf<HandlerMembers, Proof>
@@ -207,11 +204,8 @@ where
 #[diagnostic::on_unimplemented(
     message = "the handler's `Output` declares a fact missing from the stage arrow",
     label = "the handler's `Output` set is not contained in this arrow output contract",
-    note = "the stage arrow is canonical: remove the extra fact from `Output`, or add it to \
-            the arrow first when it belongs in the stage contract and then update the \
-            handler's carrier or witness; use `stage_fact_set![...]` only for an \
-            effectful-transform witness, and a `StageOutputFacts` carrier where values are \
-            returned or applied (FLOWIP-120z B9)"
+    note = "an effectful handler's `Output` is `stage_fact_set![...]`, and a returned value's \
+            is `outcome![...]`"
 )]
 pub trait HandlerOutputsAreDeclaredByArrow<ArrowMembers, Proof>:
     proof_sealed::DeclaredSubsetOf<ArrowMembers, Proof>

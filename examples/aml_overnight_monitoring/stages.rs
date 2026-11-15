@@ -198,10 +198,6 @@ impl EffectfulTransformHandler for Scorer {
         Ok(fx.complete()?)
     }
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-
     fn stage_logic_version(&self) -> &str {
         "aml-score-v1"
     }
@@ -236,10 +232,6 @@ impl EffectfulTransformHandler for CaseOpener {
             .await?;
         }
         Ok(fx.complete()?)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {

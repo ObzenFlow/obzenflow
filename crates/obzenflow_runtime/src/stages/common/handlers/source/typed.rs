@@ -1144,12 +1144,54 @@ mod tests {
         const EVENT_TYPE: &'static str = "typed_source.other_row";
     }
 
-    #[derive(Clone, Debug, StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
+    #[derive(Clone, Debug)]
     struct DishonestProduct {
         first: Row,
         second: OtherRow,
     }
+
+    impl obzenflow_core::TypedFactSet for DishonestProduct {
+        fn fact_types() -> Vec<obzenflow_core::TypedFactType> {
+            vec![
+                obzenflow_core::TypedFactType::of::<Row>(),
+                obzenflow_core::TypedFactType::of::<OtherRow>(),
+            ]
+        }
+
+        fn into_facts(
+            self,
+        ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::TypedFactSetError> {
+            Ok(vec![
+                obzenflow_core::TypedFact::from_payload(self.first)?,
+                obzenflow_core::TypedFact::from_payload(self.second)?,
+            ])
+        }
+
+        fn try_from_facts(
+            facts: &[obzenflow_core::TypedFact],
+        ) -> Result<Self, obzenflow_core::TypedFactSetError> {
+            Ok(Self {
+                first: obzenflow_core::event::schema::decode_member_fact(facts)?,
+                second: obzenflow_core::event::schema::decode_member_fact(facts)?,
+            })
+        }
+    }
+
+    impl obzenflow_core::StageFactSet for DishonestProduct {
+        type Members = obzenflow_core::event::schema::WithMember<
+            Row,
+            obzenflow_core::event::schema::WithMember<
+                OtherRow,
+                obzenflow_core::event::schema::EmptySet,
+            >,
+        >;
+
+        fn member_fact_types() -> Vec<obzenflow_core::TypedFactType> {
+            <Self as obzenflow_core::TypedFactSet>::fact_types()
+        }
+    }
+
+    impl StageOutputFacts for DishonestProduct {}
 
     // Deliberately false semantic assertion: the adapter must detect that
     // this value lowers to two facts and commit neither one.
@@ -1167,6 +1209,36 @@ mod tests {
                 second: OtherRow(2),
             }]))
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ListSource;
+
+    impl TypedFiniteSourceHandler for ListSource {
+        type Output = obzenflow_core::outcome![Row | OtherRow];
+
+        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+            Ok(Some(vec![
+                obzenflow_core::outcome(Row(1)),
+                obzenflow_core::outcome(OtherRow(2)),
+            ]))
+        }
+    }
+
+    #[test]
+    fn source_list_output_writes_recorded_facts() {
+        let writer_id = WriterId::from(StageId::new());
+        let mut adapter = TypedFiniteSourceHandlerAdapter::new(ListSource);
+        UnifiedFiniteSourceHandler::install_writer_id(&mut adapter, writer_id);
+
+        let (outcome, _) = UnifiedFiniteSourceHandler::next_invocation(&mut adapter).into_parts();
+        let ErasedSourceOutcome::Completed(ErasedSourceCompletion::Batch(events)) = outcome else {
+            panic!("expected batch")
+        };
+        assert_eq!(events.len(), 2);
+        assert_eq!(Row::from_event(&events[0]), Some(Row(1)));
+        assert_eq!(OtherRow::from_event(&events[1]), Some(OtherRow(2)));
+        assert!(events.iter().all(|event| event.writer_id == writer_id));
     }
 
     #[test]

@@ -27,9 +27,5 @@ pub use obzenflow_core::event::schema::{
     StageOutputFacts, StageOutputs, SubsetOf, TypedFact, TypedFactSet, TypedFactSetError,
     TypedFactType, TypedPayload, TypedPayloadError,
 };
-pub use obzenflow_core::stage_fact_set;
+pub use obzenflow_core::{outcome, stage_fact_set};
 pub use obzenflow_core::{ChainEvent, EventId, EventType, FlowId, StageId, StageKey, WriterId};
-
-/// Compiler support for schema-path derives; not an application authoring API.
-#[doc(hidden)]
-pub use obzenflow_core::event::schema::__private;

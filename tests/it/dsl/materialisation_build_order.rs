@@ -89,9 +89,9 @@ impl AiRole<ProbeEvent> for Echo {
     fn interpret(
         &self,
         input: ProbeEvent,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<ProbeEvent, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         Ok(input)
     }
 }

@@ -12,8 +12,8 @@ use super::warehouse::{StockRelease, StockReservation, WarehousePort};
 use async_trait::async_trait;
 use obzenflow::effects::{EffectError, Effects, Port, StageCompletion};
 use obzenflow::error::HandlerError;
-use obzenflow::schema::StageOutputFacts;
-use obzenflow::stages::stateful::EffectfulStatefulHandler;
+use obzenflow::schema::stage_fact_set;
+use obzenflow::stages::stateful::{fold, EffectfulStatefulHandler};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -40,19 +40,6 @@ impl AllocationState {
             .get(order_id)
             .map(|held| (&held.sku, &held.hold_id))
     }
-}
-
-/// Compiler-only per-fact witness required by the typed stateful handler.
-///
-/// It is deliberately not a `TypedPayload`: the enum is never journalled or
-/// routed. Each unary variant contains the first-class domain fact that is.
-#[derive(Clone, Debug, StageOutputFacts)]
-pub enum AllocationOutput {
-    Reserved(StockReserved),
-    Released(StockReleased),
-    ReservationFailed(ReservationFailed),
-    SoldOut(SoldOut),
-    CancelIgnored(CancelIgnored),
 }
 
 #[obzenflow::command]
@@ -93,7 +80,13 @@ pub(crate) fn is_reserve_policy_rejection(error: &EffectError) -> bool {
 impl EffectfulStatefulHandler for Allocator {
     type State = AllocationState;
     type Input = AllocationInput;
-    type Output = AllocationOutput;
+    type Output = stage_fact_set![
+        StockReserved,
+        StockReleased,
+        ReservationFailed,
+        SoldOut,
+        CancelIgnored
+    ];
 
     fn initial_state(&self) -> Self::State {
         AllocationState::default()
@@ -160,52 +153,43 @@ impl EffectfulStatefulHandler for Allocator {
     }
 
     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        match fact {
-            AllocationOutput::Reserved(reserved) => {
-                *state
-                    .allocated_by_sku
-                    .entry(reserved.sku.clone())
-                    .or_default() += 1;
-                state.holds_by_order.insert(
-                    reserved.order_id,
-                    HeldStock {
-                        sku: reserved.sku,
-                        hold_id: reserved.hold_id,
-                    },
-                );
-            }
-            AllocationOutput::Released(released) => {
-                let held = state
+        fold!(match fact {
+            StockReserved {
+                order_id,
+                sku,
+                hold_id,
+            } => {
+                *state.allocated_by_sku.entry(sku.clone()).or_default() += 1;
+                state
                     .holds_by_order
-                    .remove(&released.order_id)
-                    .ok_or_else(|| {
-                        HandlerError::ContractViolation(
-                            "StockReleased had no folded hold".to_string(),
-                        )
-                    })?;
-                if held.sku != released.sku || held.hold_id != released.hold_id {
+                    .insert(order_id, HeldStock { sku, hold_id });
+            }
+            StockReleased {
+                order_id,
+                sku,
+                hold_id,
+            } => {
+                let held = state.holds_by_order.remove(&order_id).ok_or_else(|| {
+                    HandlerError::ContractViolation("StockReleased had no folded hold".to_string())
+                })?;
+                if held.sku != sku || held.hold_id != hold_id {
                     return Err(HandlerError::ContractViolation(
                         "StockReleased did not match the folded hold".to_string(),
                     ));
                 }
-                let allocated = state
-                    .allocated_by_sku
-                    .get_mut(&released.sku)
-                    .ok_or_else(|| {
-                        HandlerError::ContractViolation(
-                            "StockReleased had no folded allocation count".to_string(),
-                        )
-                    })?;
+                let allocated = state.allocated_by_sku.get_mut(&sku).ok_or_else(|| {
+                    HandlerError::ContractViolation(
+                        "StockReleased had no folded allocation count".to_string(),
+                    )
+                })?;
                 *allocated = allocated.checked_sub(1).ok_or_else(|| {
                     HandlerError::ContractViolation(
                         "StockReleased would underflow allocation count".to_string(),
                     )
                 })?;
             }
-            AllocationOutput::ReservationFailed(_)
-            | AllocationOutput::SoldOut(_)
-            | AllocationOutput::CancelIgnored(_) => {}
-        }
+            ReservationFailed { .. } | SoldOut { .. } | CancelIgnored { .. } => {}
+        });
         Ok(())
     }
 
@@ -288,11 +272,12 @@ mod tests {
         allocator
             .apply(
                 &mut state,
-                AllocationOutput::Reserved(StockReserved {
+                StockReserved {
                     order_id: order("order-1"),
                     sku: sku(),
                     hold_id: HoldId::from("hold-1".to_string()),
-                }),
+                }
+                .into(),
             )
             .unwrap();
         let before = state.clone();
@@ -300,10 +285,11 @@ mod tests {
         allocator
             .apply(
                 &mut state,
-                AllocationOutput::ReservationFailed(ReservationFailed {
+                ReservationFailed {
                     order_id: order("order-2"),
                     sku: sku(),
-                }),
+                }
+                .into(),
             )
             .unwrap();
 

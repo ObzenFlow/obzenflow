@@ -35,7 +35,7 @@ use gateway_demo::domain::{
     CustomerOrderPlaced, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
     PaymentMethodState,
 };
-use gateway_demo::gateway::{AuthorizePaymentOutcome, ProcessorResponse};
+use gateway_demo::gateway::ProcessorResponse;
 use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
 use obzenflow::application::{verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication};
 use obzenflow::effects::simulated::CallLog;
@@ -52,7 +52,7 @@ use obzenflow::journal::read::{
     RunJournalKind, RunOutcome, RunRecord, RunRecordData, SystemPayload,
 };
 use obzenflow::journal::JournalRecord;
-use obzenflow::schema::TypedPayload;
+use obzenflow::schema::{outcome, TypedPayload};
 use obzenflow::stages::sinks::{
     DeliveryMethod, DeliveryResult, DiscardSink, InlineSink, SinkDescription, SinkOperationError,
     SinkRedeliverySafety, SinkWriteFailure, SinkWritePhase,
@@ -301,7 +301,7 @@ impl Gateway {
         request: &AuthorizationRequest,
         key: &IdempotencyKey,
         ctx: &EffectContext,
-    ) -> Result<AuthorizePaymentOutcome, EffectError> {
+    ) -> Result<outcome![PaymentAuthorized | PaymentDeclined], EffectError> {
         let order = &request.order;
         let response = self
             .calls
@@ -311,15 +311,13 @@ impl Gateway {
             hold_until(&self.release).await;
         }
         Ok(match response {
-            ProcessorResponse::Charged { authorization_id } => {
-                AuthorizePaymentOutcome::Authorized(PaymentAuthorized {
-                    order_id: order.order_id.clone(),
-                    customer_id: order.customer_id.clone(),
-                    amount_cents: order.amount_cents,
-                    phase: order.phase.clone(),
-                    authorization_id,
-                })
-            }
+            ProcessorResponse::Charged { authorization_id } => outcome(PaymentAuthorized {
+                order_id: order.order_id.clone(),
+                customer_id: order.customer_id.clone(),
+                amount_cents: order.amount_cents,
+                phase: order.phase.clone(),
+                authorization_id,
+            }),
             ProcessorResponse::Declined { reason } => declined(order, reason),
         })
     }
@@ -341,8 +339,11 @@ fn decide(order: &CustomerOrderPlaced) -> ProcessorResponse {
     }
 }
 
-fn declined(order: &CustomerOrderPlaced, reason: PaymentDeclineReason) -> AuthorizePaymentOutcome {
-    AuthorizePaymentOutcome::Declined(PaymentDeclined {
+fn declined(
+    order: &CustomerOrderPlaced,
+    reason: PaymentDeclineReason,
+) -> outcome![PaymentAuthorized | PaymentDeclined] {
+    outcome(PaymentDeclined {
         order_id: order.order_id.clone(),
         customer_id: order.customer_id.clone(),
         amount_cents: order.amount_cents,
@@ -5724,12 +5725,12 @@ mod ai_digest {
         fn interpret(
             &self,
             chunk: Chunk<Item>,
-            outcome: AiOutcome<ChatCompletionReply>,
+            call: AiOutcome<ChatCompletionReply>,
         ) -> Result<Sum, HandlerError> {
-            if outcome.unavailable().is_some() {
+            if call.unavailable().is_some() {
                 return Ok(Sum { total: 0 });
             }
-            outcome.replied()?;
+            call.replied()?;
             Ok(Sum {
                 total: chunk.iter().map(|item| item.value).sum(),
             })
@@ -5753,9 +5754,9 @@ mod ai_digest {
         fn interpret(
             &self,
             input: Partials<Item, Sum>,
-            outcome: AiOutcome<ChatCompletionReply>,
+            call: AiOutcome<ChatCompletionReply>,
         ) -> Result<KeyTotal, HandlerError> {
-            outcome.replied()?;
+            call.replied()?;
             Ok(KeyTotal {
                 key: parity(&input.items()[0]),
                 total: input.partials().iter().map(|partial| partial.total).sum(),

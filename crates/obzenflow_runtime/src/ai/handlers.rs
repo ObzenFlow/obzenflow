@@ -16,7 +16,8 @@ use obzenflow_core::ai::{
     AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiOutcome, AiUnavailable, Chunk, Partials,
 };
 use obzenflow_core::event::schema::{
-    EmptySet, MemberList, StageOutputFacts, SubsetProofEnd, TypedFactType, WithMember,
+    EffectfulStageOutput, EmptySet, FactsOf, MemberList, StageOutputFacts, SubsetProofEnd,
+    TypedFactType, WithMember,
 };
 use obzenflow_core::{StageFactSet, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
@@ -129,13 +130,13 @@ where
     R::Out: StageOutputFacts,
 {
     type Input = In;
-    type Output = R::Out;
+    type Output = FactsOf<R::Out>;
 
     async fn process(
         &self,
         input: In,
-        fx: &mut Effects<R::Out, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<R::Out>, HandlerError> {
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let request = self.role.prepare(&input)?;
         let outcome = match call::<R::Effect, _, _, _>(fx, INFER_LABEL, &request, None).await {
             Ok(outcome) => outcome,
@@ -200,13 +201,13 @@ where
     R::Out: StageOutputFacts,
 {
     type Input = AiMapReduceMapInput<T>;
-    type Output = R::Out;
+    type Output = FactsOf<R::Out>;
 
     async fn process(
         &self,
         group: AiMapReduceMapInput<T>,
-        fx: &mut Effects<R::Out, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<R::Out>, HandlerError> {
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let chunk = chunk_of(group);
         let request = self.role.prepare(&chunk)?;
         let numbers = Some(chunk.citation_numbers());
@@ -350,6 +351,11 @@ where
         types.push(TypedFactType::of::<AiMapReduceReduceFailed>());
         types
     }
+}
+
+impl<O: StageFactSet> EffectfulStageOutput for AiReduceFacts<O> where
+    WithMember<AiMapReduceReduceFailed, O::Members>: MemberList
+{
 }
 
 #[doc(hidden)]

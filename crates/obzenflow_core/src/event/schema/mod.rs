@@ -8,37 +8,42 @@
 //! enabling compile-time event type checking.
 
 mod effect_outcome;
+mod fold;
 mod member_set;
 mod middleware_context_key;
+mod outcome_list;
 mod stage_fact_set;
 mod stage_output;
 mod typed_fact_set;
 mod typed_payload;
 
 pub use effect_outcome::EffectOutcomeFacts;
-// FLOWIP-120z proof vocabulary: `Member`/`SubsetOf` appear in public bounds;
-// the rest is doc(hidden) macro and derive plumbing.
+// `Member` and `SubsetOf` appear in public bounds; the rest is doc(hidden)
+// macro plumbing.
 pub use member_set::{
-    const_str_eq, require_distinct, EmptySet, FactList, FactNameDisjoint, Member, MemberAfter,
-    MemberFound, MemberList, SubsetOf, SubsetProofEnd, SubsetProofStep, WithMember,
+    const_str_eq, require_distinct, AppendList, EmptySet, FactList, FactNameDisjoint, FactOr,
+    ListsEventType, Member, MemberAfter, MemberFound, MemberList, NoOtherFact, SubsetOf,
+    SubsetProofEnd, SubsetProofStep, WithMember,
 };
-// The derive shares the trait's name, serde-style: one import brings both.
 pub use middleware_context_key::MiddlewareContextKey;
-pub use obzenflow_core_derive::{EffectOutcomeFacts, StageOutputFacts};
-pub use stage_fact_set::{assert_distinct_stage_fact_set, DeclaredStageFactSet, StageFactSet};
+pub use outcome_list::{
+    outcome, ListsOutcome, NoOtherOutcome, OutcomeFacts, OutcomeList, OutcomeOr, SingleFactOutcomes,
+};
+pub use stage_fact_set::{
+    assert_distinct_stage_fact_set, DeclaredStageFactSet, DecodeCommitted, EffectfulStageOutput,
+    FactsOf, StageFactSet,
+};
 pub use stage_output::{OneFactStageOutput, StageOutputFacts, StageOutputs};
 pub use typed_fact_set::{
-    decode_member_fact, missing_fact_group_error, sum_group_arity_error, TypedFact, TypedFactSet,
-    TypedFactSetError, TypedFactType,
+    decode_member_fact, missing_fact_group_error, TypedFact, TypedFactSet, TypedFactSetError,
+    TypedFactType,
 };
 pub use typed_payload::{TypedPayload, TypedPayloadError};
 
-/// Stable, narrow compiler support selected by the carrier derives' schema path.
+/// Compiler support for `outcome!` and `fold!`.
 #[doc(hidden)]
 pub mod __private {
-    pub use super::{
-        decode_member_fact, missing_fact_group_error, sum_group_arity_error, EmptySet, FactList,
-        OneFactStageOutput, StageFactSet, TypedFact, TypedFactSet, TypedFactSetError,
-        TypedFactType, TypedPayload, WithMember,
-    };
+    pub use super::fold::{AllFolded, Folded, TakeFact};
+    pub use super::stage_fact_set::fold_start;
+    pub use obzenflow_core_derive::sorted_outcomes;
 }

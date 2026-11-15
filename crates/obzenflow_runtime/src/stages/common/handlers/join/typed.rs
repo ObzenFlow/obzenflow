@@ -1015,12 +1015,54 @@ mod tests {
         const EVENT_TYPE: &'static str = "typed_join.other_output";
     }
 
-    #[derive(Clone, Debug, StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
+    #[derive(Clone, Debug)]
     struct DishonestProduct {
         first: TestOutput,
         second: OtherOutput,
     }
+
+    impl obzenflow_core::TypedFactSet for DishonestProduct {
+        fn fact_types() -> Vec<obzenflow_core::TypedFactType> {
+            vec![
+                obzenflow_core::TypedFactType::of::<TestOutput>(),
+                obzenflow_core::TypedFactType::of::<OtherOutput>(),
+            ]
+        }
+
+        fn into_facts(
+            self,
+        ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::TypedFactSetError> {
+            Ok(vec![
+                obzenflow_core::TypedFact::from_payload(self.first)?,
+                obzenflow_core::TypedFact::from_payload(self.second)?,
+            ])
+        }
+
+        fn try_from_facts(
+            facts: &[obzenflow_core::TypedFact],
+        ) -> Result<Self, obzenflow_core::TypedFactSetError> {
+            Ok(Self {
+                first: obzenflow_core::event::schema::decode_member_fact(facts)?,
+                second: obzenflow_core::event::schema::decode_member_fact(facts)?,
+            })
+        }
+    }
+
+    impl obzenflow_core::StageFactSet for DishonestProduct {
+        type Members = obzenflow_core::event::schema::WithMember<
+            TestOutput,
+            obzenflow_core::event::schema::WithMember<
+                OtherOutput,
+                obzenflow_core::event::schema::EmptySet,
+            >,
+        >;
+
+        fn member_fact_types() -> Vec<obzenflow_core::TypedFactType> {
+            <Self as obzenflow_core::TypedFactSet>::fact_types()
+        }
+    }
+
+    impl StageOutputFacts for DishonestProduct {}
 
     impl OneFactStageOutput for DishonestProduct {}
 
@@ -1059,6 +1101,70 @@ mod tests {
                 },
             }])
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ListJoin;
+
+    impl TypedJoinHandler for ListJoin {
+        type State = ();
+        type ReferenceKey = String;
+        type Reference = TestReference;
+        type Stream = TestStream;
+        type Output = obzenflow_core::outcome![TestOutput | OtherOutput];
+
+        fn initial_state(&self) -> Self::State {}
+
+        fn admit_reference(
+            &self,
+            reference: &Self::Reference,
+        ) -> Result<Self::ReferenceKey, HandlerError> {
+            Ok(reference.key.clone())
+        }
+
+        fn process_stream(
+            &self,
+            _state: &mut Self::State,
+            _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+            _stream: Self::Stream,
+        ) -> Result<Vec<Self::Output>, HandlerError> {
+            Ok(vec![
+                obzenflow_core::outcome(OtherOutput {
+                    value: "unmatched".to_string(),
+                }),
+                obzenflow_core::outcome(TestOutput {
+                    selected_values: Vec::new(),
+                    ordinal: 0,
+                }),
+            ])
+        }
+    }
+
+    #[test]
+    fn join_list_output_writes_recorded_facts() {
+        let writer = WriterId::from(StageId::new());
+        let adapter = configured_adapter(ListJoin);
+        let mut state = adapter.initial_state();
+        let invocation = adapter
+            .process_stream(
+                &mut state,
+                stream_event(writer, &[], 1, "stream"),
+                StageId::new(),
+                writer,
+                live_scope(),
+            )
+            .expect("each listed value writes one fact");
+        let (facts, _) = invocation.into_parts();
+        assert_eq!(
+            facts
+                .iter()
+                .map(|fact| fact.event_type())
+                .collect::<Vec<_>>(),
+            vec![
+                OtherOutput::event_type_name(),
+                TestOutput::event_type_name()
+            ]
+        );
     }
 
     #[test]

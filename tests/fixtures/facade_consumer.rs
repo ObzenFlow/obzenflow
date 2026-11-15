@@ -17,7 +17,8 @@ extern crate std;
 use self::async_trait::async_trait;
 use self::of::effects::{Effects, StageCompletion};
 use self::of::prelude::*;
-use self::of::schema::{StageFactSet, TypedFactSet};
+use self::of::schema::{outcome, StageFactSet, StageOutputs, TypedFactSet};
+use self::of::stages::stateful::fold;
 use self::of::stages::{joins, merges, sinks, sources, stateful, transforms};
 use self::serde::{Deserialize, Serialize};
 use self::std::prelude::rust_2021::*;
@@ -67,24 +68,18 @@ fn renamed_facade_ingress_builders_compile() {
     });
 }
 
-#[derive(Debug, Clone, StageOutputFacts)]
-#[stage_output(schema = of::schema)]
-enum Output {
-    Emitted(Fact),
-    #[stage_output(empty)]
-    Filtered,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Left(u64);
+
+impl TypedPayload for Left {
+    const EVENT_TYPE: &'static str = "facade.left";
 }
 
-#[derive(Debug, Clone, EffectOutcomeFacts)]
-#[effect_outcome(schema = of::schema)]
-struct Outcome {
-    fact: Fact,
-}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Right(u64);
 
-#[derive(Debug, Clone, EffectOutcomeFacts)]
-#[effect_outcome(schema = of::schema)]
-enum EffectSum {
-    Success(Fact),
+impl TypedPayload for Right {
+    const EVENT_TYPE: &'static str = "facade.right";
 }
 
 type Facts = of::schema::stage_fact_set![Fact];
@@ -126,9 +121,9 @@ impl sources::TypedAsyncInfiniteSourceHandler for Pure {
 
 impl transforms::TypedTransformHandler for Pure {
     type Input = Fact;
-    type Output = Output;
-    fn process(&self, input: Fact) -> Result<Output, HandlerError> {
-        Ok(Output::Emitted(input))
+    type Output = StageOutputs<Fact>;
+    fn process(&self, input: Fact) -> Result<StageOutputs<Fact>, HandlerError> {
+        Ok(StageOutputs::one(input))
     }
 }
 
@@ -231,7 +226,7 @@ impl transforms::EffectfulTransformHandler for Pure {
 impl stateful::EffectfulStatefulHandler for Pure {
     type State = u64;
     type Input = Fact;
-    type Output = Fact;
+    type Output = of::schema::stage_fact_set![Fact, Left];
 
     fn initial_state(&self) -> u64 {
         0
@@ -241,39 +236,49 @@ impl stateful::EffectfulStatefulHandler for Pure {
         &mut self,
         state: &u64,
         input: &Fact,
-        fx: &mut Effects<Fact, NoEffects>,
-    ) -> Result<StageCompletion<Fact>, HandlerError> {
+        fx: &mut Effects<Self::Output, NoEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.emit(Fact(state + input.0)).await?;
         Ok(fx.complete()?)
     }
 
-    fn apply(&mut self, state: &mut u64, fact: Fact) -> Result<(), HandlerError> {
-        *state = fact.0;
+    fn apply(&mut self, state: &mut u64, fact: Self::Output) -> Result<(), HandlerError> {
+        fold!(match fact {
+            Fact(value) => {
+                *state = value
+            }
+            Left(value) => {
+                *state += value
+            }
+        });
         Ok(())
     }
 }
 
 #[test]
-fn renamed_facade_derives_preserve_flat_facts() {
-    let sum_facts = EffectSum::Success(Fact(3)).into_facts().unwrap();
-    std::assert!(std::matches!(
-        EffectSum::try_from_facts(&sum_facts).unwrap(),
-        EffectSum::Success(Fact(3))
-    ));
-    let facts = Output::Emitted(Fact(7)).into_facts().unwrap();
+fn renamed_facade_outcomes_preserve_flat_facts() {
+    let single: outcome![Fact | (Left, Right)] = outcome(Fact(3));
+    let facts = single.clone().into_facts().unwrap();
     std::assert_eq!(facts.len(), 1);
-    std::assert!(std::matches!(
-        Output::try_from_facts(&facts).unwrap(),
-        Output::Emitted(Fact(7))
-    ));
-    std::assert!(Output::Filtered.into_facts().unwrap().is_empty());
-    let outcome = Outcome { fact: Fact(9) };
     std::assert_eq!(
-        Outcome::try_from_facts(&outcome.into_facts().unwrap())
-            .unwrap()
-            .fact,
-        Fact(9)
+        <outcome![Fact | (Left, Right)] as TypedFactSet>::try_from_facts(&facts).unwrap(),
+        single
     );
+    let pair: outcome![Fact | (Left, Right)] = outcome((Left(1), Right(2)));
+    let facts = pair.clone().into_facts().unwrap();
+    std::assert_eq!(facts.len(), 2);
+    std::assert_eq!(
+        <outcome![Fact | (Left, Right)] as TypedFactSet>::try_from_facts(&facts).unwrap(),
+        pair
+    );
+    let mut state = 4;
+    let mut handler = Pure;
+    stateful::EffectfulStatefulHandler::apply(&mut handler, &mut state, Left(2).into()).unwrap();
+    std::assert_eq!(state, 6);
+    std::assert!(StageOutputs::<Fact>::none()
+        .into_facts()
+        .unwrap()
+        .is_empty());
     std::assert_eq!(Facts::member_fact_types().len(), 1);
     fn no_effects<S: of::effects::EffectSet>() {}
     no_effects::<NoEffects>();
@@ -310,7 +315,7 @@ fn renamed_facade_macros_and_constructors_compile() {
     infinite_source!(Fact => placeholder!());
     of::flow::async_infinite_source!(Fact => placeholder!());
     effectful_transform!(Fact -> Fact => Pure);
-    of::flow::effectful_stateful!(Fact -> Fact => Pure);
+    of::flow::effectful_stateful!(Fact -> { Fact, Left } => Pure);
     of::flow::transform!(Fact -> Fact => placeholder!());
     of::flow::stateful!(Fact -> Fact => placeholder!());
     of::flow::sink!(Fact => placeholder!());
@@ -394,9 +399,9 @@ impl AiRole<Fact> for Pure {
     fn interpret(
         &self,
         input: Fact,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<Fact, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         Ok(input)
     }
 }
@@ -412,9 +417,9 @@ impl AiRole<Chunk<Fact>> for Pure {
     fn interpret(
         &self,
         chunk: Chunk<Fact>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<Fact, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         Ok(Fact(chunk.iter().map(|fact| fact.0).sum()))
     }
 }
@@ -430,9 +435,9 @@ impl AiRole<Partials<Fact, Fact>> for Pure {
     fn interpret(
         &self,
         input: Partials<Fact, Fact>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<Fact, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         Ok(Fact(input.partials().iter().map(|fact| fact.0).sum()))
     }
 }

@@ -2,16 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Stage output carriers (FLOWIP-120z).
+//! Stage outputs.
 //!
-//! A pure typed transform returns its real domain outcome as a carrier value
-//! that lowers to flat named facts; an effectful stateful handler folds one
-//! committed fact per `apply` call. Both facades sit over the shared
-//! [`TypedFactSet`] marshalling and [`StageFactSet`] membership machinery,
-//! exactly as `EffectOutcomeFacts` does; there is no parallel marshalling
-//! stack, and a carrier is never a persisted wrapper event.
+//! A typed transform returns one fact, an `outcome![...]` list or
+//! [`StageOutputs`], each of which lowers to flat named facts through the
+//! shared [`TypedFactSet`] marshalling and [`StageFactSet`] membership
+//! machinery. The returned value is never persisted.
 
 use super::member_set::{EmptySet, WithMember};
+use super::outcome_list::{OutcomeOr, SingleFactOutcomes};
 use super::stage_fact_set::StageFactSet;
 use super::typed_fact_set::{TypedFact, TypedFactSet, TypedFactSetError, TypedFactType};
 use super::typed_payload::TypedPayload;
@@ -89,62 +88,81 @@ where
     }
 }
 
-/// Inhabited stage output carrier: a fact set that also lowers to facts.
+/// The `Output` bound of a typed transform and an AI role's `Out`: one fact,
+/// an `outcome![...]` list or [`StageOutputs`].
 ///
-/// Define one with `#[derive(StageOutputFacts)]` on an enum whose variants
-/// are single facts, products of facts (named fields, field order is commit
-/// order), or an explicit `#[stage_output(empty)]` filter arm; a scalar
-/// `TypedPayload` is a one-member carrier through the blanket. A derived
-/// carrier can never also implement `TypedPayload`: the blanket
-/// implementations would conflict, which is deliberate, because a carrier
-/// must never double as a persisted wrapper event.
+/// `stage_fact_set![...]` is refused:
+///
+/// ```compile_fail
+/// # use obzenflow_core::{stage_fact_set, StageOutputFacts, TypedPayload};
+/// # #[derive(serde::Serialize, serde::Deserialize)] struct Valid;
+/// # impl TypedPayload for Valid { const EVENT_TYPE: &'static str = "doc.valid"; }
+/// # #[derive(serde::Serialize, serde::Deserialize)] struct Invalid;
+/// # impl TypedPayload for Invalid { const EVENT_TYPE: &'static str = "doc.invalid"; }
+/// fn transform_output<O: StageOutputFacts>() {}
+/// transform_output::<stage_fact_set![Valid, Invalid]>();
+/// ```
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is not a stage output carrier",
-    note = "a typed stage output is a closed set of named facts: use \
-            #[derive(StageOutputFacts)] on a sum-of-products enum or a named-field \
-            struct, or use a single `TypedPayload` fact type directly (FLOWIP-120z)"
+    message = "`{Self}` cannot be a transform's `Output` or an AI role's `Out`",
+    label = "a transform returns one fact, `outcome![...]` or `StageOutputs<T>`",
+    note = "a transform returns exactly one outcome per input, listed as `outcome![A | (B, C)]`, \
+            or any number of facts of one type as `StageOutputs<T>`; `stage_fact_set![...]` is \
+            the set an effectful handler may emit"
 )]
 pub trait StageOutputFacts: TypedFactSet + StageFactSet {}
 
-impl<T: TypedFactSet + StageFactSet> StageOutputFacts for T {}
+impl<T: TypedPayload + Send + Sync + 'static> StageOutputFacts for T {}
 
-/// Sum-only refinement of [`StageOutputFacts`]: every value lowers to
-/// exactly one committed fact.
-///
-/// The effectful stateful `Output` bound: `apply` folds one committed fact
-/// per call, so a product carrier (which commits several facts at once)
-/// must fail this bound at compile time rather than failing
-/// `try_from_facts` at runtime. Deliberately not a blanket over all fact
-/// sets; the derive implements it for per-fact sums, and scalars qualify
-/// through this blanket.
+impl<Head, Rest> StageOutputFacts for OutcomeOr<Head, Rest> where Self: TypedFactSet + StageFactSet {}
+
+impl<T: TypedPayload + Send + Sync + 'static> StageOutputFacts for StageOutputs<T> {}
+
+/// The `Output` bound of a stateful stage, a source and a join, each of whose
+/// values lowers to exactly one fact: one fact, or an `outcome![...]` list
+/// whose outcomes are single facts.
 ///
 /// # Contract
 ///
-/// Every value must lower to exactly one fact. Conversely, every well-formed
-/// fact type advertised by [`StageFactSet::Members`] must reconstruct when
-/// passed alone to [`TypedFactSet::try_from_facts`]. Lowering and single-fact
-/// reconstruction must preserve the corresponding output value that `apply`
-/// folds. Supported derives implement this trait only for structurally valid
-/// per-fact sums. A manual implementation is a trusted semantic assertion; if
-/// committed-fact decoding contradicts it, the runtime treats the
-/// contradiction as a fatal stage-contract violation.
+/// Every value must lower to exactly one fact, and every member fact type
+/// must reconstruct when passed alone to [`TypedFactSet::try_from_facts`]. A
+/// manual implementation is a trusted semantic assertion; if a lowered value
+/// contradicts it, the runtime treats the contradiction as a fatal
+/// stage-contract violation.
+///
+/// A list with a tuple outcome is refused:
+///
+/// ```compile_fail
+/// # use obzenflow_core::{outcome, OneFactStageOutput, TypedPayload};
+/// # #[derive(serde::Serialize, serde::Deserialize)] struct Valid;
+/// # impl TypedPayload for Valid { const EVENT_TYPE: &'static str = "doc.valid"; }
+/// # #[derive(serde::Serialize, serde::Deserialize)] struct Invalid;
+/// # impl TypedPayload for Invalid { const EVENT_TYPE: &'static str = "doc.invalid"; }
+/// # #[derive(serde::Serialize, serde::Deserialize)] struct Cancelled;
+/// # impl TypedPayload for Cancelled { const EVENT_TYPE: &'static str = "doc.cancelled"; }
+/// fn source_output<O: OneFactStageOutput>() {}
+/// source_output::<outcome![Valid | (Invalid, Cancelled)]>();
+/// ```
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be an effectful stateful `Output`: it does not commit \
-               exactly one fact per value",
-    note = "`apply` folds one committed fact per call, so the stateful `Output` must be \
-            a per-fact sum (an enum with one fact per variant) or a single \
-            `TypedPayload`; a product carrier commits several facts at once and cannot \
-            fold one at a time (FLOWIP-120z)"
+    message = "`{Self}` cannot be a stateful stage's, a source's or a join's `Output`",
+    label = "these stages write one fact per value, so one fact or `outcome![A | B]` without a \
+             tuple",
+    note = "facts written together as a tuple belong in a transform's `outcome![...]`"
 )]
 pub trait OneFactStageOutput: StageOutputFacts {}
 
 impl<T: TypedPayload + Send + Sync + 'static> OneFactStageOutput for T {}
 
+impl<Head, Rest> OneFactStageOutput for OutcomeOr<Head, Rest> where
+    Self: StageOutputFacts + SingleFactOutcomes
+{
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::schema::{StageOutputFacts, TypedFact, TypedFactSetError};
-    use crate::event::ChainPayload;
+    use crate::event::schema::{
+        EffectOutcomeFacts, EffectfulStageOutput, StageOutputFacts, TypedFactSetError,
+    };
     use serde::{Deserialize, Serialize, Serializer};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,45 +219,10 @@ mod tests {
         const EVENT_TYPE: &'static str = "stage_output.cancelled";
     }
 
-    /// The FLOWIP-120z sum-of-products shape: one leaf on the valid path,
-    /// a product on the invalid path, and a deliberate filter arm.
-    #[derive(Debug, Clone, PartialEq, Eq, StageOutputFacts)]
-    #[stage_output(schema = crate::event::schema)]
-    enum ClassificationOutcome {
-        Validated(Valid),
-        Rejected {
-            invalid: Invalid,
-            cancelled: Cancelled,
-        },
-        #[stage_output(empty)]
-        Skipped,
-    }
-
-    /// Per-fact sum: qualifies as `OneFactStageOutput` via the derive.
-    #[derive(Debug, Clone, PartialEq, Eq, StageOutputFacts)]
-    #[stage_output(schema = crate::event::schema)]
-    enum PerFactSum {
-        Valid(Valid),
-        Invalid(Invalid),
-    }
-
-    /// Structural sharing across variants is legitimate: `Cancelled`
-    /// appears in two variants and the member set deduplicates it.
-    #[derive(Debug, Clone, PartialEq, Eq, StageOutputFacts)]
-    #[stage_output(schema = crate::event::schema)]
-    enum SharedLeafOutcome {
-        InvalidPath {
-            invalid: Invalid,
-            cancelled: Cancelled,
-        },
-        ValidThenCancelled {
-            valid: Valid,
-            cancelled: Cancelled,
-        },
-    }
-
     fn is_stage_output<T: StageOutputFacts>() {}
     fn is_one_fact_output<T: OneFactStageOutput>() {}
+    fn is_effect_outcome<T: EffectOutcomeFacts>() {}
+    fn is_effectful_output<T: EffectfulStageOutput>() {}
 
     #[test]
     fn scalar_payload_is_a_one_fact_stage_output() {
@@ -248,57 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn per_fact_sum_derive_emits_one_fact_stage_output() {
-        is_stage_output::<PerFactSum>();
-        is_one_fact_output::<PerFactSum>();
-        is_stage_output::<ClassificationOutcome>();
-        // ClassificationOutcome has a product and an empty variant, so it
-        // deliberately does NOT implement OneFactStageOutput.
-    }
-
-    #[test]
-    fn sum_of_products_round_trips_each_variant() {
-        for carrier in [
-            ClassificationOutcome::Validated(Valid { value: 4 }),
-            ClassificationOutcome::Rejected {
-                invalid: Invalid {
-                    reason: "zero".to_string(),
-                },
-                cancelled: Cancelled {
-                    reason: "invalid".to_string(),
-                },
-            },
-            ClassificationOutcome::Skipped,
-        ] {
-            let facts = carrier.clone().into_facts().expect("variant serializes");
-            let reconstructed =
-                ClassificationOutcome::try_from_facts(&facts).expect("variant reconstructs");
-            assert_eq!(reconstructed, carrier);
-        }
-    }
-
-    #[test]
-    fn product_variant_lowers_leaves_in_field_order() {
-        let carrier = ClassificationOutcome::Rejected {
-            invalid: Invalid {
-                reason: "zero".to_string(),
-            },
-            cancelled: Cancelled {
-                reason: "invalid".to_string(),
-            },
-        };
-        let facts = carrier.into_facts().expect("variant serializes");
-        assert_eq!(facts.len(), 2);
-        assert_eq!(facts[0].event_type.as_str(), "stage_output.invalid");
-        assert_eq!(facts[1].event_type.as_str(), "stage_output.cancelled");
-    }
-
-    #[test]
-    fn empty_variant_lowers_to_zero_facts() {
-        let facts = ClassificationOutcome::Skipped
-            .into_facts()
-            .expect("empty variant serializes");
-        assert!(facts.is_empty());
+    fn position_bounds_accept_listed_forms() {
+        is_stage_output::<crate::outcome![Valid | (Invalid, Cancelled)]>();
+        is_effect_outcome::<crate::outcome![Valid | (Invalid, Cancelled)]>();
+        is_one_fact_output::<crate::outcome![Valid | Invalid]>();
+        is_stage_output::<StageOutputs<Solo>>();
+        is_effectful_output::<crate::stage_fact_set![Valid, Invalid]>();
+        is_effectful_output::<Solo>();
     }
 
     #[test]
@@ -351,105 +290,6 @@ mod tests {
             StageOutputs::one(SerializationFails).into_facts(),
             Err(TypedFactSetError::SerializationFailed(message))
                 if message.contains("deliberate serialization failure")
-        ));
-    }
-
-    #[test]
-    fn leaf_set_dispatch_is_order_insensitive() {
-        let carrier = ClassificationOutcome::Rejected {
-            invalid: Invalid {
-                reason: "zero".to_string(),
-            },
-            cancelled: Cancelled {
-                reason: "invalid".to_string(),
-            },
-        };
-        let facts = carrier.clone().into_facts().expect("variant serializes");
-        let reversed = vec![facts[1].clone(), facts[0].clone()];
-        assert_eq!(
-            ClassificationOutcome::try_from_facts(&reversed).expect("variant reconstructs"),
-            carrier
-        );
-    }
-
-    #[test]
-    fn leaf_set_dispatch_selects_among_shared_leaves() {
-        let invalid_path = SharedLeafOutcome::InvalidPath {
-            invalid: Invalid {
-                reason: "zero".to_string(),
-            },
-            cancelled: Cancelled {
-                reason: "invalid".to_string(),
-            },
-        };
-        let valid_path = SharedLeafOutcome::ValidThenCancelled {
-            valid: Valid { value: 1 },
-            cancelled: Cancelled {
-                reason: "late".to_string(),
-            },
-        };
-        for carrier in [invalid_path, valid_path] {
-            let facts = carrier.clone().into_facts().expect("variant serializes");
-            assert_eq!(
-                SharedLeafOutcome::try_from_facts(&facts).expect("variant reconstructs"),
-                carrier
-            );
-        }
-
-        let members: Vec<String> = <SharedLeafOutcome as StageFactSet>::member_fact_types()
-            .iter()
-            .map(|t| t.event_type.to_string())
-            .collect();
-        assert_eq!(
-            members,
-            vec![
-                "stage_output.invalid",
-                "stage_output.cancelled",
-                "stage_output.valid"
-            ],
-            "the member set deduplicates shared leaves in first-occurrence order"
-        );
-    }
-
-    #[test]
-    fn sum_of_products_fails_closed_on_bad_groups() {
-        let foreign = vec![TypedFact {
-            payload_schema_version: std::num::NonZeroU32::MIN,
-            event_type: crate::event::types::EventType::from("stage_output.unknown"),
-            payload: ChainPayload::Fact(serde_json::json!({})),
-        }];
-        assert!(matches!(
-            ClassificationOutcome::try_from_facts(&foreign),
-            Err(TypedFactSetError::UnexpectedFact { .. })
-        ));
-
-        let duplicate = vec![
-            TypedFact::from_payload(Valid { value: 1 }).expect("valid"),
-            TypedFact::from_payload(Valid { value: 2 }).expect("valid again"),
-        ];
-        assert!(matches!(
-            ClassificationOutcome::try_from_facts(&duplicate),
-            Err(TypedFactSetError::DuplicateFact { .. })
-        ));
-
-        // A declared-but-mismatched combination matches no variant's set.
-        let mismatched = vec![
-            TypedFact::from_payload(Valid { value: 1 }).expect("valid"),
-            TypedFact::from_payload(Invalid {
-                reason: "zero".to_string(),
-            })
-            .expect("invalid"),
-        ];
-        assert!(matches!(
-            ClassificationOutcome::try_from_facts(&mismatched),
-            Err(TypedFactSetError::MissingFact { .. })
-        ));
-
-        // An empty group only matches an explicit empty variant.
-        let empty: Vec<TypedFact> = Vec::new();
-        assert!(matches!(
-            PerFactSum::try_from_facts(&empty),
-            Err(TypedFactSetError::MissingFact { .. })
         ));
     }
 }

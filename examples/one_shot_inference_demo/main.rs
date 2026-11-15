@@ -70,9 +70,9 @@ impl AiRole<ReducedEvidence> for GenerateBrief {
     fn interpret(
         &self,
         input: ReducedEvidence,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DecisionBrief, HandlerError> {
-        let reply = outcome.replied()?;
+        let reply = call.replied()?;
         Ok(DecisionBrief {
             question: input.question,
             recommendation: reply.text().to_string(),

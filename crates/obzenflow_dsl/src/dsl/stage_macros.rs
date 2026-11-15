@@ -3680,8 +3680,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// # impl AiRole<Partials<Story, Summary>> for Digest {
@@ -3690,8 +3690,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, input: &Partials<Story, Summary>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Combine.", format!("{} summaries", input.partials().len())))
 /// #     }
-/// #     fn interpret(&self, _: Partials<Story, Summary>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Partials<Story, Summary>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// # impl AiRole<Story> for Digest {
@@ -3700,8 +3700,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).chunks(10).reduce(Digest).on_eof();
@@ -3735,8 +3735,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// # impl AiRole<Partials<Story, Summary>> for Digest {
@@ -3745,8 +3745,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, input: &Partials<Story, Summary>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Combine.", format!("{} summaries", input.partials().len())))
 /// #     }
-/// #     fn interpret(&self, _: Partials<Story, Summary>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Partials<Story, Summary>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).chunks(10).reduce(Digest);
@@ -3776,8 +3776,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest);
@@ -3807,8 +3807,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -3838,8 +3838,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).chunks(10).key_by(|story: &Story| story.title.clone());
@@ -3868,8 +3868,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).key_by(|summary: &Summary| summary.text.clone()).chunks(10);
@@ -3898,8 +3898,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief).key_by(|story: &Story| story.title.clone());
@@ -3928,8 +3928,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// # #[derive(Clone)]
@@ -3940,8 +3940,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, input: &Partials<Story, Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Combine.", format!("{} stories", input.partials().len())))
 /// #     }
-/// #     fn interpret(&self, _: Partials<Story, Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Partials<Story, Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).chunks(10).reduce(CombineStories).on_eof();
@@ -3971,8 +3971,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -4003,8 +4003,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -4034,8 +4034,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -4065,8 +4065,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -4096,8 +4096,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);

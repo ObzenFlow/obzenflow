@@ -672,12 +672,54 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-    #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
+    #[derive(Clone, Debug)]
     struct DishonestProduct {
         first: Output,
         second: OtherOutput,
     }
+
+    impl obzenflow_core::TypedFactSet for DishonestProduct {
+        fn fact_types() -> Vec<obzenflow_core::TypedFactType> {
+            vec![
+                obzenflow_core::TypedFactType::of::<Output>(),
+                obzenflow_core::TypedFactType::of::<OtherOutput>(),
+            ]
+        }
+
+        fn into_facts(
+            self,
+        ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::TypedFactSetError> {
+            Ok(vec![
+                obzenflow_core::TypedFact::from_payload(self.first)?,
+                obzenflow_core::TypedFact::from_payload(self.second)?,
+            ])
+        }
+
+        fn try_from_facts(
+            facts: &[obzenflow_core::TypedFact],
+        ) -> Result<Self, obzenflow_core::TypedFactSetError> {
+            Ok(Self {
+                first: obzenflow_core::event::schema::decode_member_fact(facts)?,
+                second: obzenflow_core::event::schema::decode_member_fact(facts)?,
+            })
+        }
+    }
+
+    impl obzenflow_core::StageFactSet for DishonestProduct {
+        type Members = obzenflow_core::event::schema::WithMember<
+            Output,
+            obzenflow_core::event::schema::WithMember<
+                OtherOutput,
+                obzenflow_core::event::schema::EmptySet,
+            >,
+        >;
+
+        fn member_fact_types() -> Vec<obzenflow_core::TypedFactType> {
+            <Self as obzenflow_core::TypedFactSet>::fact_types()
+        }
+    }
+
+    impl obzenflow_core::StageOutputFacts for DishonestProduct {}
 
     impl OneFactStageOutput for DishonestProduct {}
 

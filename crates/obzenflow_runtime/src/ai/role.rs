@@ -34,7 +34,7 @@ pub trait AiRole<In>: Send + Sync + 'static {
     fn interpret(
         &self,
         input: In,
-        outcome: AiOutcome<AiReply<Self, In>>,
+        call: AiOutcome<AiReply<Self, In>>,
     ) -> Result<Self::Out, HandlerError>;
 
     /// The role's logic version, which changes only when its logic changes.

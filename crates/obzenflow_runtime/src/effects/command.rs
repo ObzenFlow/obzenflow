@@ -20,6 +20,17 @@ use std::sync::Arc;
 /// A port `P` with the system that answers it chosen. A command holds one per
 /// port type, in a `#[port]` field or through `through`, and performs requests
 /// through `fx` without ever seeing the system.
+///
+/// A port trait is `Send` and `Sync`, so a system that isn't thread-safe is
+/// refused at its own `impl`:
+///
+/// ```compile_fail,E0277
+/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// trait CustomerMessaging {}
+/// struct SimulatedMessaging(std::rc::Rc<()>);
+/// #[obzenflow_runtime::effects::system("simulated", effects = obzenflow_runtime::effects)]
+/// impl CustomerMessaging for SimulatedMessaging {}
+/// ```
 pub struct Port<P: ?Sized + Send + Sync + 'static> {
     name: LogicalEffectBindingName,
     evidence: SystemBindingEvidence,
@@ -467,12 +478,20 @@ pub enum PortField {
 /// #[derive(Clone, Debug)]
 /// struct Scorer;
 ///
-/// #[obzenflow_runtime::effects::command(through = (RiskEnginePort, CaseSystemPort), effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
 /// #[derive(Clone, Debug)]
-/// struct Triage;
+/// struct Triage {
+///     #[port]
+///     risk_engine: Port<dyn RiskEnginePort>,
+///     #[port]
+///     case_system: Port<dyn CaseSystemPort>,
+/// }
 ///
 /// let scorer = Scorer::through(Port::to(Vendor));
-/// let triage = Triage::through(Port::to(std::sync::Arc::new(Vendor)), Port::to(Vendor));
+/// let triage = Triage {
+///     risk_engine: Port::to(std::sync::Arc::new(Vendor)),
+///     case_system: Port::to(Vendor),
+/// };
 /// ```
 ///
 /// A command with state of its own names its port as a field:
@@ -543,11 +562,17 @@ pub enum PortField {
 /// Nor two ports of one type:
 ///
 /// ```compile_fail
+/// # use obzenflow_runtime::effects::Port;
 /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
 /// # trait RiskEnginePort: Send + Sync {}
-/// #[obzenflow_runtime::effects::command(through = (RiskEnginePort, RiskEnginePort), effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
 /// #[derive(Clone, Debug)]
-/// struct Scorer;
+/// struct Scorer {
+///     #[port]
+///     first: Port<dyn RiskEnginePort>,
+///     #[port]
+///     second: Port<dyn RiskEnginePort>,
+/// }
 /// ```
 ///
 /// Nor a `#[port]` field that holds no port:

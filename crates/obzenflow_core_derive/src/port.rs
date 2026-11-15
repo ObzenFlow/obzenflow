@@ -9,8 +9,9 @@ use quote::{quote, quote_spanned, ToTokens};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, FnArg, GenericParam, Generics, Ident, ImplItem, Item, ItemImpl, ItemTrait, LitInt,
-    LitStr, Meta, Path, PathArguments, ReturnType, Signature, Token, TraitItem, Type, TypePath,
+    parse_quote, Attribute, FnArg, GenericParam, Generics, Ident, ImplItem, Item, ItemImpl,
+    ItemTrait, LitInt, LitStr, Meta, Path, PathArguments, ReturnType, Signature, Token, TraitItem,
+    Type, TypeParamBound, TypePath,
 };
 
 const MISSING_GUARANTEE: &str = "`#[effect]` needs its guarantee: `exactly_once` or `at_least_once`
@@ -164,7 +165,7 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
         declared,
         &mut errors,
     );
-    item = stripped_trait(item);
+    item = thread_safe(stripped_trait(item));
     let errors = errors.into_iter().map(syn::Error::into_compile_error);
     quote! {
         #item
@@ -187,6 +188,21 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
 
         #(#errors)*
     }
+}
+
+fn thread_safe(mut item: ItemTrait) -> ItemTrait {
+    for marker in ["Send", "Sync"] {
+        let written = item.supertraits.iter().any(|supertrait| {
+            matches!(supertrait, TypeParamBound::Trait(bound)
+                if bound.path.segments.last().is_some_and(|segment| segment.ident == marker))
+        });
+        if !written {
+            let marker = Ident::new(marker, Span::call_site());
+            item.supertraits.push(parse_quote!(::core::marker::#marker));
+        }
+    }
+    item.colon_token.get_or_insert_with(Default::default);
+    item
 }
 
 fn stripped_trait(mut item: ItemTrait) -> ItemTrait {
@@ -800,6 +816,24 @@ mod tests {
 
     fn expanded(item: Item) -> String {
         expand_item(&PortArgs::default(), item).to_string()
+    }
+
+    #[test]
+    fn port_trait_gains_send_sync() {
+        let bare = expanded(syn::parse_quote! {
+            trait CardPort {}
+        });
+        assert!(
+            bare.contains("trait CardPort : :: core :: marker :: Send + :: core :: marker :: Sync"),
+            "{bare}"
+        );
+        let written = expanded(syn::parse_quote! {
+            trait CardPort: Send + Sync {}
+        });
+        assert!(
+            written.contains("trait CardPort : Send + Sync {"),
+            "{written}"
+        );
     }
 
     #[test]

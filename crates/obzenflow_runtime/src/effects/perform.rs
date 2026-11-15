@@ -7,7 +7,7 @@ use super::{CallRequest, DeclaredEffectSet, Effects, StageCompletion};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
 use async_trait::async_trait;
-use obzenflow_core::event::schema::{EmptySet, WithMember};
+use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
 use obzenflow_core::TypedPayload;
 use std::marker::PhantomData;
 
@@ -145,13 +145,13 @@ where
     R: CallRequest,
 {
     type Input = In;
-    type Output = R::Outcome;
+    type Output = FactsOf<R::Outcome>;
 
     async fn process(
         &self,
         input: In,
-        fx: &mut Effects<R::Outcome, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<R::Outcome>, HandlerError> {
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.call_as_output((self.request)(&input)).await?;
         Ok(fx.complete()?)
     }

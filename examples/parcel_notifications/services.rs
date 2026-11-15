@@ -10,14 +10,14 @@ use std::time::Duration;
 
 #[obzenflow::port]
 #[async_trait]
-pub trait DepotDirectory: Send + Sync {
+pub trait DepotDirectory {
     #[effect(type = "depot.lookup", exactly_once)]
     async fn lookup(&self, request: &DepotLookup) -> Result<LocatedParcel, EffectError>;
 }
 
 #[obzenflow::port]
 #[async_trait]
-pub trait CustomerMessaging: Send + Sync {
+pub trait CustomerMessaging {
     #[effect(type = "notify.email", exactly_once)]
     async fn email(&self, notice: &EmailNotice) -> Result<EmailSent, EffectError>;
 

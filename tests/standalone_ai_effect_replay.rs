@@ -139,10 +139,10 @@ impl AiRole<TicketRaised> for SummarizeTicket {
     fn interpret(
         &self,
         ticket: TicketRaised,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<TicketSummarised, HandlerError> {
         self.counters.response.fetch_add(1, Ordering::SeqCst);
-        let reply = outcome.replied()?;
+        let reply = call.replied()?;
         if self.failure == MapperFailure::AfterEffect {
             return Err(HandlerError::Domain(
                 "fixture response mapping failed".to_string(),
@@ -194,9 +194,9 @@ impl AiRole<TicketSummarised> for EmbedSummary {
     fn interpret(
         &self,
         ticket: TicketSummarised,
-        outcome: AiOutcome<EmbeddingGenerationReply>,
+        call: AiOutcome<EmbeddingGenerationReply>,
     ) -> Result<TicketEmbedded, HandlerError> {
-        let reply = outcome.replied()?;
+        let reply = call.replied()?;
         Ok(TicketEmbedded {
             id: ticket.id,
             vectors: reply.response.vectors,
@@ -402,10 +402,10 @@ impl AiRole<Chunk<TicketRaised>> for SummarizeTickets {
     fn interpret(
         &self,
         chunk: Chunk<TicketRaised>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<TicketSummarised, HandlerError> {
         let id = chunk.iter().map(|ticket| ticket.id).sum();
-        if outcome.unavailable().is_some() {
+        if call.unavailable().is_some() {
             return Ok(TicketSummarised {
                 id,
                 summary: "summary unavailable".to_string(),
@@ -413,7 +413,7 @@ impl AiRole<Chunk<TicketRaised>> for SummarizeTickets {
         }
         Ok(TicketSummarised {
             id,
-            summary: outcome.replied()?.text().to_string(),
+            summary: call.replied()?.text().to_string(),
         })
     }
 }
@@ -444,11 +444,11 @@ impl AiRole<Partials<TicketRaised, TicketSummarised>> for EmbedSummaries {
     fn interpret(
         &self,
         input: Partials<TicketRaised, TicketSummarised>,
-        outcome: AiOutcome<EmbeddingGenerationReply>,
+        call: AiOutcome<EmbeddingGenerationReply>,
     ) -> Result<TicketEmbedded, HandlerError> {
         Ok(TicketEmbedded {
             id: input.partials().iter().map(|partial| partial.id).sum(),
-            vectors: outcome.replied()?.response.vectors,
+            vectors: call.replied()?.response.vectors,
         })
     }
 }

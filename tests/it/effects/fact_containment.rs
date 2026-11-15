@@ -369,6 +369,8 @@ impl obzenflow_core::StageFactSet for CollidingOutcome {
     }
 }
 
+impl obzenflow_core::EffectOutcomeFacts for CollidingOutcome {}
+
 struct CollidingService;
 
 #[derive(Clone, Debug, Serialize)]

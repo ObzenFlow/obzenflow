@@ -422,7 +422,6 @@ where
 mod tests {
     use super::*;
     use obzenflow_core::id::CompositeId;
-    use obzenflow_core::StageOutputFacts;
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -871,13 +870,6 @@ mod tests {
         const EVENT_TYPE: &'static str = "as_of_join.unpriced";
     }
 
-    #[derive(Clone, Debug, StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
-    enum Pricing {
-        Priced(Priced),
-        Unpriced(Unpriced),
-    }
-
     #[test]
     fn left_as_of_writes_one_named_output_for_each_stream_row() {
         let adapter = adapter(crate::stages::join::left_as_of(
@@ -885,16 +877,18 @@ mod tests {
             |version: &Version| version.at,
             |row: &Row| row.key.clone(),
             |row: &Row| row.at,
-            |version: AsOf<Version>, _row: Row| match version {
-                AsOf::Found(version) => Pricing::Priced(Priced {
-                    value: version.value,
-                }),
-                AsOf::BeforeFirstVersion => Pricing::Unpriced(Unpriced {
-                    reason: "before first version".to_string(),
-                }),
-                AsOf::NoVersions => Pricing::Unpriced(Unpriced {
-                    reason: "no versions".to_string(),
-                }),
+            |version: AsOf<Version>, _row: Row| -> obzenflow_core::outcome![Priced | Unpriced] {
+                match version {
+                    AsOf::Found(version) => obzenflow_core::outcome(Priced {
+                        value: version.value,
+                    }),
+                    AsOf::BeforeFirstVersion => obzenflow_core::outcome(Unpriced {
+                        reason: "before first version".to_string(),
+                    }),
+                    AsOf::NoVersions => obzenflow_core::outcome(Unpriced {
+                        reason: "no versions".to_string(),
+                    }),
+                }
             },
         ));
         let mut state = adapter.initial_state();
