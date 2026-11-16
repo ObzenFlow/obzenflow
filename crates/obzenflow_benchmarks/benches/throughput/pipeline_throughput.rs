@@ -277,7 +277,7 @@ struct SettleEach {
 #[async_trait]
 impl EffectfulTransformHandler for SettleEach {
     type Input = Input;
-    type Output = obzenflow_core::stage_fact_set![Settled];
+    type Output = Settled;
     async fn process(
         &self,
         input: Input,

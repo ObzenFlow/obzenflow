@@ -166,9 +166,6 @@ impl TypedStatefulHandler for DailyProfile {
     fn post_emit(&self, _: &mut Self::State) {}
 }
 
-pub type ScoreOutput =
-    obzenflow::schema::stage_fact_set![TransactionCleared, AlertRaised, ScoreUnavailable];
-
 #[obzenflow::command(through = RiskEnginePort)]
 #[derive(Clone, Debug)]
 pub struct Scorer;
@@ -176,7 +173,7 @@ pub struct Scorer;
 #[async_trait]
 impl EffectfulTransformHandler for Scorer {
     type Input = ProfiledTransaction;
-    type Output = ScoreOutput;
+    type Output = obzenflow::schema::outcome![TransactionCleared | AlertRaised | ScoreUnavailable];
 
     async fn process(
         &self,
@@ -203,8 +200,6 @@ impl EffectfulTransformHandler for Scorer {
     }
 }
 
-pub type OpenCaseOutput = obzenflow::schema::stage_fact_set![CaseOpened, CaseUnavailable];
-
 #[obzenflow::command(through = CaseSystemPort)]
 #[derive(Clone, Debug)]
 pub struct CaseOpener;
@@ -212,7 +207,7 @@ pub struct CaseOpener;
 #[async_trait]
 impl EffectfulTransformHandler for CaseOpener {
     type Input = AlertRaised;
-    type Output = OpenCaseOutput;
+    type Output = obzenflow::schema::outcome![CaseOpened | CaseUnavailable];
 
     async fn process(
         &self,

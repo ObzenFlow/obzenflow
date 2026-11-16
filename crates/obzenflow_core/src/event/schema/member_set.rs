@@ -14,9 +14,8 @@
 //! `There`, because rustc's secondary notes can render hidden types even
 //! under `#[diagnostic::on_unimplemented]`.
 
-use super::typed_fact_set::{decode_member_fact, TypedFact, TypedFactSetError, TypedFactType};
+use super::typed_fact_set::TypedFactType;
 use super::typed_payload::TypedPayload;
-use std::any::Any;
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -164,7 +163,7 @@ impl<Head: 'static, Rest: AppendList<Tail>, Tail> AppendList<Tail> for WithMembe
     type Output = WithMember<Head, Rest::Output>;
 }
 
-/// One committed fact of a fact list: its head fact or one of the rest.
+/// One fact of an outcome being folded: its head fact or one of the rest.
 #[doc(hidden)]
 pub enum FactOr<Head, Rest> {
     Head(Head),
@@ -201,8 +200,8 @@ impl<Head: PartialEq, Rest: PartialEq> PartialEq for FactOr<Head, Rest> {
 
 impl<Head: Eq, Rest: Eq> Eq for FactOr<Head, Rest> {}
 
-/// What is left of a committed fact once every listed fact has been taken
-/// out; it has no value.
+/// What is left of an outcome once every listed fact has been taken out; it
+/// has no value.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoOtherFact {}
@@ -217,32 +216,13 @@ pub trait FactList: MemberList {
     /// DSL's per-stage assertion hook.
     const DISTINCT_EVENT_TYPES: ();
 
-    /// One committed fact of the list.
-    type Committed: Send + Sync + 'static;
-
     fn append_fact_types(out: &mut Vec<TypedFactType>);
-
-    fn decode_committed(fact: &TypedFact) -> Result<Self::Committed, TypedFactSetError>;
-
-    fn committed_from(fact: Box<dyn Any>) -> Self::Committed;
 }
 
 impl FactList for EmptySet {
     const DISTINCT_EVENT_TYPES: () = ();
 
-    type Committed = NoOtherFact;
-
     fn append_fact_types(_out: &mut Vec<TypedFactType>) {}
-
-    fn decode_committed(fact: &TypedFact) -> Result<NoOtherFact, TypedFactSetError> {
-        Err(TypedFactSetError::UnexpectedFact {
-            event_type: fact.event_type.clone(),
-        })
-    }
-
-    fn committed_from(_fact: Box<dyn Any>) -> NoOtherFact {
-        unreachable!("a fact whose event type the list declares is one of the list's types")
-    }
 }
 
 impl<Head, Rest> FactList for WithMember<Head, Rest>
@@ -255,47 +235,10 @@ where
         Rest::DISTINCT_EVENT_TYPES,
     );
 
-    type Committed = FactOr<Head, Rest::Committed>;
-
     fn append_fact_types(out: &mut Vec<TypedFactType>) {
         out.push(TypedFactType::of::<Head>());
         Rest::append_fact_types(out);
     }
-
-    fn decode_committed(fact: &TypedFact) -> Result<Self::Committed, TypedFactSetError> {
-        if Head::matches_fact(fact) {
-            decode_member_fact::<Head>(std::slice::from_ref(fact)).map(FactOr::Head)
-        } else {
-            Rest::decode_committed(fact).map(FactOr::Rest)
-        }
-    }
-
-    fn committed_from(fact: Box<dyn Any>) -> Self::Committed {
-        match fact.downcast::<Head>() {
-            Ok(fact) => FactOr::Head(*fact),
-            Err(other) => FactOr::Rest(Rest::committed_from(other)),
-        }
-    }
-}
-
-/// Whether the list declares a fact with `F`'s event type, evaluated at
-/// compile time.
-#[doc(hidden)]
-pub trait ListsEventType<F> {
-    const LISTED: bool;
-}
-
-impl<F> ListsEventType<F> for EmptySet {
-    const LISTED: bool = false;
-}
-
-impl<F, Head, Rest> ListsEventType<F> for WithMember<Head, Rest>
-where
-    F: TypedPayload,
-    Head: TypedPayload,
-    Rest: ListsEventType<F>,
-{
-    const LISTED: bool = const_str_eq(F::EVENT_TYPE, Head::EVENT_TYPE) || Rest::LISTED;
 }
 
 /// Pairwise `EVENT_TYPE` disjointness between one fact type and every member

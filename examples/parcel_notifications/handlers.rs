@@ -16,7 +16,7 @@ pub struct NotifyCustomer;
 #[async_trait]
 impl EffectfulTransformHandler for NotifyCustomer {
     type Input = LocatedParcel;
-    type Output = obzenflow::schema::stage_fact_set![EmailSent, SmsSent];
+    type Output = obzenflow::schema::outcome![EmailSent | SmsSent];
 
     async fn process(
         &self,

@@ -45,7 +45,7 @@ use super::typed_payload::TypedPayload;
 /// assert_eq!(answers(declined), 1);
 /// ```
 ///
-/// `StageOutputs<T>` and `stage_fact_set![...]` are refused:
+/// `StageOutputs<T>` is refused:
 ///
 /// ```compile_fail
 /// # use obzenflow_core::{EffectOutcomeFacts, StageOutputs, TypedPayload};
@@ -53,16 +53,6 @@ use super::typed_payload::TypedPayload;
 /// # impl TypedPayload for Authorized { const EVENT_TYPE: &'static str = "doc.authorized"; }
 /// fn port_answer<A: EffectOutcomeFacts>() {}
 /// port_answer::<StageOutputs<Authorized>>();
-/// ```
-///
-/// ```compile_fail
-/// # use obzenflow_core::{stage_fact_set, EffectOutcomeFacts, TypedPayload};
-/// # #[derive(serde::Serialize, serde::Deserialize)] struct Authorized;
-/// # impl TypedPayload for Authorized { const EVENT_TYPE: &'static str = "doc.authorized"; }
-/// # #[derive(serde::Serialize, serde::Deserialize)] struct Declined;
-/// # impl TypedPayload for Declined { const EVENT_TYPE: &'static str = "doc.declined"; }
-/// fn port_answer<A: EffectOutcomeFacts>() {}
-/// port_answer::<stage_fact_set![Authorized, Declined]>();
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a port's answer",

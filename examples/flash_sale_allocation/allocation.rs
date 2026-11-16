@@ -12,7 +12,7 @@ use super::warehouse::{StockRelease, StockReservation, WarehousePort};
 use async_trait::async_trait;
 use obzenflow::effects::{EffectError, Effects, Port, StageCompletion};
 use obzenflow::error::HandlerError;
-use obzenflow::schema::stage_fact_set;
+use obzenflow::schema::outcome;
 use obzenflow::stages::stateful::{fold, EffectfulStatefulHandler};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -80,13 +80,8 @@ pub(crate) fn is_reserve_policy_rejection(error: &EffectError) -> bool {
 impl EffectfulStatefulHandler for Allocator {
     type State = AllocationState;
     type Input = AllocationInput;
-    type Output = stage_fact_set![
-        StockReserved,
-        StockReleased,
-        ReservationFailed,
-        SoldOut,
-        CancelIgnored
-    ];
+    type Output =
+        outcome![StockReserved | StockReleased | ReservationFailed | SoldOut | CancelIgnored];
 
     fn initial_state(&self) -> Self::State {
         AllocationState::default()
@@ -272,12 +267,11 @@ mod tests {
         allocator
             .apply(
                 &mut state,
-                StockReserved {
+                outcome(StockReserved {
                     order_id: order("order-1"),
                     sku: sku(),
                     hold_id: HoldId::from("hold-1".to_string()),
-                }
-                .into(),
+                }),
             )
             .unwrap();
         let before = state.clone();
@@ -285,11 +279,10 @@ mod tests {
         allocator
             .apply(
                 &mut state,
-                ReservationFailed {
+                outcome(ReservationFailed {
                     order_id: order("order-2"),
                     sku: sku(),
-                }
-                .into(),
+                }),
             )
             .unwrap();
 

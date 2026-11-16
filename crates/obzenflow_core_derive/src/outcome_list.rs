@@ -15,10 +15,6 @@ const REPEATED: &str = "duplicate member in a declared stage fact set: two membe
                         type; each fact type appears exactly once";
 
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    sorted(input).unwrap_or_else(syn::Error::into_compile_error)
-}
-
-fn sorted(input: TokenStream) -> syn::Result<TokenStream> {
     let mut tokens = input.into_iter();
     let mut krate = TokenStream::new();
     for token in tokens.by_ref() {
@@ -27,8 +23,20 @@ fn sorted(input: TokenStream) -> syn::Result<TokenStream> {
             token => krate.extend([token]),
         }
     }
-    let outcomes = outcomes.parse2(tokens.collect())?;
-    refuse_repeated_facts(&outcomes)?;
+    let written: TokenStream = tokens.collect();
+    match outcomes.parse2(written.clone()) {
+        Ok(outcomes) => match refuse_repeated_facts(&outcomes) {
+            Ok(()) => list(&krate, outcomes),
+            Err(refusal) => refused(&krate, outcomes, refusal),
+        },
+        Err(refusal) => match separated_outcomes.parse2(written) {
+            Ok(outcomes) => refused(&krate, outcomes, refusal),
+            Err(_) => refusal.into_compile_error(),
+        },
+    }
+}
+
+fn list(krate: &TokenStream, outcomes: Vec<Type>) -> TokenStream {
     let mut keyed = outcomes
         .into_iter()
         .map(|outcome| (sort_key(&outcome), outcome))
@@ -42,7 +50,25 @@ fn sorted(input: TokenStream) -> syn::Result<TokenStream> {
             quote!(#krate::event::schema::OutcomeOr<#outcome, #list>)
         };
     }
-    Ok(list)
+    list
+}
+
+fn refused(krate: &TokenStream, outcomes: Vec<Type>, refusal: syn::Error) -> TokenStream {
+    let mut written: Vec<String> = Vec::new();
+    let mut kept = Vec::new();
+    for outcome in outcomes {
+        let rendered = facts(&outcome)
+            .into_iter()
+            .map(|fact| fact.to_token_stream().to_string())
+            .collect::<Vec<_>>();
+        if rendered.iter().all(|fact| !written.contains(fact)) {
+            written.extend(rendered);
+            kept.push(outcome);
+        }
+    }
+    let list = list(krate, kept);
+    let refusal = refusal.into_compile_error();
+    quote!(<#list as #krate::event::schema::__private::Refused<{ #refusal }>>::List)
 }
 
 fn outcomes(input: ParseStream<'_>) -> syn::Result<Vec<Type>> {
@@ -54,6 +80,21 @@ fn outcomes(input: ParseStream<'_>) -> syn::Result<Vec<Type>> {
         }
         input.parse::<Token![|]>()?;
         outcomes.push(input.parse::<Type>()?);
+    }
+    Ok(outcomes)
+}
+
+fn separated_outcomes(input: ParseStream<'_>) -> syn::Result<Vec<Type>> {
+    let mut outcomes = vec![input.parse::<Type>()?];
+    while !input.is_empty() {
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        } else {
+            input.parse::<Token![|]>()?;
+        }
+        if !input.is_empty() {
+            outcomes.push(input.parse::<Type>()?);
+        }
     }
     Ok(outcomes)
 }
@@ -145,6 +186,16 @@ mod tests {
             refused.contains("outcomes are separated with `|`"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn comma_list_expands_recovered_type() {
+        let refused = expanded(quote!(krate; PaymentAuthorized, PaymentDeclined));
+        assert!(
+            refused.contains("OutcomeOr < PaymentAuthorized , krate :: event :: schema :: OutcomeOr < PaymentDeclined > >"),
+            "{refused}"
+        );
+        assert!(refused.contains("__private :: Refused"), "{refused}");
     }
 
     #[test]

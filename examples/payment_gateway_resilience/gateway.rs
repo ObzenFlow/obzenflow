@@ -93,12 +93,6 @@ pub struct AuthorizePayment {
     recovery_pause_claimed: Arc<AtomicBool>,
 }
 
-type AuthorizePaymentOutput = obzenflow::schema::stage_fact_set![
-    PaymentAuthorized,
-    PaymentDeclined,
-    PaymentAuthorizationUnavailable
-];
-
 impl AuthorizePayment {
     pub fn new(payment_gateway_port: Port<dyn PaymentGatewayPort>) -> Self {
         Self {
@@ -132,7 +126,7 @@ impl AuthorizePayment {
 #[async_trait]
 impl EffectfulTransformHandler for AuthorizePayment {
     type Input = ValidatedOrder;
-    type Output = AuthorizePaymentOutput;
+    type Output = outcome![PaymentAuthorized | PaymentDeclined | PaymentAuthorizationUnavailable];
 
     async fn process(
         &self,

@@ -326,8 +326,8 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// Mealy-split effectful stateful surface: `decide` performs effects and
 /// emits facts, `apply` folds each committed fact into state.
 ///
-/// `Output` is the set of facts `decide` may emit, one fact or
-/// `stage_fact_set![...]`, and `apply` receives each committed fact as a value
+/// `Output` names the facts `decide` may emit, one fact or an `outcome![...]`
+/// list of single facts, and `apply` receives each committed fact as a value
 /// of it, one call per fact in commit order. An effect's answer never reaches
 /// `apply` whole: a multi-fact answer folds as its member facts.
 ///
@@ -357,8 +357,8 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// type Output = PaymentAuthorized;
 /// ```
 ///
-/// A stage with several facts lists them with `stage_fact_set![...]` and tells
-/// them apart in `apply` with `fold!`, whose arms are the facts' own patterns:
+/// A stage with several facts lists them with `outcome![...]` and tells them
+/// apart in `apply` with `fold!`, whose arms are the facts' own patterns:
 ///
 /// ```ignore
 /// #[async_trait::async_trait]
@@ -368,7 +368,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 ///     type State = PaymentState;
 ///     type Input = ValidatedOrder;
 ///     type Output =
-///         obzenflow_core::stage_fact_set![PaymentAuthorized, PaymentDeclined, OrderCancelled];
+///         obzenflow_core::outcome![PaymentAuthorized | PaymentDeclined | OrderCancelled];
 ///
 ///     // `initial_state` and `decide` follow.
 ///
@@ -595,8 +595,8 @@ where
             .collect::<Vec<_>>()
             .join(", ");
         HandlerError::ContractViolation(format!(
-            "effectful_stateful_output: committed event `{}` of type `{}` is not one of the \
-             `Output`'s facts ({declared}): {error}",
+            "effectful_stateful_output: committed event `{}` of type `{}` could not be decoded \
+             as one of the `Output`'s facts ({declared}): {error}",
             event.id, fact.event_type,
         ))
     })
@@ -688,10 +688,10 @@ mod tests {
             serde_json::json!({ "value": 2 }),
         );
 
-        let fact: obzenflow_core::stage_fact_set![FirstOutput, SecondOutput] =
+        let fact: obzenflow_core::outcome![FirstOutput | SecondOutput] =
             decode_effectful_stateful_fact(&event).expect("listed fact decodes");
 
-        assert_eq!(fact, SecondOutput { value: 2 }.into());
+        assert_eq!(fact, obzenflow_core::outcome(SecondOutput { value: 2 }));
     }
 
     #[test]
@@ -704,7 +704,7 @@ mod tests {
         );
 
         let error = decode_effectful_stateful_fact::<
-            obzenflow_core::stage_fact_set![FirstOutput, SecondOutput],
+            obzenflow_core::outcome![FirstOutput | SecondOutput],
         >(&event)
         .expect_err("an unlisted fact does not decode");
 

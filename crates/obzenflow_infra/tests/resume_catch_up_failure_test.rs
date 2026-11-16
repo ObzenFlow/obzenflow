@@ -168,7 +168,7 @@ struct EffectfulTail {
 #[async_trait]
 impl EffectfulTransformHandler for EffectfulTail {
     type Input = Merged;
-    type Output = obzenflow_core::stage_fact_set![AbortOutput, EffectValue];
+    type Output = obzenflow_core::outcome![AbortOutput | EffectValue];
 
     async fn process(
         &self,

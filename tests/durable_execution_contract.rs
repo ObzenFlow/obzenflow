@@ -389,12 +389,10 @@ struct Authorize {
     gateway: effects::Port<Gateway>,
 }
 
-type Authorization = obzenflow::schema::stage_fact_set![PaymentAuthorized, PaymentDeclined];
-
 #[async_trait]
 impl EffectfulTransformHandler for Authorize {
     type Input = CustomerOrderPlaced;
-    type Output = Authorization;
+    type Output = obzenflow::schema::outcome![PaymentAuthorized | PaymentDeclined];
 
     async fn process(
         &self,
@@ -4263,7 +4261,7 @@ mod two_effects {
     #[async_trait]
     impl EffectfulTransformHandler for Charge {
         type Input = ChargeOrder;
-        type Output = obzenflow::schema::stage_fact_set![Authorized, Captured];
+        type Output = obzenflow::schema::outcome![Authorized | Captured];
 
         async fn process(
             &self,

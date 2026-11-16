@@ -259,9 +259,6 @@ impl Keyed for ScriptedAuthorize {
     }
 }
 
-type GatewayOutput =
-    obzenflow_core::stage_fact_set![PaymentAuthorized, PaymentAuthorizationUnavailable];
-
 #[obzenflow::command]
 #[derive(Debug, Clone)]
 struct ScriptedGatewayTransform {
@@ -282,7 +279,7 @@ impl ScriptedGatewayTransform {
 #[async_trait]
 impl EffectfulTransformHandler for ScriptedGatewayTransform {
     type Input = ValidatedOrder;
-    type Output = GatewayOutput;
+    type Output = obzenflow_core::outcome![PaymentAuthorized | PaymentAuthorizationUnavailable];
 
     async fn process(
         &self,

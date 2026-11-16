@@ -90,24 +90,11 @@ where
 
 /// The `Output` bound of a typed transform and an AI role's `Out`: one fact,
 /// an `outcome![...]` list or [`StageOutputs`].
-///
-/// `stage_fact_set![...]` is refused:
-///
-/// ```compile_fail
-/// # use obzenflow_core::{stage_fact_set, StageOutputFacts, TypedPayload};
-/// # #[derive(serde::Serialize, serde::Deserialize)] struct Valid;
-/// # impl TypedPayload for Valid { const EVENT_TYPE: &'static str = "doc.valid"; }
-/// # #[derive(serde::Serialize, serde::Deserialize)] struct Invalid;
-/// # impl TypedPayload for Invalid { const EVENT_TYPE: &'static str = "doc.invalid"; }
-/// fn transform_output<O: StageOutputFacts>() {}
-/// transform_output::<stage_fact_set![Valid, Invalid]>();
-/// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a transform's `Output` or an AI role's `Out`",
     label = "a transform returns one fact, `outcome![...]` or `StageOutputs<T>`",
     note = "a transform returns exactly one outcome per input, listed as `outcome![A | (B, C)]`, \
-            or any number of facts of one type as `StageOutputs<T>`; `stage_fact_set![...]` is \
-            the set an effectful handler may emit"
+            or any number of facts of one type as `StageOutputs<T>`"
 )]
 pub trait StageOutputFacts: TypedFactSet + StageFactSet {}
 
@@ -236,7 +223,7 @@ mod tests {
         is_effect_outcome::<crate::outcome![Valid | (Invalid, Cancelled)]>();
         is_one_fact_output::<crate::outcome![Valid | Invalid]>();
         is_stage_output::<StageOutputs<Solo>>();
-        is_effectful_output::<crate::stage_fact_set![Valid, Invalid]>();
+        is_effectful_output::<crate::outcome![Valid | Invalid]>();
         is_effectful_output::<Solo>();
     }
 

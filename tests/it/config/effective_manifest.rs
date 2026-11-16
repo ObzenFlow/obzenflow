@@ -157,7 +157,7 @@ impl PaymentEffectsHandler {
 #[async_trait]
 impl EffectfulTransformHandler for PaymentEffectsHandler {
     type Input = Item;
-    type Output = obzenflow_core::stage_fact_set![PaymentEffectFact];
+    type Output = PaymentEffectFact;
 
     async fn process(
         &self,

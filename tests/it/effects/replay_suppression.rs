@@ -329,7 +329,7 @@ struct ReplayTransform {
 #[async_trait]
 impl EffectfulTransformHandler for ReplayTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -365,7 +365,7 @@ struct BlockingTransform {
 #[async_trait]
 impl EffectfulTransformHandler for BlockingTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -406,7 +406,7 @@ struct PostPerformBlockingTransform {
 #[async_trait]
 impl EffectfulTransformHandler for PostPerformBlockingTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -467,7 +467,7 @@ struct ReplayStateful {
 impl EffectfulStatefulHandler for ReplayStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
-    type Output = obzenflow::schema::stage_fact_set![ReplayEffectValue, ReplayOutput];
+    type Output = obzenflow::schema::outcome![ReplayEffectValue | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
@@ -553,7 +553,7 @@ fn is_circuit_breaker_rejection(error: &EffectError) -> bool {
 impl EffectfulStatefulHandler for PolicyStateful {
     type State = PolicyStatefulState;
     type Input = ReplayInput;
-    type Output = obzenflow::schema::stage_fact_set![PolicyReserved, ReservationFailed];
+    type Output = obzenflow::schema::outcome![PolicyReserved | ReservationFailed];
 
     fn initial_state(&self) -> Self::State {
         PolicyStatefulState::default()
@@ -639,7 +639,7 @@ struct ErrorAfterCommitStateful {
 impl EffectfulStatefulHandler for ErrorAfterCommitStateful {
     type State = ErrorAfterCommitState;
     type Input = ReplayInput;
-    type Output = obzenflow::schema::stage_fact_set![ReplayEffectValue, ReplayOutput];
+    type Output = obzenflow::schema::outcome![ReplayEffectValue | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ErrorAfterCommitState::default()
@@ -716,7 +716,7 @@ struct ApplyRejectingStateful {
 impl EffectfulStatefulHandler for ApplyRejectingStateful {
     type State = ApplyRejectionState;
     type Input = ReplayInput;
-    type Output = obzenflow::schema::stage_fact_set![ReplayEffectValue, ReplayOutput];
+    type Output = obzenflow::schema::outcome![ReplayEffectValue | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ApplyRejectionState::default()
@@ -813,7 +813,7 @@ struct ProductStateful {
 impl EffectfulStatefulHandler for ProductStateful {
     type State = ProductStatefulState;
     type Input = ReplayInput;
-    type Output = obzenflow::schema::stage_fact_set![ProductFirst, ProductSecond, ReplayOutput];
+    type Output = obzenflow::schema::outcome![ProductFirst | ProductSecond | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ProductStatefulState
@@ -1187,7 +1187,7 @@ struct SiblingTransform;
 #[async_trait]
 impl EffectfulTransformHandler for SiblingTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -1216,7 +1216,7 @@ struct SiblingStateful;
 impl EffectfulStatefulHandler for SiblingStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
-    type Output = obzenflow::schema::stage_fact_set![ReplayEffectValue, ReplayOutput];
+    type Output = obzenflow::schema::outcome![ReplayEffectValue | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
@@ -3727,7 +3727,7 @@ struct PortedTransform {
 #[async_trait]
 impl EffectfulTransformHandler for PortedTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -3981,7 +3981,7 @@ struct LedgerTransform {
 #[async_trait]
 impl EffectfulTransformHandler for LedgerTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -4188,7 +4188,7 @@ struct FailFastTransform {
 #[async_trait]
 impl EffectfulTransformHandler for FailFastTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -4236,7 +4236,7 @@ struct MultiEffectFailFastTransform {
 #[async_trait]
 impl EffectfulTransformHandler for MultiEffectFailFastTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,

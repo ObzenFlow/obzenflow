@@ -185,7 +185,7 @@ impl EffectfulTail {
 #[async_trait]
 impl EffectfulTransformHandler for EffectfulTail {
     type Input = JoinedItem;
-    type Output = obzenflow_core::stage_fact_set![FinalOutput, JoinEffectValue];
+    type Output = obzenflow_core::outcome![FinalOutput | JoinEffectValue];
 
     async fn process(
         &self,

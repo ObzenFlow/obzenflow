@@ -222,7 +222,7 @@ impl EffectfulTail {
 #[async_trait]
 impl EffectfulTransformHandler for EffectfulTail {
     type Input = MergedRecord;
-    type Output = obzenflow_core::stage_fact_set![FanInOutput, FanInEffectValue];
+    type Output = obzenflow_core::outcome![FanInOutput | FanInEffectValue];
 
     async fn process(
         &self,

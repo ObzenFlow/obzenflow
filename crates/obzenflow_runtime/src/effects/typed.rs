@@ -257,7 +257,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type Output = Charged;
     ///
     ///     async fn process(
     ///         &self,
@@ -298,7 +298,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type Output = Charged;
     ///
     ///     async fn process(
     ///         &self,
@@ -343,7 +343,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type Output = Charged;
     ///
     ///     async fn process(
     ///         &self,
@@ -391,7 +391,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type Output = Charged;
     ///
     ///     async fn process(
     ///         &self,
@@ -435,7 +435,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Shipped];
+    ///     type Output = Shipped;
     ///
     ///     async fn process(
     ///         &self,

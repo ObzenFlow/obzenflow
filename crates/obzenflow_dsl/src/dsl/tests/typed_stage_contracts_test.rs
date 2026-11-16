@@ -350,7 +350,7 @@ mod tests {
     #[async_trait]
     impl EffectfulTransformHandler for EffectfulMultiOutputTransform {
         type Input = OutputEvent;
-        type Output = obzenflow_core::stage_fact_set![OutputEvent, AlternateEvent];
+        type Output = obzenflow_core::outcome![OutputEvent | AlternateEvent];
 
         async fn process(
             &self,
@@ -417,7 +417,7 @@ mod tests {
     {
         type State = ();
         type Input = InputEvent;
-        type Output = obzenflow_core::stage_fact_set![OutputEvent, AlternateEvent];
+        type Output = obzenflow_core::outcome![OutputEvent | AlternateEvent];
 
         fn initial_state(&self) -> Self::State {}
 

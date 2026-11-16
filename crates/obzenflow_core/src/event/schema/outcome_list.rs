@@ -9,10 +9,14 @@
 //! lowers to those facts in the order written. The list itself is never
 //! persisted.
 
+use super::fold::FoldStart;
 use super::member_set::{
-    AppendList, EmptySet, FactList, MemberAfter, MemberFound, MemberList, WithMember,
+    AppendList, EmptySet, FactList, FactOr, MemberAfter, MemberFound, MemberList, NoOtherFact,
+    WithMember,
 };
-use super::stage_fact_set::{assert_distinct_stage_fact_set, StageFactSet};
+use super::stage_fact_set::{
+    assert_distinct_stage_fact_set, DecodeCommitted, EffectfulStageOutput, StageFactSet,
+};
 use super::typed_fact_set::{
     decode_member_fact, missing_fact_group_error, TypedFact, TypedFactSet, TypedFactSetError,
     TypedFactType,
@@ -252,6 +256,17 @@ where
     const MEMBERS_DISTINCT: () = <<Self as OutcomeList>::Members as FactList>::DISTINCT_EVENT_TYPES;
 }
 
+/// A list `outcome!` refused, kept as written so its refusal is the only
+/// error.
+#[doc(hidden)]
+pub trait Refused<const REFUSAL: bool> {
+    type List;
+}
+
+impl<List, const REFUSAL: bool> Refused<REFUSAL> for List {
+    type List = List;
+}
+
 /// Lists where every outcome is one fact.
 #[doc(hidden)]
 pub trait SingleFactOutcomes {}
@@ -259,6 +274,39 @@ pub trait SingleFactOutcomes {}
 impl SingleFactOutcomes for NoOtherOutcome {}
 
 impl<Head: TypedPayload, Rest: SingleFactOutcomes> SingleFactOutcomes for OutcomeOr<Head, Rest> {}
+
+impl<Head, Rest> EffectfulStageOutput for OutcomeOr<Head, Rest> where
+    Self: StageFactSet + SingleFactOutcomes
+{
+}
+
+impl<Head, Rest> DecodeCommitted for OutcomeOr<Head, Rest>
+where
+    Self: TypedFactSet + StageFactSet + SingleFactOutcomes,
+{
+    fn decode_committed(fact: &TypedFact) -> Result<Self, TypedFactSetError> {
+        Self::try_from_facts(std::slice::from_ref(fact))
+    }
+}
+
+impl FoldStart for NoOtherOutcome {
+    type Remaining = NoOtherFact;
+
+    fn fold_start(self) -> NoOtherFact {
+        match self {}
+    }
+}
+
+impl<Head: TypedPayload, Rest: FoldStart> FoldStart for OutcomeOr<Head, Rest> {
+    type Remaining = FactOr<Head, Rest::Remaining>;
+
+    fn fold_start(self) -> Self::Remaining {
+        match self.0 {
+            Case::Head(fact) => FactOr::Head(fact),
+            Case::Rest(rest) => FactOr::Rest(rest.fold_start()),
+        }
+    }
+}
 
 /// The list holds `Outcome` at `Position`, which the compiler infers.
 #[diagnostic::on_unimplemented(
@@ -494,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn outcome_list_tuple_lowers_in_written_order() {
+    fn outcome_list_tuple_lowers_written_order() {
         let accepted: crate::outcome![Valid | (Invalid, Cancelled)] = outcome(Valid { value: 4 });
         assert_eq!(
             recorded(&accepted.into_facts().expect("outcome lowers")),
@@ -588,5 +636,56 @@ mod tests {
     fn outcome_list_debug_prints_held_outcome() {
         let accepted: crate::outcome![Valid | (Invalid, Cancelled)] = outcome(Valid { value: 4 });
         assert_eq!(format!("{accepted:?}"), "Valid { value: 4 }");
+    }
+
+    fn command_output<O: EffectfulStageOutput + DecodeCommitted>() {}
+
+    #[test]
+    fn fact_list_command_output_accepted() {
+        command_output::<crate::outcome![Valid | Invalid]>();
+        command_output::<Valid>();
+    }
+
+    #[test]
+    fn committed_fact_decodes_into_list() {
+        let invalid = Invalid {
+            reason: "empty".to_string(),
+        };
+        let fact = TypedFact::from_payload(invalid.clone()).unwrap();
+        let decoded =
+            <crate::outcome![Valid | Invalid] as DecodeCommitted>::decode_committed(&fact).unwrap();
+        assert_eq!(decoded, outcome(invalid));
+    }
+
+    #[test]
+    fn foreign_fact_decode_refused() {
+        let fact = TypedFact::from_payload(Cancelled {
+            reason: "late".to_string(),
+        })
+        .unwrap();
+        assert!(
+            <crate::outcome![Valid | Invalid] as DecodeCommitted>::decode_committed(&fact).is_err()
+        );
+    }
+
+    #[test]
+    fn list_outcome_folds_by_fact() {
+        fn label(fact: crate::outcome![Valid | Invalid]) -> &'static str {
+            crate::fold!(match fact {
+                Valid { .. } => {
+                    "valid"
+                }
+                Invalid { .. } => {
+                    "invalid"
+                }
+            })
+        }
+        assert_eq!(label(outcome(Valid { value: 1 })), "valid");
+        assert_eq!(
+            label(outcome(Invalid {
+                reason: "empty".to_string()
+            })),
+            "invalid"
+        );
     }
 }

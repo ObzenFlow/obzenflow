@@ -113,7 +113,7 @@ impl<Outcome> EffectOutcomeSemantics<Outcome> for RecordedReply
 where
     Outcome: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    type PublicFacts = obzenflow_core::stage_fact_set![];
+    type PublicFacts = obzenflow_core::event::schema::EmptySet;
 
     const KIND: EffectOutcomeKind = EffectOutcomeKind::RecordedReply;
 

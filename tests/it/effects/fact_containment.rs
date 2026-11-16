@@ -111,7 +111,7 @@ impl PerformTransform {
 #[async_trait]
 impl EffectfulTransformHandler for PerformTransform {
     type Input = ContainmentInput;
-    type Output = obzenflow_core::stage_fact_set![ContainmentOutput, ContainmentEffectValue];
+    type Output = obzenflow_core::outcome![ContainmentOutput | ContainmentEffectValue];
 
     async fn process(
         &self,

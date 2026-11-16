@@ -82,7 +82,7 @@ impl TypedPayload for Right {
     const EVENT_TYPE: &'static str = "facade.right";
 }
 
-type Facts = of::schema::stage_fact_set![Fact];
+type Facts = Fact;
 type NoEffects = <Pure as of::effects::Command>::AllowedEffects;
 
 #[of::effects::command(effects = of::effects)]
@@ -226,7 +226,7 @@ impl transforms::EffectfulTransformHandler for Pure {
 impl stateful::EffectfulStatefulHandler for Pure {
     type State = u64;
     type Input = Fact;
-    type Output = of::schema::stage_fact_set![Fact, Left];
+    type Output = of::schema::outcome![Fact | Left];
 
     fn initial_state(&self) -> u64 {
         0
@@ -273,7 +273,7 @@ fn renamed_facade_outcomes_preserve_flat_facts() {
     );
     let mut state = 4;
     let mut handler = Pure;
-    stateful::EffectfulStatefulHandler::apply(&mut handler, &mut state, Left(2).into()).unwrap();
+    stateful::EffectfulStatefulHandler::apply(&mut handler, &mut state, outcome(Left(2))).unwrap();
     std::assert_eq!(state, 6);
     std::assert!(StageOutputs::<Fact>::none()
         .into_facts()

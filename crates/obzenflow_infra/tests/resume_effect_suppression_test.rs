@@ -139,7 +139,7 @@ struct EnrichTransform {
 #[async_trait]
 impl EffectfulTransformHandler for EnrichTransform {
     type Input = Reading;
-    type Output = obzenflow_core::stage_fact_set![Enriched, EffectValue];
+    type Output = obzenflow_core::outcome![Enriched | EffectValue];
 
     async fn process(
         &self,

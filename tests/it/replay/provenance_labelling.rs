@@ -145,7 +145,7 @@ struct ValidateOrder;
 #[async_trait]
 impl EffectfulTransformHandler for ValidateOrder {
     type Input = OrderPlaced;
-    type Output = obzenflow_core::stage_fact_set![ValidatedOrder, OrderCancelled];
+    type Output = obzenflow_core::outcome![ValidatedOrder | OrderCancelled];
 
     async fn process(
         &self,
@@ -224,11 +224,8 @@ impl AuthorizePayment {
 #[async_trait]
 impl EffectfulTransformHandler for AuthorizePayment {
     type Input = ValidatedOrder;
-    type Output = obzenflow_core::stage_fact_set![
-        OrderAuthorized,
-        AuthorizationUnavailable,
-        OrderCancelled,
-        AuthGrant
+    type Output = obzenflow_core::outcome![
+        OrderAuthorized | AuthorizationUnavailable | OrderCancelled | AuthGrant
     ];
 
     async fn process(

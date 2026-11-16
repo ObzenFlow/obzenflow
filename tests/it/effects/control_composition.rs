@@ -93,7 +93,7 @@ impl OneEffectHandler {
 #[async_trait]
 impl EffectfulTransformHandler for OneEffectHandler {
     type Input = CompositionInput;
-    type Output = obzenflow_core::stage_fact_set![CompositionFact];
+    type Output = CompositionFact;
 
     async fn process(
         &self,
@@ -122,7 +122,7 @@ impl TwoEffectHandler {
 #[async_trait]
 impl EffectfulTransformHandler for TwoEffectHandler {
     type Input = CompositionInput;
-    type Output = obzenflow_core::stage_fact_set![CompositionFact];
+    type Output = CompositionFact;
 
     async fn process(
         &self,
@@ -726,7 +726,7 @@ impl PaidHandler {
 #[async_trait]
 impl EffectfulTransformHandler for PaidHandler {
     type Input = CompositionInput;
-    type Output = obzenflow_core::stage_fact_set![CompositionFact];
+    type Output = CompositionFact;
 
     async fn process(
         &self,
@@ -747,7 +747,7 @@ struct WholePortHandler {
 #[async_trait]
 impl EffectfulTransformHandler for WholePortHandler {
     type Input = CompositionInput;
-    type Output = obzenflow_core::stage_fact_set![CompositionFact];
+    type Output = CompositionFact;
 
     async fn process(
         &self,
@@ -765,7 +765,7 @@ struct NoEffectHandler;
 #[async_trait]
 impl EffectfulTransformHandler for NoEffectHandler {
     type Input = CompositionInput;
-    type Output = obzenflow_core::stage_fact_set![CompositionFact];
+    type Output = CompositionFact;
 
     async fn process(
         &self,

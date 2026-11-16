@@ -2,12 +2,26 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Folding one committed fact of a `stage_fact_set![...]`, written
+//! Folding one outcome of an `outcome![...]` list of single facts, written
 //! `fold!(match fact { … })`.
 
 use super::member_set::{FactOr, MemberAfter, MemberFound, NoOtherFact};
 
-/// Takes fact `T` out of a committed fact, or leaves the facts still to fold.
+/// A value `fold!` takes apart: an outcome whose facts are still to fold.
+#[doc(hidden)]
+pub trait FoldStart {
+    type Remaining;
+
+    fn fold_start(self) -> Self::Remaining;
+}
+
+/// The facts of `fact` still to fold.
+#[doc(hidden)]
+pub fn fold_start<List: FoldStart>(fact: List) -> List::Remaining {
+    fact.fold_start()
+}
+
+/// Takes fact `T` out of an outcome, or leaves the facts still to fold.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{T}` is not a fact left to fold",
@@ -76,8 +90,8 @@ pub trait Folded {
     fn unfolded<Value>() -> Value;
 }
 
-/// Fold one committed fact of a `stage_fact_set![...]` by each fact's own
-/// pattern, inside an effectful stateful handler's `apply`.
+/// Fold one outcome of an `outcome![...]` list of single facts by each fact's
+/// own pattern, inside an effectful stateful handler's `apply`.
 ///
 /// Each arm is an irrefutable pattern of one listed fact, `|` joins
 /// alternatives, `name @ Fact { .. }` binds the whole fact, and `_` may end
@@ -85,7 +99,7 @@ pub trait Folded {
 /// unlisted or already folded, are refused at compile time.
 ///
 /// ```
-/// use obzenflow_core::{fold, stage_fact_set, TypedPayload};
+/// use obzenflow_core::{fold, outcome, TypedPayload};
 /// use serde::{Deserialize, Serialize};
 ///
 /// #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,7 +120,7 @@ pub trait Folded {
 ///     const EVENT_TYPE: &'static str = "stock.sold_out";
 /// }
 ///
-/// type Output = stage_fact_set![StockReserved, StockReleased, SoldOut];
+/// type Output = outcome![StockReserved | StockReleased | SoldOut];
 ///
 /// fn apply(holds: &mut Vec<u32>, fact: Output) {
 ///     fold!(match fact {
@@ -117,8 +131,8 @@ pub trait Folded {
 /// }
 ///
 /// let mut holds = Vec::new();
-/// apply(&mut holds, StockReserved { hold_id: 7 }.into());
-/// apply(&mut holds, SoldOut.into());
+/// apply(&mut holds, outcome(StockReserved { hold_id: 7 }));
+/// apply(&mut holds, outcome(SoldOut));
 /// assert_eq!(holds, vec![7]);
 /// ```
 ///
@@ -126,12 +140,12 @@ pub trait Folded {
 /// refused:
 ///
 /// ```compile_fail
-/// # use obzenflow_core::{fold, stage_fact_set, TypedPayload};
+/// # use obzenflow_core::{fold, outcome, TypedPayload};
 /// # #[derive(serde::Serialize, serde::Deserialize)] struct StockReserved;
 /// # impl TypedPayload for StockReserved { const EVENT_TYPE: &'static str = "doc.reserved"; }
 /// # #[derive(serde::Serialize, serde::Deserialize)] struct CancelIgnored;
 /// # impl TypedPayload for CancelIgnored { const EVENT_TYPE: &'static str = "doc.ignored"; }
-/// fn apply(fact: stage_fact_set![StockReserved, CancelIgnored]) {
+/// fn apply(fact: outcome![StockReserved | CancelIgnored]) {
 ///     fold!(match fact {
 ///         StockReserved => {}
 ///     });
@@ -139,14 +153,17 @@ pub trait Folded {
 /// ```
 ///
 /// ```compile_fail
-/// # use obzenflow_core::{fold, stage_fact_set, TypedPayload};
+/// # use obzenflow_core::{fold, outcome, TypedPayload};
 /// # #[derive(serde::Serialize, serde::Deserialize)] struct StockReserved;
 /// # impl TypedPayload for StockReserved { const EVENT_TYPE: &'static str = "doc.reserved"; }
+/// # #[derive(serde::Serialize, serde::Deserialize)] struct SoldOut;
+/// # impl TypedPayload for SoldOut { const EVENT_TYPE: &'static str = "doc.sold_out"; }
 /// # #[derive(serde::Serialize, serde::Deserialize)] struct Unlisted;
 /// # impl TypedPayload for Unlisted { const EVENT_TYPE: &'static str = "doc.unlisted"; }
-/// fn apply(fact: stage_fact_set![StockReserved]) {
+/// fn apply(fact: outcome![StockReserved | SoldOut]) {
 ///     fold!(match fact {
 ///         StockReserved => {}
+///         SoldOut => {}
 ///         Unlisted => {}
 ///     });
 /// }

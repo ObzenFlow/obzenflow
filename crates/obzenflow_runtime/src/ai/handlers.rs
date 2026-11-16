@@ -228,7 +228,7 @@ where
 
 #[doc(hidden)]
 pub type AiMapPartialFacts<T, P> =
-    obzenflow_core::stage_fact_set![AiMapReduceTaggedPartial<T, P>, AiMapReduceChunkFailed];
+    obzenflow_core::outcome![AiMapReduceTaggedPartial<T, P> | AiMapReduceChunkFailed];
 
 #[doc(hidden)]
 pub struct AiPartialMapHandler<R, T> {

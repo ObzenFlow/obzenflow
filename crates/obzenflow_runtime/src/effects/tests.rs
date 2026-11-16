@@ -1363,7 +1363,7 @@ fn is_test_policy_rejection(error: &EffectError) -> bool {
 impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTranslationStateful {
     type State = Vec<u64>;
     type Input = FirstOutput;
-    type Output = obzenflow_core::stage_fact_set![CountingOutput, SecondOutput];
+    type Output = obzenflow_core::outcome![CountingOutput | SecondOutput];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1415,7 +1415,7 @@ struct EmitThenErrorStateful;
 impl crate::stages::common::handlers::EffectfulStatefulHandler for EmitThenErrorStateful {
     type State = Vec<String>;
     type Input = FirstOutput;
-    type Output = obzenflow_core::stage_fact_set![FirstOutput, SecondOutput];
+    type Output = obzenflow_core::outcome![FirstOutput | SecondOutput];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1496,7 +1496,7 @@ struct SecondFactApplyErrorStateful;
 impl crate::stages::common::handlers::EffectfulStatefulHandler for SecondFactApplyErrorStateful {
     type State = Vec<String>;
     type Input = FirstOutput;
-    type Output = obzenflow_core::stage_fact_set![FirstOutput, SecondOutput];
+    type Output = obzenflow_core::outcome![FirstOutput | SecondOutput];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -2928,10 +2928,8 @@ async fn typed_completion_reports_direct_facts_in_commit_order() {
         output_descriptor_for::<FirstOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
-    let mut effects = Effects::<
-        obzenflow_core::stage_fact_set![FirstOutput, SecondOutput],
-        Allowed<()>,
-    >::new(ctx);
+    let mut effects =
+        Effects::<obzenflow_core::outcome![FirstOutput | SecondOutput], Allowed<()>>::new(ctx);
 
     effects.emit(FirstOutput { value: 1 }).await.unwrap();
     effects

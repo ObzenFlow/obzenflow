@@ -9,7 +9,7 @@ pub use crate::dsl::ai_stage::{
 };
 pub use obzenflow_adapters::middleware::{capture_middleware, MiddlewareFactory};
 pub use obzenflow_core::assert_distinct_stage_fact_set;
-pub use obzenflow_core::stage_fact_set;
+pub use obzenflow_core::event::schema::{EmptySet, WithMember};
 pub use obzenflow_core::StageFactSet;
 pub use obzenflow_runtime::effects::assert_command;
 pub use obzenflow_runtime::effects::assert_handler_performs_no_ai_effect;

@@ -180,8 +180,7 @@ impl<Input> EffectfulStatefulInputMatchesArrow<Input> for Input {}
 #[diagnostic::on_unimplemented(
     message = "the stage arrow declares an output fact missing from the handler's `Output`",
     label = "this arrow output contract is not contained in the handler's `Output` set",
-    note = "an effectful handler's `Output` is `stage_fact_set![...]`, and a returned value's \
-            is `outcome![...]`"
+    note = "a handler's `Output` is one fact or `outcome![...]`"
 )]
 pub trait ArrowOutputsAreDeclaredByHandler<HandlerMembers, Proof>:
     proof_sealed::DeclaredSubsetOf<HandlerMembers, Proof>
@@ -204,8 +203,7 @@ where
 #[diagnostic::on_unimplemented(
     message = "the handler's `Output` declares a fact missing from the stage arrow",
     label = "the handler's `Output` set is not contained in this arrow output contract",
-    note = "an effectful handler's `Output` is `stage_fact_set![...]`, and a returned value's \
-            is `outcome![...]`"
+    note = "a handler's `Output` is one fact or `outcome![...]`"
 )]
 pub trait HandlerOutputsAreDeclaredByArrow<ArrowMembers, Proof>:
     proof_sealed::DeclaredSubsetOf<ArrowMembers, Proof>

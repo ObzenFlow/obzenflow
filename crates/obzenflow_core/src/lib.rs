@@ -41,10 +41,9 @@ pub use journal::Journal;
 
 // Schema types, stage fact sets and membership proofs.
 pub use event::schema::{
-    assert_distinct_stage_fact_set, outcome, DeclaredStageFactSet, EffectOutcomeFacts,
-    EffectfulStageOutput, Member, MiddlewareContextKey, OneFactStageOutput, StageFactSet,
-    StageOutputFacts, StageOutputs, SubsetOf, TypedFact, TypedFactSet, TypedFactSetError,
-    TypedFactType, TypedPayload,
+    assert_distinct_stage_fact_set, outcome, EffectOutcomeFacts, EffectfulStageOutput, Member,
+    MiddlewareContextKey, OneFactStageOutput, StageFactSet, StageOutputFacts, StageOutputs,
+    SubsetOf, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
 };
 
 // Re-export typed IDs
