@@ -22,7 +22,7 @@ use obzenflow_core::metrics::{
     BoundaryDirection, CompositeBoundary, CompositeBoundaryEdge, CompositeBoundaryPort,
     CompositeDurationAccumulator,
 };
-use obzenflow_core::{outcome, StageId, StageOutputs, TypedPayload, WriterId};
+use obzenflow_core::{outcome, Outcomes, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{ai, flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -116,15 +116,13 @@ struct Explode;
 
 impl TypedTransformHandler for Explode {
     type Input = Seed;
-    type Output = StageOutputs<SeedValue>;
+    type Output = Outcomes<SeedValue>;
 
-    fn process(&self, seed: Seed) -> Result<StageOutputs<SeedValue>, HandlerError> {
-        Ok(StageOutputs::many(seed.values.iter().map(|value| {
-            SeedValue {
-                seed: seed.id,
-                key: seed.key,
-                value: *value,
-            }
+    fn process(&self, seed: Seed) -> Result<Outcomes<SeedValue>, HandlerError> {
+        Ok(Outcomes::many(seed.values.iter().map(|value| SeedValue {
+            seed: seed.id,
+            key: seed.key,
+            value: *value,
         })))
     }
 }

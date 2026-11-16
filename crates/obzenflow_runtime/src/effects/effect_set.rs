@@ -157,7 +157,7 @@ where
 }
 
 /// Check-time hook forcing a set's duplicate guard, mirroring
-/// `assert_distinct_stage_fact_set` for the effect side.
+/// `assert_distinct_outcome_facts` for the effect side.
 #[doc(hidden)]
 pub const fn assert_distinct_effect_set<S: EffectSet>() {
     S::MEMBERS_DISTINCT

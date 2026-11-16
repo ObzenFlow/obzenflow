@@ -14,7 +14,7 @@
 
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
-use obzenflow_core::{StageOutputs, TypedPayload, WriterId};
+use obzenflow_core::{Outcomes, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, infinite_source, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
@@ -737,14 +737,14 @@ struct CycleEntry;
 
 impl TypedTransformHandler for CycleEntry {
     type Input = Tick;
-    type Output = StageOutputs<Tick>;
+    type Output = Outcomes<Tick>;
 
-    fn process(&self, mut event: Tick) -> Result<StageOutputs<Tick>, HandlerError> {
+    fn process(&self, mut event: Tick) -> Result<Outcomes<Tick>, HandlerError> {
         if event.kind == "done" {
-            return Ok(StageOutputs::none());
+            return Ok(Outcomes::none());
         }
         event.kind = if event.depth >= 2 { "done" } else { "iter" }.to_string();
-        Ok(StageOutputs::one(event))
+        Ok(Outcomes::one(event))
     }
 }
 
@@ -754,14 +754,14 @@ struct CycleIter;
 
 impl TypedTransformHandler for CycleIter {
     type Input = Tick;
-    type Output = StageOutputs<Tick>;
+    type Output = Outcomes<Tick>;
 
-    fn process(&self, mut event: Tick) -> Result<StageOutputs<Tick>, HandlerError> {
+    fn process(&self, mut event: Tick) -> Result<Outcomes<Tick>, HandlerError> {
         if event.kind != "iter" {
-            return Ok(StageOutputs::none());
+            return Ok(Outcomes::none());
         }
         event.depth += 1;
-        Ok(StageOutputs::one(event))
+        Ok(Outcomes::one(event))
     }
 }
 

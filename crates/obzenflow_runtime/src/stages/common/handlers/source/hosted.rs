@@ -34,7 +34,7 @@ use obzenflow_core::ingress::{
     HostedIngressBindingSlot, IngressContentDigest, IngressContext, IngressReceipt,
     IngressRequestId,
 };
-use obzenflow_core::{ChainEvent, EventId, OneFactStageOutput, WriterId};
+use obzenflow_core::{ChainEvent, EventId, OneFactOutcome, WriterId};
 use ring::digest::{digest, SHA256};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -294,7 +294,7 @@ impl HostedAdmission {
     /// Decide every member, lower the new ones, and hold their receipts until
     /// commit. Duplicates and conflicts resolve immediately. Joins only occur
     /// within one poll: the source polls again only after this poll commits.
-    pub(super) fn admit<O: OneFactStageOutput>(
+    pub(super) fn admit<O: OneFactOutcome>(
         &mut self,
         writer_id: WriterId,
         submissions: Vec<HostedSubmission<O>>,

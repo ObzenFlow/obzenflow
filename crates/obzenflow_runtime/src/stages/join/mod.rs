@@ -52,7 +52,7 @@ pub use strategies::{
     InnerJoin, InnerJoinBuilder, LeftJoin, LeftJoinBuilder, StrictJoin, StrictJoinBuilder,
 };
 
-use obzenflow_core::{OneFactStageOutput, TypedPayload};
+use obzenflow_core::{OneFactOutcome, TypedPayload};
 use std::hash::Hash;
 
 /// Construct an inner join with a finite reference side.
@@ -342,7 +342,7 @@ pub fn left_as_of<C, S, E, K, T, CatalogKeyFn, EffectiveAtFn, StreamKeyFn, AsOfF
 where
     C: TypedPayload + Clone + Send + Sync + 'static,
     S: TypedPayload + Clone + Send + Sync + 'static,
-    E: OneFactStageOutput + Send + Sync + 'static,
+    E: OneFactOutcome + Send + Sync + 'static,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     T: Ord + Copy + Send + Sync + std::fmt::Debug + 'static,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,

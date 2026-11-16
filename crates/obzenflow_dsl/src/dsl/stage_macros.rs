@@ -140,7 +140,7 @@ macro_rules! __obzenflow_row_facts {
 #[macro_export]
 macro_rules! __obzenflow_admit_typed_source {
     (factory = $factory:ident, output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __source_policies: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -185,7 +185,7 @@ macro_rules! __obzenflow_admit_typed_source {
 #[macro_export]
 macro_rules! __obzenflow_admit_placeholder_source {
     (factory = $factory:ident, output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, message = $message:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __source_policies: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -1214,7 +1214,7 @@ macro_rules! __obzenflow_async_infinite_source_attachment_contract {
 macro_rules! __obzenflow_transform_typed {
     // -- exact input, placeholder, explicit output contract --
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -1226,7 +1226,7 @@ macro_rules! __obzenflow_transform_typed {
         >($name, None, __observers)
     }};
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -1243,7 +1243,7 @@ macro_rules! __obzenflow_transform_typed {
     // flow.
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -1504,20 +1504,20 @@ macro_rules! __obzenflow_assert_effectful_transform_contract {
             H: $crate::__private::EffectfulTransformHandler,
             <H as $crate::__private::EffectfulTransformHandler>::Input:
                 $crate::dsl::typing::EffectfulTransformInputMatchesArrow<$in>,
-            <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::StageFactSet>::Members:
+            <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
-                    <<H as $crate::__private::EffectfulTransformHandler>::Output as $crate::__private::StageFactSet>::Members,
+                    <<H as $crate::__private::EffectfulTransformHandler>::Output as $crate::__private::Outcome>::Members,
                     ArrowToHandlerProof,
                 >,
-            <<H as $crate::__private::EffectfulTransformHandler>::Output as $crate::__private::StageFactSet>::Members:
+            <<H as $crate::__private::EffectfulTransformHandler>::Output as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
-                    <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::StageFactSet>::Members,
+                    <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members,
                     HandlerToArrowProof,
                 >,
         {}
 
         __obzenflow_assert_effectful_transform_contract::<_, _, _>(&$handler);
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
     }};
@@ -1536,20 +1536,20 @@ macro_rules! __obzenflow_assert_effectful_stateful_contract {
             H: $crate::__private::EffectfulStatefulHandler,
             <H as $crate::__private::EffectfulStatefulHandler>::Input:
                 $crate::dsl::typing::EffectfulStatefulInputMatchesArrow<$in>,
-            <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::StageFactSet>::Members:
+            <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
-                    <<H as $crate::__private::EffectfulStatefulHandler>::Output as $crate::__private::StageFactSet>::Members,
+                    <<H as $crate::__private::EffectfulStatefulHandler>::Output as $crate::__private::Outcome>::Members,
                     ArrowToHandlerProof,
                 >,
-            <<H as $crate::__private::EffectfulStatefulHandler>::Output as $crate::__private::StageFactSet>::Members:
+            <<H as $crate::__private::EffectfulStatefulHandler>::Output as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
-                    <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::StageFactSet>::Members,
+                    <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members,
                     HandlerToArrowProof,
                 >,
         {}
 
         __obzenflow_assert_effectful_stateful_contract::<_, _, _>(&$handler);
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
     }};
@@ -2150,7 +2150,7 @@ macro_rules! __obzenflow_stateful_emit_option {
 #[macro_export]
 macro_rules! __obzenflow_stateful_typed {
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), emit = $emit:ident $(($interval:expr))?, middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -2166,7 +2166,7 @@ macro_rules! __obzenflow_stateful_typed {
             __observers,        )
     }};
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), emit = $emit:ident $(($interval:expr))?, middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -2183,7 +2183,7 @@ macro_rules! __obzenflow_stateful_typed {
     }};
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = $emit:ident $(($interval:expr))?, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -2530,7 +2530,7 @@ macro_rules! __obzenflow_join_typed {
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!(),
      middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -2548,7 +2548,7 @@ macro_rules! __obzenflow_join_typed {
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!($msg:expr),
      middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -2591,7 +2591,7 @@ macro_rules! __obzenflow_join_typed {
      name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
      middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
@@ -4224,20 +4224,20 @@ macro_rules! __obzenflow_assert_ai_outputs {
         fn __obzenflow_assert_ai_outputs<H, ArrowToHandlerProof, HandlerToArrowProof>(_: &H)
         where
             H: $crate::dsl::ai_stage::AiStageHandler,
-            <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::StageFactSet>::Members:
+            <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
-                    <<H as $crate::dsl::ai_stage::AiStageHandler>::Out as $crate::__private::StageFactSet>::Members,
+                    <<H as $crate::dsl::ai_stage::AiStageHandler>::Out as $crate::__private::Outcome>::Members,
                     ArrowToHandlerProof,
                 >,
-            <<H as $crate::dsl::ai_stage::AiStageHandler>::Out as $crate::__private::StageFactSet>::Members:
+            <<H as $crate::dsl::ai_stage::AiStageHandler>::Out as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
-                    <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::StageFactSet>::Members,
+                    <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members,
                     HandlerToArrowProof,
                 >,
         {}
 
         __obzenflow_assert_ai_outputs::<_, _, _>(&$handler);
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
             $crate::__obzenflow_row_facts![$($member),+],
         >();
     }};

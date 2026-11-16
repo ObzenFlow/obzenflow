@@ -16,7 +16,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_core::{Member, OneFactStageOutput, StageFactSet, TypedFactType, TypedPayload};
+use obzenflow_core::{Member, OneFactOutcome, Outcome, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
     AdmitSource, JoinBinding, TypedJoinHandlerAdapter, UnifiedAsyncFiniteSourceHandler,
     UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
@@ -179,7 +179,7 @@ impl<Input> EffectfulStatefulInputMatchesArrow<Input> for Input {}
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "the stage arrow declares an output fact missing from the handler's `Output`",
-    label = "this arrow output contract is not contained in the handler's `Output` set",
+    label = "this arrow output contract is not contained in the handler's `Output`",
     note = "a handler's `Output` is one fact or `outcome![...]`"
 )]
 pub trait ArrowOutputsAreDeclaredByHandler<HandlerMembers, Proof>:
@@ -202,7 +202,7 @@ where
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "the handler's `Output` declares a fact missing from the stage arrow",
-    label = "the handler's `Output` set is not contained in this arrow output contract",
+    label = "the handler's `Output` is not contained in this arrow output contract",
     note = "a handler's `Output` is one fact or `outcome![...]`"
 )]
 pub trait HandlerOutputsAreDeclaredByArrow<ArrowMembers, Proof>:
@@ -581,7 +581,7 @@ fn source_metadata_from_contract<PrimaryOutput, ArrowOutputSet>(
 ) -> StageTypingMetadata
 where
     PrimaryOutput: TypedPayload + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
 {
     let output_contract = ArrowOutputSet::member_fact_types()
         .into_iter()
@@ -616,10 +616,10 @@ where
     H: AdmitSource<dyn UnifiedFiniteSourceHandler, Kind>,
     H::Handler: UnifiedFiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
-    <H::Output as StageFactSet>::Members:
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
+    <H::Output as Outcome>::Members:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
@@ -655,10 +655,10 @@ where
     H: AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, Kind>,
     H::Handler: UnifiedAsyncFiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
-    <H::Output as StageFactSet>::Members:
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
+    <H::Output as Outcome>::Members:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
@@ -690,10 +690,10 @@ where
     H: AdmitSource<dyn UnifiedInfiniteSourceHandler, Kind>,
     H::Handler: UnifiedInfiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
-    <H::Output as StageFactSet>::Members:
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
+    <H::Output as Outcome>::Members:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
@@ -729,10 +729,10 @@ where
     H: AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, Kind>,
     H::Handler: UnifiedAsyncInfiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
-    <H::Output as StageFactSet>::Members:
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
+    <H::Output as Outcome>::Members:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
@@ -758,7 +758,7 @@ pub fn placeholder_finite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
 ) -> Box<dyn StageDescriptor>
 where
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
         true,
@@ -786,7 +786,7 @@ pub fn placeholder_async_finite_source_descriptor<PrimaryOutput, ArrowOutputSet>
 ) -> Box<dyn StageDescriptor>
 where
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
         true,
@@ -814,7 +814,7 @@ pub fn placeholder_infinite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
 ) -> Box<dyn StageDescriptor>
 where
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
         true,
@@ -842,7 +842,7 @@ pub fn placeholder_async_infinite_source_descriptor<PrimaryOutput, ArrowOutputSe
 ) -> Box<dyn StageDescriptor>
 where
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
         true,
@@ -866,7 +866,7 @@ fn transform_metadata_from_contract<ArrowInput, PrimaryOutput, ArrowOutputSet>(
 where
     ArrowInput: TypedPayload + 'static,
     PrimaryOutput: TypedPayload + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
 {
     let output_contract = ArrowOutputSet::member_fact_types()
         .into_iter()
@@ -884,7 +884,7 @@ where
 /// Canonical admission factory for a real synchronous transform.
 ///
 /// Public only for exported macro expansion. The handler owns its associated
-/// types, the arrow supplies an exact fact set, and this function proves both
+/// types, the arrow supplies its exact facts, and this function proves both
 /// directions before adapting and erasing the handler.
 #[doc(hidden)]
 pub fn typed_transform_descriptor<
@@ -905,10 +905,10 @@ where
     H::Input: TransformInputMatchesArrow<ArrowInput>,
     ArrowInput: TypedPayload + Send + Sync + 'static,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
-    <H::Output as StageFactSet>::Members:
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
+    <H::Output as Outcome>::Members:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata =
@@ -936,7 +936,7 @@ pub fn placeholder_transform_descriptor<
 where
     ArrowInput: TypedPayload + Send + Sync + 'static,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>,
 {
     let metadata = transform_metadata_from_contract::<ArrowInput, PrimaryOutput, ArrowOutputSet>(
@@ -958,7 +958,7 @@ fn stateful_metadata_from_contract<ArrowInput, PrimaryOutput, ArrowOutputSet>(
 where
     ArrowInput: TypedPayload + 'static,
     PrimaryOutput: TypedPayload + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
 {
     let output_contract = ArrowOutputSet::member_fact_types()
         .into_iter()
@@ -994,10 +994,10 @@ where
     H::Input: StatefulInputMatchesArrow<ArrowInput>,
     ArrowInput: TypedPayload + Send + Sync + 'static,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
-    <H::Output as StageFactSet>::Members:
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
+    <H::Output as Outcome>::Members:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata =
@@ -1028,7 +1028,7 @@ pub fn placeholder_stateful_descriptor<
 where
     ArrowInput: TypedPayload + Send + Sync + 'static,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>,
 {
     let metadata = stateful_metadata_from_contract::<ArrowInput, PrimaryOutput, ArrowOutputSet>(
@@ -1055,7 +1055,7 @@ where
     ArrowReference: TypedPayload + 'static,
     ArrowStream: TypedPayload + 'static,
     PrimaryOutput: TypedPayload + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
 {
     let output_contract = ArrowOutputSet::member_fact_types()
         .into_iter()
@@ -1095,10 +1095,10 @@ where
     ArrowReference: TypedPayload + Clone + Send + Sync + 'static,
     ArrowStream: TypedPayload + Send + Sync + 'static,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
-    <H::Output as StageFactSet>::Members:
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
+    <H::Output as Outcome>::Members:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata =
@@ -1134,7 +1134,7 @@ where
     ArrowReference: TypedPayload + Clone + Send + Sync + 'static,
     ArrowStream: TypedPayload + Send + Sync + 'static,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>,
 {
     let metadata =
@@ -1534,7 +1534,7 @@ impl<In, Out> fmt::Debug for PlaceholderStateful<In, Out> {
 impl<In, Out> TypedStatefulHandler for PlaceholderStateful<In, Out>
 where
     In: TypedPayload + Send + Sync + 'static,
-    Out: OneFactStageOutput + Send + Sync + 'static,
+    Out: OneFactOutcome + Send + Sync + 'static,
 {
     type State = ();
     type Input = In;
@@ -1655,7 +1655,7 @@ impl<Ref, Stream, Out> TypedJoinHandler for PlaceholderJoin<Ref, Stream, Out>
 where
     Ref: TypedPayload + Clone + Send + Sync + 'static,
     Stream: TypedPayload + Send + Sync + 'static,
-    Out: OneFactStageOutput + Send + Sync + 'static,
+    Out: OneFactOutcome + Send + Sync + 'static,
 {
     type State = ();
     type ReferenceKey = ();
@@ -2091,7 +2091,7 @@ fn selected_or_single_output_for_fan_in(
 
 /// FLOWIP-120m: unconditional producer-side effect-fact containment.
 ///
-/// Every declared effect's fact set must be contained in the stage's arrow
+/// Every declared effect's facts must be contained in the stage's arrow
 /// contract. This check runs before live I/O.
 pub fn validate_effect_fact_containment(
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,

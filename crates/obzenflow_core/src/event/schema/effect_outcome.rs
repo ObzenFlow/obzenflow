@@ -11,16 +11,16 @@
 //! the stage output contract.
 
 use super::member_set::FactList;
+use super::outcome::Outcome;
+use super::outcome_facts::OutcomeFacts;
 use super::outcome_list::{OutcomeList, OutcomeOr};
-use super::stage_fact_set::StageFactSet;
-use super::typed_fact_set::TypedFactSet;
 use super::typed_payload::TypedPayload;
 
 /// The bound of a port method's answer: one fact, or an `outcome![...]`
 /// list.
 ///
 /// ```
-/// use obzenflow_core::event::schema::{EffectOutcomeFacts, TypedFactSet};
+/// use obzenflow_core::event::schema::{EffectOutcome, OutcomeFacts};
 /// use obzenflow_core::{outcome, TypedPayload};
 /// use serde::{Deserialize, Serialize};
 ///
@@ -36,7 +36,7 @@ use super::typed_payload::TypedPayload;
 ///     const EVENT_TYPE: &'static str = "payment.declined";
 /// }
 ///
-/// fn answers<A: EffectOutcomeFacts>(answer: A) -> usize {
+/// fn answers<A: EffectOutcome>(answer: A) -> usize {
 ///     answer.into_facts().unwrap().len()
 /// }
 ///
@@ -45,14 +45,14 @@ use super::typed_payload::TypedPayload;
 /// assert_eq!(answers(declined), 1);
 /// ```
 ///
-/// `StageOutputs<T>` is refused:
+/// `Outcomes<T>` is refused:
 ///
 /// ```compile_fail
-/// # use obzenflow_core::{EffectOutcomeFacts, StageOutputs, TypedPayload};
+/// # use obzenflow_core::{EffectOutcome, Outcomes, TypedPayload};
 /// # #[derive(serde::Serialize, serde::Deserialize)] struct Authorized;
 /// # impl TypedPayload for Authorized { const EVENT_TYPE: &'static str = "doc.authorized"; }
-/// fn port_answer<A: EffectOutcomeFacts>() {}
-/// port_answer::<StageOutputs<Authorized>>();
+/// fn port_answer<A: EffectOutcome>() {}
+/// port_answer::<Outcomes<Authorized>>();
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a port's answer",
@@ -60,11 +60,11 @@ use super::typed_payload::TypedPayload;
     note = "a port method answers each call with exactly one outcome, listed as \
             `outcome![A | (B, C)]`"
 )]
-pub trait EffectOutcomeFacts: TypedFactSet + StageFactSet {}
+pub trait EffectOutcome: OutcomeFacts + Outcome {}
 
-impl<T: TypedPayload + Send + Sync + 'static> EffectOutcomeFacts for T {}
+impl<T: TypedPayload + Send + Sync + 'static> EffectOutcome for T {}
 
-impl<Head, Rest> EffectOutcomeFacts for OutcomeOr<Head, Rest>
+impl<Head, Rest> EffectOutcome for OutcomeOr<Head, Rest>
 where
     Self: OutcomeList,
     <Self as OutcomeList>::Members: FactList,

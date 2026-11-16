@@ -11,7 +11,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{StageOutputs, TypedPayload};
+use obzenflow_core::{Outcomes, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
@@ -615,13 +615,13 @@ struct ZeroThenFanOut;
 
 impl TypedTransformHandler for ZeroThenFanOut {
     type Input = HandlerInput;
-    type Output = StageOutputs<HandlerOutput>;
+    type Output = Outcomes<HandlerOutput>;
 
     fn process(&self, input: HandlerInput) -> Result<Self::Output, HandlerError> {
         if input.value == 0 {
-            return Ok(StageOutputs::none());
+            return Ok(Outcomes::none());
         }
-        Ok(StageOutputs::many((0..3).map(|copy| HandlerOutput {
+        Ok(Outcomes::many((0..3).map(|copy| HandlerOutput {
             value: input.value,
             copy,
         })))

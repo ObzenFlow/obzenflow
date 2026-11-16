@@ -224,7 +224,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 #[async_trait]
 pub trait EffectfulTransformHandler: crate::effects::Command + Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: obzenflow_core::EffectfulStageOutput;
+    type Output: obzenflow_core::EffectfulOutcome;
 
     async fn process(
         &self,

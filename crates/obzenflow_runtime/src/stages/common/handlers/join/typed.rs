@@ -12,7 +12,7 @@ use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::provenance::CompositeActivationContext;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{ChainEvent, OneFactStageOutput, StageId, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, OneFactOutcome, StageId, TypedPayload, WriterId};
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -52,7 +52,7 @@ pub(super) fn lower_join_outputs<O>(
     framework_eof: Option<EofKind>,
 ) -> Result<ErasedJoinInvocation, HandlerError>
 where
-    O: OneFactStageOutput,
+    O: OneFactOutcome,
 {
     let mut events = Vec::with_capacity(outputs.len());
 
@@ -65,7 +65,7 @@ where
                 StageFatalCode::Protocol,
                 StageFatalReason::ProtocolInputIntegrity,
                 format!(
-                    "one_fact_stage_output: `{}` lowered to {} facts instead of exactly one",
+                    "one_fact_outcome: `{}` lowered to {} facts instead of exactly one",
                     std::any::type_name::<O>(),
                     facts.len(),
                 ),
@@ -173,7 +173,7 @@ pub trait TypedJoinHandler: Send + Sync {
     type ReferenceKey: Eq + Hash + Clone + Send + Sync;
     type Reference: TypedPayload + Clone + Send + Sync + 'static;
     type Stream: TypedPayload + Send + Sync + 'static;
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
 
@@ -276,7 +276,7 @@ where
         framework_eof: Option<EofKind>,
     ) -> Result<ErasedJoinInvocation, HandlerError>
     where
-        O: OneFactStageOutput,
+        O: OneFactOutcome,
     {
         lower_join_outputs(
             self.writer_id()?,
@@ -428,7 +428,7 @@ mod tests {
     use obzenflow_core::event::provenance::CompositeActivationContext;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::id::CompositeId;
-    use obzenflow_core::{OneFactStageOutput, StageOutputFacts};
+    use obzenflow_core::{OneFactOutcome, TransformOutcome};
     use serde::de::{self, Deserializer};
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1021,7 +1021,7 @@ mod tests {
         second: OtherOutput,
     }
 
-    impl obzenflow_core::TypedFactSet for DishonestProduct {
+    impl obzenflow_core::OutcomeFacts for DishonestProduct {
         fn fact_types() -> Vec<obzenflow_core::TypedFactType> {
             vec![
                 obzenflow_core::TypedFactType::of::<TestOutput>(),
@@ -1031,7 +1031,7 @@ mod tests {
 
         fn into_facts(
             self,
-        ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::TypedFactSetError> {
+        ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::OutcomeError> {
             Ok(vec![
                 obzenflow_core::TypedFact::from_payload(self.first)?,
                 obzenflow_core::TypedFact::from_payload(self.second)?,
@@ -1040,7 +1040,7 @@ mod tests {
 
         fn try_from_facts(
             facts: &[obzenflow_core::TypedFact],
-        ) -> Result<Self, obzenflow_core::TypedFactSetError> {
+        ) -> Result<Self, obzenflow_core::OutcomeError> {
             Ok(Self {
                 first: obzenflow_core::event::schema::decode_member_fact(facts)?,
                 second: obzenflow_core::event::schema::decode_member_fact(facts)?,
@@ -1048,7 +1048,7 @@ mod tests {
         }
     }
 
-    impl obzenflow_core::StageFactSet for DishonestProduct {
+    impl obzenflow_core::Outcome for DishonestProduct {
         type Members = obzenflow_core::event::schema::WithMember<
             TestOutput,
             obzenflow_core::event::schema::WithMember<
@@ -1058,13 +1058,13 @@ mod tests {
         >;
 
         fn member_fact_types() -> Vec<obzenflow_core::TypedFactType> {
-            <Self as obzenflow_core::TypedFactSet>::fact_types()
+            <Self as obzenflow_core::OutcomeFacts>::fact_types()
         }
     }
 
-    impl StageOutputFacts for DishonestProduct {}
+    impl TransformOutcome for DishonestProduct {}
 
-    impl OneFactStageOutput for DishonestProduct {}
+    impl OneFactOutcome for DishonestProduct {}
 
     #[derive(Clone, Debug)]
     struct DishonestJoin;
@@ -1180,13 +1180,13 @@ mod tests {
                 writer,
                 live_scope(),
             )
-            .expect_err("two facts violate OneFactStageOutput");
+            .expect_err("two facts violate OneFactOutcome");
         let HandlerError::Fatal(fatal) = error else {
             panic!("dishonest output must become a fatal protocol error")
         };
         assert_eq!(fatal.code, StageFatalCode::Protocol);
         assert_eq!(fatal.reason, StageFatalReason::ProtocolInputIntegrity);
-        assert!(fatal.detail.contains("one_fact_stage_output"));
+        assert!(fatal.detail.contains("one_fact_outcome"));
     }
 
     #[test]

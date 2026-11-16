@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::provenance::causality_context::CausalInput;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{ChainEvent, EventId, OneFactStageOutput, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, EventId, OneFactOutcome, TypedPayload, WriterId};
 use std::time::Duration;
 
 /// The outputs of one emission and whether they close the contribution epoch.
@@ -179,7 +179,7 @@ impl<O> TypedStatefulDrainInvocation<O> {
 pub trait TypedStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
 
@@ -289,7 +289,7 @@ impl<H> TypedStatefulHandlerAdapter<H> {
         fallback_trace: &TraceState,
     ) -> Result<Vec<ChainEvent>, StageFatal>
     where
-        O: OneFactStageOutput,
+        O: OneFactOutcome,
     {
         let writer_id = self.writer_id()?;
         if let Some(traces) = output_traces.as_ref() {
@@ -322,15 +322,14 @@ impl<H> TypedStatefulHandlerAdapter<H> {
                         StageFatalCode::Protocol,
                         StageFatalReason::ProtocolInputIntegrity,
                         format!(
-                            "one_fact_stage_output: `{}` lowered to {} facts instead of exactly one",
+                            "one_fact_outcome: `{}` lowered to {} facts instead of exactly one",
                             std::any::type_name::<O>(),
                             facts.len(),
                         ),
                     ));
                 }
                 let fact = facts.pop().expect("length checked above");
-                let mut event =
-                    fact.into_event(writer_id);
+                let mut event = fact.into_event(writer_id);
                 output_traces
                     .as_ref()
                     .and_then(|traces| traces.get(index))
@@ -678,7 +677,7 @@ mod tests {
         second: OtherOutput,
     }
 
-    impl obzenflow_core::TypedFactSet for DishonestProduct {
+    impl obzenflow_core::OutcomeFacts for DishonestProduct {
         fn fact_types() -> Vec<obzenflow_core::TypedFactType> {
             vec![
                 obzenflow_core::TypedFactType::of::<Output>(),
@@ -688,7 +687,7 @@ mod tests {
 
         fn into_facts(
             self,
-        ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::TypedFactSetError> {
+        ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::OutcomeError> {
             Ok(vec![
                 obzenflow_core::TypedFact::from_payload(self.first)?,
                 obzenflow_core::TypedFact::from_payload(self.second)?,
@@ -697,7 +696,7 @@ mod tests {
 
         fn try_from_facts(
             facts: &[obzenflow_core::TypedFact],
-        ) -> Result<Self, obzenflow_core::TypedFactSetError> {
+        ) -> Result<Self, obzenflow_core::OutcomeError> {
             Ok(Self {
                 first: obzenflow_core::event::schema::decode_member_fact(facts)?,
                 second: obzenflow_core::event::schema::decode_member_fact(facts)?,
@@ -705,7 +704,7 @@ mod tests {
         }
     }
 
-    impl obzenflow_core::StageFactSet for DishonestProduct {
+    impl obzenflow_core::Outcome for DishonestProduct {
         type Members = obzenflow_core::event::schema::WithMember<
             Output,
             obzenflow_core::event::schema::WithMember<
@@ -715,13 +714,13 @@ mod tests {
         >;
 
         fn member_fact_types() -> Vec<obzenflow_core::TypedFactType> {
-            <Self as obzenflow_core::TypedFactSet>::fact_types()
+            <Self as obzenflow_core::OutcomeFacts>::fact_types()
         }
     }
 
-    impl obzenflow_core::StageOutputFacts for DishonestProduct {}
+    impl obzenflow_core::TransformOutcome for DishonestProduct {}
 
-    impl OneFactStageOutput for DishonestProduct {}
+    impl OneFactOutcome for DishonestProduct {}
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct OtherOutput {
@@ -777,7 +776,7 @@ mod tests {
 
         assert_eq!(fatal.code, StageFatalCode::Protocol);
         assert_eq!(fatal.reason, StageFatalReason::ProtocolInputIntegrity);
-        assert!(fatal.detail.contains("one_fact_stage_output"));
+        assert!(fatal.detail.contains("one_fact_outcome"));
         assert_eq!(state.inner, 4, "failed lowering cannot install successor");
         assert_eq!(state.trace.parent_ids(), before_trace);
     }

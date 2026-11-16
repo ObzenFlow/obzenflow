@@ -19,9 +19,9 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     EFFECT_RECOVERY_ABANDONED_EVENT_TYPE,
 };
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::schema::EffectOutcomeFacts;
+use obzenflow_core::event::schema::EffectOutcome;
 pub use obzenflow_core::event::schema::{
-    TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
+    OutcomeError, OutcomeFacts, TypedFact, TypedFactType, TypedPayload,
 };
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
@@ -174,7 +174,7 @@ use identity::{
     hash_json_value, stamp_output_event,
 };
 use replay::{
-    decode_effect_outcome, decode_effect_outcome_group, effect_fact_set_error,
+    decode_effect_outcome, decode_effect_outcome_group, effect_outcome_error,
     effect_record_from_event, effect_record_group_materialization, is_routable_output_fact,
     recorded_failure_from_outcome, validate_effect_outcome_group, EffectRecordMaterialization,
 };

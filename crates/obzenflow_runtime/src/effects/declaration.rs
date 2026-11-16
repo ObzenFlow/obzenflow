@@ -4,7 +4,7 @@
 
 use super::binding::EffectDeclarationBinding;
 use super::*;
-use obzenflow_core::StageFactSet;
+use obzenflow_core::Outcome;
 use serde::de::DeserializeOwned;
 
 pub use obzenflow_core::event::IdempotencyKey;
@@ -35,16 +35,16 @@ pub enum EffectOutcomeKind {
     /// contract.
     DomainFacts,
     /// The outcome is framework-owned replay material returned to the
-    /// handler, never a stage output fact.
+    /// handler, never a fact the stage writes.
     RecordedReply,
 }
 
-/// Successful domain-effect outcomes lower to their named fact set.
+/// Successful domain-effect outcomes lower to their named facts.
 #[derive(Debug, Clone, Copy)]
 pub struct DomainFacts;
 
 /// Successful integration replies are recorded by the framework without
-/// entering the stage's public fact set.
+/// entering the stage's outcome.
 #[derive(Debug, Clone, Copy)]
 pub struct RecordedReply;
 
@@ -69,33 +69,33 @@ pub enum PreparedEffectSuccess {
 
 /// Sealed semantics selected by an [`Effect`] for its successful outcome.
 ///
-/// The associated public fact set drives both compile-time containment and
+/// The associated public facts drive both compile-time containment and
 /// value-level build validation. The preparation and replay methods keep the
 /// mode-specific marshalling behind the same runtime path.
-pub trait EffectOutcomeSemantics<Outcome>:
+pub trait EffectOutcomeSemantics<Answer>:
     sealed_outcome_semantics::Sealed + Send + Sync + 'static
 {
-    type PublicFacts: StageFactSet;
+    type PublicFacts: Outcome;
 
     const KIND: EffectOutcomeKind;
 
     #[doc(hidden)]
-    fn prepare_success(output: &Outcome) -> Result<PreparedEffectSuccess, EffectError>;
+    fn prepare_success(output: &Answer) -> Result<PreparedEffectSuccess, EffectError>;
 
     #[doc(hidden)]
-    fn decode_success(records: &[&EffectRecord]) -> Result<Outcome, EffectError>;
+    fn decode_success(records: &[&EffectRecord]) -> Result<Answer, EffectError>;
 }
 
-impl<Outcome> EffectOutcomeSemantics<Outcome> for DomainFacts
+impl<Answer> EffectOutcomeSemantics<Answer> for DomainFacts
 where
-    Outcome: EffectOutcomeFacts + Clone + Send + Sync + 'static,
+    Answer: EffectOutcome + Clone + Send + Sync + 'static,
 {
-    type PublicFacts = Outcome;
+    type PublicFacts = Answer;
 
     const KIND: EffectOutcomeKind = EffectOutcomeKind::DomainFacts;
 
-    fn prepare_success(output: &Outcome) -> Result<PreparedEffectSuccess, EffectError> {
-        let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
+    fn prepare_success(output: &Answer) -> Result<PreparedEffectSuccess, EffectError> {
+        let facts = output.clone().into_facts().map_err(effect_outcome_error)?;
         if facts.is_empty() {
             return Err(EffectError::Execution(
                 "domain effect success must author at least one fact".to_string(),
@@ -104,26 +104,26 @@ where
         Ok(PreparedEffectSuccess::DomainFacts(facts))
     }
 
-    fn decode_success(records: &[&EffectRecord]) -> Result<Outcome, EffectError> {
+    fn decode_success(records: &[&EffectRecord]) -> Result<Answer, EffectError> {
         decode_effect_outcome_group(records)
     }
 }
 
-impl<Outcome> EffectOutcomeSemantics<Outcome> for RecordedReply
+impl<Answer> EffectOutcomeSemantics<Answer> for RecordedReply
 where
-    Outcome: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+    Answer: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     type PublicFacts = obzenflow_core::event::schema::EmptySet;
 
     const KIND: EffectOutcomeKind = EffectOutcomeKind::RecordedReply;
 
-    fn prepare_success(output: &Outcome) -> Result<PreparedEffectSuccess, EffectError> {
+    fn prepare_success(output: &Answer) -> Result<PreparedEffectSuccess, EffectError> {
         serde_json::to_value(output)
             .map(PreparedEffectSuccess::RecordedReply)
             .map_err(|error| EffectError::Serialization(error.to_string()))
     }
 
-    fn decode_success(records: &[&EffectRecord]) -> Result<Outcome, EffectError> {
+    fn decode_success(records: &[&EffectRecord]) -> Result<Answer, EffectError> {
         validate_effect_outcome_group(records)?;
         let [record] = records else {
             return Err(EffectError::EffectProvenanceMismatch(
@@ -233,8 +233,7 @@ impl EffectDeclaration {
             outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
             public_outcome_fact_types: <<E::OutcomeSemantics as EffectOutcomeSemantics<
                 E::Outcome,
-            >>::PublicFacts as StageFactSet>::member_fact_types(
-            ),
+            >>::PublicFacts as Outcome>::member_fact_types(),
         }
     }
 

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::provenance::CompositeActivationContext;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{ChainEvent, OneFactStageOutput, StageId, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, OneFactOutcome, StageId, TypedPayload, WriterId};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -130,7 +130,7 @@ pub trait TypedAsOfJoinHandler: Send + Sync {
     type EffectiveTime: Ord + Copy + Send + Sync + Debug + 'static;
     type Reference: TypedPayload + Clone + Send + Sync + 'static;
     type Stream: TypedPayload + Send + Sync + 'static;
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
 

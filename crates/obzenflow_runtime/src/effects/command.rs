@@ -12,7 +12,7 @@ use super::{
     NamedEffect, RequestList,
 };
 use crate::stages::common::handlers::{EffectfulStatefulHandler, EffectfulTransformHandler};
-use obzenflow_core::event::schema::{EffectOutcomeFacts, EmptySet, WithMember};
+use obzenflow_core::event::schema::{EffectOutcome, EmptySet, WithMember};
 use obzenflow_core::SystemBindingEvidence;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -398,7 +398,7 @@ pub trait PortAnswer {
     type Outcome;
 }
 
-impl<O: EffectOutcomeFacts> PortAnswer for Result<O, EffectError> {
+impl<O: EffectOutcome> PortAnswer for Result<O, EffectError> {
     type Outcome = O;
 }
 

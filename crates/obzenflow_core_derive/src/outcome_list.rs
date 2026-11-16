@@ -11,7 +11,7 @@ use syn::{Token, Type};
 const COMMAS: &str = "outcomes are separated with `|`: write `outcome![A | B]`, and `(A, B)` for \
                       facts written together";
 
-const REPEATED: &str = "duplicate member in a declared stage fact set: two members share an event \
+const REPEATED: &str = "duplicate fact in an outcome: two facts share an event \
                         type; each fact type appears exactly once";
 
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
@@ -201,6 +201,9 @@ mod tests {
     #[test]
     fn repeated_fact_refused() {
         let refused = expanded(quote!(krate; Approved | (Approved, Audited)));
-        assert!(refused.contains("duplicate member"), "{refused}");
+        assert!(
+            refused.contains("duplicate fact in an outcome"),
+            "{refused}"
+        );
     }
 }

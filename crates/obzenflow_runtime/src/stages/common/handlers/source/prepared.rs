@@ -10,7 +10,7 @@
 use super::continuation::{AsyncReaderOpener, SourceContinuation, SyncReaderOpener};
 use super::SourceError;
 use crate::stages::source::SourceReaderInitContext;
-use obzenflow_core::OneFactStageOutput;
+use obzenflow_core::OneFactOutcome;
 
 pub(super) mod sealed {
     pub trait Admitted<Family: ?Sized, Kind> {}
@@ -25,7 +25,7 @@ pub(super) mod sealed {
 pub trait AdmitSource<Family: ?Sized, Kind>:
     sealed::Admitted<Family, Kind> + Send + Sync + 'static
 {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     type Handler: Send + Sync + 'static;
     /// The continuation captured with the source, before any open (FLOWIP-134i B8).
     const CONTINUATION: SourceContinuation;

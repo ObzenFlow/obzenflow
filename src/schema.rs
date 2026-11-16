@@ -17,9 +17,8 @@
 //! answer and a command's `Output` are written the same way.
 
 pub use obzenflow_core::event::schema::{
-    EffectOutcomeFacts, Member, OneFactStageOutput, StageFactSet, StageOutputFacts, StageOutputs,
-    SubsetOf, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
-    TypedPayloadError,
+    EffectOutcome, Member, OneFactOutcome, Outcome, OutcomeError, OutcomeFacts, Outcomes, SubsetOf,
+    TransformOutcome, TypedFact, TypedFactType, TypedPayload, TypedPayloadError,
 };
 pub use obzenflow_core::outcome;
 pub use obzenflow_core::{ChainEvent, EventId, EventType, FlowId, StageId, StageKey, WriterId};

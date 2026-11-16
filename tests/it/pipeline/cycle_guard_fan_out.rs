@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::JournalReader;
-use obzenflow_core::StageOutputs;
+use obzenflow_core::Outcomes;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -157,12 +157,9 @@ impl FanOutEntryTransform {
 
 impl TypedTransformHandler for FanOutEntryTransform {
     type Input = SeedEvent;
-    type Output = StageOutputs<SeedEvent>;
+    type Output = Outcomes<SeedEvent>;
 
-    fn process(
-        &self,
-        event: SeedEvent,
-    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+    fn process(&self, event: SeedEvent) -> std::result::Result<Outcomes<SeedEvent>, HandlerError> {
         self.processed.fetch_add(1, Ordering::Relaxed);
 
         if event.kind == "seed" {
@@ -176,20 +173,20 @@ impl TypedTransformHandler for FanOutEntryTransform {
                     target: event.target,
                 });
             }
-            return Ok(StageOutputs::many(outputs));
+            return Ok(Outcomes::many(outputs));
         }
 
         if event.kind == "iter" {
             if event.iter >= event.target {
-                return Ok(StageOutputs::one(SeedEvent {
+                return Ok(Outcomes::one(SeedEvent {
                     kind: "done".to_string(),
                     ..event
                 }));
             }
-            return Ok(StageOutputs::one(event));
+            return Ok(Outcomes::one(event));
         }
 
-        Ok(StageOutputs::none())
+        Ok(Outcomes::none())
     }
 }
 
@@ -218,19 +215,19 @@ impl IterationTransform {
 
 impl TypedTransformHandler for IterationTransform {
     type Input = SeedEvent;
-    type Output = StageOutputs<SeedEvent>;
+    type Output = Outcomes<SeedEvent>;
 
     fn process(
         &self,
         mut event: SeedEvent,
-    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+    ) -> std::result::Result<Outcomes<SeedEvent>, HandlerError> {
         if event.kind != "iter" {
-            return Ok(StageOutputs::none());
+            return Ok(Outcomes::none());
         }
 
         self.processed.fetch_add(1, Ordering::Relaxed);
         event.iter = event.iter.saturating_add(1);
-        Ok(StageOutputs::one(event))
+        Ok(Outcomes::one(event))
     }
 }
 

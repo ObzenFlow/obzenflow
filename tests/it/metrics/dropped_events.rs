@@ -10,7 +10,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::StageOutputs;
+use obzenflow_core::Outcomes;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -88,16 +88,16 @@ impl DroppingTransform {
 
 impl TypedTransformHandler for DroppingTransform {
     type Input = CorrelatedTestEvent;
-    type Output = StageOutputs<CorrelatedTestEvent>;
+    type Output = Outcomes<CorrelatedTestEvent>;
 
     fn process(
         &self,
         event: CorrelatedTestEvent,
-    ) -> std::result::Result<StageOutputs<CorrelatedTestEvent>, HandlerError> {
+    ) -> std::result::Result<Outcomes<CorrelatedTestEvent>, HandlerError> {
         if self.drop_indices.contains(&(event.index as usize)) {
-            return Ok(StageOutputs::none());
+            return Ok(Outcomes::none());
         }
-        Ok(StageOutputs::one(event))
+        Ok(Outcomes::one(event))
     }
 }
 

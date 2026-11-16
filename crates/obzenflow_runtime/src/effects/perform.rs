@@ -163,7 +163,7 @@ mod tests {
         effectful_transform_effects, EffectAcknowledgement, EffectError, EffectSafety, EffectSet,
     };
     use super::*;
-    use obzenflow_core::StageFactSet;
+    use obzenflow_core::Outcome;
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -245,8 +245,8 @@ mod tests {
         let charge = perform(ChargeRequest::for_invoice).through(Port::to(Scripted));
         assert_handler(&charge);
         assert_eq!(
-            <<Perform<fn(&Invoice) -> ChargeRequest, Invoice, ChargeRequest> as EffectfulTransformHandler>::Output as StageFactSet>::member_fact_types(),
-            <Paid as StageFactSet>::member_fact_types(),
+            <<Perform<fn(&Invoice) -> ChargeRequest, Invoice, ChargeRequest> as EffectfulTransformHandler>::Output as Outcome>::member_fact_types(),
+            <Paid as Outcome>::member_fact_types(),
         );
     }
 

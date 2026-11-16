@@ -7,7 +7,7 @@
 use super::{Accumulator, StatefulWithEmission};
 use crate::stages::common::handlers::stateful::TypedStatefulContribution;
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
-use obzenflow_core::{EventId, OneFactStageOutput, TypedPayload};
+use obzenflow_core::{EventId, OneFactOutcome, TypedPayload};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
@@ -146,7 +146,7 @@ impl<T, K, O, FKey, FScore, FOutput> Accumulator for TopN<T, K, O, FKey, FScore,
 where
     T: TypedPayload + Clone + Send + Sync + Debug + 'static,
     K: Hash + Eq + Clone + Send + Sync + Debug + 'static,
-    O: OneFactStageOutput + Send + Sync + 'static,
+    O: OneFactOutcome + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
     FOutput: Fn(TopNSnapshot<K, T>) -> O + Send + Sync + Clone + 'static,

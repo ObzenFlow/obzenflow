@@ -331,7 +331,7 @@ struct CollidingOutcome {
     primary: ColliderA,
 }
 
-impl obzenflow_core::TypedFactSet for CollidingOutcome {
+impl obzenflow_core::OutcomeFacts for CollidingOutcome {
     fn fact_types() -> Vec<obzenflow_core::TypedFactType> {
         // The buggy shape under test: the value-level metadata declares two
         // distinct member types that collide on `EVENT_TYPE`.
@@ -341,35 +341,33 @@ impl obzenflow_core::TypedFactSet for CollidingOutcome {
         ]
     }
 
-    fn into_facts(
-        self,
-    ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::TypedFactSetError> {
+    fn into_facts(self) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::OutcomeError> {
         Ok(vec![obzenflow_core::TypedFact::from_payload(self.primary)?])
     }
 
     fn try_from_facts(
         _facts: &[obzenflow_core::TypedFact],
-    ) -> Result<Self, obzenflow_core::TypedFactSetError> {
+    ) -> Result<Self, obzenflow_core::OutcomeError> {
         // Reconstruction is ambiguous by construction; the flow-build
         // rejection this fixture exercises exists so this is never reached.
-        Err(obzenflow_core::TypedFactSetError::SerializationFailed(
+        Err(obzenflow_core::OutcomeError::SerializationFailed(
             "colliding carrier reconstruction is ambiguous by construction".to_string(),
         ))
     }
 }
 
-impl obzenflow_core::StageFactSet for CollidingOutcome {
+impl obzenflow_core::Outcome for CollidingOutcome {
     type Members = obzenflow_core::event::schema::WithMember<
         ColliderA,
         obzenflow_core::event::schema::EmptySet,
     >;
 
     fn member_fact_types() -> Vec<obzenflow_core::TypedFactType> {
-        <Self as obzenflow_core::TypedFactSet>::fact_types()
+        <Self as obzenflow_core::OutcomeFacts>::fact_types()
     }
 }
 
-impl obzenflow_core::EffectOutcomeFacts for CollidingOutcome {}
+impl obzenflow_core::EffectOutcome for CollidingOutcome {}
 
 struct CollidingService;
 

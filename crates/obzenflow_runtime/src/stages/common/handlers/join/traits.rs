@@ -10,7 +10,7 @@ use crate::stages::join::config::{
 };
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::{ChainEvent, OneFactStageOutput, StageId, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, OneFactOutcome, StageId, TypedPayload, WriterId};
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -124,7 +124,7 @@ pub trait UnifiedJoinHandler: sealed::Sealed + Send + Sync {
 pub trait JoinBinding: Clone + std::fmt::Debug + Send + Sync + 'static {
     type Reference: TypedPayload + Clone + Send + Sync + 'static;
     type Stream: TypedPayload + Send + Sync + 'static;
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     type Adapter: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static;
 
     fn into_adapter(self) -> Self::Adapter;

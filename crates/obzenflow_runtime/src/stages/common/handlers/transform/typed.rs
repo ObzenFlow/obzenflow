@@ -12,7 +12,7 @@ use obzenflow_core::event::observability::{
     NoObservations, ObservationRecord, ObservationRecorder,
 };
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-use obzenflow_core::event::schema::{StageOutputFacts, TypedFactSet, TypedPayload};
+use obzenflow_core::event::schema::{OutcomeFacts, TransformOutcome, TypedPayload};
 use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, WriterId};
 use std::sync::Arc;
@@ -64,7 +64,7 @@ impl<O> TypedTransformInvocation<O> {
 )]
 pub trait TypedTransformHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: StageOutputFacts;
+    type Output: TransformOutcome;
 
     fn process(&self, input: Self::Input) -> Result<Self::Output, HandlerError>;
 

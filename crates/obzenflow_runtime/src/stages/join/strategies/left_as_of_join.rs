@@ -6,7 +6,7 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::{AsOf, AsOfJoin, AsOfReferenceView, TypedAsOfJoinHandler};
-use obzenflow_core::{OneFactStageOutput, TypedPayload};
+use obzenflow_core::{OneFactOutcome, TypedPayload};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -123,7 +123,7 @@ where
         join_fn: J,
     ) -> LeftAsOfJoinBuild<C, S, E, K, T, CatalogKeyFn, EffectiveAtFn, StreamKeyFn, AsOfFn, J>
     where
-        E: OneFactStageOutput + Send + Sync + 'static,
+        E: OneFactOutcome + Send + Sync + 'static,
         J: Fn(AsOf<C>, S) -> E + Send + Sync + Clone,
     {
         AsOfJoin::new(LeftAsOfJoin {
@@ -186,7 +186,7 @@ impl<C, S, E, K, T, CatalogKeyFn, EffectiveAtFn, StreamKeyFn, AsOfFn, JoinFn> Ty
 where
     C: TypedPayload + Clone + Send + Sync + 'static,
     S: TypedPayload + Clone + Send + Sync + 'static,
-    E: OneFactStageOutput + Send + Sync + 'static,
+    E: OneFactOutcome + Send + Sync + 'static,
     K: Eq + Hash + Clone + Send + Sync + Debug,
     T: Ord + Copy + Send + Sync + Debug + 'static,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync,

@@ -5,25 +5,25 @@
 //! Stage outputs.
 //!
 //! A typed transform returns one fact, an `outcome![...]` list or
-//! [`StageOutputs`], each of which lowers to flat named facts through the
-//! shared [`TypedFactSet`] marshalling and [`StageFactSet`] membership
+//! [`Outcomes`], each of which lowers to flat named facts through the
+//! shared [`OutcomeFacts`] marshalling and [`Outcome`] membership
 //! machinery. The returned value is never persisted.
 
 use super::member_set::{EmptySet, WithMember};
-use super::outcome_list::{OutcomeOr, SingleFactOutcomes};
-use super::stage_fact_set::StageFactSet;
-use super::typed_fact_set::{TypedFact, TypedFactSet, TypedFactSetError, TypedFactType};
+use super::outcome::Outcome;
+use super::outcome_facts::{OutcomeError, OutcomeFacts, TypedFact, TypedFactType};
+use super::outcome_list::{OutcomeOr, SingleFactCases};
 use super::typed_payload::TypedPayload;
 
 /// Lowering-only carrier for zero or more facts of one payload type.
 ///
-/// `StageOutputs<T>` supplies dynamic cardinality without turning `Vec<T>` into
+/// `Outcomes<T>` supplies dynamic cardinality without turning `Vec<T>` into
 /// framework vocabulary. The carrier is never persisted: each contained value
 /// lowers directly to a `T` fact in insertion order.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StageOutputs<T>(Vec<T>);
+pub struct Outcomes<T>(Vec<T>);
 
-impl<T: TypedPayload> StageOutputs<T> {
+impl<T: TypedPayload> Outcomes<T> {
     /// Return a carrier that lowers to no facts.
     pub fn none() -> Self {
         Self(Vec::new())
@@ -40,7 +40,7 @@ impl<T: TypedPayload> StageOutputs<T> {
     }
 }
 
-impl<T> StageFactSet for StageOutputs<T>
+impl<T> Outcome for Outcomes<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
@@ -51,7 +51,7 @@ where
     }
 }
 
-impl<T> TypedFactSet for StageOutputs<T>
+impl<T> OutcomeFacts for Outcomes<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
@@ -59,13 +59,13 @@ where
         vec![TypedFactType::of::<T>()]
     }
 
-    fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+    fn into_facts(self) -> Result<Vec<TypedFact>, OutcomeError> {
         self.0.into_iter().map(TypedFact::from_payload).collect()
     }
 
-    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, OutcomeError> {
         if let Some(unexpected) = facts.iter().find(|fact| !T::matches_fact(fact)) {
-            return Err(TypedFactSetError::UnexpectedFact {
+            return Err(OutcomeError::UnexpectedFact {
                 event_type: unexpected.event_type.clone(),
             });
         }
@@ -76,9 +76,9 @@ where
                 serde_json::from_value(
                     fact.payload
                         .contract_body()
-                        .map_err(|e| TypedFactSetError::SerializationFailed(e.to_string()))?,
+                        .map_err(|e| OutcomeError::SerializationFailed(e.to_string()))?,
                 )
-                .map_err(|error| TypedFactSetError::DeserializationFailed {
+                .map_err(|error| OutcomeError::DeserializationFailed {
                     event_type: fact.event_type.clone(),
                     error: error.to_string(),
                 })
@@ -89,20 +89,20 @@ where
 }
 
 /// The `Output` bound of a typed transform and an AI role's `Out`: one fact,
-/// an `outcome![...]` list or [`StageOutputs`].
+/// an `outcome![...]` list or [`Outcomes`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a transform's `Output` or an AI role's `Out`",
-    label = "a transform returns one fact, `outcome![...]` or `StageOutputs<T>`",
+    label = "a transform returns one fact, `outcome![...]` or `Outcomes<T>`",
     note = "a transform returns exactly one outcome per input, listed as `outcome![A | (B, C)]`, \
-            or any number of facts of one type as `StageOutputs<T>`"
+            or any number of facts of one type as `Outcomes<T>`"
 )]
-pub trait StageOutputFacts: TypedFactSet + StageFactSet {}
+pub trait TransformOutcome: OutcomeFacts + Outcome {}
 
-impl<T: TypedPayload + Send + Sync + 'static> StageOutputFacts for T {}
+impl<T: TypedPayload + Send + Sync + 'static> TransformOutcome for T {}
 
-impl<Head, Rest> StageOutputFacts for OutcomeOr<Head, Rest> where Self: TypedFactSet + StageFactSet {}
+impl<Head, Rest> TransformOutcome for OutcomeOr<Head, Rest> where Self: OutcomeFacts + Outcome {}
 
-impl<T: TypedPayload + Send + Sync + 'static> StageOutputFacts for StageOutputs<T> {}
+impl<T: TypedPayload + Send + Sync + 'static> TransformOutcome for Outcomes<T> {}
 
 /// The `Output` bound of a stateful stage, a source and a join, each of whose
 /// values lowers to exactly one fact: one fact, or an `outcome![...]` list
@@ -111,7 +111,7 @@ impl<T: TypedPayload + Send + Sync + 'static> StageOutputFacts for StageOutputs<
 /// # Contract
 ///
 /// Every value must lower to exactly one fact, and every member fact type
-/// must reconstruct when passed alone to [`TypedFactSet::try_from_facts`]. A
+/// must reconstruct when passed alone to [`OutcomeFacts::try_from_facts`]. A
 /// manual implementation is a trusted semantic assertion; if a lowered value
 /// contradicts it, the runtime treats the contradiction as a fatal
 /// stage-contract violation.
@@ -119,14 +119,14 @@ impl<T: TypedPayload + Send + Sync + 'static> StageOutputFacts for StageOutputs<
 /// A list with a tuple outcome is refused:
 ///
 /// ```compile_fail
-/// # use obzenflow_core::{outcome, OneFactStageOutput, TypedPayload};
+/// # use obzenflow_core::{outcome, OneFactOutcome, TypedPayload};
 /// # #[derive(serde::Serialize, serde::Deserialize)] struct Valid;
 /// # impl TypedPayload for Valid { const EVENT_TYPE: &'static str = "doc.valid"; }
 /// # #[derive(serde::Serialize, serde::Deserialize)] struct Invalid;
 /// # impl TypedPayload for Invalid { const EVENT_TYPE: &'static str = "doc.invalid"; }
 /// # #[derive(serde::Serialize, serde::Deserialize)] struct Cancelled;
 /// # impl TypedPayload for Cancelled { const EVENT_TYPE: &'static str = "doc.cancelled"; }
-/// fn source_output<O: OneFactStageOutput>() {}
+/// fn source_output<O: OneFactOutcome>() {}
 /// source_output::<outcome![Valid | (Invalid, Cancelled)]>();
 /// ```
 #[diagnostic::on_unimplemented(
@@ -135,21 +135,19 @@ impl<T: TypedPayload + Send + Sync + 'static> StageOutputFacts for StageOutputs<
              tuple",
     note = "facts written together as a tuple belong in a transform's `outcome![...]`"
 )]
-pub trait OneFactStageOutput: StageOutputFacts {}
+pub trait OneFactOutcome: TransformOutcome {}
 
-impl<T: TypedPayload + Send + Sync + 'static> OneFactStageOutput for T {}
+impl<T: TypedPayload + Send + Sync + 'static> OneFactOutcome for T {}
 
-impl<Head, Rest> OneFactStageOutput for OutcomeOr<Head, Rest> where
-    Self: StageOutputFacts + SingleFactOutcomes
+impl<Head, Rest> OneFactOutcome for OutcomeOr<Head, Rest> where
+    Self: TransformOutcome + SingleFactCases
 {
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::schema::{
-        EffectOutcomeFacts, EffectfulStageOutput, StageOutputFacts, TypedFactSetError,
-    };
+    use crate::event::schema::{EffectOutcome, EffectfulOutcome, OutcomeError, TransformOutcome};
     use serde::{Deserialize, Serialize, Serializer};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,7 +156,7 @@ mod tests {
     }
 
     impl TypedPayload for Solo {
-        const EVENT_TYPE: &'static str = "stage_output.solo";
+        const EVENT_TYPE: &'static str = "outcomes.solo";
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -176,7 +174,7 @@ mod tests {
     }
 
     impl TypedPayload for SerializationFails {
-        const EVENT_TYPE: &'static str = "stage_output.serialization_fails";
+        const EVENT_TYPE: &'static str = "outcomes.serialization_fails";
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,7 +183,7 @@ mod tests {
     }
 
     impl TypedPayload for Valid {
-        const EVENT_TYPE: &'static str = "stage_output.valid";
+        const EVENT_TYPE: &'static str = "outcomes.valid";
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,7 +192,7 @@ mod tests {
     }
 
     impl TypedPayload for Invalid {
-        const EVENT_TYPE: &'static str = "stage_output.invalid";
+        const EVENT_TYPE: &'static str = "outcomes.invalid";
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,38 +201,38 @@ mod tests {
     }
 
     impl TypedPayload for Cancelled {
-        const EVENT_TYPE: &'static str = "stage_output.cancelled";
+        const EVENT_TYPE: &'static str = "outcomes.cancelled";
     }
 
-    fn is_stage_output<T: StageOutputFacts>() {}
-    fn is_one_fact_output<T: OneFactStageOutput>() {}
-    fn is_effect_outcome<T: EffectOutcomeFacts>() {}
-    fn is_effectful_output<T: EffectfulStageOutput>() {}
+    fn is_transform_outcome<T: TransformOutcome>() {}
+    fn is_one_fact_outcome<T: OneFactOutcome>() {}
+    fn is_effect_outcome<T: EffectOutcome>() {}
+    fn is_effectful_outcome<T: EffectfulOutcome>() {}
 
     #[test]
-    fn scalar_payload_is_a_one_fact_stage_output() {
-        is_stage_output::<Solo>();
-        is_one_fact_output::<Solo>();
+    fn scalar_payload_satisfies_outcome_bounds() {
+        is_transform_outcome::<Solo>();
+        is_one_fact_outcome::<Solo>();
     }
 
     #[test]
     fn position_bounds_accept_listed_forms() {
-        is_stage_output::<crate::outcome![Valid | (Invalid, Cancelled)]>();
+        is_transform_outcome::<crate::outcome![Valid | (Invalid, Cancelled)]>();
         is_effect_outcome::<crate::outcome![Valid | (Invalid, Cancelled)]>();
-        is_one_fact_output::<crate::outcome![Valid | Invalid]>();
-        is_stage_output::<StageOutputs<Solo>>();
-        is_effectful_output::<crate::outcome![Valid | Invalid]>();
-        is_effectful_output::<Solo>();
+        is_one_fact_outcome::<crate::outcome![Valid | Invalid]>();
+        is_transform_outcome::<Outcomes<Solo>>();
+        is_effectful_outcome::<crate::outcome![Valid | Invalid]>();
+        is_effectful_outcome::<Solo>();
     }
 
     #[test]
     fn dynamic_homogeneous_outputs_lower_zero_one_and_many_in_order() {
-        assert!(StageOutputs::<Solo>::none()
+        assert!(Outcomes::<Solo>::none()
             .into_facts()
             .expect("empty output lowers")
             .is_empty());
 
-        let one = StageOutputs::one(Solo { value: 4 })
+        let one = Outcomes::one(Solo { value: 4 })
             .into_facts()
             .expect("one output lowers");
         assert_eq!(one.len(), 1);
@@ -243,7 +241,7 @@ mod tests {
             serde_json::json!({ "value": 4 })
         );
 
-        let many = StageOutputs::many([Solo { value: 3 }, Solo { value: 7 }])
+        let many = Outcomes::many([Solo { value: 3 }, Solo { value: 7 }])
             .into_facts()
             .expect("many outputs lower");
         assert_eq!(many.len(), 2);
@@ -256,17 +254,17 @@ mod tests {
             serde_json::json!({ "value": 7 })
         );
         assert_eq!(
-            <StageOutputs<Solo> as StageFactSet>::member_fact_types(),
-            <Solo as StageFactSet>::member_fact_types()
+            <Outcomes<Solo> as Outcome>::member_fact_types(),
+            <Solo as Outcome>::member_fact_types()
         );
     }
 
     #[test]
     fn dynamic_homogeneous_outputs_reconstruct_repeated_facts() {
-        let original = StageOutputs::many([Solo { value: 2 }, Solo { value: 2 }]);
+        let original = Outcomes::many([Solo { value: 2 }, Solo { value: 2 }]);
         let facts = original.clone().into_facts().expect("outputs lower");
         assert_eq!(
-            StageOutputs::<Solo>::try_from_facts(&facts).expect("outputs reconstruct"),
+            Outcomes::<Solo>::try_from_facts(&facts).expect("outputs reconstruct"),
             original
         );
     }
@@ -274,8 +272,8 @@ mod tests {
     #[test]
     fn dynamic_homogeneous_outputs_propagate_serialization_failure() {
         assert!(matches!(
-            StageOutputs::one(SerializationFails).into_facts(),
-            Err(TypedFactSetError::SerializationFailed(message))
+            Outcomes::one(SerializationFails).into_facts(),
+            Err(OutcomeError::SerializationFailed(message))
                 if message.contains("deliberate serialization failure")
         ));
     }

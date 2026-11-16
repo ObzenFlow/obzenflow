@@ -14,7 +14,7 @@ use obzenflow_core::{
     event::payloads::flow_control_payload::FlowControlPayload,
     event::{payloads::execution_payload::StageLifecycleFact, ChainPayload},
     id::StageId,
-    StageOutputs, TypedPayload,
+    Outcomes, TypedPayload,
 };
 use obzenflow_dsl::{
     effectful_stateful, effectful_transform, flow, sink, source, transform, FlowDefinition,
@@ -147,10 +147,10 @@ impl FanOutTransform {
 
 impl TypedTransformHandler for FanOutTransform {
     type Input = ReplayInput;
-    type Output = StageOutputs<ReplayInput>;
+    type Output = Outcomes<ReplayInput>;
 
-    fn process(&self, input: ReplayInput) -> Result<StageOutputs<ReplayInput>, HandlerError> {
-        Ok(StageOutputs::many([
+    fn process(&self, input: ReplayInput) -> Result<Outcomes<ReplayInput>, HandlerError> {
+        Ok(Outcomes::many([
             ReplayInput {
                 value: input.value * 10 + 1,
             },

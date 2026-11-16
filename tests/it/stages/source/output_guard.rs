@@ -57,7 +57,7 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
     assert!(csv_example.contains("CsvSource::builder(CustomerCsv)"));
     assert!(csv_example.contains("CsvSource::builder(TicketCsv)"));
     assert!(yaml.contains("pub trait YamlDecoder"));
-    assert!(yaml.contains("type Output: OneFactStageOutput"));
+    assert!(yaml.contains("type Output: OneFactOutcome"));
     assert!(yaml.contains("pub fn builder(decoder: D)"));
 
     assert!(yaml_example.contains("YamlSource::builder(AccountYaml)"));

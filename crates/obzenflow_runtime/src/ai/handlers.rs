@@ -16,10 +16,10 @@ use obzenflow_core::ai::{
     AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiOutcome, AiUnavailable, Chunk, Partials,
 };
 use obzenflow_core::event::schema::{
-    EffectfulStageOutput, EmptySet, FactsOf, MemberList, StageOutputFacts, SubsetProofEnd,
+    EffectfulOutcome, EmptySet, FactsOf, MemberList, SubsetProofEnd, TransformOutcome,
     TypedFactType, WithMember,
 };
-use obzenflow_core::{StageFactSet, TypedPayload};
+use obzenflow_core::{Outcome, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
@@ -45,7 +45,7 @@ where
     E: AiEffect
         + AllowedEffectsAllowEffect<Allowed, At>
         + EffectOutcomeFitsOutput<Output, SubsetProofEnd>,
-    Output: StageFactSet,
+    Output: Outcome,
     Allowed: EffectSet,
 {
     let effect = fx
@@ -127,7 +127,7 @@ impl<R, In> EffectfulTransformHandler for AiInferHandler<R, In>
 where
     In: TypedPayload + Send + Sync + 'static,
     R: AiRole<In>,
-    R::Out: StageOutputFacts,
+    R::Out: TransformOutcome,
 {
     type Input = In;
     type Output = FactsOf<R::Out>;
@@ -198,7 +198,7 @@ impl<R, T> EffectfulTransformHandler for AiMapHandler<R, T>
 where
     T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     R: AiRole<Chunk<T>>,
-    R::Out: StageOutputFacts,
+    R::Out: TransformOutcome,
 {
     type Input = AiMapReduceMapInput<T>;
     type Output = FactsOf<R::Out>;
@@ -340,7 +340,7 @@ where
 #[doc(hidden)]
 pub struct AiReduceFacts<O>(PhantomData<fn() -> O>);
 
-impl<O: StageFactSet> StageFactSet for AiReduceFacts<O>
+impl<O: Outcome> Outcome for AiReduceFacts<O>
 where
     WithMember<AiMapReduceReduceFailed, O::Members>: MemberList,
 {
@@ -353,7 +353,7 @@ where
     }
 }
 
-impl<O: StageFactSet> EffectfulStageOutput for AiReduceFacts<O> where
+impl<O: Outcome> EffectfulOutcome for AiReduceFacts<O> where
     WithMember<AiMapReduceReduceFailed, O::Members>: MemberList
 {
 }
@@ -400,8 +400,8 @@ where
     T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     P: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     S: AiRole<Partials<T, P>>,
-    S::Out: StageOutputFacts,
-    WithMember<AiMapReduceReduceFailed, <S::Out as StageFactSet>::Members>: MemberList,
+    S::Out: TransformOutcome,
+    WithMember<AiMapReduceReduceFailed, <S::Out as Outcome>::Members>: MemberList,
 {
     type Input = AiMapReduceReduceInput<T, P>;
     type Output = AiReduceFacts<S::Out>;

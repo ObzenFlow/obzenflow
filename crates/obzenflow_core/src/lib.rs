@@ -39,11 +39,11 @@ pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
 pub use journal::Journal;
 
-// Schema types, stage fact sets and membership proofs.
+// Schema types, outcomes and membership proofs.
 pub use event::schema::{
-    assert_distinct_stage_fact_set, outcome, EffectOutcomeFacts, EffectfulStageOutput, Member,
-    MiddlewareContextKey, OneFactStageOutput, StageFactSet, StageOutputFacts, StageOutputs,
-    SubsetOf, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
+    assert_distinct_outcome_facts, outcome, EffectOutcome, EffectfulOutcome, Member,
+    MiddlewareContextKey, OneFactOutcome, Outcome, OutcomeError, OutcomeFacts, Outcomes, SubsetOf,
+    TransformOutcome, TypedFact, TypedFactType, TypedPayload,
 };
 
 // Re-export typed IDs

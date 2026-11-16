@@ -732,7 +732,7 @@ struct RecordedReplyValue {
 fn assert_effect_outcome_fits<E, Output, Proof>()
 where
     E: EffectOutcomeFitsOutput<Output, Proof>,
-    Output: obzenflow_core::StageFactSet,
+    Output: obzenflow_core::Outcome,
 {
 }
 

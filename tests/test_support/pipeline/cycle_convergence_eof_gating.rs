@@ -15,7 +15,7 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{CycleDepth, DeliveryContract, StageOutputs, TransportContract};
+use obzenflow_core::{CycleDepth, DeliveryContract, Outcomes, TransportContract};
 use obzenflow_dsl::{
     async_infinite_source, async_source, flow, sink, source, test_flow, transform, FlowDefinition,
 };
@@ -316,22 +316,22 @@ impl EntryConvergeTransform {
 
 impl TypedTransformHandler for EntryConvergeTransform {
     type Input = SeedEvent;
-    type Output = StageOutputs<SeedEvent>;
+    type Output = Outcomes<SeedEvent>;
 
     fn process(
         &self,
         mut event: SeedEvent,
-    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+    ) -> std::result::Result<Outcomes<SeedEvent>, HandlerError> {
         self.processed_data.fetch_add(1, Ordering::Relaxed);
 
         if event.depth >= event.target {
             event.kind = KIND_DONE.to_string();
-            Ok(StageOutputs::one(event))
+            Ok(Outcomes::one(event))
         } else if event.kind == KIND_SEED || event.kind == KIND_ITER {
             event.kind = KIND_ITER.to_string();
-            Ok(StageOutputs::one(event))
+            Ok(Outcomes::one(event))
         } else {
-            Ok(StageOutputs::none())
+            Ok(Outcomes::none())
         }
     }
 }
@@ -353,14 +353,14 @@ impl IterationTransform {
 
 impl TypedTransformHandler for IterationTransform {
     type Input = SeedEvent;
-    type Output = StageOutputs<SeedEvent>;
+    type Output = Outcomes<SeedEvent>;
 
     fn process(
         &self,
         mut event: SeedEvent,
-    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+    ) -> std::result::Result<Outcomes<SeedEvent>, HandlerError> {
         if event.kind != KIND_ITER {
-            return Ok(StageOutputs::none());
+            return Ok(Outcomes::none());
         }
 
         self.processed_iterations.fetch_add(1, Ordering::Relaxed);
@@ -369,7 +369,7 @@ impl TypedTransformHandler for IterationTransform {
         }
 
         event.depth = event.depth.saturating_add(1);
-        Ok(StageOutputs::one(event))
+        Ok(Outcomes::one(event))
     }
 }
 

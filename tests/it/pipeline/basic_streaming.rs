@@ -4,7 +4,7 @@
 
 // tests/basic_streaming.rs
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::StageOutputs;
+use obzenflow_core::Outcomes;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -154,13 +154,13 @@ impl Doubler {
 
 impl TypedTransformHandler for Doubler {
     type Input = StreamItem;
-    type Output = StageOutputs<StreamItem>;
+    type Output = Outcomes<StreamItem>;
 
     fn process(
         &self,
         event: StreamItem,
-    ) -> std::result::Result<StageOutputs<StreamItem>, HandlerError> {
-        Ok(StageOutputs::many([event.clone(), event]))
+    ) -> std::result::Result<Outcomes<StreamItem>, HandlerError> {
+        Ok(Outcomes::many([event.clone(), event]))
     }
 }
 

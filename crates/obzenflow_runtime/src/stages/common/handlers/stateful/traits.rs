@@ -396,7 +396,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 pub trait EffectfulStatefulHandler: crate::effects::Command + Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: obzenflow_core::EffectfulStageOutput + Send + Sync + 'static;
+    type Output: obzenflow_core::EffectfulOutcome + Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
 

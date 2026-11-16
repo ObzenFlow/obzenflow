@@ -14,11 +14,9 @@ use super::member_set::{
     AppendList, EmptySet, FactList, FactOr, MemberAfter, MemberFound, MemberList, NoOtherFact,
     WithMember,
 };
-use super::stage_fact_set::{
-    assert_distinct_stage_fact_set, DecodeCommitted, EffectfulStageOutput, StageFactSet,
-};
-use super::typed_fact_set::{
-    decode_member_fact, missing_fact_group_error, TypedFact, TypedFactSet, TypedFactSetError,
+use super::outcome::{assert_distinct_outcome_facts, DecodeCommitted, EffectfulOutcome, Outcome};
+use super::outcome_facts::{
+    decode_member_fact, missing_fact_group_error, OutcomeError, OutcomeFacts, TypedFact,
     TypedFactType,
 };
 use super::typed_payload::TypedPayload;
@@ -41,21 +39,21 @@ pub enum NoOtherOutcome {}
 /// One outcome of a list: a fact, or a tuple of up to twelve facts written
 /// together.
 #[doc(hidden)]
-pub trait OutcomeFacts: Sized + Send + Sync + 'static {
+pub trait CaseFacts: Sized + Send + Sync + 'static {
     type Members: MemberList;
 
     fn append_fact_types(out: &mut Vec<TypedFactType>);
 
     fn declares(fact: &TypedFact) -> bool;
 
-    fn lower(self, out: &mut Vec<TypedFact>) -> Result<(), TypedFactSetError>;
+    fn lower(self, out: &mut Vec<TypedFact>) -> Result<(), OutcomeError>;
 
     fn matches_group(facts: &[TypedFact]) -> bool;
 
-    fn decode(facts: &[TypedFact]) -> Result<Self, TypedFactSetError>;
+    fn decode(facts: &[TypedFact]) -> Result<Self, OutcomeError>;
 }
 
-impl<T> OutcomeFacts for T
+impl<T> CaseFacts for T
 where
     T: TypedPayload + Send + Sync + 'static,
 {
@@ -69,7 +67,7 @@ where
         T::matches_fact(fact)
     }
 
-    fn lower(self, out: &mut Vec<TypedFact>) -> Result<(), TypedFactSetError> {
+    fn lower(self, out: &mut Vec<TypedFact>) -> Result<(), OutcomeError> {
         out.push(TypedFact::from_payload(self)?);
         Ok(())
     }
@@ -78,7 +76,7 @@ where
         matches!(facts, [fact] if T::matches_fact(fact))
     }
 
-    fn decode(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+    fn decode(facts: &[TypedFact]) -> Result<Self, OutcomeError> {
         decode_member_fact::<T>(facts)
     }
 }
@@ -90,7 +88,7 @@ macro_rules! tuple_outcome_members {
 
 macro_rules! tuple_outcome {
     ($arity:literal: $($fact:ident . $index:tt),+) => {
-        impl<$($fact),+> OutcomeFacts for ($($fact,)+)
+        impl<$($fact),+> CaseFacts for ($($fact,)+)
         where
             $($fact: TypedPayload + Send + Sync + 'static,)+
         {
@@ -104,7 +102,7 @@ macro_rules! tuple_outcome {
                 false $(|| $fact::matches_fact(fact))+
             }
 
-            fn lower(self, out: &mut Vec<TypedFact>) -> Result<(), TypedFactSetError> {
+            fn lower(self, out: &mut Vec<TypedFact>) -> Result<(), OutcomeError> {
                 $(out.push(TypedFact::from_payload(self.$index)?);)+
                 Ok(())
             }
@@ -114,7 +112,7 @@ macro_rules! tuple_outcome {
                     $(&& facts.iter().any(|fact| $fact::matches_fact(fact)))+
             }
 
-            fn decode(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+            fn decode(facts: &[TypedFact]) -> Result<Self, OutcomeError> {
                 Ok(($(decode_member_fact::<$fact>(facts)?,)+))
             }
         }
@@ -142,9 +140,9 @@ pub trait OutcomeList: Sized + Send + Sync + 'static {
 
     fn declares(fact: &TypedFact) -> bool;
 
-    fn lower(self) -> Result<Vec<TypedFact>, TypedFactSetError>;
+    fn lower(self) -> Result<Vec<TypedFact>, OutcomeError>;
 
-    fn decode_group(facts: &[TypedFact]) -> Option<Result<Self, TypedFactSetError>>;
+    fn decode_group(facts: &[TypedFact]) -> Option<Result<Self, OutcomeError>>;
 }
 
 impl OutcomeList for NoOtherOutcome {
@@ -156,18 +154,18 @@ impl OutcomeList for NoOtherOutcome {
         false
     }
 
-    fn lower(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+    fn lower(self) -> Result<Vec<TypedFact>, OutcomeError> {
         match self {}
     }
 
-    fn decode_group(_facts: &[TypedFact]) -> Option<Result<Self, TypedFactSetError>> {
+    fn decode_group(_facts: &[TypedFact]) -> Option<Result<Self, OutcomeError>> {
         None
     }
 }
 
 impl<Head, Rest> OutcomeList for OutcomeOr<Head, Rest>
 where
-    Head: OutcomeFacts,
+    Head: CaseFacts,
     Rest: OutcomeList,
     Head::Members: AppendList<Rest::Members>,
 {
@@ -182,7 +180,7 @@ where
         Head::declares(fact) || Rest::declares(fact)
     }
 
-    fn lower(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+    fn lower(self) -> Result<Vec<TypedFact>, OutcomeError> {
         match self.0 {
             Case::Head(outcome) => {
                 let mut facts = Vec::new();
@@ -193,7 +191,7 @@ where
         }
     }
 
-    fn decode_group(facts: &[TypedFact]) -> Option<Result<Self, TypedFactSetError>> {
+    fn decode_group(facts: &[TypedFact]) -> Option<Result<Self, OutcomeError>> {
         if Head::matches_group(facts) {
             return Some(Head::decode(facts).map(|outcome| Self(Case::Head(outcome))));
         }
@@ -201,27 +199,27 @@ where
     }
 }
 
-impl<Head, Rest> TypedFactSet for OutcomeOr<Head, Rest>
+impl<Head, Rest> OutcomeFacts for OutcomeOr<Head, Rest>
 where
     Self: OutcomeList,
     <Self as OutcomeList>::Members: FactList,
 {
     fn fact_types() -> Vec<TypedFactType> {
-        assert_distinct_stage_fact_set::<Self>();
+        assert_distinct_outcome_facts::<Self>();
         let mut out = Vec::new();
         <Self as OutcomeList>::append_fact_types(&mut out);
         out
     }
 
-    fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
-        assert_distinct_stage_fact_set::<Self>();
+    fn into_facts(self) -> Result<Vec<TypedFact>, OutcomeError> {
+        assert_distinct_outcome_facts::<Self>();
         self.lower()
     }
 
-    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
-        assert_distinct_stage_fact_set::<Self>();
+    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, OutcomeError> {
+        assert_distinct_outcome_facts::<Self>();
         if let Some(undeclared) = facts.iter().find(|fact| !Self::declares(fact)) {
-            return Err(TypedFactSetError::UnexpectedFact {
+            return Err(OutcomeError::UnexpectedFact {
                 event_type: undeclared.event_type.clone(),
             });
         }
@@ -230,7 +228,7 @@ where
                 .iter()
                 .any(|later| later.descriptor() == fact.descriptor())
             {
-                return Err(TypedFactSetError::DuplicateFact {
+                return Err(OutcomeError::DuplicateFact {
                     event_type: fact.event_type.clone(),
                 });
             }
@@ -240,7 +238,7 @@ where
     }
 }
 
-impl<Head, Rest> StageFactSet for OutcomeOr<Head, Rest>
+impl<Head, Rest> Outcome for OutcomeOr<Head, Rest>
 where
     Self: OutcomeList,
     <Self as OutcomeList>::Members: FactList,
@@ -269,22 +267,19 @@ impl<List, const REFUSAL: bool> Refused<REFUSAL> for List {
 
 /// Lists where every outcome is one fact.
 #[doc(hidden)]
-pub trait SingleFactOutcomes {}
+pub trait SingleFactCases {}
 
-impl SingleFactOutcomes for NoOtherOutcome {}
+impl SingleFactCases for NoOtherOutcome {}
 
-impl<Head: TypedPayload, Rest: SingleFactOutcomes> SingleFactOutcomes for OutcomeOr<Head, Rest> {}
+impl<Head: TypedPayload, Rest: SingleFactCases> SingleFactCases for OutcomeOr<Head, Rest> {}
 
-impl<Head, Rest> EffectfulStageOutput for OutcomeOr<Head, Rest> where
-    Self: StageFactSet + SingleFactOutcomes
-{
-}
+impl<Head, Rest> EffectfulOutcome for OutcomeOr<Head, Rest> where Self: Outcome + SingleFactCases {}
 
 impl<Head, Rest> DecodeCommitted for OutcomeOr<Head, Rest>
 where
-    Self: TypedFactSet + StageFactSet + SingleFactOutcomes,
+    Self: OutcomeFacts + Outcome + SingleFactCases,
 {
-    fn decode_committed(fact: &TypedFact) -> Result<Self, TypedFactSetError> {
+    fn decode_committed(fact: &TypedFact) -> Result<Self, OutcomeError> {
         Self::try_from_facts(std::slice::from_ref(fact))
     }
 }
@@ -422,7 +417,7 @@ impl<Head: Eq, Rest: Eq> Eq for OutcomeOr<Head, Rest> {}
 /// with [`outcome`](crate::event::schema::outcome).
 ///
 /// ```
-/// use obzenflow_core::event::schema::TypedFactSet;
+/// use obzenflow_core::event::schema::OutcomeFacts;
 /// use obzenflow_core::{outcome, TypedPayload};
 /// use serde::{Deserialize, Serialize};
 ///
@@ -588,7 +583,7 @@ mod tests {
         }];
         assert!(matches!(
             <crate::outcome![Valid | (Invalid, Cancelled)]>::try_from_facts(&foreign),
-            Err(TypedFactSetError::UnexpectedFact { .. })
+            Err(OutcomeError::UnexpectedFact { .. })
         ));
 
         let repeated = vec![
@@ -597,7 +592,7 @@ mod tests {
         ];
         assert!(matches!(
             <crate::outcome![Valid | (Invalid, Cancelled)]>::try_from_facts(&repeated),
-            Err(TypedFactSetError::DuplicateFact { .. })
+            Err(OutcomeError::DuplicateFact { .. })
         ));
 
         let unmatched = vec![
@@ -609,12 +604,12 @@ mod tests {
         ];
         assert!(matches!(
             <crate::outcome![Valid | (Invalid, Cancelled)]>::try_from_facts(&unmatched),
-            Err(TypedFactSetError::MissingFact { .. })
+            Err(OutcomeError::MissingFact { .. })
         ));
 
         assert!(matches!(
             <crate::outcome![Valid | (Invalid, Cancelled)]>::try_from_facts(&[]),
-            Err(TypedFactSetError::MissingFact { .. })
+            Err(OutcomeError::MissingFact { .. })
         ));
     }
 
@@ -638,7 +633,7 @@ mod tests {
         assert_eq!(format!("{accepted:?}"), "Valid { value: 4 }");
     }
 
-    fn command_output<O: EffectfulStageOutput + DecodeCommitted>() {}
+    fn command_output<O: EffectfulOutcome + DecodeCommitted>() {}
 
     #[test]
     fn fact_list_command_output_accepted() {

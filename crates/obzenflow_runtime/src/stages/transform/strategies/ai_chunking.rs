@@ -15,7 +15,7 @@ use obzenflow_core::event::payloads::execution_payload::{AiChunkingPlannedFact, 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{StageOutputs, TypedPayload};
+use obzenflow_core::{Outcomes, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -240,11 +240,11 @@ where
     Item: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     type Input = In;
-    type Output = StageOutputs<ChunkEnvelope<Item>>;
+    type Output = Outcomes<ChunkEnvelope<Item>>;
 
     fn process(&self, input: In) -> Result<Self::Output, HandlerError> {
         self.plan_once(input)
-            .map(|planned| StageOutputs::many(planned.chunks))
+            .map(|planned| Outcomes::many(planned.chunks))
     }
 
     fn process_invocation(
@@ -253,7 +253,7 @@ where
     ) -> Result<TypedTransformInvocation<Self::Output>, HandlerError> {
         let planned = self.plan_once(input)?;
         Ok(TypedTransformInvocation::with_framework_execution(
-            StageOutputs::many(planned.chunks),
+            Outcomes::many(planned.chunks),
             ExecutionPayload::AiChunkingPlanned(planned.plan),
             vec![planned.work],
         ))

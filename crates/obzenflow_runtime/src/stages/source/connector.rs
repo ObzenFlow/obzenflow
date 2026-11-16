@@ -22,7 +22,7 @@ use super::{
     SourceError,
 };
 use async_trait::async_trait;
-use obzenflow_core::{OneFactStageOutput, StageId};
+use obzenflow_core::{OneFactOutcome, StageId};
 
 /// Stable source identity, without execution mode, journals or runtime controls.
 #[derive(Clone, Debug)]
@@ -34,7 +34,7 @@ pub struct SourceReaderInitContext {
 
 /// Reusable configuration for a synchronous source that eventually exhausts.
 pub trait FiniteSourceConnector: Send + Sync + Sized + 'static {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     type Reader: Send + 'static;
     /// How interrupted input continues on resume (FLOWIP-134i B8).
     type Continuation: FiniteContinuation<Self::Reader, Output = Self::Output>;
@@ -45,7 +45,7 @@ pub trait FiniteSourceConnector: Send + Sync + Sized + 'static {
 /// Reusable configuration for an asynchronous source that eventually exhausts.
 #[async_trait]
 pub trait AsyncFiniteSourceConnector: Send + Sync + Sized + 'static {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     type Reader: Send + 'static;
     /// How interrupted input continues on resume (FLOWIP-134i B8).
     type Continuation: AsyncFiniteContinuation<Self::Reader, Output = Self::Output>;
@@ -55,7 +55,7 @@ pub trait AsyncFiniteSourceConnector: Send + Sync + Sized + 'static {
 
 /// Reusable configuration for a synchronous source stopped by runtime control.
 pub trait InfiniteSourceConnector: Send + Sync + Sized + 'static {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     type Reader: Send + 'static;
     /// How interrupted input continues on resume (FLOWIP-134i B8).
     type Continuation: InfiniteContinuation<Self::Reader, Output = Self::Output>;
@@ -66,7 +66,7 @@ pub trait InfiniteSourceConnector: Send + Sync + Sized + 'static {
 /// Reusable configuration for an asynchronous source stopped by runtime control.
 #[async_trait]
 pub trait AsyncInfiniteSourceConnector: Send + Sync + Sized + 'static {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     type Reader: Send + 'static;
     /// How interrupted input continues on resume (FLOWIP-134i B8).
     type Continuation: AsyncInfiniteContinuation<Self::Reader, Output = Self::Output>;

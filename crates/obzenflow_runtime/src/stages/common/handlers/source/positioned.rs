@@ -12,7 +12,7 @@
 
 use super::SourceError;
 use obzenflow_core::source::{SourceInputIdentity, SourcePosition};
-use obzenflow_core::OneFactStageOutput;
+use obzenflow_core::OneFactOutcome;
 
 /// A reader that a committed position resumes.
 pub trait SeekableSource: Send + Sync {
@@ -34,7 +34,7 @@ type FinitePoll<T, P> = Result<Option<Vec<SourceRecord<T, P>>>, SourceError>;
 
 /// A synchronous finite reader that reports the position after each record.
 pub trait PositionedFiniteReader: SeekableSource {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     /// The next batch, `None` once the input is exhausted.
     fn next(&mut self) -> FinitePoll<Self::Output, Self::Position>;

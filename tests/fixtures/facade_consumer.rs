@@ -17,7 +17,7 @@ extern crate std;
 use self::async_trait::async_trait;
 use self::of::effects::{Effects, StageCompletion};
 use self::of::prelude::*;
-use self::of::schema::{outcome, StageFactSet, StageOutputs, TypedFactSet};
+use self::of::schema::{outcome, Outcome, OutcomeFacts, Outcomes};
 use self::of::stages::stateful::fold;
 use self::of::stages::{joins, merges, sinks, sources, stateful, transforms};
 use self::serde::{Deserialize, Serialize};
@@ -121,9 +121,9 @@ impl sources::TypedAsyncInfiniteSourceHandler for Pure {
 
 impl transforms::TypedTransformHandler for Pure {
     type Input = Fact;
-    type Output = StageOutputs<Fact>;
-    fn process(&self, input: Fact) -> Result<StageOutputs<Fact>, HandlerError> {
-        Ok(StageOutputs::one(input))
+    type Output = Outcomes<Fact>;
+    fn process(&self, input: Fact) -> Result<Outcomes<Fact>, HandlerError> {
+        Ok(Outcomes::one(input))
     }
 }
 
@@ -261,24 +261,21 @@ fn renamed_facade_outcomes_preserve_flat_facts() {
     let facts = single.clone().into_facts().unwrap();
     std::assert_eq!(facts.len(), 1);
     std::assert_eq!(
-        <outcome![Fact | (Left, Right)] as TypedFactSet>::try_from_facts(&facts).unwrap(),
+        <outcome![Fact | (Left, Right)] as OutcomeFacts>::try_from_facts(&facts).unwrap(),
         single
     );
     let pair: outcome![Fact | (Left, Right)] = outcome((Left(1), Right(2)));
     let facts = pair.clone().into_facts().unwrap();
     std::assert_eq!(facts.len(), 2);
     std::assert_eq!(
-        <outcome![Fact | (Left, Right)] as TypedFactSet>::try_from_facts(&facts).unwrap(),
+        <outcome![Fact | (Left, Right)] as OutcomeFacts>::try_from_facts(&facts).unwrap(),
         pair
     );
     let mut state = 4;
     let mut handler = Pure;
     stateful::EffectfulStatefulHandler::apply(&mut handler, &mut state, outcome(Left(2))).unwrap();
     std::assert_eq!(state, 6);
-    std::assert!(StageOutputs::<Fact>::none()
-        .into_facts()
-        .unwrap()
-        .is_empty());
+    std::assert!(Outcomes::<Fact>::none().into_facts().unwrap().is_empty());
     std::assert_eq!(Facts::member_fact_types().len(), 1);
     fn no_effects<S: of::effects::EffectSet>() {}
     no_effects::<NoEffects>();

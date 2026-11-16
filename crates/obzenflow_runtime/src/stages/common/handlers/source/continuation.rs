@@ -412,7 +412,7 @@ use crate::stages::source::SourceReaderInitContext;
 use futures::future::BoxFuture;
 use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::source::{position_version, SourcePosition};
-use obzenflow_core::OneFactStageOutput;
+use obzenflow_core::OneFactOutcome;
 use std::marker::PhantomData;
 
 /// Unfinished input cannot be continued; resume refuses.
@@ -482,7 +482,7 @@ pub type AsyncReaderOpener<R> = Box<
             `PositionedFiniteReader<Position = P>`; only infinite connectors can reattach live"
 )]
 pub trait FiniteContinuation<R>: sealed::Sealed + Send + Sync + 'static {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     #[doc(hidden)]
     type Handler: UnifiedFiniteSourceHandler + Send + Sync + 'static;
     #[doc(hidden)]
@@ -499,7 +499,7 @@ pub trait FiniteContinuation<R>: sealed::Sealed + Send + Sync + 'static {
             `TypedAsyncFiniteSourceHandler`"
 )]
 pub trait AsyncFiniteContinuation<R>: sealed::Sealed + Send + Sync + 'static {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     #[doc(hidden)]
     type Handler: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static;
     #[doc(hidden)]
@@ -516,7 +516,7 @@ pub trait AsyncFiniteContinuation<R>: sealed::Sealed + Send + Sync + 'static {
             `Reattach<AtMostOnce>`, with a reader implementing `TypedInfiniteSourceHandler`"
 )]
 pub trait InfiniteContinuation<R>: sealed::Sealed + Send + Sync + 'static {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     #[doc(hidden)]
     type Handler: UnifiedInfiniteSourceHandler + Send + Sync + 'static;
     #[doc(hidden)]
@@ -533,7 +533,7 @@ pub trait InfiniteContinuation<R>: sealed::Sealed + Send + Sync + 'static {
             `Reattach<AtMostOnce>`, with a reader implementing `TypedAsyncInfiniteSourceHandler`"
 )]
 pub trait AsyncInfiniteContinuation<R>: sealed::Sealed + Send + Sync + 'static {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
     #[doc(hidden)]
     type Handler: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static;
     #[doc(hidden)]

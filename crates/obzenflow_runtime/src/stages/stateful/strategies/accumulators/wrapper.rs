@@ -13,7 +13,7 @@ use crate::stages::common::handlers::stateful::{
     TypedStatefulHandler, TypedStatefulInvocation, TypedStatefulOutputIds,
 };
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
-use obzenflow_core::{OneFactStageOutput, TypedPayload};
+use obzenflow_core::{OneFactOutcome, TypedPayload};
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
@@ -156,7 +156,7 @@ impl<O> AccumulatorOutput<O> {
 pub trait Accumulator: Send + Sync + Debug {
     type State: Clone + Send + Sync + Debug;
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
     fn accumulate(&self, state: &mut Self::State, input: Self::Input);
