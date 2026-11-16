@@ -5,27 +5,19 @@
 use super::domain::{EmailSent, LocatedParcel, ParcelStatus, SmsSent};
 use super::services::{CustomerMessaging, EmailNotice, SmsNotice};
 use async_trait::async_trait;
-use obzenflow::effects::{Effects, Port, StageCompletion};
+use obzenflow::effects::{Effects, StageCompletion};
 use obzenflow::error::HandlerError;
+use obzenflow::schema::outcome;
 use obzenflow::stages::transforms::EffectfulTransformHandler;
 
-#[obzenflow::command]
+#[obzenflow::command(through = CustomerMessaging)]
 #[derive(Clone, Debug)]
-pub struct NotifyCustomer {
-    #[port]
-    messaging: Port<dyn CustomerMessaging>,
-}
-
-impl NotifyCustomer {
-    pub fn new(messaging: Port<dyn CustomerMessaging>) -> Self {
-        Self { messaging }
-    }
-}
+pub struct NotifyCustomer;
 
 #[async_trait]
 impl EffectfulTransformHandler for NotifyCustomer {
     type Input = LocatedParcel;
-    type Output = obzenflow::schema::stage_fact_set![EmailSent, SmsSent];
+    type Output = outcome![EmailSent | SmsSent];
 
     async fn process(
         &self,

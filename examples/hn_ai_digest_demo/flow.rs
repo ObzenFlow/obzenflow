@@ -128,9 +128,9 @@ impl AiRole<Chunk<FormattedStory>> for HnDigest {
     fn interpret(
         &self,
         _: Chunk<FormattedStory>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<HnDigestGroupSummary, HandlerError> {
-        let reply = outcome.replied()?;
+        let reply = call.replied()?;
         Ok(HnDigestGroupSummary {
             output_markdown: strip_accidental_story_echo(reply.text()),
         })
@@ -154,9 +154,9 @@ impl AiRole<Partials<FormattedStory, HnDigestGroupSummary>> for HnDigest {
     fn interpret(
         &self,
         input: Partials<FormattedStory, HnDigestGroupSummary>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<HnDigestSummary, HandlerError> {
-        let reply = outcome.replied()?;
+        let reply = call.replied()?;
         let markdown = render_digest_links(reply.text(), input.items())?;
         Ok(self.summary(input, &reply, markdown))
     }

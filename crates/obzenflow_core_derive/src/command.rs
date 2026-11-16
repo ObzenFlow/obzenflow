@@ -10,13 +10,15 @@ use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{
-    parenthesized, parse_quote, parse_quote_spanned, token, Attribute, Fields, GenericArgument,
-    Ident, Index, Item, ItemStruct, Meta, Path, PathArguments, Token, Type, TypeTraitObject,
-    WherePredicate,
+    parse_quote, parse_quote_spanned, token, Attribute, Fields, GenericArgument, Ident, Index,
+    Item, ItemStruct, Meta, Path, PathArguments, Token, Type, TypeTraitObject, WherePredicate,
 };
 
-const ARGUMENTS: &str = "`#[obzenflow::command]` takes `through = Port` or \
-                         `through = (PortA, PortB)`, and optionally `effects = <path>`";
+const ARGUMENTS: &str =
+    "`#[obzenflow::command]` takes `through = Port`, and optionally `effects = <path>`";
+
+const THROUGH_ONE: &str = "`through` names one port; a command that works through several ports \
+                           marks each with a `#[port]` field";
 
 const NOT_A_STRUCT: &str = "`#[obzenflow::command]` marks a struct, which declares the ports it \
                             works through";
@@ -26,7 +28,7 @@ const UNIT_STRUCT: &str =
      instead";
 
 struct CommandArgs {
-    through: Option<Vec<Path>>,
+    through: Option<Path>,
     effects: EffectsPath,
 }
 
@@ -43,15 +45,10 @@ impl Parse for CommandArgs {
             if key == "effects" {
                 effects = EffectsPath::written(input.parse::<Path>()?);
             } else if input.peek(token::Paren) {
-                let ports;
-                parenthesized!(ports in input);
-                let ports = Punctuated::<Path, Token![,]>::parse_terminated(&ports)?;
-                if ports.is_empty() {
-                    return Err(syn::Error::new(key.span(), ARGUMENTS));
-                }
-                through = Some(ports.into_iter().collect());
+                let ports: TokenTree = input.parse()?;
+                return Err(syn::Error::new(ports.span(), THROUGH_ONE));
             } else {
-                through = Some(vec![input.parse::<Path>()?]);
+                through = Some(input.parse::<Path>()?);
             }
             if !input.is_empty() {
                 input.parse::<Token![,]>()?;
@@ -77,7 +74,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         return refused(item, syn::Error::new(Span::call_site(), NOT_A_STRUCT));
     };
     let expansion = match &args.through {
-        Some(ports) => expand_through(&args.effects, command.clone(), ports),
+        Some(port) => expand_through(&args.effects, command.clone(), port),
         None => expand_fields(&args.effects, command.clone()),
     };
     expansion.unwrap_or_else(|error| refused(without_marks(command).to_token_stream(), error))
@@ -101,35 +98,23 @@ fn refused(item: TokenStream, error: syn::Error) -> TokenStream {
 fn expand_through(
     effects: &EffectsPath,
     mut command: ItemStruct,
-    ports: &[Path],
+    port: &Path,
 ) -> Result<TokenStream, syn::Error> {
     if !matches!(command.fields, Fields::Unit) {
         return Err(syn::Error::new(command.ident.span(), UNIT_STRUCT));
     }
-    let mut written: Vec<String> = Vec::new();
-    let mut names: Vec<Ident> = Vec::new();
-    let mut held = Vec::new();
+    refuse_generics(port)?;
     let effects_path = effects.tokens();
-    for port in ports {
-        refuse_generics(port)?;
-        let compact = compact_tokens(port);
-        if written.contains(&compact) {
-            return Err(two_ports(&command.ident, &compact, port));
-        }
-        written.push(compact);
-        let name = field_name(port, &names);
-        let ty: Type = parse_quote!(#effects_path::Port<dyn #port>);
-        let port_name = port_label(port);
-        held.push(HeldPort {
-            ty,
-            accessor: quote!(self.#name),
-            field: quote!(#effects_path::PortField::Through(#port_name)),
-            listed: None,
-        });
-        names.push(name);
-    }
-    let types = held.iter().map(|port| &port.ty).collect::<Vec<_>>();
-    let fields: syn::FieldsNamed = parse_quote!({ #(#names: #types),* });
+    let field = field_name(port);
+    let ty: Type = parse_quote!(#effects_path::Port<dyn #port>);
+    let port_name = port_label(port);
+    let held = [HeldPort {
+        ty: ty.clone(),
+        accessor: quote!(self.#field),
+        field: quote!(#effects_path::PortField::Through(#port_name)),
+        listed: None,
+    }];
+    let fields: syn::FieldsNamed = parse_quote!({ #field: #ty });
     command.fields = Fields::Named(fields);
     command.semi_token = None;
 
@@ -137,10 +122,9 @@ fn expand_through(
     let (impl_generics, ty_generics, where_clause) = command.generics.split_for_impl();
     let constructor = quote! {
         impl #impl_generics #name #ty_generics #where_clause {
-            /// Builds this command from the ports it works through, in the
-            /// order `through` lists them.
-            pub fn through(#(#names: #types),*) -> Self {
-                Self { #(#names),* }
+            /// Builds this command from the port it works through.
+            pub fn through(#field: #ty) -> Self {
+                Self { #field }
             }
         }
     };
@@ -342,7 +326,7 @@ fn port_of_field(ty: &Type) -> String {
     }
 }
 
-fn field_name(port: &Path, taken: &[Ident]) -> Ident {
+fn field_name(port: &Path) -> Ident {
     let label = port_label(port);
     let mut name = String::new();
     let mut previous_lower = false;
@@ -356,12 +340,7 @@ fn field_name(port: &Path, taken: &[Ident]) -> Ident {
     if !name.ends_with("port") {
         name.push_str("_port");
     }
-    let ident = format_ident!("{name}");
-    if taken.contains(&ident) {
-        format_ident!("{name}_{}", taken.len())
-    } else {
-        ident
-    }
+    format_ident!("{name}")
 }
 
 fn located_at(tokens: TokenStream, span: Span) -> TokenStream {
@@ -461,36 +440,20 @@ mod tests {
     }
 
     #[test]
-    fn through_constructor_preserves_port_order() {
-        let expanded = expanded(
+    fn through_tuple_refused() {
+        let refused = expanded(
             quote!(through = (RiskEnginePort, CaseSystemPort)),
             quote!(
                 pub struct Triage;
             ),
         );
-        let risk_engine = expanded
-            .find("pub fn through (risk_engine_port")
-            .expect("the first port comes first");
-        let case_system = expanded
-            .find("case_system_port : :: obzenflow :: effects :: Port < dyn CaseSystemPort >) -> Self")
-            .expect("the second port comes second");
-        assert!(risk_engine < case_system, "{expanded}");
         assert!(
-            expanded.contains("Self { risk_engine_port , case_system_port }"),
-            "{expanded}"
-        );
-    }
-
-    #[test]
-    fn field_name_collision_appends_index() {
-        let expanded = expanded(
-            quote!(through = (billing::CardPort, refunds::CardPort)),
-            quote!(
-                struct Refund;
+            refused.contains(
+                "`through` names one port; a command that works through several ports marks each \
+                 with a `#[port]` field"
             ),
+            "{refused}"
         );
-        assert!(expanded.contains("card_port :"), "{expanded}");
-        assert!(expanded.contains("card_port_1 :"), "{expanded}");
     }
 
     #[test]
@@ -555,22 +518,6 @@ mod tests {
                 "`through = warehouse::WarehousePort<StockRelease, StockReservation>`: a port takes no generic parameters; to allow some of its requests, write the port as a `#[port(StockRelease, StockReservation)]` field"
             ),
             "{two}"
-        );
-    }
-
-    #[test]
-    fn through_duplicate_port_refused() {
-        let expanded = expanded(
-            quote!(through = (PaymentGatewayPort, PaymentGatewayPort)),
-            quote!(
-                struct ChargeInvoice;
-            ),
-        );
-        assert!(
-            expanded.contains(
-                "`ChargeInvoice` holds two ports of type `PaymentGatewayPort`; a command holds one port per port type"
-            ),
-            "{expanded}"
         );
     }
 
@@ -755,16 +702,6 @@ mod tests {
         assert!(
             expanded_args.contains("takes `through = Port`"),
             "{expanded_args}"
-        );
-        let expanded_empty = expanded(
-            quote!(through = ()),
-            quote!(
-                struct Charge;
-            ),
-        );
-        assert!(
-            expanded_empty.contains("takes `through = Port`"),
-            "{expanded_empty}"
         );
         let expanded_item = expanded(
             quote!(),

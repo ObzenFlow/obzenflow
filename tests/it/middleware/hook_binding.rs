@@ -407,7 +407,7 @@ impl HookTransform {
 #[async_trait]
 impl EffectfulTransformHandler for HookTransform {
     type Input = HookInput;
-    type Output = obzenflow_core::stage_fact_set![HookOutput, HookEffectValue];
+    type Output = obzenflow_core::outcome![HookOutput | HookEffectValue];
 
     async fn process(
         &self,

@@ -855,7 +855,7 @@ mod tests {
             serde_json::json!({}),
         );
         let error = HandlerError::ContractViolation(
-            "one_fact_stage_output: singleton reconstruction failed".to_string(),
+            "one_fact_outcome: singleton reconstruction failed".to_string(),
         );
 
         let directive = contract_violation_directive::<()>(&error, "processing", &input, "fold")
@@ -864,7 +864,7 @@ mod tests {
         match directive {
             EventLoopDirective::Transition(StatefulEvent::Error(message)) => {
                 assert!(message.contains("Stateful stage contract violation"));
-                assert!(message.contains("one_fact_stage_output"));
+                assert!(message.contains("one_fact_outcome"));
                 assert!(message.contains("fold"));
             }
             _ => panic!("expected a transition through the stateful Error event"),

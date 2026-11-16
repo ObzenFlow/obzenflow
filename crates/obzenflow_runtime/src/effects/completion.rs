@@ -4,7 +4,7 @@
 
 //! Typed evidence returned by a completed effectful stage invocation.
 
-use obzenflow_core::{EventDescriptor, StageFactSet};
+use obzenflow_core::{EventDescriptor, Outcome};
 use std::marker::PhantomData;
 
 /// Evidence that one effectful handler invocation completed after authoring
@@ -15,13 +15,13 @@ use std::marker::PhantomData;
 /// re-enter a supervisor.
 #[must_use = "an effectful handler must return its StageCompletion receipt"]
 #[derive(Debug)]
-pub struct StageCompletion<Output: StageFactSet> {
+pub struct StageCompletion<Output: Outcome> {
     committed_fact_count: usize,
     committed_fact_types: Vec<EventDescriptor>,
     _output: PhantomData<fn() -> Output>,
 }
 
-impl<Output: StageFactSet> StageCompletion<Output> {
+impl<Output: Outcome> StageCompletion<Output> {
     pub(super) fn new(
         committed_fact_count: usize,
         committed_fact_types: Vec<EventDescriptor>,

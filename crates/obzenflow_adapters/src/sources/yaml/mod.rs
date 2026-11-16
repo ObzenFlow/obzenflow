@@ -16,7 +16,7 @@ mod document;
 use super::file_version::FileVersion;
 use document::Node;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
-use obzenflow_core::OneFactStageOutput;
+use obzenflow_core::OneFactOutcome;
 use obzenflow_runtime::stages::source::{
     FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceError,
     SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
@@ -45,7 +45,7 @@ pub enum YamlSelection {
 
 /// Application-owned mapping from one selected YAML record to one fact.
 pub trait YamlDecoder: Clone + Send + Sync + 'static {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn decode(&self, record: YamlRecord<'_>) -> Result<Self::Output, YamlDecodeError>;
 }

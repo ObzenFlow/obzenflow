@@ -7,33 +7,23 @@ use super::domain::{
     PaymentMethodState, ValidatedOrder,
 };
 use obzenflow::error::HandlerError;
-use obzenflow::schema::StageOutputFacts;
+use obzenflow::schema::outcome;
 use obzenflow::stages::transforms::TypedTransformHandler;
-
-#[derive(Debug, Clone, StageOutputFacts)]
-pub enum ValidationOutcome {
-    Validated(ValidatedOrder),
-    Invalid {
-        invalid: InvalidOrder,
-        cancelled: CancelledOrder,
-    },
-}
 
 #[derive(Debug, Clone)]
 pub struct ValidateOrder;
 
 impl TypedTransformHandler for ValidateOrder {
     type Input = CustomerOrderPlaced;
-    type Output = ValidationOutcome;
+    type Output = outcome![ValidatedOrder | (InvalidOrder, CancelledOrder)];
 
     fn process(&self, order: CustomerOrderPlaced) -> Result<Self::Output, HandlerError> {
         match invalid_reason_for(&order) {
-            None => Ok(ValidationOutcome::Validated(validated_order(order))),
-            Some(reason) => {
-                let invalid = invalid_order(&order, reason.clone());
-                let cancelled = cancelled_order(&order, reason);
-                Ok(ValidationOutcome::Invalid { invalid, cancelled })
-            }
+            None => Ok(outcome(validated_order(order))),
+            Some(reason) => Ok(outcome((
+                invalid_order(&order, reason.clone()),
+                cancelled_order(&order, reason),
+            ))),
         }
     }
 }

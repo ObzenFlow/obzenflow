@@ -292,7 +292,7 @@ pub(super) fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result
 
 pub(super) fn decode_effect_outcome_group<T>(records: &[&EffectRecord]) -> Result<T, EffectError>
 where
-    T: TypedFactSet,
+    T: OutcomeFacts,
 {
     validate_effect_outcome_group(records)?;
     let [single] = records else {
@@ -330,7 +330,7 @@ where
                 )),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        return T::try_from_facts(&facts).map_err(effect_fact_set_error);
+        return T::try_from_facts(&facts).map_err(effect_outcome_error);
     };
 
     match &single.outcome {
@@ -351,7 +351,7 @@ where
             )
             .map_err(|error| EffectError::Serialization(error.to_string()))?,
         }])
-        .map_err(effect_fact_set_error),
+        .map_err(effect_outcome_error),
         EffectOutcomePayload::Succeeded { .. } => Err(EffectError::EffectProvenanceMismatch(
             "opaque effect success cannot reconstruct typed facts".to_string(),
         )),
@@ -543,19 +543,19 @@ fn validate_failure_detail(
     Ok(())
 }
 
-pub(super) fn effect_fact_set_error(error: TypedFactSetError) -> EffectError {
+pub(super) fn effect_outcome_error(error: OutcomeError) -> EffectError {
     match error {
-        TypedFactSetError::SerializationFailed(message) => EffectError::Serialization(message),
-        TypedFactSetError::DeserializationFailed { event_type, error } => {
+        OutcomeError::SerializationFailed(message) => EffectError::Serialization(message),
+        OutcomeError::DeserializationFailed { event_type, error } => {
             EffectError::Serialization(format!("{event_type}: {error}"))
         }
-        TypedFactSetError::MissingFact { event_type } => EffectError::EffectProvenanceMismatch(
-            format!("effect outcome group is missing fact `{event_type}`"),
-        ),
-        TypedFactSetError::DuplicateFact { event_type } => EffectError::EffectProvenanceMismatch(
+        OutcomeError::MissingFact { event_type } => EffectError::EffectProvenanceMismatch(format!(
+            "effect outcome group is missing fact `{event_type}`"
+        )),
+        OutcomeError::DuplicateFact { event_type } => EffectError::EffectProvenanceMismatch(
             format!("effect outcome group has duplicate fact `{event_type}`"),
         ),
-        TypedFactSetError::UnexpectedFact { event_type } => EffectError::EffectProvenanceMismatch(
+        OutcomeError::UnexpectedFact { event_type } => EffectError::EffectProvenanceMismatch(
             format!("effect outcome group contains unexpected fact `{event_type}`"),
         ),
     }

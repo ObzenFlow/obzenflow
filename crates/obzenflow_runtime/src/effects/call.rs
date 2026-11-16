@@ -7,7 +7,7 @@ use super::{
     EffectPortSlotSet, EffectSafety, IdempotencyKey, Named,
 };
 use async_trait::async_trait;
-use obzenflow_core::event::schema::EffectOutcomeFacts;
+use obzenflow_core::event::schema::EffectOutcome;
 use obzenflow_core::SystemBindingEvidence;
 use serde::Serialize;
 
@@ -278,7 +278,7 @@ pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'stat
     type Port: ?Sized + Send + Sync + 'static;
 
     /// The facts a successful call records.
-    type Outcome: EffectOutcomeFacts + Clone + Send + Sync + 'static;
+    type Outcome: EffectOutcome + Clone + Send + Sync + 'static;
 
     async fn call(
         &self,

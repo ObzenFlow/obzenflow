@@ -151,7 +151,7 @@ pub trait TypedPayload: Serialize + DeserializeOwned + Sized {
         event_type == Self::EVENT_TYPE
     }
 
-    fn matches_fact(fact: &super::typed_fact_set::TypedFact) -> bool {
+    fn matches_fact(fact: &super::outcome_facts::TypedFact) -> bool {
         fact.payload.kind() == Self::EVENT_KIND
             && Self::accepts_payload(&fact.payload)
             && fact.event_type.as_str() == Self::EVENT_TYPE

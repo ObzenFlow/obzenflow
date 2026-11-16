@@ -83,7 +83,7 @@ struct AnswerNumbers {
 #[async_trait]
 impl EffectfulTransformHandler for AnswerNumbers {
     type Input = Number;
-    type Output = obzenflow::schema::stage_fact_set![Answered];
+    type Output = Answered;
 
     async fn process(
         &self,

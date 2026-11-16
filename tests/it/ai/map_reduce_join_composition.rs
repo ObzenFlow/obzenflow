@@ -22,7 +22,7 @@ use obzenflow_core::metrics::{
     BoundaryDirection, CompositeBoundary, CompositeBoundaryEdge, CompositeBoundaryPort,
     CompositeDurationAccumulator,
 };
-use obzenflow_core::{StageId, StageOutputFacts, StageOutputs, TypedPayload, WriterId};
+use obzenflow_core::{outcome, Outcomes, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{ai, flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -116,15 +116,13 @@ struct Explode;
 
 impl TypedTransformHandler for Explode {
     type Input = Seed;
-    type Output = StageOutputs<SeedValue>;
+    type Output = Outcomes<SeedValue>;
 
-    fn process(&self, seed: Seed) -> Result<StageOutputs<SeedValue>, HandlerError> {
-        Ok(StageOutputs::many(seed.values.iter().map(|value| {
-            SeedValue {
-                seed: seed.id,
-                key: seed.key,
-                value: *value,
-            }
+    fn process(&self, seed: Seed) -> Result<Outcomes<SeedValue>, HandlerError> {
+        Ok(Outcomes::many(seed.values.iter().map(|value| SeedValue {
+            seed: seed.id,
+            key: seed.key,
+            value: *value,
         })))
     }
 }
@@ -148,9 +146,9 @@ impl AiRole<Chunk<SeedValue>> for SumMap {
     fn interpret(
         &self,
         chunk: Chunk<SeedValue>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<Partial, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         Ok(Partial {
             total: chunk.iter().map(|item| item.value).sum(),
         })
@@ -177,9 +175,9 @@ impl AiRole<Partials<SeedValue, Partial>> for SumReduce {
     fn interpret(
         &self,
         input: Partials<SeedValue, Partial>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<Row, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         let first = &input.items()[0];
         if first.seed == 4 {
             return Err(HandlerError::Domain("deliberate fixture failure".into()));
@@ -906,12 +904,6 @@ impl TypedPayload for HeldValue {
     const EVENT_TYPE: &'static str = "test.ai_join.held_value";
 }
 
-#[derive(Clone, Debug, StageOutputFacts)]
-enum Triage {
-    Kept(SeedValue),
-    Held(HeldValue),
-}
-
 #[derive(Clone)]
 struct TriageRole {
     version: String,
@@ -920,7 +912,7 @@ struct TriageRole {
 
 impl AiRole<SeedValue> for TriageRole {
     type Effect = ChatCompletion;
-    type Out = Triage;
+    type Out = outcome![SeedValue | HeldValue];
 
     fn stage_logic_version(&self) -> &str {
         &self.version
@@ -936,18 +928,18 @@ impl AiRole<SeedValue> for TriageRole {
     fn interpret(
         &self,
         item: SeedValue,
-        outcome: AiOutcome<ChatCompletionReply>,
-    ) -> Result<Triage, HandlerError> {
+        call: AiOutcome<ChatCompletionReply>,
+    ) -> Result<Self::Out, HandlerError> {
         self.interpreted.fetch_add(1, Ordering::SeqCst);
-        if let Some(unavailable) = outcome.unavailable() {
-            return Ok(Triage::Held(HeldValue {
+        if let Some(unavailable) = call.unavailable() {
+            return Ok(outcome(HeldValue {
                 seed: item.seed,
                 value: item.value,
                 unavailable: unavailable.clone(),
             }));
         }
-        outcome.replied()?;
-        Ok(Triage::Kept(item))
+        call.replied()?;
+        Ok(outcome(item))
     }
 }
 

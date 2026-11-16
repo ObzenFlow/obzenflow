@@ -52,7 +52,7 @@ pub use strategies::{
     InnerJoin, InnerJoinBuilder, LeftJoin, LeftJoinBuilder, StrictJoin, StrictJoinBuilder,
 };
 
-use obzenflow_core::{OneFactStageOutput, TypedPayload};
+use obzenflow_core::{OneFactOutcome, TypedPayload};
 use std::hash::Hash;
 
 /// Construct an inner join with a finite reference side.
@@ -202,9 +202,10 @@ where
 /// check:
 ///
 /// ```
-/// # use obzenflow_core::{StageOutputFacts, TypedPayload};
+/// # use obzenflow_core::TypedPayload;
 /// # use serde::{Deserialize, Serialize};
 /// use chrono::{NaiveDateTime, TimeDelta};
+/// use obzenflow_core::outcome;
 /// use obzenflow_runtime::stages::join::{left_as_of, AsOf};
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct FxRate { currency: String, effective_at: NaiveDateTime, rate: f64 }
@@ -222,26 +223,20 @@ where
 /// # struct RateMissing { currency: String }
 /// # impl TypedPayload for RateMissing { const EVENT_TYPE: &'static str = "doc.rate_missing"; }
 ///
-/// #[derive(Clone, Debug, StageOutputFacts)]
-/// #[stage_output(schema = obzenflow_core::event::schema)]
-/// enum Pricing {
-///     Priced(Priced),
-///     RateStale(RateStale),
-///     RateMissing(RateMissing),
-/// }
-///
 /// let price = left_as_of(
 ///     |rate: &FxRate| rate.currency.clone(),
 ///     |rate: &FxRate| rate.effective_at,
 ///     |payment: &Payment| payment.currency.clone(),
 ///     |payment: &Payment| payment.booked_at,
-///     |rate: AsOf<FxRate>, payment: Payment| match rate {
-///         AsOf::Found(rate) if payment.booked_at - rate.effective_at > TimeDelta::hours(2) => {
-///             Pricing::RateStale(RateStale { currency: payment.currency })
-///         }
-///         AsOf::Found(rate) => Pricing::Priced(Priced { rate: rate.rate }),
-///         AsOf::BeforeFirstVersion | AsOf::NoVersions => {
-///             Pricing::RateMissing(RateMissing { currency: payment.currency })
+///     |rate: AsOf<FxRate>, payment: Payment| -> outcome![Priced | RateStale | RateMissing] {
+///         match rate {
+///             AsOf::Found(rate) if payment.booked_at - rate.effective_at > TimeDelta::hours(2) => {
+///                 outcome(RateStale { currency: payment.currency })
+///             }
+///             AsOf::Found(rate) => outcome(Priced { rate: rate.rate }),
+///             AsOf::BeforeFirstVersion | AsOf::NoVersions => {
+///                 outcome(RateMissing { currency: payment.currency })
+///             }
 ///         }
 ///     },
 /// );
@@ -347,7 +342,7 @@ pub fn left_as_of<C, S, E, K, T, CatalogKeyFn, EffectiveAtFn, StreamKeyFn, AsOfF
 where
     C: TypedPayload + Clone + Send + Sync + 'static,
     S: TypedPayload + Clone + Send + Sync + 'static,
-    E: OneFactStageOutput + Send + Sync + 'static,
+    E: OneFactOutcome + Send + Sync + 'static,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     T: Ord + Copy + Send + Sync + std::fmt::Debug + 'static,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,

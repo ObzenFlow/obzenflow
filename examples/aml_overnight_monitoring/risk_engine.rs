@@ -3,15 +3,15 @@
 // https://obzenflow.dev
 
 use super::domain::{
-    AccountHistory, AccountKey, PaymentFormat, ProfiledTransaction, ReasonCode, Reasons,
-    RulesVersion, TxnId, AMLWORLD_TIME,
+    AccountHistory, AccountKey, AlertRaised, AlertSubject, PaymentFormat, ProfiledTransaction,
+    ReasonCode, Reasons, RulesVersion, TransactionCleared, TxnId, AMLWORLD_TIME,
 };
 use super::money::{Currency, Money, UsdCents, UsdPerUnit};
-use super::vendors::{ScoreOutcome, RISK_ENGINE_SOURCE};
+use super::vendors::RISK_ENGINE_SOURCE;
 use async_trait::async_trait;
 use obzenflow::effects::simulated::{CallLog, CallLogError};
 use obzenflow::effects::{EffectContext, EffectError, IdempotencyKey};
-use obzenflow::schema::FlowId;
+use obzenflow::schema::{outcome, FlowId};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -60,14 +60,14 @@ pub enum RiskVerdict {
 
 #[obzenflow::port]
 #[async_trait]
-pub trait RiskEnginePort: Send + Sync {
+pub trait RiskEnginePort {
     #[effect(type = "aml.score_transaction", exactly_once)]
     async fn score(
         &self,
         request: &ScoreRequest,
         key: &IdempotencyKey,
         ctx: &EffectContext,
-    ) -> Result<ScoreOutcome, EffectError>;
+    ) -> Result<outcome![TransactionCleared | AlertRaised], EffectError>;
 }
 
 pub struct RiskEngineOutage;
@@ -80,7 +80,7 @@ impl RiskEnginePort for RiskEngineOutage {
         _: &ScoreRequest,
         _: &IdempotencyKey,
         _: &EffectContext,
-    ) -> Result<ScoreOutcome, EffectError> {
+    ) -> Result<outcome![TransactionCleared | AlertRaised], EffectError> {
         Err(EffectError::unavailable(
             RISK_ENGINE_SOURCE,
             "unavailable",
@@ -118,11 +118,25 @@ impl RiskEnginePort for SimulatedRiskEngine {
         request: &ScoreRequest,
         key: &IdempotencyKey,
         ctx: &EffectContext,
-    ) -> Result<ScoreOutcome, EffectError> {
+    ) -> Result<outcome![TransactionCleared | AlertRaised], EffectError> {
         let verdict = self.answer(request, key, ctx.flow_id()).map_err(|error| {
             EffectError::unavailable(RISK_ENGINE_SOURCE, "ledger_write_failed", error)
         })?;
-        Ok(ScoreOutcome::from_verdict(request, verdict))
+        Ok(match verdict {
+            RiskVerdict::Cleared { rules_version } => outcome(TransactionCleared {
+                txn_id: request.txn_id,
+                rules_version,
+            }),
+            RiskVerdict::Flagged {
+                reasons,
+                rules_version,
+            } => outcome(AlertRaised::new(
+                AlertSubject::Transaction(request.txn_id),
+                request.payer.clone(),
+                reasons,
+                rules_version,
+            )),
+        })
     }
 }
 

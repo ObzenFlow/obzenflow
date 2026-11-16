@@ -6,7 +6,7 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TypedTransformHandler;
-use obzenflow_core::{StageOutputs, TypedPayload};
+use obzenflow_core::{Outcomes, TypedPayload};
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -49,13 +49,13 @@ where
     F: Fn(&T) -> bool + Send + Sync,
 {
     type Input = T;
-    type Output = StageOutputs<T>;
+    type Output = Outcomes<T>;
 
     fn process(&self, input: T) -> Result<Self::Output, HandlerError> {
         Ok(if (self.predicate)(&input) {
-            StageOutputs::one(input)
+            Outcomes::one(input)
         } else {
-            StageOutputs::none()
+            Outcomes::none()
         })
     }
 }
@@ -63,7 +63,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::TypedFactSet;
+    use obzenflow_core::OutcomeFacts;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize)]

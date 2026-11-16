@@ -122,7 +122,7 @@ impl PerformsBothEffects {
 #[async_trait]
 impl EffectfulTransformHandler for PerformsBothEffects {
     type Input = Input;
-    type Output = obzenflow_core::stage_fact_set![EffectFact, EffectReply];
+    type Output = obzenflow_core::outcome![EffectFact | EffectReply];
 
     async fn process(
         &self,

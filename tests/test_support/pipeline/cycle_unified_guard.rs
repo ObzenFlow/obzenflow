@@ -9,7 +9,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{CycleDepth, StageOutputs};
+use obzenflow_core::{CycleDepth, Outcomes};
 use obzenflow_dsl::{
     async_source, flow, sink, source, stateful, test_flow, transform, FlowDefinition,
 };
@@ -167,13 +167,10 @@ struct DropAllTransform;
 
 impl TypedTransformHandler for DropAllTransform {
     type Input = SeedEvent;
-    type Output = StageOutputs<SeedEvent>;
+    type Output = Outcomes<SeedEvent>;
 
-    fn process(
-        &self,
-        _event: SeedEvent,
-    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
-        Ok(StageOutputs::none())
+    fn process(&self, _event: SeedEvent) -> std::result::Result<Outcomes<SeedEvent>, HandlerError> {
+        Ok(Outcomes::none())
     }
 }
 

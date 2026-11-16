@@ -732,7 +732,7 @@ struct RecordedReplyValue {
 fn assert_effect_outcome_fits<E, Output, Proof>()
 where
     E: EffectOutcomeFitsOutput<Output, Proof>,
-    Output: obzenflow_core::StageFactSet,
+    Output: obzenflow_core::Outcome,
 {
 }
 
@@ -1341,29 +1341,6 @@ impl TypedPayload for SecondOutput {
     const EVENT_TYPE: &'static str = "test.second_output";
 }
 
-/// Product carrier for the multi-fact effect tests, derived per FLOWIP-120m:
-/// exact reconstruction, one fact per field.
-#[derive(Clone, Debug, PartialEq, Eq, obzenflow_core::EffectOutcomeFacts)]
-#[effect_outcome(schema = obzenflow_core::event::schema)]
-struct MultiFactOutcome {
-    first: FirstOutput,
-    second: SecondOutput,
-}
-
-#[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
-#[stage_output(schema = obzenflow_core::event::schema)]
-enum OrderedStatefulOutput {
-    First(FirstOutput),
-    Second(SecondOutput),
-}
-
-#[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
-#[stage_output(schema = obzenflow_core::event::schema)]
-enum PolicyTranslationOutput {
-    Reserved(CountingOutput),
-    Failed(SecondOutput),
-}
-
 #[derive(Clone, Debug)]
 struct PolicyTranslationStateful {
     effect_calls: Arc<AtomicUsize>,
@@ -1386,7 +1363,7 @@ fn is_test_policy_rejection(error: &EffectError) -> bool {
 impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTranslationStateful {
     type State = Vec<u64>;
     type Input = FirstOutput;
-    type Output = PolicyTranslationOutput;
+    type Output = obzenflow_core::outcome![CountingOutput | SecondOutput];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1420,48 +1397,12 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTransla
     }
 
     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        if let PolicyTranslationOutput::Reserved(reserved) = fact {
-            state.push(reserved.value);
-        }
-        Ok(())
-    }
-}
-
-// `OneFactStageOutput` is an open, law-bearing marker. This deliberately false
-// implementation proves the fatal runtime backstop for a trusted manual claim.
-impl obzenflow_core::OneFactStageOutput for MultiFactOutcome {}
-
-#[crate::effects::command(effects = crate::effects)]
-#[derive(Clone, Debug)]
-struct DishonestProductStateful {
-    apply_calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl crate::stages::common::handlers::EffectfulStatefulHandler for DishonestProductStateful {
-    type State = u64;
-    type Input = FirstOutput;
-    type Output = MultiFactOutcome;
-
-    fn initial_state(&self) -> Self::State {
-        0
-    }
-
-    async fn decide(
-        &mut self,
-        _state: &Self::State,
-        input: &Self::Input,
-        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        fx.emit(FirstOutput { value: input.value }).await?;
-        Err(HandlerError::Domain(
-            "failure after dishonest emit".to_string(),
-        ))
-    }
-
-    fn apply(&mut self, state: &mut Self::State, _fact: Self::Output) -> Result<(), HandlerError> {
-        self.apply_calls.fetch_add(1, Ordering::SeqCst);
-        *state += 1;
+        obzenflow_core::fold!(match fact {
+            CountingOutput { value } => {
+                state.push(value)
+            }
+            _ => {}
+        });
         Ok(())
     }
 }
@@ -1474,7 +1415,7 @@ struct EmitThenErrorStateful;
 impl crate::stages::common::handlers::EffectfulStatefulHandler for EmitThenErrorStateful {
     type State = Vec<String>;
     type Input = FirstOutput;
-    type Output = OrderedStatefulOutput;
+    type Output = obzenflow_core::outcome![FirstOutput | SecondOutput];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1497,10 +1438,14 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for EmitThenError
     }
 
     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        match fact {
-            OrderedStatefulOutput::First(first) => state.push(format!("first:{}", first.value)),
-            OrderedStatefulOutput::Second(second) => state.push(second.value),
-        }
+        obzenflow_core::fold!(match fact {
+            FirstOutput { value } => {
+                state.push(format!("first:{value}"))
+            }
+            SecondOutput { value } => {
+                state.push(value)
+            }
+        });
         Ok(())
     }
 }
@@ -1551,7 +1496,7 @@ struct SecondFactApplyErrorStateful;
 impl crate::stages::common::handlers::EffectfulStatefulHandler for SecondFactApplyErrorStateful {
     type State = Vec<String>;
     type Input = FirstOutput;
-    type Output = OrderedStatefulOutput;
+    type Output = obzenflow_core::outcome![FirstOutput | SecondOutput];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1572,15 +1517,15 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SecondFactApp
     }
 
     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        match fact {
-            OrderedStatefulOutput::First(first) => {
-                state.push(format!("first:{}", first.value));
+        obzenflow_core::fold!(match fact {
+            FirstOutput { value } => {
+                state.push(format!("first:{value}"));
                 Ok(())
             }
-            OrderedStatefulOutput::Second(_) => {
+            SecondOutput { .. } => {
                 Err(HandlerError::Validation("second apply failed".to_string()))
             }
-        }
+        })
     }
 }
 
@@ -1597,7 +1542,7 @@ impl Effect for MultiFactEffect {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
     type BindingMode = Named<FixtureEvidence>;
 
-    type Outcome = MultiFactOutcome;
+    type Outcome = obzenflow_core::outcome![(FirstOutput, SecondOutput)];
     type OutcomeSemantics = crate::effects::DomainFacts;
 
     fn label(&self) -> &str {
@@ -1610,12 +1555,12 @@ impl Effect for MultiFactEffect {
 
     async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(MultiFactOutcome {
-            first: FirstOutput { value: 10 },
-            second: SecondOutput {
+        Ok(obzenflow_core::outcome((
+            FirstOutput { value: 10 },
+            SecondOutput {
                 value: "twenty".to_string(),
             },
-        })
+        )))
     }
 }
 
@@ -2983,10 +2928,8 @@ async fn typed_completion_reports_direct_facts_in_commit_order() {
         output_descriptor_for::<FirstOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
-    let mut effects = Effects::<
-        obzenflow_core::stage_fact_set![FirstOutput, SecondOutput],
-        Allowed<()>,
-    >::new(ctx);
+    let mut effects =
+        Effects::<obzenflow_core::outcome![FirstOutput | SecondOutput], Allowed<()>>::new(ctx);
 
     effects.emit(FirstOutput { value: 1 }).await.unwrap();
     effects
@@ -3679,62 +3622,6 @@ async fn effectful_stateful_second_apply_error_names_the_second_committed_fact()
                 && message.contains(&SecondOutput::event_type_name())
                 && message.contains("Validation error: second apply failed")
     ));
-}
-
-#[tokio::test]
-async fn false_one_fact_assertion_takes_precedence_over_decide_error() {
-    use crate::stages::common::handlers::{
-        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
-    };
-
-    let stage_id = StageId::new();
-    let writer_id = WriterId::from(stage_id);
-    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let input = ChainEventFactory::data_event(
-        writer_id,
-        FirstOutput::event_type_name(),
-        FirstOutput::payload_schema_version(),
-        json!({ "value": 9 }),
-    );
-    let parent =
-        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
-    let mut effect_context = invocation_context(journal.clone(), parent, None);
-    effect_context.emit_enabled = true;
-    effect_context.output_contract = output_contract_for_many(vec![
-        output_descriptor_for::<FirstOutput>(),
-        output_descriptor_for::<SecondOutput>(),
-    ]);
-
-    let apply_calls = Arc::new(AtomicUsize::new(0));
-    let mut adapter = EffectfulStatefulHandlerAdapter::new(
-        DishonestProductStateful {
-            apply_calls: apply_calls.clone(),
-        },
-        test_allow_all_effect_boundary(),
-    );
-    let mut state = 0;
-
-    let error = adapter
-        .accumulate(
-            &mut state,
-            input,
-            Some(effect_context),
-            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-        )
-        .await
-        .expect_err("false one-fact assertion must fail after singleton decoding");
-
-    assert!(error.is_contract_violation());
-    assert!(error.to_string().contains("one_fact_stage_output"));
-    assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
-
-    let events = journal.events();
-    assert_eq!(events.len(), 1, "the emitted fact was already durable");
-    assert!(events[0].is_fact());
-    assert_eq!(
-        events[0].event_type(),
-        FirstOutput::event_type_name().as_str()
-    );
 }
 
 #[tokio::test]
@@ -4580,12 +4467,12 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
 
     assert_eq!(
         live_output,
-        MultiFactOutcome {
-            first: FirstOutput { value: 10 },
-            second: SecondOutput {
+        obzenflow_core::outcome((
+            FirstOutput { value: 10 },
+            SecondOutput {
                 value: "twenty".to_string()
             },
-        }
+        ))
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 

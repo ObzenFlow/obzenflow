@@ -529,7 +529,7 @@ pub(super) fn build_domain_effect_success_facts(
         ));
     }
 
-    // FLOWIP-120q: the full fact set is in hand here, so stamp the group
+    // FLOWIP-120q: every fact of the outcome is in hand here, so stamp the group
     // cardinality on every fact. Sized completeness checks read this back.
     let outcome_fact_count = OutcomeFactCount::new(u32::try_from(facts.len()).map_err(|_| {
         EffectError::Execution("effect outcome fact count exceeds u32 range".to_string())

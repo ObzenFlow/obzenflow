@@ -11,7 +11,7 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
-use obzenflow_core::{EventId, StageId, StageOutputFacts, TypedPayload, WriterId};
+use obzenflow_core::{outcome, EventId, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -715,12 +715,6 @@ impl TypedPayload for KeyOverLimit {
     const EVENT_TYPE: &'static str = "flowip_134e.key_over_limit";
 }
 
-#[derive(Clone, Debug, StageOutputFacts)]
-enum KeyVerdict {
-    Total(KeyTotal),
-    OverLimit(KeyOverLimit),
-}
-
 #[derive(Clone, Debug)]
 struct KeyLimit {
     limit: u64,
@@ -729,7 +723,7 @@ struct KeyLimit {
 impl TypedStatefulHandler for KeyLimit {
     type State = BTreeMap<String, u64>;
     type Input = Input;
-    type Output = KeyVerdict;
+    type Output = outcome![KeyTotal | KeyOverLimit];
 
     fn initial_state(&self) -> Self::State {
         BTreeMap::new()
@@ -745,13 +739,13 @@ impl TypedStatefulHandler for KeyLimit {
                 .iter()
                 .map(|(key, &total)| {
                     if total > self.limit {
-                        KeyVerdict::OverLimit(KeyOverLimit {
+                        outcome(KeyOverLimit {
                             key: key.clone(),
                             total,
                             limit: self.limit,
                         })
                     } else {
-                        KeyVerdict::Total(KeyTotal {
+                        outcome(KeyTotal {
                             key: key.clone(),
                             total,
                         })

@@ -15,7 +15,7 @@ use obzenflow_core::config::{ConfigScope, ConfigSource};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
-use obzenflow_core::{StageId, StageOutputFacts, TypedPayload, WriterId};
+use obzenflow_core::{outcome, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -202,20 +202,14 @@ impl TypedFiniteSourceHandler for StreamSource {
     }
 }
 
-#[derive(Clone, Debug, StageOutputFacts)]
-enum MixedFact {
-    Reference(ReferenceItem),
-    Stream(StreamItem),
-}
-
 #[derive(Clone, Debug)]
 struct MixedSource {
-    rows: std::collections::VecDeque<MixedFact>,
+    rows: std::collections::VecDeque<outcome![ReferenceItem | StreamItem]>,
     reads: Arc<AtomicUsize>,
 }
 
 impl TypedFiniteSourceHandler for MixedSource {
-    type Output = MixedFact;
+    type Output = outcome![ReferenceItem | StreamItem];
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
@@ -825,13 +819,13 @@ async fn mixed_join_feeds_filter_both_roles_with_backpressure_and_replay() {
             // and after its selected rows. A one-row credit window also proves
             // that filtered rows release backpressure on both subscriptions.
             let reference = |key: &str, version: &str| {
-                MixedFact::Reference(ReferenceItem {
+                outcome(ReferenceItem {
                     key: key.into(),
                     version: version.into(),
                 })
             };
             let stream = |key: &str| {
-                MixedFact::Stream(StreamItem {
+                outcome(StreamItem {
                     key: key.into(),
                     reject: false,
                 })

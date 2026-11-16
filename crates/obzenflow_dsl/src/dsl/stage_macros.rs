@@ -125,13 +125,23 @@ macro_rules! __obzenflow_async_source_timeout_diagnostic {
     };
 }
 
+/// The facts a stage row lists, as a type.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_row_facts {
+    () => { $crate::__private::EmptySet };
+    ($head:ty $(, $rest:ty)* $(,)?) => {
+        $crate::__private::WithMember<$head, $crate::__obzenflow_row_facts!($($rest),*)>
+    };
+}
+
 /// Shared proof-carrying source admission used by all four source families.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_admit_typed_source {
     (factory = $factory:ident, output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __source_policies: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($policy)),*];
@@ -142,7 +152,7 @@ macro_rules! __obzenflow_admit_typed_source {
             _,
             _,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
             _,
             _,
@@ -175,8 +185,8 @@ macro_rules! __obzenflow_admit_typed_source {
 #[macro_export]
 macro_rules! __obzenflow_admit_placeholder_source {
     (factory = $factory:ident, output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, message = $message:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __source_policies: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($policy)),*];
@@ -185,7 +195,7 @@ macro_rules! __obzenflow_admit_placeholder_source {
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($observer)),*];        $crate::dsl::typing::$factory::<
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
         >(
             $name,
             $message,
@@ -1204,26 +1214,26 @@ macro_rules! __obzenflow_async_infinite_source_attachment_contract {
 macro_rules! __obzenflow_transform_typed {
     // -- exact input, placeholder, explicit output contract --
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($mw)),*];        $crate::dsl::typing::placeholder_transform_descriptor::<
             $in,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
         >($name, None, __observers)
     }};
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($mw)),*];        $crate::dsl::typing::placeholder_transform_descriptor::<
             $in,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
         >($name, Some($msg), __observers)
     }};
@@ -1233,15 +1243,15 @@ macro_rules! __obzenflow_transform_typed {
     // flow.
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($mw)),*];        $crate::dsl::typing::typed_transform_descriptor::<
             _,
             $in,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
             _,
             _,
@@ -1494,21 +1504,21 @@ macro_rules! __obzenflow_assert_effectful_transform_contract {
             H: $crate::__private::EffectfulTransformHandler,
             <H as $crate::__private::EffectfulTransformHandler>::Input:
                 $crate::dsl::typing::EffectfulTransformInputMatchesArrow<$in>,
-            <$crate::__private::stage_fact_set![$($member),+] as $crate::__private::StageFactSet>::Members:
+            <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
-                    <<H as $crate::__private::EffectfulTransformHandler>::Output as $crate::__private::StageFactSet>::Members,
+                    <<H as $crate::__private::EffectfulTransformHandler>::Output as $crate::__private::Outcome>::Members,
                     ArrowToHandlerProof,
                 >,
-            <<H as $crate::__private::EffectfulTransformHandler>::Output as $crate::__private::StageFactSet>::Members:
+            <<H as $crate::__private::EffectfulTransformHandler>::Output as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
-                    <$crate::__private::stage_fact_set![$($member),+] as $crate::__private::StageFactSet>::Members,
+                    <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members,
                     HandlerToArrowProof,
                 >,
         {}
 
         __obzenflow_assert_effectful_transform_contract::<_, _, _>(&$handler);
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
     }};
 }
@@ -1526,21 +1536,21 @@ macro_rules! __obzenflow_assert_effectful_stateful_contract {
             H: $crate::__private::EffectfulStatefulHandler,
             <H as $crate::__private::EffectfulStatefulHandler>::Input:
                 $crate::dsl::typing::EffectfulStatefulInputMatchesArrow<$in>,
-            <$crate::__private::stage_fact_set![$($member),+] as $crate::__private::StageFactSet>::Members:
+            <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
-                    <<H as $crate::__private::EffectfulStatefulHandler>::Output as $crate::__private::StageFactSet>::Members,
+                    <<H as $crate::__private::EffectfulStatefulHandler>::Output as $crate::__private::Outcome>::Members,
                     ArrowToHandlerProof,
                 >,
-            <<H as $crate::__private::EffectfulStatefulHandler>::Output as $crate::__private::StageFactSet>::Members:
+            <<H as $crate::__private::EffectfulStatefulHandler>::Output as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
-                    <$crate::__private::stage_fact_set![$($member),+] as $crate::__private::StageFactSet>::Members,
+                    <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members,
                     HandlerToArrowProof,
                 >,
         {}
 
         __obzenflow_assert_effectful_stateful_contract::<_, _, _>(&$handler);
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
     }};
 }
@@ -2140,14 +2150,14 @@ macro_rules! __obzenflow_stateful_emit_option {
 #[macro_export]
 macro_rules! __obzenflow_stateful_typed {
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), emit = $emit:ident $(($interval:expr))?, middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($mw)),*];        $crate::dsl::typing::placeholder_stateful_descriptor::<
             $in,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
         >(
             $name,
@@ -2156,14 +2166,14 @@ macro_rules! __obzenflow_stateful_typed {
             __observers,        )
     }};
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), emit = $emit:ident $(($interval:expr))?, middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($mw)),*];        $crate::dsl::typing::placeholder_stateful_descriptor::<
             $in,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
         >(
             $name,
@@ -2173,15 +2183,15 @@ macro_rules! __obzenflow_stateful_typed {
     }};
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = $emit:ident $(($interval:expr))?, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($mw)),*];        $crate::dsl::typing::typed_stateful_descriptor::<
             _,
             $in,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
             _,
             _,
@@ -2520,8 +2530,8 @@ macro_rules! __obzenflow_join_typed {
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!(),
      middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($mw)),*];
@@ -2529,7 +2539,7 @@ macro_rules! __obzenflow_join_typed {
             $ref_ty,
             $str_ty,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
         >($name, stringify!($ref_var), None, __observers)
     }};
@@ -2538,8 +2548,8 @@ macro_rules! __obzenflow_join_typed {
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!($msg:expr),
      middleware = [$($mw:expr),*]) => {{
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($mw)),*];
@@ -2547,7 +2557,7 @@ macro_rules! __obzenflow_join_typed {
             $ref_ty,
             $str_ty,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
         >($name, stringify!($ref_var), Some($msg), __observers)
     }};
@@ -2581,8 +2591,8 @@ macro_rules! __obzenflow_join_typed {
      name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
      middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
             vec![$($crate::__private::capture_middleware($mw)),*];
@@ -2591,7 +2601,7 @@ macro_rules! __obzenflow_join_typed {
             $ref_ty,
             $str_ty,
             $out,
-            $crate::__private::stage_fact_set![$($member),+],
+            $crate::__obzenflow_row_facts![$($member),+],
             _,
             _,
             _,
@@ -3193,7 +3203,7 @@ macro_rules! effectful_stateful {
 /// #[async_trait]
 /// impl EffectfulTransformHandler for Checkout {
 ///     type Input = Order;
-///     type Output = obzenflow_core::stage_fact_set![Charged];
+///     type Output = Charged;
 ///
 ///     async fn process(
 ///         &self,
@@ -3295,7 +3305,7 @@ macro_rules! effectful_stateful {
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
 /// #     type Input = Order;
-/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type Output = Charged;
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
 /// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
@@ -3342,7 +3352,7 @@ macro_rules! effectful_stateful {
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
 /// #     type Input = Order;
-/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type Output = Charged;
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
 /// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
@@ -3387,7 +3397,7 @@ macro_rules! effectful_stateful {
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
 /// #     type Input = Order;
-/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type Output = Charged;
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
 /// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
@@ -3432,7 +3442,7 @@ macro_rules! effectful_stateful {
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
 /// #     type Input = Order;
-/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type Output = Charged;
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
 /// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
@@ -3472,7 +3482,7 @@ macro_rules! effectful_stateful {
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
 /// #     type Input = Order;
-/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type Output = Charged;
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
 /// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
@@ -3512,7 +3522,7 @@ macro_rules! effectful_stateful {
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
 /// #     type Input = Order;
-/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type Output = Charged;
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
 /// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
@@ -3555,7 +3565,7 @@ macro_rules! effectful_stateful {
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Post {
 /// #     type Input = Order;
-/// #     type Output = obzenflow_core::stage_fact_set![Posted];
+/// #     type Output = Posted;
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
 /// #         fx.call(LedgerPosting).await?;
 /// #         Ok(fx.complete()?)
@@ -3596,7 +3606,7 @@ macro_rules! effectful_stateful {
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
 /// #     type Input = Order;
-/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type Output = Charged;
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
 /// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
@@ -3639,7 +3649,7 @@ macro_rules! effectful_stateful {
 /// # #[async_trait]
 /// # impl EffectfulTransformHandler for Checkout {
 /// #     type Input = Order;
-/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type Output = Charged;
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
 /// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
@@ -3680,8 +3690,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// # impl AiRole<Partials<Story, Summary>> for Digest {
@@ -3690,8 +3700,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, input: &Partials<Story, Summary>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Combine.", format!("{} summaries", input.partials().len())))
 /// #     }
-/// #     fn interpret(&self, _: Partials<Story, Summary>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Partials<Story, Summary>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// # impl AiRole<Story> for Digest {
@@ -3700,8 +3710,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).chunks(10).reduce(Digest).on_eof();
@@ -3735,8 +3745,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// # impl AiRole<Partials<Story, Summary>> for Digest {
@@ -3745,8 +3755,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, input: &Partials<Story, Summary>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Combine.", format!("{} summaries", input.partials().len())))
 /// #     }
-/// #     fn interpret(&self, _: Partials<Story, Summary>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Partials<Story, Summary>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).chunks(10).reduce(Digest);
@@ -3776,8 +3786,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest);
@@ -3807,8 +3817,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -3838,8 +3848,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).chunks(10).key_by(|story: &Story| story.title.clone());
@@ -3868,8 +3878,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).key_by(|summary: &Summary| summary.text.clone()).chunks(10);
@@ -3898,8 +3908,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief).key_by(|story: &Story| story.title.clone());
@@ -3928,8 +3938,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
 /// #     }
-/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Chunk<Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// # #[derive(Clone)]
@@ -3940,8 +3950,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, input: &Partials<Story, Story>) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Combine.", format!("{} stories", input.partials().len())))
 /// #     }
-/// #     fn interpret(&self, _: Partials<Story, Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Partials<Story, Story>, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let digest = ai::map(Digest).chunks(10).reduce(CombineStories).on_eof();
@@ -3971,8 +3981,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -4003,8 +4013,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -4034,8 +4044,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -4065,8 +4075,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -4096,8 +4106,8 @@ macro_rules! effectful_transform {
 /// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
 /// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
 /// #     }
-/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
-/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     fn interpret(&self, _: Story, call: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: call.replied()?.text().to_string() })
 /// #     }
 /// # }
 /// let brief = ai::infer(Brief);
@@ -4214,21 +4224,21 @@ macro_rules! __obzenflow_assert_ai_outputs {
         fn __obzenflow_assert_ai_outputs<H, ArrowToHandlerProof, HandlerToArrowProof>(_: &H)
         where
             H: $crate::dsl::ai_stage::AiStageHandler,
-            <$crate::__private::stage_fact_set![$($member),+] as $crate::__private::StageFactSet>::Members:
+            <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
-                    <<H as $crate::dsl::ai_stage::AiStageHandler>::Out as $crate::__private::StageFactSet>::Members,
+                    <<H as $crate::dsl::ai_stage::AiStageHandler>::Out as $crate::__private::Outcome>::Members,
                     ArrowToHandlerProof,
                 >,
-            <<H as $crate::dsl::ai_stage::AiStageHandler>::Out as $crate::__private::StageFactSet>::Members:
+            <<H as $crate::dsl::ai_stage::AiStageHandler>::Out as $crate::__private::Outcome>::Members:
                 $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
-                    <$crate::__private::stage_fact_set![$($member),+] as $crate::__private::StageFactSet>::Members,
+                    <$crate::__obzenflow_row_facts![$($member),+] as $crate::__private::Outcome>::Members,
                     HandlerToArrowProof,
                 >,
         {}
 
         __obzenflow_assert_ai_outputs::<_, _, _>(&$handler);
-        const _: () = $crate::__private::assert_distinct_stage_fact_set::<
-            $crate::__private::stage_fact_set![$($member),+],
+        const _: () = $crate::__private::assert_distinct_outcome_facts::<
+            $crate::__obzenflow_row_facts![$($member),+],
         >();
     }};
 }

@@ -36,7 +36,7 @@ use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
-    CycleDepth, DivergenceContract, EventId, FlowId, JournalId, JournalRecord, StageOutputs,
+    CycleDepth, DivergenceContract, EventId, FlowId, JournalId, JournalRecord, Outcomes,
     TransportContract, TypedPayload,
 };
 use obzenflow_dsl::{effectful_transform, sink, source, test_flow, transform};
@@ -230,16 +230,13 @@ struct CycleEntryTransform;
 
 impl TypedTransformHandler for CycleEntryTransform {
     type Input = SeedEvent;
-    type Output = StageOutputs<SeedEvent>;
+    type Output = Outcomes<SeedEvent>;
 
-    fn process(
-        &self,
-        event: SeedEvent,
-    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+    fn process(&self, event: SeedEvent) -> std::result::Result<Outcomes<SeedEvent>, HandlerError> {
         Ok(if event.looped {
-            StageOutputs::none()
+            Outcomes::none()
         } else {
-            StageOutputs::one(event)
+            Outcomes::one(event)
         })
     }
 }
@@ -261,16 +258,13 @@ struct FanInEntryTransform;
 
 impl TypedTransformHandler for FanInEntryTransform {
     type Input = SeedEvent;
-    type Output = StageOutputs<SeedEvent>;
+    type Output = Outcomes<SeedEvent>;
 
-    fn process(
-        &self,
-        event: SeedEvent,
-    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+    fn process(&self, event: SeedEvent) -> std::result::Result<Outcomes<SeedEvent>, HandlerError> {
         Ok(if event.looped {
-            StageOutputs::none()
+            Outcomes::none()
         } else {
-            StageOutputs::one(event)
+            Outcomes::one(event)
         })
     }
 }

@@ -617,7 +617,7 @@ async fn assert_journal_parity(console: bool) {
     assert!(live_chunks.iter().all(|envelope| {
         !matches!(
             &envelope.payload,
-            ChainPayload::Fact(_) if envelope.event_type().contains("StageOutputs")
+            ChainPayload::Fact(_) if envelope.event_type().contains("Outcomes")
         )
     }));
     assert_eq!(

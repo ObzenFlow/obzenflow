@@ -2691,6 +2691,8 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 #[async_trait]
 impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for EffectfulStatefulDescriptor<H>
+where
+    H::Output: obzenflow_core::event::schema::DecodeCommitted,
 {
     fn prepare_middleware(&mut self) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
         refuse_effect_row(&self.name, self.effect_refusal.as_ref())

@@ -87,7 +87,7 @@ pub use crate::stages::common::control_strategies::{
 mod helper_tests {
     use super::*;
     use crate::stages::common::handler_error::HandlerError;
-    use obzenflow_core::TypedFactSet;
+    use obzenflow_core::OutcomeFacts;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize)]

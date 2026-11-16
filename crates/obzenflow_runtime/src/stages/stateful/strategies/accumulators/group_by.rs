@@ -12,7 +12,7 @@ use crate::stages::common::handlers::stateful::{
 };
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
 use obzenflow_core::event::provenance::causality_context::CausalInput;
-use obzenflow_core::{EventId, OneFactStageOutput, TypedPayload};
+use obzenflow_core::{EventId, OneFactOutcome, TypedPayload};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug};
 use std::hash::Hash;
@@ -220,7 +220,7 @@ where
     T: TypedPayload + Send + Sync + 'static,
     K: Hash + Eq + Clone + Send + Sync + Debug + 'static,
     S: Default + Clone + Send + Sync + Debug + 'static,
-    O: OneFactStageOutput + Send + Sync + 'static,
+    O: OneFactOutcome + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FUpdate: Fn(&mut S, &T) + Send + Sync + Clone + 'static,
     FOutput: Fn(&K, &S) -> O + Send + Sync + Clone + 'static,

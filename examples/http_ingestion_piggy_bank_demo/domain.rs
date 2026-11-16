@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::money::{Balance, UsdCents};
-use obzenflow::schema::{StageOutputFacts, TypedPayload};
+use obzenflow::schema::TypedPayload;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::num::NonZeroU32;
@@ -215,13 +215,6 @@ pub struct RetryReturned {
 
 impl TypedPayload for RetryReturned {
     const EVENT_TYPE: &'static str = "bank.retry_returned";
-}
-
-#[derive(Debug, Clone, StageOutputFacts)]
-pub enum Assessed {
-    Moved(BalanceMoved),
-    FeeCharged(FeeCharged),
-    RetryReturned(RetryReturned),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

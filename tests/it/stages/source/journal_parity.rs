@@ -9,7 +9,7 @@ use crate::replay_testkit;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
-use obzenflow_core::{StageId, StageOutputFacts, TypedPayload, WriterId};
+use obzenflow_core::{outcome, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{
     async_infinite_source, async_source, flow, infinite_source, sink, source, FlowDefinition,
 };
@@ -124,12 +124,6 @@ async fn source_replay_rejects_version_drift_before_selected_feed_filtering() {
         "source must diagnose descriptor drift before filtering: {error}");
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, StageOutputFacts)]
-enum SourceFact {
-    Alpha(Alpha),
-    Beta(Beta),
-}
-
 #[derive(Debug, Default)]
 struct Counters {
     opens: [AtomicUsize; 4],
@@ -143,13 +137,13 @@ struct Counters {
     beta_delivered: AtomicUsize,
 }
 
-fn pair(source: &'static str, value: u64) -> Vec<SourceFact> {
+fn pair(source: &'static str, value: u64) -> Vec<outcome![Alpha | Beta]> {
     vec![
-        SourceFact::Alpha(Alpha {
+        outcome(Alpha {
             source: source.to_string(),
             value,
         }),
-        SourceFact::Beta(Beta {
+        outcome(Beta {
             source: source.to_string(),
             value,
         }),
@@ -162,7 +156,7 @@ struct SyncFinite {
 }
 
 impl TypedFiniteSourceHandler for SyncFinite {
-    type Output = SourceFact;
+    type Output = outcome![Alpha | Beta];
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.counters
@@ -183,7 +177,7 @@ struct AsyncFinite {
 
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for AsyncFinite {
-    type Output = SourceFact;
+    type Output = outcome![Alpha | Beta];
 
     async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.counters
@@ -210,7 +204,7 @@ struct SyncInfinite {
 }
 
 impl TypedInfiniteSourceHandler for SyncInfinite {
-    type Output = SourceFact;
+    type Output = outcome![Alpha | Beta];
 
     fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         self.counters
@@ -231,7 +225,7 @@ struct AsyncInfinite {
 
 #[async_trait]
 impl TypedAsyncInfiniteSourceHandler for AsyncInfinite {
-    type Output = SourceFact;
+    type Output = outcome![Alpha | Beta];
 
     async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         self.counters
@@ -705,7 +699,7 @@ async fn assert_source_parity(connectors: bool) {
 struct SyncFiniteConnector(Arc<Counters>);
 
 impl FiniteSourceConnector for SyncFiniteConnector {
-    type Output = SourceFact;
+    type Output = outcome![Alpha | Beta];
     type Reader = SyncFinite;
     type Continuation = Refuse;
     fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
@@ -726,7 +720,7 @@ struct AsyncFiniteConnector(Arc<Counters>);
 
 #[async_trait]
 impl AsyncFiniteSourceConnector for AsyncFiniteConnector {
-    type Output = SourceFact;
+    type Output = outcome![Alpha | Beta];
     type Reader = AsyncFinite;
     type Continuation = Refuse;
     async fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
@@ -746,7 +740,7 @@ impl AsyncFiniteSourceConnector for AsyncFiniteConnector {
 struct SyncInfiniteConnector(Arc<Counters>);
 
 impl InfiniteSourceConnector for SyncInfiniteConnector {
-    type Output = SourceFact;
+    type Output = outcome![Alpha | Beta];
     type Reader = SyncInfinite;
     type Continuation = Reattach<AtMostOnce>;
     fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
@@ -767,7 +761,7 @@ struct AsyncInfiniteConnector(Arc<Counters>);
 
 #[async_trait]
 impl AsyncInfiniteSourceConnector for AsyncInfiniteConnector {
-    type Output = SourceFact;
+    type Output = outcome![Alpha | Beta];
     type Reader = AsyncInfinite;
     type Continuation = Reattach<AtMostOnce>;
     async fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {

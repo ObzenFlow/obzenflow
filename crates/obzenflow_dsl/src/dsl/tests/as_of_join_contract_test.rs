@@ -4,7 +4,7 @@
 
 use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::typing::TypeHint;
-use obzenflow_core::{StageOutputFacts, TypedPayload};
+use obzenflow_core::{outcome, TypedPayload};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::join::{
     left, left_as_of, AsOf, AsOfJoin, AsOfReferenceView, JoinCatalogKind, JoinReferenceMode,
@@ -60,21 +60,16 @@ impl TypedPayload for CurrencyNotQuoted {
     const EVENT_TYPE: &'static str = "test.as_of.currency_not_quoted";
 }
 
-#[derive(Clone, Debug, StageOutputFacts)]
-#[stage_output(schema = obzenflow_core::event::schema)]
-enum PricingOutcome {
-    Priced(Priced),
-    RateMissing(RateMissing),
-    CurrencyNotQuoted(CurrencyNotQuoted),
-}
-
-fn price_payment(rate: AsOf<FxRate>, payment: Payment) -> PricingOutcome {
+fn price_payment(
+    rate: AsOf<FxRate>,
+    payment: Payment,
+) -> outcome![Priced | RateMissing | CurrencyNotQuoted] {
     match rate {
-        AsOf::Found(rate) => PricingOutcome::Priced(Priced { rate: rate.rate }),
-        AsOf::BeforeFirstVersion => PricingOutcome::RateMissing(RateMissing {
+        AsOf::Found(rate) => outcome(Priced { rate: rate.rate }),
+        AsOf::BeforeFirstVersion => outcome(RateMissing {
             currency: payment.currency,
         }),
-        AsOf::NoVersions => PricingOutcome::CurrencyNotQuoted(CurrencyNotQuoted {
+        AsOf::NoVersions => outcome(CurrencyNotQuoted {
             currency: payment.currency,
         }),
     }
@@ -89,7 +84,7 @@ impl TypedAsOfJoinHandler for PriceHandler {
     type EffectiveTime = u32;
     type Reference = FxRate;
     type Stream = Payment;
-    type Output = PricingOutcome;
+    type Output = outcome![Priced | RateMissing | CurrencyNotQuoted];
 
     fn initial_state(&self) -> Self::State {}
 
@@ -155,12 +150,16 @@ fn left_as_of_takes_todays_join_row_with_a_per_fact_output() {
 
 #[test]
 fn the_builder_takes_the_same_four_accessors() {
-    let price = LeftJoinBuilder::<FxRate, Payment, PricingOutcome>::new()
-        .catalog_key(|rate: &FxRate| rate.currency.clone())
-        .effective_at(|rate: &FxRate| rate.effective_at)
-        .stream_key(|payment: &Payment| payment.currency.clone())
-        .as_of(|payment: &Payment| payment.booked_at)
-        .build(price_payment);
+    let price = LeftJoinBuilder::<
+        FxRate,
+        Payment,
+        outcome![Priced | RateMissing | CurrencyNotQuoted],
+    >::new()
+    .catalog_key(|rate: &FxRate| rate.currency.clone())
+    .effective_at(|rate: &FxRate| rate.effective_at)
+    .stream_key(|payment: &Payment| payment.currency.clone())
+    .as_of(|payment: &Payment| payment.booked_at)
+    .build(price_payment);
     let join = crate::join!(
         catalog fx_rates: FxRate,
         Payment -> { Priced, RateMissing, CurrencyNotQuoted } => price

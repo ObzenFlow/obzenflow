@@ -13,7 +13,7 @@ use obzenflow::effects::{
     StageCompletion,
 };
 use obzenflow::error::HandlerError;
-use obzenflow::schema::EffectOutcomeFacts;
+use obzenflow::schema::outcome;
 use obzenflow::stages::transforms::EffectfulTransformHandler;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -27,14 +27,14 @@ const SCRIPTED_SLOW_ANSWER_DELAY: Duration = Duration::from_secs(300);
 
 #[obzenflow::port]
 #[async_trait]
-pub trait PaymentGatewayPort: Send + Sync {
+pub trait PaymentGatewayPort {
     #[effect(type = "payment.authorize", exactly_once)]
     async fn authorize(
         &self,
         request: &AuthorizeRequest,
         key: &IdempotencyKey,
         ctx: &EffectContext,
-    ) -> Result<AuthorizePaymentOutcome, EffectError>;
+    ) -> Result<outcome![PaymentAuthorized | PaymentDeclined], EffectError>;
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,12 +84,6 @@ impl Keyed for AuthorizeRequest {
     }
 }
 
-#[derive(Debug, Clone, EffectOutcomeFacts)]
-pub enum AuthorizePaymentOutcome {
-    Authorized(PaymentAuthorized),
-    Declined(PaymentDeclined),
-}
-
 #[obzenflow::command]
 #[derive(Debug, Clone)]
 pub struct AuthorizePayment {
@@ -98,12 +92,6 @@ pub struct AuthorizePayment {
     first_recovery_pause: Option<Duration>,
     recovery_pause_claimed: Arc<AtomicBool>,
 }
-
-type AuthorizePaymentOutput = obzenflow::schema::stage_fact_set![
-    PaymentAuthorized,
-    PaymentDeclined,
-    PaymentAuthorizationUnavailable
-];
 
 impl AuthorizePayment {
     pub fn new(payment_gateway_port: Port<dyn PaymentGatewayPort>) -> Self {
@@ -138,7 +126,7 @@ impl AuthorizePayment {
 #[async_trait]
 impl EffectfulTransformHandler for AuthorizePayment {
     type Input = ValidatedOrder;
-    type Output = AuthorizePaymentOutput;
+    type Output = outcome![PaymentAuthorized | PaymentDeclined | PaymentAuthorizationUnavailable];
 
     async fn process(
         &self,
@@ -204,7 +192,7 @@ impl PaymentGatewayPort for SimulatedProcessor {
         request: &AuthorizeRequest,
         key: &IdempotencyKey,
         ctx: &EffectContext,
-    ) -> Result<AuthorizePaymentOutcome, EffectError> {
+    ) -> Result<outcome![PaymentAuthorized | PaymentDeclined], EffectError> {
         let latency_ms: u64 = ctx.rng("processor_latency").u64(50..=200);
         ctx.sleep(Duration::from_millis(latency_ms)).await;
         let times_out = self.outage_times_out(request);
@@ -226,11 +214,9 @@ impl PaymentGatewayPort for SimulatedProcessor {
             })??;
         Ok(match response {
             ProcessorResponse::Charged { authorization_id } => {
-                AuthorizePaymentOutcome::Authorized(request.authorized(authorization_id))
+                outcome(request.authorized(authorization_id))
             }
-            ProcessorResponse::Declined { reason } => {
-                AuthorizePaymentOutcome::Declined(request.declined(reason))
-            }
+            ProcessorResponse::Declined { reason } => outcome(request.declined(reason)),
         })
     }
 }
@@ -252,9 +238,9 @@ impl PaymentGatewayPort for SlowAnswerProcessor {
         request: &AuthorizeRequest,
         key: &IdempotencyKey,
         ctx: &EffectContext,
-    ) -> Result<AuthorizePaymentOutcome, EffectError> {
+    ) -> Result<outcome![PaymentAuthorized | PaymentDeclined], EffectError> {
         let deciding = !self.processor.calls.is_decided(key);
-        let outcome = self.processor.authorize(request, key, ctx).await?;
+        let answer = self.processor.authorize(request, key, ctx).await?;
         if deciding && request.order_id == SCRIPTED_SLOW_ANSWER {
             println!(
                 "⏳ Oh no, this is taking a long time. The processor has decided order {} (customer {}, amount: ${:.2}) and its answer is on the way. Wouldn't it be terrible if the power went out right now, or if you typed pkill -9 payment_gateway?",
@@ -264,7 +250,7 @@ impl PaymentGatewayPort for SlowAnswerProcessor {
             );
             ctx.sleep(SCRIPTED_SLOW_ANSWER_DELAY).await;
         }
-        Ok(outcome)
+        Ok(answer)
     }
 }
 

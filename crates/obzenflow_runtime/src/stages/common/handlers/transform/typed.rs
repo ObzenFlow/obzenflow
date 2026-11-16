@@ -12,7 +12,7 @@ use obzenflow_core::event::observability::{
     NoObservations, ObservationRecord, ObservationRecorder,
 };
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-use obzenflow_core::event::schema::{StageOutputFacts, TypedFactSet, TypedPayload};
+use obzenflow_core::event::schema::{OutcomeFacts, TransformOutcome, TypedPayload};
 use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, WriterId};
 use std::sync::Arc;
@@ -64,7 +64,7 @@ impl<O> TypedTransformInvocation<O> {
 )]
 pub trait TypedTransformHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: StageOutputFacts;
+    type Output: TransformOutcome;
 
     fn process(&self, input: Self::Input) -> Result<Self::Output, HandlerError>;
 
@@ -176,7 +176,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::{StageId, StageOutputFacts, TypedPayload, WriterId};
+    use obzenflow_core::{StageId, TypedPayload, WriterId};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -206,26 +206,20 @@ mod tests {
         const EVENT_TYPE: &'static str = "typed_transform.second";
     }
 
-    #[derive(Clone, Debug, StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
-    enum Output {
-        Both { first: First, second: Second },
-    }
-
     #[derive(Clone, Debug)]
     struct Classifier;
 
     impl TypedTransformHandler for Classifier {
         type Input = Input;
-        type Output = Output;
+        type Output = obzenflow_core::outcome![(First, Second)];
 
         fn process(&self, input: Input) -> Result<Self::Output, HandlerError> {
-            Ok(Output::Both {
-                first: First { value: input.value },
-                second: Second {
+            Ok(obzenflow_core::outcome((
+                First { value: input.value },
+                Second {
                     value: input.value + 1,
                 },
-            })
+            )))
         }
     }
 

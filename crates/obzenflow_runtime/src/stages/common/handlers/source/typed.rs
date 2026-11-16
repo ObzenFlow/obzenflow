@@ -40,7 +40,7 @@ use obzenflow_core::ingress::IngressContext;
 use obzenflow_core::source::{
     EncodedSourcePosition, SourcePosition, SourcePositionError, SourceProgress,
 };
-use obzenflow_core::{ChainEvent, OneFactStageOutput, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, OneFactOutcome, TypedPayload, WriterId};
 use serde::de::DeserializeOwned;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -73,7 +73,7 @@ pub(super) fn lower_outputs<O>(
     outputs: Vec<(O, Option<IngressContext>)>,
 ) -> Result<Vec<ChainEvent>, StageFatal>
 where
-    O: OneFactStageOutput,
+    O: OneFactOutcome,
 {
     let mut events = Vec::with_capacity(outputs.len());
     for (output, ingress_context) in outputs {
@@ -85,7 +85,7 @@ where
         })?;
         if facts.len() != 1 {
             return Err(protocol_fatal(format!(
-                "one_fact_stage_output: `{}` lowered to {} facts instead of exactly one",
+                "one_fact_outcome: `{}` lowered to {} facts instead of exactly one",
                 std::any::type_name::<O>(),
                 facts.len(),
             )));
@@ -105,7 +105,7 @@ fn lower_positioned<O, P>(
     records: Vec<SourceRecord<O, P>>,
 ) -> Result<Vec<ChainEvent>, StageFatal>
 where
-    O: OneFactStageOutput,
+    O: OneFactOutcome,
     P: SourcePosition,
 {
     let mut outputs = Vec::with_capacity(records.len());
@@ -278,7 +278,7 @@ impl Drop for SourceObservationPoll {
     note = "implement TypedFiniteSourceHandler with Output matching the source! arrow (FLOWIP-134g)"
 )]
 pub trait TypedFiniteSourceHandler: Send + Sync {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError>;
 }
@@ -291,7 +291,7 @@ pub trait TypedFiniteSourceHandler: Send + Sync {
 )]
 #[async_trait]
 pub trait TypedAsyncFiniteSourceHandler: Send + Sync {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn poll_timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(30))
@@ -315,7 +315,7 @@ pub trait TypedAsyncFiniteSourceHandler: Send + Sync {
     note = "implement TypedInfiniteSourceHandler with Output matching the infinite_source! arrow (FLOWIP-134g)"
 )]
 pub trait TypedInfiniteSourceHandler: Send + Sync {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn next(&mut self) -> Result<Vec<Self::Output>, SourceError>;
 }
@@ -328,7 +328,7 @@ pub trait TypedInfiniteSourceHandler: Send + Sync {
 )]
 #[async_trait]
 pub trait TypedAsyncInfiniteSourceHandler: Send + Sync {
-    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn poll_timeout(&self) -> Option<Duration> {
         None
@@ -1049,7 +1049,7 @@ mod tests {
     use crate::execution::{RuntimeExecution, RuntimeMode};
     use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
     use obzenflow_core::event::ChainPayload;
-    use obzenflow_core::{FlowId, OneFactStageOutput, StageId, StageOutputFacts, TypedPayload};
+    use obzenflow_core::{FlowId, OneFactOutcome, StageId, TransformOutcome, TypedPayload};
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1144,16 +1144,58 @@ mod tests {
         const EVENT_TYPE: &'static str = "typed_source.other_row";
     }
 
-    #[derive(Clone, Debug, StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
+    #[derive(Clone, Debug)]
     struct DishonestProduct {
         first: Row,
         second: OtherRow,
     }
 
+    impl obzenflow_core::OutcomeFacts for DishonestProduct {
+        fn fact_types() -> Vec<obzenflow_core::TypedFactType> {
+            vec![
+                obzenflow_core::TypedFactType::of::<Row>(),
+                obzenflow_core::TypedFactType::of::<OtherRow>(),
+            ]
+        }
+
+        fn into_facts(
+            self,
+        ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::OutcomeError> {
+            Ok(vec![
+                obzenflow_core::TypedFact::from_payload(self.first)?,
+                obzenflow_core::TypedFact::from_payload(self.second)?,
+            ])
+        }
+
+        fn try_from_facts(
+            facts: &[obzenflow_core::TypedFact],
+        ) -> Result<Self, obzenflow_core::OutcomeError> {
+            Ok(Self {
+                first: obzenflow_core::event::schema::decode_member_fact(facts)?,
+                second: obzenflow_core::event::schema::decode_member_fact(facts)?,
+            })
+        }
+    }
+
+    impl obzenflow_core::Outcome for DishonestProduct {
+        type Members = obzenflow_core::event::schema::WithMember<
+            Row,
+            obzenflow_core::event::schema::WithMember<
+                OtherRow,
+                obzenflow_core::event::schema::EmptySet,
+            >,
+        >;
+
+        fn member_fact_types() -> Vec<obzenflow_core::TypedFactType> {
+            <Self as obzenflow_core::OutcomeFacts>::fact_types()
+        }
+    }
+
+    impl TransformOutcome for DishonestProduct {}
+
     // Deliberately false semantic assertion: the adapter must detect that
     // this value lowers to two facts and commit neither one.
-    impl OneFactStageOutput for DishonestProduct {}
+    impl OneFactOutcome for DishonestProduct {}
 
     #[derive(Clone, Debug)]
     struct DishonestSource;
@@ -1167,6 +1209,36 @@ mod tests {
                 second: OtherRow(2),
             }]))
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ListSource;
+
+    impl TypedFiniteSourceHandler for ListSource {
+        type Output = obzenflow_core::outcome![Row | OtherRow];
+
+        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+            Ok(Some(vec![
+                obzenflow_core::outcome(Row(1)),
+                obzenflow_core::outcome(OtherRow(2)),
+            ]))
+        }
+    }
+
+    #[test]
+    fn source_list_output_writes_recorded_facts() {
+        let writer_id = WriterId::from(StageId::new());
+        let mut adapter = TypedFiniteSourceHandlerAdapter::new(ListSource);
+        UnifiedFiniteSourceHandler::install_writer_id(&mut adapter, writer_id);
+
+        let (outcome, _) = UnifiedFiniteSourceHandler::next_invocation(&mut adapter).into_parts();
+        let ErasedSourceOutcome::Completed(ErasedSourceCompletion::Batch(events)) = outcome else {
+            panic!("expected batch")
+        };
+        assert_eq!(events.len(), 2);
+        assert_eq!(Row::from_event(&events[0]), Some(Row(1)));
+        assert_eq!(OtherRow::from_event(&events[1]), Some(OtherRow(2)));
+        assert!(events.iter().all(|event| event.writer_id == writer_id));
     }
 
     #[test]

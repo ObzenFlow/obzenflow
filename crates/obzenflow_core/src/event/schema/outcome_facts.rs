@@ -12,7 +12,7 @@ use crate::event::ChainEventFactory;
 use crate::WriterId;
 use std::any::{type_name, TypeId};
 
-/// Type metadata for one member of a typed fact set.
+/// Type metadata for one fact type of an outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedFactType {
     pub type_id: TypeId,
@@ -54,7 +54,7 @@ impl TypedFact {
         }
     }
 
-    pub fn from_payload<T>(payload: T) -> Result<Self, TypedFactSetError>
+    pub fn from_payload<T>(payload: T) -> Result<Self, OutcomeError>
     where
         T: TypedPayload,
     {
@@ -63,7 +63,7 @@ impl TypedFact {
             payload_schema_version: T::payload_schema_version(),
             payload: payload
                 .into_chain_payload()
-                .map_err(|e| TypedFactSetError::SerializationFailed(e.to_string()))?,
+                .map_err(|e| OutcomeError::SerializationFailed(e.to_string()))?,
         })
     }
 
@@ -101,9 +101,9 @@ impl TypedFact {
     }
 }
 
-/// Error returned while serializing a typed fact set.
+/// Error returned while turning an outcome into facts or back.
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum TypedFactSetError {
+pub enum OutcomeError {
     #[error("failed to serialize typed fact: {0}")]
     SerializationFailed(String),
 
@@ -123,12 +123,11 @@ pub enum TypedFactSetError {
     UnexpectedFact { event_type: EventType },
 }
 
-/// Build the `MissingFact` error for an empty recorded group, naming every
-/// declared member type. `#[doc(hidden)]`: an `effect_outcome!` expansion
-/// detail (FLOWIP-120m).
+/// Build the `MissingFact` error for a recorded group that matches no
+/// outcome, naming every declared member type.
 #[doc(hidden)]
-pub fn missing_fact_group_error(declared: &[TypedFactType]) -> TypedFactSetError {
-    TypedFactSetError::MissingFact {
+pub fn missing_fact_group_error(declared: &[TypedFactType]) -> OutcomeError {
+    OutcomeError::MissingFact {
         event_type: EventType::from(
             declared
                 .iter()
@@ -139,53 +138,23 @@ pub fn missing_fact_group_error(declared: &[TypedFactType]) -> TypedFactSetError
     }
 }
 
-/// Classify a multi-fact group decoded as a sum carrier, whose cardinality is
-/// exactly one fact: a repeat of the first fact's type is `DuplicateFact`,
-/// and a second declared-but-different member is `UnexpectedFact` (mixed sum
-/// variants). `#[doc(hidden)]`: an `effect_outcome!` expansion detail
-/// (FLOWIP-120m).
-#[doc(hidden)]
-pub fn sum_group_arity_error(first: &TypedFact, rest: &[TypedFact]) -> TypedFactSetError {
-    if rest
-        .iter()
-        .any(|fact| fact.descriptor() == first.descriptor())
-    {
-        TypedFactSetError::DuplicateFact {
-            event_type: first.event_type.clone(),
-        }
-    } else {
-        TypedFactSetError::UnexpectedFact {
-            event_type: rest
-                .first()
-                .map(|fact| fact.event_type.clone())
-                .unwrap_or_else(|| first.event_type.clone()),
-        }
-    }
-}
-
-/// A typed marshalling bridge for code paths that still produce a typed value
-/// before it is converted into `Data` facts.
-///
-/// The blanket `TypedPayload -> TypedFactSet` implementation keeps scalar
-/// stateful outputs working while FLOWIP-120b moves effectful authoring to
-/// explicit `fx.emit` calls and flat output contracts.
+/// A typed marshalling bridge between a value and the `Data` facts it lowers
+/// to: one fact, an `outcome![...]` list or `Outcomes<T>`.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not lower to named facts",
-    note = "a closed set of named facts is written as an enum or named-field struct with \
-            #[derive(EffectOutcomeFacts)]; a single fact is its `TypedPayload` type directly \
-            (FLOWIP-120m)"
+    note = "write one fact, or `outcome![A | (B, C)]` for exactly one of several outcomes"
 )]
-pub trait TypedFactSet: Send + Sync + 'static {
+pub trait OutcomeFacts: Send + Sync + 'static {
     fn fact_types() -> Vec<TypedFactType>;
 
-    fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError>;
+    fn into_facts(self) -> Result<Vec<TypedFact>, OutcomeError>;
 
-    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError>
+    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, OutcomeError>
     where
         Self: Sized;
 }
 
-impl<T> TypedFactSet for T
+impl<T> OutcomeFacts for T
 where
     T: TypedPayload + Send + Sync + 'static,
 {
@@ -193,11 +162,11 @@ where
         vec![TypedFactType::of::<T>()]
     }
 
-    fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+    fn into_facts(self) -> Result<Vec<TypedFact>, OutcomeError> {
         Ok(vec![TypedFact::from_payload(self)?])
     }
 
-    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, OutcomeError> {
         decode_fact::<T>(facts)
     }
 }
@@ -209,12 +178,12 @@ where
 /// and of more than one is `DuplicateFact`. The recorded group is the
 /// carrier's facts and nothing else, so a foreign fact is corruption, never
 /// something to skip.
-fn decode_fact<T>(facts: &[TypedFact]) -> Result<T, TypedFactSetError>
+fn decode_fact<T>(facts: &[TypedFact]) -> Result<T, OutcomeError>
 where
     T: TypedPayload,
 {
     if let Some(unexpected) = facts.iter().find(|fact| !T::matches_fact(fact)) {
-        return Err(TypedFactSetError::UnexpectedFact {
+        return Err(OutcomeError::UnexpectedFact {
             event_type: unexpected.event_type.clone(),
         });
     }
@@ -223,34 +192,31 @@ where
 
 /// Decode exactly one `T` fact from a group, ignoring facts of other types.
 ///
-/// Carrier-internal building block (FLOWIP-120m): a multi-member carrier's
-/// `try_from_facts` scans the whole group for undeclared facts itself, then
-/// decodes each declared member with this helper, which must therefore
-/// tolerate the sibling members it is not looking for. Whole-group exactness
-/// is the carrier's job, not this helper's; use the strict scalar decode
-/// through `TypedFactSet::try_from_facts` everywhere else.
+/// A multi-fact outcome's `try_from_facts` scans the whole group for
+/// undeclared facts itself, then decodes each member with this helper, which
+/// therefore tolerates the sibling members it is not looking for. Use the
+/// strict scalar decode through `OutcomeFacts::try_from_facts` everywhere
+/// else.
 #[doc(hidden)]
-pub fn decode_member_fact<T>(facts: &[TypedFact]) -> Result<T, TypedFactSetError>
+pub fn decode_member_fact<T>(facts: &[TypedFact]) -> Result<T, OutcomeError>
 where
     T: TypedPayload,
 {
     let mut matches = facts.iter().filter(|fact| T::matches_fact(fact));
-    let fact = matches
-        .next()
-        .ok_or_else(|| TypedFactSetError::MissingFact {
-            event_type: EventType::from(T::event_type_name()),
-        })?;
+    let fact = matches.next().ok_or_else(|| OutcomeError::MissingFact {
+        event_type: EventType::from(T::event_type_name()),
+    })?;
     if matches.next().is_some() {
-        return Err(TypedFactSetError::DuplicateFact {
+        return Err(OutcomeError::DuplicateFact {
             event_type: EventType::from(T::event_type_name()),
         });
     }
     serde_json::from_value(
         fact.payload
             .contract_body()
-            .map_err(|e| TypedFactSetError::SerializationFailed(e.to_string()))?,
+            .map_err(|e| OutcomeError::SerializationFailed(e.to_string()))?,
     )
-    .map_err(|e| TypedFactSetError::DeserializationFailed {
+    .map_err(|e| OutcomeError::DeserializationFailed {
         event_type: fact.event_type.clone(),
         error: e.to_string(),
     })
@@ -272,10 +238,10 @@ mod tests {
     }
 
     #[test]
-    fn scalar_typed_payload_is_single_fact_set() {
+    fn scalar_outcome_serializes_one_fact() {
         let facts = First { value: 7 }
             .into_facts()
-            .expect("scalar fact set serializes");
+            .expect("scalar outcome serializes");
 
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].event_type, "fact.first");
@@ -286,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_fact_set_reconstructs_from_member_fact_by_event_type() {
+    fn scalar_outcome_reconstructs_by_event_type() {
         let facts = vec![TypedFact::from_payload(First { value: 7 }).expect("first fact")];
 
         let reconstructed = First::try_from_facts(&facts).expect("reconstruct scalar");
@@ -317,7 +283,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            TypedFactSetError::UnexpectedFact { ref event_type }
+            OutcomeError::UnexpectedFact { ref event_type }
                 if event_type.as_str() == "fact.second"
         ));
     }
@@ -331,7 +297,7 @@ mod tests {
 
         let err = First::try_from_facts(&facts).expect_err("duplicate must fail closed");
 
-        assert!(matches!(err, TypedFactSetError::DuplicateFact { .. }));
+        assert!(matches!(err, OutcomeError::DuplicateFact { .. }));
     }
 
     #[test]
@@ -366,24 +332,24 @@ mod tests {
         Second(Second),
     }
 
-    impl TypedFactSet for HandWrittenSum {
+    impl OutcomeFacts for HandWrittenSum {
         fn fact_types() -> Vec<TypedFactType> {
             vec![TypedFactType::of::<First>(), TypedFactType::of::<Second>()]
         }
 
-        fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+        fn into_facts(self) -> Result<Vec<TypedFact>, OutcomeError> {
             match self {
                 Self::First(fact) => Ok(vec![TypedFact::from_payload(fact)?]),
                 Self::Second(fact) => Ok(vec![TypedFact::from_payload(fact)?]),
             }
         }
 
-        fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+        fn try_from_facts(facts: &[TypedFact]) -> Result<Self, OutcomeError> {
             if let Some(unexpected) = facts
                 .iter()
                 .find(|fact| !First::matches_fact(fact) && !Second::matches_fact(fact))
             {
-                return Err(TypedFactSetError::UnexpectedFact {
+                return Err(OutcomeError::UnexpectedFact {
                     event_type: unexpected.event_type.clone(),
                 });
             }
@@ -394,14 +360,14 @@ mod tests {
                     }
                     Ok(Self::Second(decode_member_fact::<Second>(facts)?))
                 }
-                [] => Err(TypedFactSetError::MissingFact {
+                [] => Err(OutcomeError::MissingFact {
                     event_type: EventType::from(format!(
                         "{} | {}",
                         First::event_type_name(),
                         Second::event_type_name()
                     )),
                 }),
-                [first, ..] => Err(TypedFactSetError::DuplicateFact {
+                [first, ..] => Err(OutcomeError::DuplicateFact {
                     event_type: first.event_type.clone(),
                 }),
             }
@@ -426,7 +392,7 @@ mod tests {
         let empty: Vec<TypedFact> = Vec::new();
         assert!(matches!(
             HandWrittenSum::try_from_facts(&empty),
-            Err(TypedFactSetError::MissingFact { .. })
+            Err(OutcomeError::MissingFact { .. })
         ));
 
         let mixed = vec![
@@ -438,7 +404,7 @@ mod tests {
         ];
         assert!(matches!(
             HandWrittenSum::try_from_facts(&mixed),
-            Err(TypedFactSetError::DuplicateFact { .. })
+            Err(OutcomeError::DuplicateFact { .. })
         ));
 
         let unknown = vec![TypedFact {
@@ -448,7 +414,7 @@ mod tests {
         }];
         assert!(matches!(
             HandWrittenSum::try_from_facts(&unknown),
-            Err(TypedFactSetError::UnexpectedFact { .. })
+            Err(OutcomeError::UnexpectedFact { .. })
         ));
     }
 
@@ -459,24 +425,24 @@ mod tests {
         second: Second,
     }
 
-    impl TypedFactSet for HandWrittenProduct {
+    impl OutcomeFacts for HandWrittenProduct {
         fn fact_types() -> Vec<TypedFactType> {
             vec![TypedFactType::of::<First>(), TypedFactType::of::<Second>()]
         }
 
-        fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+        fn into_facts(self) -> Result<Vec<TypedFact>, OutcomeError> {
             Ok(vec![
                 TypedFact::from_payload(self.first)?,
                 TypedFact::from_payload(self.second)?,
             ])
         }
 
-        fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+        fn try_from_facts(facts: &[TypedFact]) -> Result<Self, OutcomeError> {
             if let Some(unexpected) = facts
                 .iter()
                 .find(|fact| !First::matches_fact(fact) && !Second::matches_fact(fact))
             {
-                return Err(TypedFactSetError::UnexpectedFact {
+                return Err(OutcomeError::UnexpectedFact {
                     event_type: unexpected.event_type.clone(),
                 });
             }
@@ -505,7 +471,7 @@ mod tests {
         let missing = vec![TypedFact::from_payload(First { value: 9 }).expect("first")];
         assert!(matches!(
             HandWrittenProduct::try_from_facts(&missing),
-            Err(TypedFactSetError::MissingFact { .. })
+            Err(OutcomeError::MissingFact { .. })
         ));
 
         let duplicated = vec![
@@ -518,7 +484,7 @@ mod tests {
         ];
         assert!(matches!(
             HandWrittenProduct::try_from_facts(&duplicated),
-            Err(TypedFactSetError::DuplicateFact { .. })
+            Err(OutcomeError::DuplicateFact { .. })
         ));
 
         let mut with_unknown = carrier.into_facts().expect("product serializes");
@@ -529,7 +495,7 @@ mod tests {
         });
         assert!(matches!(
             HandWrittenProduct::try_from_facts(&with_unknown),
-            Err(TypedFactSetError::UnexpectedFact { .. })
+            Err(OutcomeError::UnexpectedFact { .. })
         ));
     }
 }

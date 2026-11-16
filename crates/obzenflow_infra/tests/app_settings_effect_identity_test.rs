@@ -190,8 +190,6 @@ impl Scorer {
     }
 }
 
-type ScoreOutput = obzenflow_core::stage_fact_set![Scored, Score, Unscored, Noted, Capped];
-
 const RESCORE_OFFSET: u64 = 1_000;
 
 #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
@@ -213,7 +211,10 @@ impl ScoreTransform {
     async fn score(
         &self,
         value: u64,
-        fx: &mut Effects<ScoreOutput, <Self as Command>::AllowedEffects>,
+        fx: &mut Effects<
+            <Self as EffectfulTransformHandler>::Output,
+            <Self as Command>::AllowedEffects,
+        >,
     ) -> Result<Score, EffectError> {
         let score = fx.call(self.request(value)).await?;
         if self.app.rescore {
@@ -226,7 +227,7 @@ impl ScoreTransform {
 #[async_trait]
 impl EffectfulTransformHandler for ScoreTransform {
     type Input = Reading;
-    type Output = ScoreOutput;
+    type Output = obzenflow_core::outcome![Scored | Score | Unscored | Noted | Capped];
 
     async fn process(
         &self,

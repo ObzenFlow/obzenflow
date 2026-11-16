@@ -5,43 +5,15 @@
 use super::case_system::{
     CaseRequest, CaseSystem, CaseSystemPort, SimulatedCaseSystem, UnreadableCaseSystem,
 };
-use super::domain::{AlertRaised, AlertSubject, TransactionCleared};
-use super::risk_engine::{RiskEnginePort, RiskVerdict, ScoreRequest, SimulatedRiskEngine};
+use super::risk_engine::{RiskEnginePort, ScoreRequest, SimulatedRiskEngine};
 use obzenflow::effects::simulated::CallLogError;
 use obzenflow::effects::{EffectPortResolutionError, IdempotencyKey, Keyed, Port};
-use obzenflow::schema::EffectOutcomeFacts;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub const RISK_ENGINE_SOURCE: &str = "risk_engine";
 pub const CASE_SYSTEM_SOURCE: &str = "case_system";
-
-#[derive(Clone, Debug, EffectOutcomeFacts)]
-pub enum ScoreOutcome {
-    Cleared(TransactionCleared),
-    Flagged(AlertRaised),
-}
-
-impl ScoreOutcome {
-    pub fn from_verdict(request: &ScoreRequest, verdict: RiskVerdict) -> Self {
-        match verdict {
-            RiskVerdict::Cleared { rules_version } => Self::Cleared(TransactionCleared {
-                txn_id: request.txn_id,
-                rules_version,
-            }),
-            RiskVerdict::Flagged {
-                reasons,
-                rules_version,
-            } => Self::Flagged(AlertRaised::new(
-                AlertSubject::Transaction(request.txn_id),
-                request.payer.clone(),
-                reasons,
-                rules_version,
-            )),
-        }
-    }
-}
 
 impl Keyed for ScoreRequest {
     fn idempotency_key(&self) -> IdempotencyKey {

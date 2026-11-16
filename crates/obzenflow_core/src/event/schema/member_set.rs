@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Type-level membership proofs for declared stage sets (FLOWIP-120z).
+//! Type-level membership proofs for declared outcomes and effect sets (FLOWIP-120z).
 //!
-//! A stage's authorable fact set and permitted effect set are static,
+//! A stage's outcome facts and permitted effect set are static,
 //! compiler-visible sets. This module holds the shared proof vocabulary: the
 //! hidden type-level member list, the indexed membership witness, and the
 //! recursive subset witness. `Effects::{emit, perform}` and the DSL equality
@@ -14,8 +14,9 @@
 //! `There`, because rustc's secondary notes can render hidden types even
 //! under `#[diagnostic::on_unimplemented]`.
 
-use super::typed_fact_set::TypedFactType;
+use super::outcome_facts::TypedFactType;
 use super::typed_payload::TypedPayload;
+use std::fmt;
 use std::marker::PhantomData;
 
 mod sealed {
@@ -35,7 +36,7 @@ pub struct EmptySet;
 pub struct WithMember<Head, Rest>(PhantomData<fn() -> (Head, Rest)>);
 
 /// Sealed marker for the two list shapes; nothing outside this module can
-/// add a third, so every declared set is one of these.
+/// add a third, so every member list is one of these.
 #[doc(hidden)]
 pub trait MemberList: sealed::Sealed + Send + Sync + 'static {}
 
@@ -58,10 +59,10 @@ pub struct MemberAfter<Index>(PhantomData<fn() -> Index>);
 /// assertion helpers; the index parameter is always inferred. It is proof
 /// machinery, never implemented or named by user code.
 #[diagnostic::on_unimplemented(
-    message = "`{T}` is not a declared member of this stage's set",
-    label = "`{T}` is missing from the declared set",
-    note = "`emit` requires the fact type in the handler's `Output` set and `perform` \
-            requires the effect type in its `AllowedEffects` set; add the member to the \
+    message = "`{T}` is not declared by this stage",
+    label = "`{T}` is missing from the stage's declaration",
+    note = "`emit` requires the fact type in the handler's `Output` and `perform` \
+            requires the effect type in its `AllowedEffects`; add the member to the \
             handler declaration and the matching DSL clause, or remove this call \
             (FLOWIP-120z)"
 )]
@@ -96,9 +97,9 @@ pub struct SubsetProofStep<AtIndex, RestProof>(PhantomData<fn() -> (AtIndex, Res
 /// Proof machinery, never implemented or named by user code. The proof
 /// parameter is always inferred.
 #[diagnostic::on_unimplemented(
-    message = "not every member of this fact set is declared by the enclosing set",
-    note = "every fact an allowed effect may author must be a member of the handler's \
-            `Output` set, and a stage arrow must equal the handler's declared set in both \
+    message = "not every fact of this outcome is declared by the enclosing outcome",
+    note = "every fact an allowed effect may author must be listed in the handler's \
+            `Output`, and a stage arrow must list the same facts as the handler's `Output` in both \
             directions (FLOWIP-120z)"
 )]
 pub trait SubsetOf<Super, Proof>: sealed::SubsetOf<Super, Proof> {}
@@ -148,6 +149,63 @@ pub const fn const_str_eq(a: &str, b: &str) -> bool {
 #[doc(hidden)]
 pub const fn require_distinct(_head_disjoint: (), _rest_distinct: ()) {}
 
+/// The list `Self` followed by `Tail`.
+#[doc(hidden)]
+pub trait AppendList<Tail> {
+    type Output: MemberList;
+}
+
+impl<Tail: MemberList> AppendList<Tail> for EmptySet {
+    type Output = Tail;
+}
+
+impl<Head: 'static, Rest: AppendList<Tail>, Tail> AppendList<Tail> for WithMember<Head, Rest> {
+    type Output = WithMember<Head, Rest::Output>;
+}
+
+/// One fact of an outcome being folded: its head fact or one of the rest.
+#[doc(hidden)]
+pub enum FactOr<Head, Rest> {
+    Head(Head),
+    Rest(Rest),
+}
+
+impl<Head: fmt::Debug, Rest: fmt::Debug> fmt::Debug for FactOr<Head, Rest> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Head(fact) => fact.fmt(formatter),
+            Self::Rest(rest) => rest.fmt(formatter),
+        }
+    }
+}
+
+impl<Head: Clone, Rest: Clone> Clone for FactOr<Head, Rest> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Head(fact) => Self::Head(fact.clone()),
+            Self::Rest(rest) => Self::Rest(rest.clone()),
+        }
+    }
+}
+
+impl<Head: PartialEq, Rest: PartialEq> PartialEq for FactOr<Head, Rest> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Head(left), Self::Head(right)) => left == right,
+            (Self::Rest(left), Self::Rest(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl<Head: Eq, Rest: Eq> Eq for FactOr<Head, Rest> {}
+
+/// What is left of an outcome once every listed fact has been taken out; it
+/// has no value.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoOtherFact {}
+
 /// A member list whose heads are fact types, with a const duplicate guard
 /// over `EVENT_TYPE` and a value-level projection for descriptors and
 /// runtime defence in depth.
@@ -185,7 +243,7 @@ where
 
 /// Pairwise `EVENT_TYPE` disjointness between one fact type and every member
 /// of the list; combined with the recursion in [`FactList`], this is the
-/// O(n^2) duplicate guard over a declared set.
+/// O(n^2) duplicate guard over a member list.
 #[doc(hidden)]
 pub trait FactNameDisjoint<X> {
     const OK: ();
@@ -204,7 +262,7 @@ where
     const OK: () = {
         assert!(
             !const_str_eq(X::EVENT_TYPE, Head::EVENT_TYPE),
-            "duplicate member in a declared stage fact set: two members share an event \
+            "duplicate fact in an outcome: two facts share an event \
              type; each fact type appears exactly once (FLOWIP-120z)"
         );
         Rest::OK

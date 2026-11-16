@@ -5,6 +5,7 @@
 use crate::{exported_jsonl, replay_testkit};
 
 use async_trait::async_trait;
+use obzenflow::stages::stateful::fold;
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry, MiddlewareFactory};
 use obzenflow_core::{
     event::chain_event::ChainEvent,
@@ -13,7 +14,7 @@ use obzenflow_core::{
     event::payloads::flow_control_payload::FlowControlPayload,
     event::{payloads::execution_payload::StageLifecycleFact, ChainPayload},
     id::StageId,
-    StageOutputs, TypedPayload,
+    Outcomes, TypedPayload,
 };
 use obzenflow_dsl::{
     effectful_stateful, effectful_transform, flow, sink, source, transform, FlowDefinition,
@@ -146,10 +147,10 @@ impl FanOutTransform {
 
 impl TypedTransformHandler for FanOutTransform {
     type Input = ReplayInput;
-    type Output = StageOutputs<ReplayInput>;
+    type Output = Outcomes<ReplayInput>;
 
-    fn process(&self, input: ReplayInput) -> Result<StageOutputs<ReplayInput>, HandlerError> {
-        Ok(StageOutputs::many([
+    fn process(&self, input: ReplayInput) -> Result<Outcomes<ReplayInput>, HandlerError> {
+        Ok(Outcomes::many([
             ReplayInput {
                 value: input.value * 10 + 1,
             },
@@ -206,16 +207,19 @@ impl CallCounter {
     }
 
     #[effect(type = "effect_replay.product", exactly_once)]
-    fn product(&self, request: &Product) -> Result<ProductOutcome, EffectError> {
+    fn product(
+        &self,
+        request: &Product,
+    ) -> Result<obzenflow::schema::outcome![(ProductFirst, ProductSecond)], EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ProductOutcome {
-            first: ProductFirst {
+        Ok(obzenflow::schema::outcome((
+            ProductFirst {
                 value: request.value + 100,
             },
-            second: ProductSecond {
+            ProductSecond {
                 value: request.value + 200,
             },
-        })
+        )))
     }
 }
 
@@ -325,7 +329,7 @@ struct ReplayTransform {
 #[async_trait]
 impl EffectfulTransformHandler for ReplayTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -361,7 +365,7 @@ struct BlockingTransform {
 #[async_trait]
 impl EffectfulTransformHandler for BlockingTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -402,7 +406,7 @@ struct PostPerformBlockingTransform {
 #[async_trait]
 impl EffectfulTransformHandler for PostPerformBlockingTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -459,20 +463,11 @@ struct ReplayStateful {
     counter: Port<CallCounter>,
 }
 
-/// Stateful `Output` enum derived per FLOWIP-120m: the same sum shape an
-/// effect outcome carrier uses also serves the per-fact Mealy fold, decoding
-/// each committed fact into its matching variant.
-#[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
-enum ReplayStatefulFact {
-    EffectValue(ReplayEffectValue),
-    Output(ReplayOutput),
-}
-
 #[async_trait]
 impl EffectfulStatefulHandler for ReplayStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
-    type Output = ReplayStatefulFact;
+    type Output = obzenflow::schema::outcome![ReplayEffectValue | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
@@ -498,9 +493,12 @@ impl EffectfulStatefulHandler for ReplayStateful {
     }
 
     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        if let ReplayStatefulFact::Output(output) = fact {
-            state.outputs.push(output);
-        }
+        fold!(match fact {
+            output @ ReplayOutput { .. } => {
+                state.outputs.push(output)
+            }
+            _ => {}
+        });
         Ok(())
     }
 
@@ -537,12 +535,6 @@ struct PolicyStatefulState {
     allocated: Vec<u64>,
 }
 
-#[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
-enum PolicyStatefulFact {
-    Reserved(PolicyReserved),
-    Failed(ReservationFailed),
-}
-
 #[obzenflow::command]
 #[derive(Clone, Debug)]
 struct PolicyStateful {
@@ -561,7 +553,7 @@ fn is_circuit_breaker_rejection(error: &EffectError) -> bool {
 impl EffectfulStatefulHandler for PolicyStateful {
     type State = PolicyStatefulState;
     type Input = ReplayInput;
-    type Output = PolicyStatefulFact;
+    type Output = obzenflow::schema::outcome![PolicyReserved | ReservationFailed];
 
     fn initial_state(&self) -> Self::State {
         PolicyStatefulState::default()
@@ -592,9 +584,12 @@ impl EffectfulStatefulHandler for PolicyStateful {
     }
 
     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        if let PolicyStatefulFact::Reserved(reserved) = fact {
-            state.allocated.push(reserved.request_id);
-        }
+        fold!(match fact {
+            PolicyReserved { request_id } => {
+                state.allocated.push(request_id)
+            }
+            _ => {}
+        });
         Ok(())
     }
 
@@ -626,70 +621,6 @@ impl InlineSink for ReservationFailureSink {
     }
 }
 
-/// B1 regression carrier: the product shape cannot reconstruct from one fact,
-/// but the open marker permits a trusted manual assertion. The integration
-/// test below proves that a false assertion fails the stage after the authored
-/// facts become durable.
-#[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
-struct DishonestReplayStatefulOutput {
-    effect_value: ReplayEffectValue,
-    output: ReplayOutput,
-}
-
-impl obzenflow_core::OneFactStageOutput for DishonestReplayStatefulOutput {}
-
-#[obzenflow::command]
-#[derive(Clone, Debug)]
-struct DishonestOneFactStateful {
-    #[port(Counting)]
-    counter: Port<CallCounter>,
-    decide_inputs: Arc<Mutex<Vec<u64>>>,
-    apply_calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl EffectfulStatefulHandler for DishonestOneFactStateful {
-    type State = ReplayStatefulState;
-    type Input = ReplayInput;
-    type Output = DishonestReplayStatefulOutput;
-
-    fn initial_state(&self) -> Self::State {
-        ReplayStatefulState::default()
-    }
-
-    async fn decide(
-        &mut self,
-        _state: &Self::State,
-        input: &Self::Input,
-        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        self.decide_inputs
-            .lock()
-            .expect("decide inputs lock poisoned")
-            .push(input.value);
-
-        let effect = fx.call(Counting { value: input.value }).await?;
-        fx.emit(ReplayOutput {
-            value: input.value,
-            effect_value: effect.effect_value,
-        })
-        .await?;
-        Ok(fx.complete()?)
-    }
-
-    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        self.apply_calls.fetch_add(1, Ordering::SeqCst);
-        state.outputs.push(fact.output);
-        Ok(())
-    }
-
-    fn stage_logic_version(&self) -> &str {
-        // The sealed fixture and dishonest replay have identical durable
-        // behaviour. Only the non-durable Rust carrier differs.
-        "effect-replay-stateful-v1"
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 struct ErrorAfterCommitState {
     applied: Vec<String>,
@@ -708,7 +639,7 @@ struct ErrorAfterCommitStateful {
 impl EffectfulStatefulHandler for ErrorAfterCommitStateful {
     type State = ErrorAfterCommitState;
     type Input = ReplayInput;
-    type Output = ReplayStatefulFact;
+    type Output = obzenflow::schema::outcome![ReplayEffectValue | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ErrorAfterCommitState::default()
@@ -742,12 +673,14 @@ impl EffectfulStatefulHandler for ErrorAfterCommitStateful {
     }
 
     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        let entry = match fact {
-            ReplayStatefulFact::EffectValue(value) => {
-                format!("effect:{}", value.effect_value)
+        let entry = fold!(match fact {
+            ReplayEffectValue { effect_value } => {
+                format!("effect:{effect_value}")
             }
-            ReplayStatefulFact::Output(output) => format!("output:{}", output.value),
-        };
+            ReplayOutput { value, .. } => {
+                format!("output:{value}")
+            }
+        });
         state.applied.push(entry.clone());
         self.applied
             .lock()
@@ -783,7 +716,7 @@ struct ApplyRejectingStateful {
 impl EffectfulStatefulHandler for ApplyRejectingStateful {
     type State = ApplyRejectionState;
     type Input = ReplayInput;
-    type Output = ReplayStatefulFact;
+    type Output = obzenflow::schema::outcome![ReplayEffectValue | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ApplyRejectionState::default()
@@ -810,14 +743,14 @@ impl EffectfulStatefulHandler for ApplyRejectingStateful {
     }
 
     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        let (entry, reject) = match fact {
-            ReplayStatefulFact::EffectValue(value) => {
-                (format!("effect:{}", value.effect_value), false)
+        let (entry, reject) = fold!(match fact {
+            ReplayEffectValue { effect_value } => {
+                (format!("effect:{effect_value}"), false)
             }
-            ReplayStatefulFact::Output(output) => {
-                (format!("output:{}", output.value), self.reject_apply)
+            ReplayOutput { value, .. } => {
+                (format!("output:{value}"), self.reject_apply)
             }
-        };
+        });
         self.apply_attempts
             .lock()
             .expect("apply attempts lock poisoned")
@@ -860,26 +793,9 @@ impl TypedPayload for ProductSecond {
     const EVENT_TYPE: &'static str = "effect_replay.product_second";
 }
 
-/// Product outcome: both facts are recorded together under one effect
-/// cursor, in field order.
-#[derive(Clone, Debug, PartialEq, Eq, obzenflow_core::EffectOutcomeFacts)]
-struct ProductOutcome {
-    first: ProductFirst,
-    second: ProductSecond,
-}
-
 #[derive(Clone, Debug, Serialize)]
 struct Product {
     value: u64,
-}
-
-/// The stage's per-fact `Output` enum: the carrier never reaches `apply`;
-/// each committed member fact folds individually, in ordinal order.
-#[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
-enum ProductStatefulFact {
-    First(ProductFirst),
-    Second(ProductSecond),
-    Output(ReplayOutput),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -897,7 +813,7 @@ struct ProductStateful {
 impl EffectfulStatefulHandler for ProductStateful {
     type State = ProductStatefulState;
     type Input = ReplayInput;
-    type Output = ProductStatefulFact;
+    type Output = obzenflow::schema::outcome![ProductFirst | ProductSecond | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ProductStatefulState
@@ -909,13 +825,12 @@ impl EffectfulStatefulHandler for ProductStateful {
         input: &ReplayInput,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        let outcome = fx
-            .call(Product { value: input.value })
+        fx.call(Product { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(ReplayOutput {
             value: input.value,
-            effect_value: outcome.first.value,
+            effect_value: input.value + 100,
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
@@ -923,11 +838,17 @@ impl EffectfulStatefulHandler for ProductStateful {
     }
 
     fn apply(&mut self, _state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        let entry = match &fact {
-            ProductStatefulFact::First(first) => format!("first:{}", first.value),
-            ProductStatefulFact::Second(second) => format!("second:{}", second.value),
-            ProductStatefulFact::Output(output) => format!("output:{}", output.value),
-        };
+        let entry = fold!(match fact {
+            ProductFirst { value } => {
+                format!("first:{value}")
+            }
+            ProductSecond { value } => {
+                format!("second:{value}")
+            }
+            ReplayOutput { value, .. } => {
+                format!("output:{value}")
+            }
+        });
         self.applied
             .lock()
             .expect("applied lock poisoned")
@@ -1266,7 +1187,7 @@ struct SiblingTransform;
 #[async_trait]
 impl EffectfulTransformHandler for SiblingTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -1295,7 +1216,7 @@ struct SiblingStateful;
 impl EffectfulStatefulHandler for SiblingStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
-    type Output = ReplayStatefulFact;
+    type Output = obzenflow::schema::outcome![ReplayEffectValue | ReplayOutput];
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
@@ -1321,9 +1242,12 @@ impl EffectfulStatefulHandler for SiblingStateful {
     }
 
     fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
-        if let ReplayStatefulFact::Output(output) = fact {
-            state.outputs.push(output);
-        }
+        fold!(match fact {
+            output @ ReplayOutput { .. } => {
+                state.outputs.push(output)
+            }
+            _ => {}
+        });
         Ok(())
     }
 }
@@ -1479,44 +1403,6 @@ fn build_policy_stateful_flow(
             topology: {
                 inputs |> allocate;
                 allocate |> reservation_failures;
-            }
-        })
-    })
-}
-
-/// Match `build_stateful_flow` at every durable replay boundary while
-/// replacing only the handler-side output carrier with a deliberately false
-/// `OneFactStageOutput` implementation.
-fn build_dishonest_one_fact_stateful_flow(
-    journal_base: PathBuf,
-    calls: Arc<AtomicUsize>,
-    decide_inputs: Arc<Mutex<Vec<u64>>>,
-    apply_calls: Arc<AtomicUsize>,
-    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
-) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = ReplaySource::new();
-        let effectful_handler = DishonestOneFactStateful {
-            counter: call_counter(calls),
-            decide_inputs,
-            apply_calls,
-        };
-        let collector_handler = CollectSink { outputs };
-
-        Ok(flow! {
-            name: "effect_replay_stateful",
-            journals: disk_journals(journal_base),
-
-            stages: {
-                inputs = source!(ReplayInput => inputs_handler);
-                effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler);
-                collector = sink!(ReplayOutput => collector_handler);
-            },
-
-            topology: {
-                inputs |> effectful;
-                effectful |> collector;
             }
         })
     })
@@ -3230,198 +3116,6 @@ async fn effectful_stateful_reconciles_completed_facts_before_decide_error_live_
     );
 }
 
-/// FLOWIP-120z B1: a manual `OneFactStageOutput` implementation is a trusted
-/// law, not a structural proof. A dishonest product keeps its already-authored
-/// facts durable, then fails the stage when the adapter cannot reconstruct the
-/// first fact as the product. Strict replay uses a lawful completed fixture
-/// with the same durable contract and must reach the same boundary without
-/// executing the effect again.
-#[tokio::test]
-async fn effectful_stateful_false_one_fact_marker_is_fatal_live_and_under_strict_replay() {
-    let _guard = effect_replay_test_guard().await;
-    let temp = tempfile::tempdir().expect("tempdir");
-
-    let falsely_marked_facts =
-        obzenflow_core::TypedFactSet::into_facts(DishonestReplayStatefulOutput {
-            effect_value: ReplayEffectValue { effect_value: 100 },
-            output: ReplayOutput {
-                value: 0,
-                effect_value: 100,
-            },
-        })
-        .expect("the dishonest product should lower as an ordinary two-fact carrier");
-    assert_eq!(
-        falsely_marked_facts
-            .iter()
-            .map(|fact| fact.event_type.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            ReplayEffectValue::event_type_name(),
-            ReplayOutput::event_type_name(),
-        ],
-        "the manual marker must be demonstrably false before exercising its runtime backstop"
-    );
-    let missing_output_type = ReplayOutput::event_type_name();
-
-    let live_journal_base = temp.path().join("live_failure_journals");
-    let live_calls = Arc::new(AtomicUsize::new(0));
-    let live_decide_inputs = Arc::new(Mutex::new(Vec::new()));
-    let live_apply_calls = Arc::new(AtomicUsize::new(0));
-    let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    let live_result = tokio::time::timeout(
-        Duration::from_secs(15),
-        replay_testkit::unsynced_application()
-            .with_cli_args(["obzenflow"])
-            .run_async(build_dishonest_one_fact_stateful_flow(
-                live_journal_base.clone(),
-                live_calls.clone(),
-                live_decide_inputs.clone(),
-                live_apply_calls.clone(),
-                live_outputs,
-            )),
-    )
-    .await
-    .expect("live false one-fact assertion should terminate the flow promptly");
-    live_result.expect_err("a false one-fact assertion must fail the live flow");
-    assert_eq!(
-        live_calls.load(Ordering::SeqCst),
-        1,
-        "only the offending input may execute its effect"
-    );
-    assert_eq!(
-        live_decide_inputs
-            .lock()
-            .expect("live decide inputs lock poisoned")
-            .as_slice(),
-        &[1],
-        "the stage must not decide a later input after the carrier contradiction"
-    );
-    assert_eq!(
-        live_apply_calls.load(Ordering::SeqCst),
-        0,
-        "singleton reconstruction must fail before apply"
-    );
-
-    let live_run = latest_run_dir(&live_journal_base);
-    let live_fact_identities = assert_replay_stateful_contract_failure_archive(
-        &live_run,
-        0,
-        &[
-            "one_fact_stage_output",
-            "could not be reconstructed",
-            "missing typed fact",
-            missing_output_type.as_str(),
-        ],
-    )
-    .await;
-
-    // A failed archive is not a strict replay source. Use the lawful unary
-    // carrier to seal the same flat arrow, effect manifest, topology, and
-    // stage logic version, then replay that history through the dishonest
-    // handler-side carrier.
-    let replay_journal_base = temp.path().join("strict_replay_journals");
-    let fixture_calls = Arc::new(AtomicUsize::new(0));
-    let fixture_outputs = Arc::new(Mutex::new(Vec::new()));
-    replay_testkit::unsynced_application()
-        .with_cli_args(["obzenflow"])
-        .run_async(build_stateful_flow(
-            replay_journal_base.clone(),
-            fixture_calls.clone(),
-            fixture_outputs,
-        ))
-        .await
-        .expect("lawful fixture flow should seal the strict replay archive");
-    assert_eq!(
-        fixture_calls.load(Ordering::SeqCst),
-        3,
-        "the lawful fixture must execute one effect for each source input"
-    );
-
-    let replay_source = latest_run_dir(&replay_journal_base);
-    let replay_source_facts =
-        replay_stateful_fact_identities(&read_stage_events(&replay_source, "effectful").await);
-    assert_eq!(
-        replay_source_facts.len(),
-        6,
-        "the completed fixture should contain two ordered facts for each input"
-    );
-
-    let replay_calls = Arc::new(AtomicUsize::new(0));
-    let replay_decide_inputs = Arc::new(Mutex::new(Vec::new()));
-    let replay_apply_calls = Arc::new(AtomicUsize::new(0));
-    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    let replay_result = tokio::time::timeout(
-        Duration::from_secs(15),
-        replay_testkit::unsynced_application()
-            .with_cli_args(vec![
-                OsString::from("obzenflow"),
-                OsString::from("--replay-from"),
-                replay_source.as_os_str().to_os_string(),
-            ])
-            .run_async(build_dishonest_one_fact_stateful_flow(
-                replay_journal_base.clone(),
-                replay_calls.clone(),
-                replay_decide_inputs.clone(),
-                replay_apply_calls.clone(),
-                replay_outputs,
-            )),
-    )
-    .await
-    .expect("strict replay false one-fact assertion should terminate the flow promptly");
-    replay_result.expect_err("strict replay must reach the false one-fact assertion");
-    assert_eq!(
-        replay_calls.load(Ordering::SeqCst),
-        0,
-        "strict replay must reconstruct the committed effect outcome without live I/O"
-    );
-    assert_eq!(
-        replay_decide_inputs
-            .lock()
-            .expect("replay decide inputs lock poisoned")
-            .as_slice(),
-        &[1],
-        "strict replay must stop before the next archived input"
-    );
-    assert_eq!(
-        replay_apply_calls.load(Ordering::SeqCst),
-        0,
-        "strict replay must reproduce the singleton reconstruction failure before apply"
-    );
-
-    let replay_run = latest_run_dir(&replay_journal_base);
-    assert_ne!(
-        replay_run, replay_source,
-        "the failed replay must produce its own evidence archive"
-    );
-    let replay_fact_identities = assert_replay_stateful_contract_failure_archive(
-        &replay_run,
-        0,
-        &[
-            "one_fact_stage_output",
-            "could not be reconstructed",
-            "missing typed fact",
-            missing_output_type.as_str(),
-        ],
-    )
-    .await;
-    assert_eq!(
-        replay_fact_identities,
-        replay_source_facts[..2],
-        "strict replay must preserve the exact first-input fact identities and order"
-    );
-    assert_eq!(
-        live_fact_identities
-            .iter()
-            .map(|(_, event_type)| event_type)
-            .collect::<Vec<_>>(),
-        replay_fact_identities
-            .iter()
-            .map(|(_, event_type)| event_type)
-            .collect::<Vec<_>>(),
-        "live and replay must stop after the same ordered fact types"
-    );
-}
-
 /// FLOWIP-120z B2: a stateful fold cannot skip an already-durable fact. An
 /// `apply` rejection keeps the facts durable, but publishes stage-fatal
 /// lifecycle evidence before later input or successful EOF/drain. A completed
@@ -4033,7 +3727,7 @@ struct PortedTransform {
 #[async_trait]
 impl EffectfulTransformHandler for PortedTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -4287,7 +3981,7 @@ struct LedgerTransform {
 #[async_trait]
 impl EffectfulTransformHandler for LedgerTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -4494,7 +4188,7 @@ struct FailFastTransform {
 #[async_trait]
 impl EffectfulTransformHandler for FailFastTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,
@@ -4542,7 +4236,7 @@ struct MultiEffectFailFastTransform {
 #[async_trait]
 impl EffectfulTransformHandler for MultiEffectFailFastTransform {
     type Input = ReplayInput;
-    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type Output = obzenflow_core::outcome![ReplayOutput | ReplayEffectValue];
 
     async fn process(
         &self,

@@ -7,7 +7,7 @@ use super::{CallRequest, DeclaredEffectSet, Effects, StageCompletion};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
 use async_trait::async_trait;
-use obzenflow_core::event::schema::{EmptySet, WithMember};
+use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
 use obzenflow_core::TypedPayload;
 use std::marker::PhantomData;
 
@@ -145,13 +145,13 @@ where
     R: CallRequest,
 {
     type Input = In;
-    type Output = R::Outcome;
+    type Output = FactsOf<R::Outcome>;
 
     async fn process(
         &self,
         input: In,
-        fx: &mut Effects<R::Outcome, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<R::Outcome>, HandlerError> {
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.call_as_output((self.request)(&input)).await?;
         Ok(fx.complete()?)
     }
@@ -163,7 +163,7 @@ mod tests {
         effectful_transform_effects, EffectAcknowledgement, EffectError, EffectSafety, EffectSet,
     };
     use super::*;
-    use obzenflow_core::StageFactSet;
+    use obzenflow_core::Outcome;
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -245,8 +245,8 @@ mod tests {
         let charge = perform(ChargeRequest::for_invoice).through(Port::to(Scripted));
         assert_handler(&charge);
         assert_eq!(
-            <<Perform<fn(&Invoice) -> ChargeRequest, Invoice, ChargeRequest> as EffectfulTransformHandler>::Output as StageFactSet>::member_fact_types(),
-            <Paid as StageFactSet>::member_fact_types(),
+            <<Perform<fn(&Invoice) -> ChargeRequest, Invoice, ChargeRequest> as EffectfulTransformHandler>::Output as Outcome>::member_fact_types(),
+            <Paid as Outcome>::member_fact_types(),
         );
     }
 

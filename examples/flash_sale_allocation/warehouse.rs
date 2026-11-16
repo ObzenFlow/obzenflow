@@ -60,7 +60,7 @@ impl Default for WarehouseConfig {
 /// here: the allocator is the domain authority and sends only authorised work.
 #[obzenflow::port]
 #[async_trait]
-pub trait WarehousePort: Send + Sync {
+pub trait WarehousePort {
     #[effect(type = "allocation.reserve_stock", exactly_once)]
     async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError>;
 

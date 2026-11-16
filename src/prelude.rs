@@ -13,4 +13,4 @@ pub use crate::flow::{
     effectful_transform, flow, handler_set, inference, infinite_source, join, merge, placeholder,
     sink, source, stateful, transform, FlowDefinition,
 };
-pub use crate::schema::{EffectOutcomeFacts, StageOutputFacts, TypedPayload};
+pub use crate::schema::TypedPayload;

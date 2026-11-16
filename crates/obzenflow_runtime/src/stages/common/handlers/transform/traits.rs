@@ -176,8 +176,8 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 /// inside this handler before the handler is erased for execution. They carry
 /// no runtime metadata and are never journalled.
 ///
-/// A single output fact may be named directly. For a multi-fact arrow, use
-/// [`obzenflow_core::stage_fact_set!`]. The handler is a
+/// A single output fact may be named directly. For a multi-fact arrow, list
+/// the facts with [`obzenflow_core::outcome!`]. The handler is a
 /// [`Command`](crate::effects::Command), which allows every effect the ports it
 /// works through declare.
 ///
@@ -194,11 +194,8 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 /// #[async_trait]
 /// impl EffectfulTransformHandler for GatewayTransform {
 ///     type Input = ValidatedOrder;
-///     type Output = obzenflow_core::stage_fact_set![
-///         PaymentAuthorized,
-///         PaymentDeclined,
-///         OrderCancelled,
-///         PaymentAuthorizationUnavailable,
+///     type Output = obzenflow_core::outcome![
+///         PaymentAuthorized | PaymentDeclined | OrderCancelled | PaymentAuthorizationUnavailable
 ///     ];
 ///
 ///     // `process` mirrors this contract through
@@ -227,7 +224,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 #[async_trait]
 pub trait EffectfulTransformHandler: crate::effects::Command + Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: obzenflow_core::StageFactSet;
+    type Output: obzenflow_core::EffectfulOutcome;
 
     async fn process(
         &self,

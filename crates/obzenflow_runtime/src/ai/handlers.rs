@@ -16,9 +16,10 @@ use obzenflow_core::ai::{
     AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiOutcome, AiUnavailable, Chunk, Partials,
 };
 use obzenflow_core::event::schema::{
-    EmptySet, MemberList, StageOutputFacts, SubsetProofEnd, TypedFactType, WithMember,
+    EffectfulOutcome, EmptySet, FactsOf, MemberList, SubsetProofEnd, TransformOutcome,
+    TypedFactType, WithMember,
 };
-use obzenflow_core::{StageFactSet, TypedPayload};
+use obzenflow_core::{Outcome, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
@@ -44,7 +45,7 @@ where
     E: AiEffect
         + AllowedEffectsAllowEffect<Allowed, At>
         + EffectOutcomeFitsOutput<Output, SubsetProofEnd>,
-    Output: StageFactSet,
+    Output: Outcome,
     Allowed: EffectSet,
 {
     let effect = fx
@@ -126,16 +127,16 @@ impl<R, In> EffectfulTransformHandler for AiInferHandler<R, In>
 where
     In: TypedPayload + Send + Sync + 'static,
     R: AiRole<In>,
-    R::Out: StageOutputFacts,
+    R::Out: TransformOutcome,
 {
     type Input = In;
-    type Output = R::Out;
+    type Output = FactsOf<R::Out>;
 
     async fn process(
         &self,
         input: In,
-        fx: &mut Effects<R::Out, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<R::Out>, HandlerError> {
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let request = self.role.prepare(&input)?;
         let outcome = match call::<R::Effect, _, _, _>(fx, INFER_LABEL, &request, None).await {
             Ok(outcome) => outcome,
@@ -197,16 +198,16 @@ impl<R, T> EffectfulTransformHandler for AiMapHandler<R, T>
 where
     T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     R: AiRole<Chunk<T>>,
-    R::Out: StageOutputFacts,
+    R::Out: TransformOutcome,
 {
     type Input = AiMapReduceMapInput<T>;
-    type Output = R::Out;
+    type Output = FactsOf<R::Out>;
 
     async fn process(
         &self,
         group: AiMapReduceMapInput<T>,
-        fx: &mut Effects<R::Out, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<R::Out>, HandlerError> {
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let chunk = chunk_of(group);
         let request = self.role.prepare(&chunk)?;
         let numbers = Some(chunk.citation_numbers());
@@ -227,7 +228,7 @@ where
 
 #[doc(hidden)]
 pub type AiMapPartialFacts<T, P> =
-    obzenflow_core::stage_fact_set![AiMapReduceTaggedPartial<T, P>, AiMapReduceChunkFailed];
+    obzenflow_core::outcome![AiMapReduceTaggedPartial<T, P> | AiMapReduceChunkFailed];
 
 #[doc(hidden)]
 pub struct AiPartialMapHandler<R, T> {
@@ -339,7 +340,7 @@ where
 #[doc(hidden)]
 pub struct AiReduceFacts<O>(PhantomData<fn() -> O>);
 
-impl<O: StageFactSet> StageFactSet for AiReduceFacts<O>
+impl<O: Outcome> Outcome for AiReduceFacts<O>
 where
     WithMember<AiMapReduceReduceFailed, O::Members>: MemberList,
 {
@@ -350,6 +351,11 @@ where
         types.push(TypedFactType::of::<AiMapReduceReduceFailed>());
         types
     }
+}
+
+impl<O: Outcome> EffectfulOutcome for AiReduceFacts<O> where
+    WithMember<AiMapReduceReduceFailed, O::Members>: MemberList
+{
 }
 
 #[doc(hidden)]
@@ -394,8 +400,8 @@ where
     T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     P: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     S: AiRole<Partials<T, P>>,
-    S::Out: StageOutputFacts,
-    WithMember<AiMapReduceReduceFailed, <S::Out as StageFactSet>::Members>: MemberList,
+    S::Out: TransformOutcome,
+    WithMember<AiMapReduceReduceFailed, <S::Out as Outcome>::Members>: MemberList,
 {
     type Input = AiMapReduceReduceInput<T, P>;
     type Output = AiReduceFacts<S::Out>;

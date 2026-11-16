@@ -72,7 +72,7 @@ pub use strategies::emissions::{
     emit, EmissionStrategy, EmitAlways, EveryInterval, EveryN, OnEOF, TimeWindow,
 };
 
-use obzenflow_core::{OneFactStageOutput, TypedPayload};
+use obzenflow_core::{OneFactOutcome, TypedPayload};
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -106,7 +106,7 @@ where
     T: TypedPayload + Send + Sync,
     K: Hash + Eq + Clone + Debug + Send + Sync,
     S: Default + Send + Sync + Debug + Clone,
-    O: OneFactStageOutput + Send + Sync,
+    O: OneFactOutcome + Send + Sync,
     FKey: Fn(&T) -> K + Send + Sync + Clone,
     FUpdate: Fn(&mut S, &T) + Send + Sync + Clone,
     FOutput: Fn(&K, &S) -> O + Send + Sync + Clone,
@@ -124,7 +124,7 @@ pub fn top_n<T, K, O, FKey, FScore, FOutput>(
 where
     T: Clone + Debug + Send + Sync + TypedPayload + 'static,
     K: Hash + Eq + Clone + Debug + Send + Sync + 'static,
-    O: OneFactStageOutput + Send + Sync + 'static,
+    O: OneFactOutcome + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
     FOutput: Fn(TopNSnapshot<K, T>) -> O + Send + Sync + Clone + 'static,
@@ -142,7 +142,7 @@ pub fn top_n_by<T, K, O, FKey, FScore, FOutput>(
 where
     T: Clone + Debug + Send + Sync + TypedPayload + 'static,
     K: Hash + Eq + Clone + Debug + Send + Sync + 'static,
-    O: OneFactStageOutput + Send + Sync + 'static,
+    O: OneFactOutcome + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
     FOutput: Fn(TopNBySnapshot<K, T>) -> O + Send + Sync + Clone + 'static,

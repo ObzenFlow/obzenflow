@@ -10,7 +10,7 @@ mod tests {
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
     use obzenflow_core::journal::archive::DeliveryOrder;
-    use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload};
+    use obzenflow_core::{outcome, ChainEvent, StageId, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
     use obzenflow_runtime::effects::{Effects, StageCompletion};
     use obzenflow_runtime::feed_plan::{
@@ -245,18 +245,11 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug, StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
-    enum ExactSourceOutput {
-        Input(InputEvent),
-        Alternate(AlternateEvent),
-    }
-
     #[derive(Clone, Debug)]
     struct MultiExactSource;
 
     impl TypedFiniteSourceHandler for MultiExactSource {
-        type Output = ExactSourceOutput;
+        type Output = outcome![InputEvent | AlternateEvent];
 
         fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
             Ok(None)
@@ -265,7 +258,7 @@ mod tests {
 
     #[async_trait]
     impl TypedAsyncFiniteSourceHandler for MultiExactSource {
-        type Output = ExactSourceOutput;
+        type Output = outcome![InputEvent | AlternateEvent];
 
         async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
             Ok(None)
@@ -273,7 +266,7 @@ mod tests {
     }
 
     impl TypedInfiniteSourceHandler for MultiExactSource {
-        type Output = ExactSourceOutput;
+        type Output = outcome![InputEvent | AlternateEvent];
 
         fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
             Ok(Vec::new())
@@ -282,7 +275,7 @@ mod tests {
 
     #[async_trait]
     impl TypedAsyncInfiniteSourceHandler for MultiExactSource {
-        type Output = ExactSourceOutput;
+        type Output = outcome![InputEvent | AlternateEvent];
 
         async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
             Ok(Vec::new())
@@ -317,24 +310,15 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug, StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
-    enum ExactTransformOutput {
-        Output(OutputEvent),
-        Alternate(AlternateEvent),
-    }
-
     #[derive(Clone, Debug)]
     struct TypedExactTransform;
 
     impl TypedTransformHandler for TypedExactTransform {
         type Input = InputEvent;
-        type Output = ExactTransformOutput;
+        type Output = outcome![OutputEvent | AlternateEvent];
 
         fn process(&self, input: InputEvent) -> Result<Self::Output, HandlerError> {
-            Ok(ExactTransformOutput::Output(OutputEvent {
-                value: input.value,
-            }))
+            Ok(outcome(OutputEvent { value: input.value }))
         }
     }
 
@@ -366,7 +350,7 @@ mod tests {
     #[async_trait]
     impl EffectfulTransformHandler for EffectfulMultiOutputTransform {
         type Input = OutputEvent;
-        type Output = obzenflow_core::stage_fact_set![OutputEvent, AlternateEvent];
+        type Output = obzenflow_core::outcome![OutputEvent | AlternateEvent];
 
         async fn process(
             &self,
@@ -410,7 +394,7 @@ mod tests {
     impl TypedStatefulHandler for MultiOutputStateful {
         type State = ();
         type Input = InputEvent;
-        type Output = ExactTransformOutput;
+        type Output = outcome![OutputEvent | AlternateEvent];
 
         fn initial_state(&self) -> Self::State {}
 
@@ -427,20 +411,13 @@ mod tests {
     #[derive(Clone, Debug)]
     struct EffectfulProductStateful;
 
-    #[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
-    #[effect_outcome(schema = obzenflow_core::event::schema)]
-    enum EffectfulStatefulOutput {
-        Output(OutputEvent),
-        Alternate(AlternateEvent),
-    }
-
     #[async_trait]
     impl obzenflow_runtime::stages::common::handlers::EffectfulStatefulHandler
         for EffectfulProductStateful
     {
         type State = ();
         type Input = InputEvent;
-        type Output = EffectfulStatefulOutput;
+        type Output = obzenflow_core::outcome![OutputEvent | AlternateEvent];
 
         fn initial_state(&self) -> Self::State {}
 
@@ -557,13 +534,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug, StageOutputFacts)]
-    #[stage_output(schema = obzenflow_core::event::schema)]
-    enum ExactJoinOutput {
-        Joined(JoinedEvent),
-        Alternate(AlternateEvent),
-    }
-
     #[derive(Clone, Debug)]
     struct MultiOutputJoin;
 
@@ -572,7 +542,7 @@ mod tests {
         type ReferenceKey = ();
         type Reference = ReferenceEvent;
         type Stream = StreamEvent;
-        type Output = ExactJoinOutput;
+        type Output = outcome![JoinedEvent | AlternateEvent];
 
         fn initial_state(&self) -> Self::State {}
 
@@ -799,6 +769,132 @@ mod tests {
             metadata,
             vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
         );
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct PairedEvent {
+        value: String,
+    }
+
+    impl TypedPayload for PairedEvent {
+        const EVENT_TYPE: &'static str = "test.paired";
+    }
+
+    #[derive(Clone, Debug)]
+    struct TupleOutcomeTransform;
+
+    impl TypedTransformHandler for TupleOutcomeTransform {
+        type Input = InputEvent;
+        type Output = outcome![OutputEvent | (AlternateEvent, PairedEvent)];
+
+        fn process(&self, input: InputEvent) -> Result<Self::Output, HandlerError> {
+            Ok(outcome((
+                AlternateEvent {
+                    value: input.value.clone(),
+                },
+                PairedEvent { value: input.value },
+            )))
+        }
+    }
+
+    #[test]
+    fn transform_tuple_outcome_lowers_to_contract() {
+        let transform = crate::transform!(
+            name: "tuple_transform",
+            InputEvent -> { OutputEvent, AlternateEvent, PairedEvent } => TupleOutcomeTransform
+        );
+        let metadata = transform.typing_metadata().unwrap();
+        assert_output_contract(
+            metadata,
+            vec![
+                exact::<OutputEvent>(),
+                exact::<AlternateEvent>(),
+                exact::<PairedEvent>(),
+            ],
+        );
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct VerdictRequest;
+
+    impl VerdictRequest {
+        fn for_input(_: &InputEvent) -> Self {
+            Self
+        }
+    }
+
+    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    trait VerdictPort {
+        #[effect(type = "test.typed.verdict", exactly_once)]
+        fn verdict(
+            &self,
+            request: &VerdictRequest,
+        ) -> Result<outcome![OutputEvent | AlternateEvent], obzenflow_runtime::effects::EffectError>;
+    }
+
+    struct Verdicts;
+
+    #[obzenflow_runtime::effects::system("verdicts", effects = obzenflow_runtime::effects)]
+    impl VerdictPort for Verdicts {
+        fn verdict(
+            &self,
+            _: &VerdictRequest,
+        ) -> Result<outcome![AlternateEvent | OutputEvent], obzenflow_runtime::effects::EffectError>
+        {
+            Ok(outcome(AlternateEvent {
+                value: "declined".to_string(),
+            }))
+        }
+    }
+
+    #[test]
+    fn perform_list_answer_equals_row() {
+        let verdict = obzenflow_runtime::effects::perform(VerdictRequest::for_input)
+            .through(obzenflow_runtime::effects::Port::to(Verdicts));
+        let stage = crate::effectful_transform!(
+            name: "verdict",
+            InputEvent -> { OutputEvent, AlternateEvent } => verdict);
+        let metadata = stage.typing_metadata().unwrap();
+        assert_output_contract(
+            metadata,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
+    }
+
+    #[derive(Clone)]
+    struct TriageRole;
+
+    impl obzenflow_runtime::ai::AiRole<InputEvent> for TriageRole {
+        type Effect = obzenflow_adapters::ai::ChatCompletion;
+        type Out = outcome![OutputEvent | AlternateEvent];
+
+        fn prepare(
+            &self,
+            input: &InputEvent,
+        ) -> Result<obzenflow_core::ai::ChatRequestSpec, HandlerError> {
+            Ok(obzenflow_core::ai::ChatRequestSpec::new(
+                "Triage.",
+                input.value.clone(),
+            ))
+        }
+
+        fn interpret(
+            &self,
+            input: InputEvent,
+            call: obzenflow_core::ai::AiOutcome<obzenflow_core::ai::ChatCompletionReply>,
+        ) -> Result<Self::Out, HandlerError> {
+            call.replied()?;
+            Ok(outcome(OutputEvent { value: input.value }))
+        }
+    }
+
+    #[test]
+    fn ai_role_list_out_equals_row() {
+        let triage = obzenflow_adapters::ai::infer(TriageRole);
+        let stage = crate::ai!(
+            name: "triage",
+            InputEvent -> { OutputEvent, AlternateEvent } => triage);
+        assert_eq!(stage.name(), "triage");
     }
 
     #[test]

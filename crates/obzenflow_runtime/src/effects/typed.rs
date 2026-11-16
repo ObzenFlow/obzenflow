@@ -9,15 +9,15 @@ use super::{
     EffectBindingUse, EffectError, EffectInvocationContext, EffectSet, EffectsCore, NamedEffect,
     StageCompletion,
 };
-use obzenflow_core::event::schema::{EmptySet, WithMember};
+use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
 use obzenflow_core::{
-    assert_distinct_stage_fact_set, ChainEvent, Member, StageFactSet, SubsetOf, TypedPayload,
+    assert_distinct_outcome_facts, ChainEvent, Member, Outcome, SubsetOf, TypedPayload,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::marker::PhantomData;
 
 /// Diagnostic facade proving that one emitted fact belongs to the handler's
-/// declared output set.
+/// `Output`.
 ///
 /// The blanket implementation deliberately delegates to the neutral
 /// [`Member`] proof. User code should name only `Output`; this trait exists so
@@ -25,9 +25,9 @@ use std::marker::PhantomData;
 /// type-level list machinery.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "fact `{Self}` is not declared in this handler's `Output` set",
+    message = "fact `{Self}` is not declared in this handler's `Output`",
     label = "`{Self}` cannot be emitted by this handler",
-    note = "add `{Self}` to the canonical stage arrow, then mirror the arrow's flat fact set in \
+    note = "add `{Self}` to the canonical stage arrow, then list the arrow's facts in \
             the handler's `Output`, or remove this `emit` call (FLOWIP-120z)"
 )]
 pub trait OutputAllowsFact<Output, At> {}
@@ -36,7 +36,7 @@ pub trait OutputAllowsFact<Output, At> {}
 impl<T, Output, At> OutputAllowsFact<Output, At> for T
 where
     T: TypedPayload,
-    Output: StageFactSet,
+    Output: Outcome,
     Output::Members: Member<T, At>,
 {
 }
@@ -64,16 +64,16 @@ where
 }
 
 /// Diagnostic facade proving that every fact in an effect outcome belongs to
-/// the handler's declared output set.
+/// the handler's `Output`.
 ///
 /// The underlying bidirectional stage-contract checks remain elsewhere; this
 /// facade names the one-way containment rule enforced at `perform`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "effect `{Self}` has outcome facts outside this handler's `Output` set",
+    message = "effect `{Self}` has outcome facts outside this handler's `Output`",
     label = "this effect's outcome does not fit the handler's declared output contract",
-    note = "add the intended outcome facts to the canonical stage arrow, then mirror the \
-            arrow's flat fact set in the handler's `Output`, or perform an effect whose outcome \
+    note = "add the intended outcome facts to the canonical stage arrow, then list the \
+            arrow's facts in the handler's `Output`, or perform an effect whose outcome \
             already fits (FLOWIP-120z)"
 )]
 pub trait EffectOutcomeFitsOutput<Output, Proof> {}
@@ -82,8 +82,8 @@ pub trait EffectOutcomeFitsOutput<Output, Proof> {}
 impl<E, Output, Proof> EffectOutcomeFitsOutput<Output, Proof> for E
 where
     E: Effect,
-    Output: StageFactSet,
-    <<E::OutcomeSemantics as super::EffectOutcomeSemantics<E::Outcome>>::PublicFacts as StageFactSet>::Members:
+    Output: Outcome,
+    <<E::OutcomeSemantics as super::EffectOutcomeSemantics<E::Outcome>>::PublicFacts as Outcome>::Members:
         SubsetOf<Output::Members, Proof>,
 {
 }
@@ -111,13 +111,13 @@ where
 }
 
 /// Diagnostic facade proving that every fact a request's outcome authors
-/// belongs to the handler's declared output set, named by the request.
+/// belongs to the handler's `Output`, named by the request.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "effect `{Self}` has outcome facts outside this handler's `Output` set",
+    message = "effect `{Self}` has outcome facts outside this handler's `Output`",
     label = "this effect's outcome does not fit the handler's declared output contract",
-    note = "add the intended outcome facts to the canonical stage arrow, then mirror the \
-            arrow's flat fact set in the handler's `Output`, or perform an effect whose outcome \
+    note = "add the intended outcome facts to the canonical stage arrow, then list the \
+            arrow's facts in the handler's `Output`, or perform an effect whose outcome \
             already fits"
 )]
 pub trait RequestOutcomeFits<Output, Proof> {}
@@ -132,12 +132,12 @@ where
 
 /// Replay-safe effect context restricted to one handler's declared output
 /// facts and effect capabilities.
-pub struct Effects<Output: StageFactSet, AllowedEffects: EffectSet> {
+pub struct Effects<Output: Outcome, AllowedEffects: EffectSet> {
     core: EffectsCore,
     _capabilities: PhantomData<fn() -> (Output, AllowedEffects)>,
 }
 
-impl<R: CallRequest> Effects<R::Outcome, DeclaredEffectSet<WithMember<R, EmptySet>>> {
+impl<R: CallRequest> Effects<FactsOf<R::Outcome>, DeclaredEffectSet<WithMember<R, EmptySet>>> {
     pub(super) async fn call_as_output(&mut self, request: R) -> Result<R::Outcome, EffectError> {
         let projection = self.core.project_named_effect::<Call<R>>()?;
         Box::pin(self.core.perform(Call::new(request, projection))).await
@@ -146,11 +146,11 @@ impl<R: CallRequest> Effects<R::Outcome, DeclaredEffectSet<WithMember<R, EmptySe
 
 impl<Output, AllowedEffects> Effects<Output, AllowedEffects>
 where
-    Output: StageFactSet,
+    Output: Outcome,
     AllowedEffects: EffectSet,
 {
     pub(crate) fn new(ctx: EffectInvocationContext) -> Self {
-        assert_distinct_stage_fact_set::<Output>();
+        assert_distinct_outcome_facts::<Output>();
         assert_distinct_effect_set::<AllowedEffects>();
         Self {
             core: EffectsCore::new(ctx),
@@ -194,7 +194,7 @@ where
 
     pub(crate) async fn emit_carrier<C>(&mut self, carrier: C) -> Result<(), EffectError>
     where
-        C: obzenflow_core::event::schema::TypedFactSet,
+        C: obzenflow_core::event::schema::OutcomeFacts,
     {
         let facts = carrier
             .into_facts()
@@ -203,8 +203,8 @@ where
     }
 
     /// Runtime-owned integration SPI that performs one declared first-party
-    /// effect whose complete outcome fact set is a subset of this handler's
-    /// output set.
+    /// effect whose outcome facts are all listed in this handler's
+    /// `Output`.
     #[doc(hidden)]
     pub async fn perform<E, EffectAt, OutcomeProof>(
         &mut self,
@@ -257,7 +257,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type Output = Charged;
     ///
     ///     async fn process(
     ///         &self,
@@ -298,7 +298,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type Output = Charged;
     ///
     ///     async fn process(
     ///         &self,
@@ -343,7 +343,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type Output = Charged;
     ///
     ///     async fn process(
     ///         &self,
@@ -391,7 +391,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type Output = Charged;
     ///
     ///     async fn process(
     ///         &self,
@@ -404,7 +404,7 @@ where
     /// }
     /// ```
     ///
-    /// Neither does a request whose outcome is outside the handler's output set:
+    /// Neither does a request whose outcome is outside the handler's `Output`:
     ///
     /// ```compile_fail,E0277
     /// # use async_trait::async_trait;
@@ -435,7 +435,7 @@ where
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Shipped];
+    ///     type Output = Shipped;
     ///
     ///     async fn process(
     ///         &self,
@@ -487,7 +487,7 @@ where
     }
 
     /// Capture deterministic ambient data. Capture records are framework
-    /// evidence, not stage output facts, and therefore need no output member.
+    /// evidence outside the stage's outcome, so they need no output member.
     pub async fn capture<T>(&mut self, label: &'static str, value: T) -> Result<T, EffectError>
     where
         T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,

@@ -144,10 +144,10 @@ impl AiRole<ReducedEvidence> for BriefRole {
     fn interpret(
         &self,
         input: ReducedEvidence,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DecisionBrief, HandlerError> {
         self.interpret_calls.fetch_add(1, Ordering::SeqCst);
-        let reply = outcome.replied()?;
+        let reply = call.replied()?;
         assert_eq!(
             reply.request().user_prompt(),
             Some(self.user_prompt(&input).as_str()),
@@ -176,9 +176,9 @@ impl AiRole<ReducedEvidence> for BriefRoleV2 {
     fn interpret(
         &self,
         input: ReducedEvidence,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DecisionBrief, HandlerError> {
-        self.inner.interpret(input, outcome)
+        self.inner.interpret(input, call)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -224,10 +224,10 @@ impl AiRole<ReducedEvidence> for GatedBriefRole {
     fn interpret(
         &self,
         input: ReducedEvidence,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DecisionBrief, HandlerError> {
         self.gate.park_after_reply();
-        self.inner.interpret(input, outcome)
+        self.inner.interpret(input, call)
     }
 }
 
@@ -248,9 +248,9 @@ impl AiRole<DecisionBrief> for ReviewRole {
     fn interpret(
         &self,
         input: DecisionBrief,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DecisionBrief, HandlerError> {
-        let reply = outcome.replied()?;
+        let reply = call.replied()?;
         Ok(DecisionBrief {
             value: input.value,
             answer: format!("{} / {}", input.answer, reply.text()),
@@ -1266,11 +1266,11 @@ impl AiRole<ReducedEvidence> for AvailabilityRole {
     fn interpret(
         &self,
         input: ReducedEvidence,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DecisionBrief, HandlerError> {
-        let answer = match outcome.unavailable() {
+        let answer = match call.unavailable() {
             Some(unavailable) => format!("unavailable: {}", unavailable.cause),
-            None => outcome.replied()?.text().to_string(),
+            None => call.replied()?.text().to_string(),
         };
         Ok(DecisionBrief {
             value: input.value,

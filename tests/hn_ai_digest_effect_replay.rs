@@ -149,12 +149,12 @@ impl AiRole<Chunk<DigestItem>> for MapRole {
     fn interpret(
         &self,
         chunk: Chunk<DigestItem>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DigestPartial, HandlerError> {
-        if self.convert_unavailable && outcome.unavailable().is_some() {
+        if self.convert_unavailable && call.unavailable().is_some() {
             return Ok(DigestPartial { value: 0 });
         }
-        outcome.replied()?;
+        call.replied()?;
         if self.fail_interpret {
             return Err(HandlerError::Domain(
                 "fixture interpretation failure".to_string(),
@@ -186,9 +186,9 @@ impl AiRole<Partials<DigestItem, DigestPartial>> for ReduceRole {
     fn interpret(
         &self,
         input: Partials<DigestItem, DigestPartial>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DigestOut, HandlerError> {
-        outcome.replied()?;
+        call.replied()?;
         Ok(DigestOut {
             total: input.partials().iter().map(|partial| partial.value).sum(),
         })
@@ -3017,9 +3017,9 @@ impl AiRole<Chunk<DigestItem>> for OneRole {
     fn interpret(
         &self,
         chunk: Chunk<DigestItem>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DigestPartial, HandlerError> {
-        MapRole::default().interpret(chunk, outcome)
+        MapRole::default().interpret(chunk, call)
     }
 }
 
@@ -3041,9 +3041,9 @@ impl AiRole<Partials<DigestItem, DigestPartial>> for OneRole {
     fn interpret(
         &self,
         input: Partials<DigestItem, DigestPartial>,
-        outcome: AiOutcome<ChatCompletionReply>,
+        call: AiOutcome<ChatCompletionReply>,
     ) -> Result<DigestOut, HandlerError> {
-        ReduceRole.interpret(input, outcome)
+        ReduceRole.interpret(input, call)
     }
 }
 

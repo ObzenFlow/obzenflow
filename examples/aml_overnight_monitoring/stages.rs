@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use obzenflow::effects::{EffectError, Effects, StageCompletion};
 use obzenflow::error::HandlerError;
+use obzenflow::schema::outcome;
 use obzenflow::stages::joins::{
     AsOfReferenceView, JoinReferenceView, TypedAsOfJoinHandler, TypedJoinHandler,
 };
@@ -166,9 +167,6 @@ impl TypedStatefulHandler for DailyProfile {
     fn post_emit(&self, _: &mut Self::State) {}
 }
 
-pub type ScoreOutput =
-    obzenflow::schema::stage_fact_set![TransactionCleared, AlertRaised, ScoreUnavailable];
-
 #[obzenflow::command(through = RiskEnginePort)]
 #[derive(Clone, Debug)]
 pub struct Scorer;
@@ -176,7 +174,7 @@ pub struct Scorer;
 #[async_trait]
 impl EffectfulTransformHandler for Scorer {
     type Input = ProfiledTransaction;
-    type Output = ScoreOutput;
+    type Output = outcome![TransactionCleared | AlertRaised | ScoreUnavailable];
 
     async fn process(
         &self,
@@ -198,16 +196,10 @@ impl EffectfulTransformHandler for Scorer {
         Ok(fx.complete()?)
     }
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-
     fn stage_logic_version(&self) -> &str {
         "aml-score-v1"
     }
 }
-
-pub type OpenCaseOutput = obzenflow::schema::stage_fact_set![CaseOpened, CaseUnavailable];
 
 #[obzenflow::command(through = CaseSystemPort)]
 #[derive(Clone, Debug)]
@@ -216,7 +208,7 @@ pub struct CaseOpener;
 #[async_trait]
 impl EffectfulTransformHandler for CaseOpener {
     type Input = AlertRaised;
-    type Output = OpenCaseOutput;
+    type Output = outcome![CaseOpened | CaseUnavailable];
 
     async fn process(
         &self,
@@ -236,10 +228,6 @@ impl EffectfulTransformHandler for CaseOpener {
             .await?;
         }
         Ok(fx.complete()?)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {

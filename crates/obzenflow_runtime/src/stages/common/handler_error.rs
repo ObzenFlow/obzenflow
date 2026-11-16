@@ -88,7 +88,7 @@ pub enum HandlerError {
     ///
     /// A call site enforcing a trusted runtime contract may promote this to a
     /// stage-fatal FSM error. The effectful stateful supervisor does so for
-    /// `OneFactStageOutput` contradictions and rejection of already-committed
+    /// `OneFactOutcome` contradictions and rejection of already-committed
     /// facts by the state fold.
     ContractViolation(String),
     /// Generic or unclassified error.
@@ -248,14 +248,14 @@ mod tests {
     #[test]
     fn contract_violation_is_distinct_from_record_errors() {
         let error = HandlerError::ContractViolation(
-            "one_fact_stage_output: singleton reconstruction failed".to_string(),
+            "one_fact_outcome: singleton reconstruction failed".to_string(),
         );
 
         assert!(error.is_contract_violation());
         assert_eq!(error.kind(), ErrorKind::Unknown);
         assert_eq!(
             error.to_string(),
-            "Contract violation: one_fact_stage_output: singleton reconstruction failed"
+            "Contract violation: one_fact_outcome: singleton reconstruction failed"
         );
     }
 }

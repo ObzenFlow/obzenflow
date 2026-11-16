@@ -32,7 +32,7 @@ use obzenflow_core::{
         CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload, RecoveryFact,
     },
     event::ChainPayload,
-    StageOutputs, TypedPayload,
+    Outcomes, TypedPayload,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -123,10 +123,10 @@ impl FanOutTransform {
 
 impl TypedTransformHandler for FanOutTransform {
     type Input = CompInput;
-    type Output = StageOutputs<CompInput>;
+    type Output = Outcomes<CompInput>;
 
-    fn process(&self, input: CompInput) -> Result<StageOutputs<CompInput>, HandlerError> {
-        Ok(StageOutputs::many([
+    fn process(&self, input: CompInput) -> Result<Outcomes<CompInput>, HandlerError> {
+        Ok(Outcomes::many([
             CompInput {
                 value: input.value * 10 + 1,
             },
@@ -191,7 +191,7 @@ impl RetryTransform {
 #[async_trait]
 impl EffectfulTransformHandler for RetryTransform {
     type Input = CompInput;
-    type Output = obzenflow_core::stage_fact_set![CompOutput, CompEffectValue];
+    type Output = obzenflow_core::outcome![CompOutput | CompEffectValue];
 
     async fn process(
         &self,

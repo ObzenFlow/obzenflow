@@ -16,7 +16,7 @@ use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, StageOutputs};
+use obzenflow_core::{Outcomes, StageId};
 use obzenflow_dsl::{sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 #[cfg(feature = "test-support")]
@@ -120,13 +120,13 @@ struct DropTransform;
 
 impl TypedTransformHandler for DropTransform {
     type Input = MetricEvent;
-    type Output = StageOutputs<MetricEvent>;
+    type Output = Outcomes<MetricEvent>;
 
     fn process(
         &self,
         _event: MetricEvent,
-    ) -> std::result::Result<StageOutputs<MetricEvent>, HandlerError> {
-        Ok(StageOutputs::none())
+    ) -> std::result::Result<Outcomes<MetricEvent>, HandlerError> {
+        Ok(Outcomes::none())
     }
 }
 

@@ -19,7 +19,7 @@ use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{DeliveryContract, StageOutputs};
+use obzenflow_core::{DeliveryContract, Outcomes};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -131,19 +131,19 @@ impl FanOutTransform {
 
 impl TypedTransformHandler for FanOutTransform {
     type Input = DeliveryTestEvent;
-    type Output = StageOutputs<FanOutTestEvent>;
+    type Output = Outcomes<FanOutTestEvent>;
 
     fn process(
         &self,
         _event: DeliveryTestEvent,
-    ) -> std::result::Result<StageOutputs<FanOutTestEvent>, HandlerError> {
+    ) -> std::result::Result<Outcomes<FanOutTestEvent>, HandlerError> {
         let mut out = Vec::with_capacity(self.fan_out);
         for index in 0..self.fan_out {
             out.push(FanOutTestEvent {
                 fan_out_index: index as u64,
             });
         }
-        Ok(StageOutputs::many(out))
+        Ok(Outcomes::many(out))
     }
 }
 

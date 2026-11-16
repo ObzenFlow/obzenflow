@@ -20,9 +20,9 @@ use obzenflow_core::ai::{
     AiMapReduceReduceInput, AiMapReduceTaggedPartial, AiMapReduceWindowFailed, AiModelSpec, Chunk,
     Partials,
 };
-use obzenflow_core::event::schema::StageOutputFacts;
+use obzenflow_core::event::schema::TransformOutcome;
 use obzenflow_core::journal::archive::manifest::AI_MODEL_SPECS_CAPABILITY;
-use obzenflow_core::{StageFactSet, TypedPayload};
+use obzenflow_core::{Outcome, TypedPayload};
 use obzenflow_runtime::ai::{
     AiBinding, AiCollector, AiEffect, AiGrouping, AiInferHandler, AiKeying, AiMapHandler,
     AiModelSource, AiPartialMapHandler, AiReduceHandler, AiResolverPort, AiRole,
@@ -52,7 +52,7 @@ pub trait AiStageHandler: Send + 'static {
     /// The stage's input fact.
     type In: TypedPayload + Clone + Send + Sync + 'static;
     /// What the stage authors.
-    type Out: StageFactSet;
+    type Out: Outcome;
     /// What one call takes, for diagnostics.
     type CallIn;
     /// What one call produces, for diagnostics.
@@ -542,15 +542,15 @@ fn member_middleware(
         .collect()
 }
 
-fn fact_set_hints<S: StageFactSet>() -> Vec<TypeHint> {
+fn outcome_hints<S: Outcome>() -> Vec<TypeHint> {
     S::member_fact_types()
         .into_iter()
         .map(TypeHint::exact_fact_type)
         .collect()
 }
 
-fn output_metadata<S: StageFactSet>(input: TypeHint, extra: Vec<TypeHint>) -> StageTypingMetadata {
-    let mut members = fact_set_hints::<S>();
+fn output_metadata<S: Outcome>(input: TypeHint, extra: Vec<TypeHint>) -> StageTypingMetadata {
+    let mut members = outcome_hints::<S>();
     let primary = if members.is_empty() {
         TypeHint::Unspecified
     } else {
@@ -573,7 +573,7 @@ impl<R, In> AiStageHandler for Infer<R, In>
 where
     In: TypedPayload + Clone + Send + Sync + 'static,
     R: AiRole<In>,
-    R::Out: StageOutputFacts,
+    R::Out: TransformOutcome,
 {
     type In = In;
     type Out = R::Out;
@@ -597,7 +597,7 @@ impl<R, In> AiStagePlan for InferPlan<R, In>
 where
     In: TypedPayload + Clone + Send + Sync + 'static,
     R: AiRole<In>,
-    R::Out: StageOutputFacts,
+    R::Out: TransformOutcome,
 {
     fn lower(self: Box<Self>, stage: AiStageLowering<'_>) -> LoweringResult<FlowMember> {
         let middleware = row_middleware(stage.name, &[R::Effect::EFFECT_TYPE], stage.middleware)?;
@@ -625,7 +625,7 @@ impl<R, T, K> AiStageHandler for Chunked<R, T, K>
 where
     T: TypedPayload + Clone + Send + Sync + 'static,
     R: AiRole<Chunk<T>>,
-    R::Out: StageOutputFacts,
+    R::Out: TransformOutcome,
     K: AiKeySpec<T>,
 {
     type In = T;
@@ -669,7 +669,7 @@ impl<R, T, K> AiStagePlan for MapPlan<R, T, K>
 where
     T: TypedPayload + Clone + Send + Sync + 'static,
     R: AiRole<Chunk<T>>,
-    R::Out: StageOutputFacts,
+    R::Out: TransformOutcome,
     K: AiKeySpec<T>,
 {
     fn lower(self: Box<Self>, stage: AiStageLowering<'_>) -> LoweringResult<FlowMember> {
@@ -707,7 +707,7 @@ impl<R, T, Key> CompositeDescriptor for AiMapComposite<R, T, Key>
 where
     T: TypedPayload + Clone + Send + Sync + 'static,
     R: AiRole<Chunk<T>>,
-    R::Out: StageOutputFacts,
+    R::Out: TransformOutcome,
     Key: Ord + Clone + Serialize + Send + Sync + 'static,
 {
     fn name(&self) -> &str {
@@ -773,7 +773,7 @@ where
             .payload::<T>()
             .default()
             .output("out", "map")
-            .payload_hints(fact_set_hints::<R::Out>())
+            .payload_hints(outcome_hints::<R::Out>())
             .default();
         Ok(())
     }
@@ -785,7 +785,7 @@ where
     R: AiRole<Chunk<T>>,
     R::Out: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     S: AiRole<Partials<T, R::Out>>,
-    S::Out: StageOutputFacts,
+    S::Out: TransformOutcome,
     K: AiKeySpec<T>,
 {
     type In = T;
@@ -821,7 +821,7 @@ where
     R: AiRole<Chunk<T>>,
     R::Out: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     S: AiRole<Partials<T, R::Out>>,
-    S::Out: StageOutputFacts,
+    S::Out: TransformOutcome,
     K: AiKeySpec<T>,
 {
     fn lower(self: Box<Self>, stage: AiStageLowering<'_>) -> LoweringResult<FlowMember> {
@@ -889,7 +889,7 @@ where
     R: AiRole<Chunk<T>>,
     R::Out: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     S: AiRole<Partials<T, R::Out>>,
-    S::Out: StageOutputFacts,
+    S::Out: TransformOutcome,
     Key: Ord + Clone + Serialize + Send + Sync + 'static,
 {
     fn name(&self) -> &str {
@@ -1016,7 +1016,7 @@ where
             .payload::<T>()
             .default()
             .output("out", "reduce")
-            .payload_hints(fact_set_hints::<S::Out>())
+            .payload_hints(outcome_hints::<S::Out>())
             .default();
         Ok(())
     }
