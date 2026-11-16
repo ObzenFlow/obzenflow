@@ -735,12 +735,16 @@ pub async fn metrics_pending_refresh_does_not_block_publication_or_other_journal
     let owned = ctx.journals.clone();
     let (task, _control) = run(ctx);
     gate.entered.notified().await;
-    until(|| exports.0.lock().unwrap().len() >= 4).await;
+    let pending_from = exports.0.lock().unwrap().len();
+    until(|| {
+        let snapshots = exports.0.lock().unwrap();
+        snapshots.len() > pending_from
+            && snapshots.last().unwrap().event_counts.get(&b) == Some(&200)
+    })
+    .await;
     {
         let snapshots = exports.0.lock().unwrap();
-        let last = snapshots.last().unwrap();
-        assert_eq!(last.event_counts.get(&b), Some(&200));
-        assert!(!last.event_counts.contains_key(&a));
+        assert!(!snapshots.last().unwrap().event_counts.contains_key(&a));
     }
     fast.append(fact(b, b.into(), 500, 2), Default::default())
         .await
@@ -911,6 +915,16 @@ pub async fn metrics_terminal_accounting_survives_without_optional_packets(
     )
     .await
     .unwrap();
+    let (task, _control) = run(ctx);
+    until(|| {
+        exports
+            .0
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|snapshot| snapshot.event_counts.get(&stage) == Some(&1000))
+    })
+    .await;
     system
         .append(
             SystemEventFactory::new(writer).pipeline_not_started(),
@@ -925,7 +939,6 @@ pub async fn metrics_terminal_accounting_survives_without_optional_packets(
         )
         .await
         .unwrap();
-    let (task, _control) = run(ctx);
     tokio::time::timeout(Duration::from_secs(2), task.wait_for_completion())
         .await
         .unwrap()
