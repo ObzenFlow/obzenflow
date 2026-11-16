@@ -10,7 +10,7 @@ implementations of Core's schema contracts at compile time.
 
 ## Responsibilities
 
-- Events, typed payloads, outcome lists, fact sets, identifiers, and causal context.
+- Events, typed payloads, outcome lists, identifiers, and causal context.
 - Journal append and read contracts, factories, archives, and run manifests.
 - Delivery, effect, and stage-verification contracts.
 - Measurement snapshots and the `MetricsSnapshotExporter` publication port.

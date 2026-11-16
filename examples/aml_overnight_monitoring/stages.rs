@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use obzenflow::effects::{EffectError, Effects, StageCompletion};
 use obzenflow::error::HandlerError;
+use obzenflow::schema::outcome;
 use obzenflow::stages::joins::{
     AsOfReferenceView, JoinReferenceView, TypedAsOfJoinHandler, TypedJoinHandler,
 };
@@ -173,7 +174,7 @@ pub struct Scorer;
 #[async_trait]
 impl EffectfulTransformHandler for Scorer {
     type Input = ProfiledTransaction;
-    type Output = obzenflow::schema::outcome![TransactionCleared | AlertRaised | ScoreUnavailable];
+    type Output = outcome![TransactionCleared | AlertRaised | ScoreUnavailable];
 
     async fn process(
         &self,
@@ -207,7 +208,7 @@ pub struct CaseOpener;
 #[async_trait]
 impl EffectfulTransformHandler for CaseOpener {
     type Input = AlertRaised;
-    type Output = obzenflow::schema::outcome![CaseOpened | CaseUnavailable];
+    type Output = outcome![CaseOpened | CaseUnavailable];
 
     async fn process(
         &self,
