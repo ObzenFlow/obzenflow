@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn tuple_outcome_keeps_written_order() {
+    fn tuple_outcome_preserves_written_order() {
         let list = expanded(quote!(krate; ValidatedOrder | (InvalidOrder, CancelledOrder)));
         assert!(
             list.contains("OutcomeOr < (InvalidOrder , CancelledOrder) ,"),

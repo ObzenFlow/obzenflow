@@ -680,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn effectful_stateful_set_decodes_committed_fact() {
+    fn effectful_stateful_list_decodes_committed_fact() {
         let event = obzenflow_core::event::ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),
             SecondOutput::event_type_name(),
