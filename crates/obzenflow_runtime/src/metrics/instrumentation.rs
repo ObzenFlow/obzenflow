@@ -12,6 +12,7 @@ use crate::control_plane::{
     NoControlPlane, RateLimiterSnapshotter,
 };
 use crate::execution::RuntimeExecution;
+use crate::messaging::record_descriptor;
 use hdrhistogram::Histogram;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::journal_record::JournalRecord;
@@ -22,7 +23,7 @@ use obzenflow_core::event::provenance::{
 };
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::{ChainEvent, JournalEvent};
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::{
     EventId, FlowId, JournalPayload, MiddlewareExecutionScope, StageId, WriterId,
@@ -601,13 +602,11 @@ impl StageInstrumentation {
             Some(envelope.envelope.provenance.journal.journal_writer_id);
         *self.last_consumed_vector_clock.write().unwrap() =
             Some(envelope.envelope.provenance.journal.vector_clock.clone());
-        if let Some(event) = (&envelope.authored() as &dyn Any).downcast_ref::<ChainEvent>() {
-            if event.consumes_data_credit() {
-                let event_type = event.descriptor();
+        if let Some(record) = (envelope as &dyn Any).downcast_ref::<JournalRecord<ChainPayload>>() {
+            if record.consumes_data_credit() {
+                let event_type = record_descriptor(record);
                 let mut counts = self.data_reader_seq_by_upstream_event_type.write().unwrap();
-                *counts
-                    .entry((upstream_stage, event_type.clone()))
-                    .or_insert(0) += 1;
+                *counts.entry((upstream_stage, event_type)).or_insert(0) += 1;
             }
         }
     }
@@ -624,28 +623,28 @@ impl StageInstrumentation {
         *self.last_receipted_vector_clock.write().unwrap() = Some(vector_clock);
     }
 
-    /// Note an emitted event for wide-event observability.
-    pub fn record_emitted<T: JournalEvent>(&self, event: &T) {
+    /// Note an emitted record for wide-event observability.
+    pub fn record_emitted(&self, record: &JournalRecord<ChainPayload>) {
         self.writer_seq.fetch_add(1, Ordering::Relaxed);
-        *self.last_emitted_event_id.write().unwrap() = Some(*event.id());
-        *self.last_emitted_writer.write().unwrap() = Some(*event.writer_id());
+        *self.last_emitted_event_id.write().unwrap() = Some(*record.id());
+        *self.last_emitted_writer.write().unwrap() = Some(*record.writer_id());
     }
 
-    /// Note an emitted output event and increment the emitted counter.
+    /// Note a committed output record and increment the emitted counter.
     ///
-    /// Use this for data/delivery events that represent stage outputs. Do not
-    /// use it for observability-only events (e.g. metrics heartbeats).
-    pub fn record_output_event(&self, event: &ChainEvent) {
-        self.record_emitted(event);
-        if event.consumes_data_credit() {
-            let event_type = event.descriptor();
+    /// Use this for data/delivery records that represent stage outputs. Do not
+    /// use it for observability-only records (e.g. metrics heartbeats).
+    pub fn record_output_event(&self, record: &JournalRecord<ChainPayload>) {
+        self.record_emitted(record);
+        if record.consumes_data_credit() {
+            let event_type = record_descriptor(record);
             let mut frontier = self.authored_data_frontier.write().unwrap();
             frontier.writer_seq = frontier.writer_seq.saturating_add(1);
             *frontier
                 .writer_seq_by_event_type
                 .entry(event_type)
                 .or_insert(0) += 1;
-            frontier.last_event_id = Some(event.id);
+            frontier.last_event_id = Some(*record.id());
         }
         self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
     }
@@ -653,16 +652,16 @@ impl StageInstrumentation {
     /// Note a physically committed Data row whose durable author is another
     /// stage. Forwarded pre-error rows remain emitted journal evidence and
     /// telemetry, but cannot advance this stage's authored transport frontier.
-    pub fn record_forwarded_output_event(&self, event: &ChainEvent) {
-        self.record_emitted(event);
+    pub fn record_forwarded_output_event(&self, record: &JournalRecord<ChainPayload>) {
+        self.record_emitted(record);
         self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Note a Data output routed to the error journal. It remains an emitted
     /// stage event for existing lifecycle accounting, but it is deliberately
     /// absent from the typed data-journal counters used by composite ports.
-    pub fn record_error_journal_output_event(&self, event: &ChainEvent) {
-        self.record_emitted(event);
+    pub fn record_error_journal_output_event(&self, record: &JournalRecord<ChainPayload>) {
+        self.record_emitted(record);
         self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1050,7 +1049,8 @@ mod tests {
             serde_json::json!({}),
         );
 
-        instrumentation.record_error_journal_output_event(&event);
+        instrumentation
+            .record_error_journal_output_event(&JournalRecord::new(JournalWriterId::new(), event));
 
         let snapshot = instrumentation.snapshot();
         assert_eq!(snapshot.accounting.events_emitted_total, 1);

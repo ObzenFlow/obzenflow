@@ -4,6 +4,7 @@
 
 //! Builder for journal sink stages
 
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::WriterId;
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{JonestownSignalStrategy, SignalGate};
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
@@ -171,6 +173,14 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
                 .map(super::receipts::SinkReceiptClassification::new),
             failure_lifecycle_recorded: false,
             failure_causal_event_id: None,
+            flow_context: Arc::new(make_flow_context(
+                &self.config.flow_name,
+                &self.resources.flow_id.to_string(),
+                &self.config.stage_name,
+                self.config.stage_id,
+                StageType::Sink,
+            )),
+            stage_constants: None,
         };
 
         let context = JournalSinkContext::new(resources);

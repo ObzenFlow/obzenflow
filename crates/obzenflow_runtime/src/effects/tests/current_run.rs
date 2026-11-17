@@ -129,32 +129,35 @@ impl Window {
 
     fn context(&self, input: u64) -> EffectInvocationContext {
         EffectInvocationContext {
-            flow_id: self.flow_id,
-            stage_id: self.stage_id,
-            stage_key: STAGE_KEY.to_string(),
-            writer_id: WriterId::from(self.stage_id),
+            stage: Arc::new(StageConstants {
+                flow_id: self.flow_id,
+                stage_id: self.stage_id,
+                stage_key: STAGE_KEY.to_string(),
+                writer_id: WriterId::from(self.stage_id),
+                stage_logic_version: "test-v1".to_string(),
+                data_journal: self.erased.clone(),
+                flow_context: None,
+                observers: None,
+                instrumentation: None,
+                heartbeat_state: None,
+                effect_history: None,
+                current_run_history: self.history.clone(),
+                runtime_execution: self.execution.clone(),
+                effect_ports: self.ports.clone(),
+                effect_declarations: vec![
+                    EffectDeclaration::named(&fixtures().counting),
+                    EffectDeclaration::named_at_least_once(&fixtures().affine_counting),
+                    EffectDeclaration::named_at_least_once(&fixtures().invariant_affine),
+                    self.transactional.clone(),
+                ],
+                output_contract: StageOutputContract::empty(),
+                backpressure_readers: Vec::new(),
+                lineage: obzenflow_core::config::LineagePolicy::default(),
+                catch_up: None,
+            }),
             input_seq: StageInputPosition(input),
-            lineage: obzenflow_core::config::LineagePolicy::default(),
-            stage_logic_version: "test-v1".to_string(),
-            data_journal: self.erased.clone(),
-            flow_context: None,
-            observers: None,
-            instrumentation: None,
-            heartbeat_state: None,
             parent: parent_envelope(WriterId::from(self.stage_id)).into(),
-            effect_history: None,
-            current_run_history: self.history.clone(),
-            runtime_execution: self.execution.clone(),
-            effect_ports: self.ports.clone(),
-            effect_declarations: vec![
-                EffectDeclaration::named(&fixtures().counting),
-                EffectDeclaration::named_at_least_once(&fixtures().affine_counting),
-                EffectDeclaration::named_at_least_once(&fixtures().invariant_affine),
-                self.transactional.clone(),
-            ],
-            output_contract: StageOutputContract::empty(),
             backpressure_writer: BackpressureWriter::disabled(),
-            backpressure_readers: Vec::new(),
             emit_enabled: false,
             effect_boundary: Some(Arc::new(WindowBoundary {
                 invariant: InvariantEvidenceBoundary {
@@ -163,7 +166,6 @@ impl Window {
                     consults: Arc::new(AtomicUsize::new(0)),
                 },
             })),
-            catch_up: None,
         }
     }
 
@@ -360,7 +362,7 @@ async fn current_run_history_answers_a_resumed_recovery_as_the_full_scan_does() 
             EffectPortRegistry::new(),
         );
         ctx.effect_boundary = Some(boundary);
-        let history = ctx.current_run_history.clone();
+        let history = ctx.stage.current_run_history.clone();
         let mut core = EffectsCore::new(ctx);
         let outcome = core
             .perform(AffineCountingEffect {
@@ -480,8 +482,8 @@ async fn current_run_history_reads_each_record_once() {
     let history = CurrentRunHistory::new(counted.clone());
     for input in 1..=8 {
         let mut ctx = window.context(input);
-        ctx.data_journal = counted.clone();
-        ctx.current_run_history = history.clone();
+        stage_mut(&mut ctx).data_journal = counted.clone();
+        stage_mut(&mut ctx).current_run_history = history.clone();
         let mut core = EffectsCore::new(ctx);
         window.perform(&mut core, input, Action::Affine).await;
         window.perform(&mut core, input, Action::Repeatable).await;
@@ -505,8 +507,8 @@ async fn an_uncommitted_journal_tail_fails_the_lookup_before_any_call() {
     let history = CurrentRunHistory::new(erased.clone());
     let context = |input: u64| {
         let mut ctx = window.context(input);
-        ctx.data_journal = erased.clone();
-        ctx.current_run_history = history.clone();
+        stage_mut(&mut ctx).data_journal = erased.clone();
+        stage_mut(&mut ctx).current_run_history = history.clone();
         ctx
     };
 
@@ -547,7 +549,7 @@ async fn current_run_history_answers_only_for_the_journal_it_folds() {
     let other: Arc<dyn Journal<ChainEvent>> =
         Arc::new(MemoryJournal::new(JournalOwner::stage(window.stage_id)));
     let mut ctx = window.context(1);
-    ctx.current_run_history = CurrentRunHistory::new(other);
+    stage_mut(&mut ctx).current_run_history = CurrentRunHistory::new(other);
     let mut core = EffectsCore::new(ctx);
     let error = core
         .perform(CountingEffect {

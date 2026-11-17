@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
@@ -29,6 +30,7 @@ use crate::stages::common::supervision::catch_up::test_support::{
     caught_up_through, context, open_at, RecordingJournal,
 };
 use crate::stages::common::supervision::catch_up::CatchUpAction;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::merges::MergeStrategyKind;
 use crate::stages::resources_builder::SubscriptionFactory;
 use crate::supervised_base::base::Supervisor;
@@ -46,11 +48,10 @@ impl Merge {
         let journal = RecordingJournal::new();
         let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
         let empty = SubscriptionFactory::new(HashMap::new()).bind(&[]);
+        let flow_id = FlowId::new();
         let ctx = MergeContext::new(MergeResources {
             stage_id,
             stage_name: "trades".to_string(),
-            flow_name: "flow".to_string(),
-            flow_id: FlowId::new(),
             strategy: MergeStrategyKind::ThenLive,
             writer_id: None,
             runtime_execution: execution.clone(),
@@ -72,6 +73,13 @@ impl Merge {
             backpressure_stall: Default::default(),
             heartbeat: None,
             catch_up: context(stage_id, "trades", execution, Some(journal)),
+            flow_context: Arc::new(make_flow_context(
+                "flow",
+                &flow_id.to_string(),
+                "trades",
+                stage_id,
+                StageType::Merge,
+            )),
         });
         let supervisor = MergeSupervisor::new("trades".to_string(), stage_id);
         Self {

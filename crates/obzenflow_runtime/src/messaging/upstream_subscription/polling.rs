@@ -7,11 +7,11 @@ use super::{
     DeliveryFilter, EofOutcome, HeldHead, MergeCandidateMeta, PollResult, ReaderProgress,
     StageInputPosition, UpstreamSubscription,
 };
-use crate::messaging::DeliveredRecord;
+use crate::messaging::{record_descriptor, DeliveredRecord};
 use obzenflow_core::event::payloads::chain_payload::EventKind;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::provenance::CompositeActivationContext;
+use obzenflow_core::event::provenance::{ChainEventProvenance, CompositeActivationContext};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
@@ -20,6 +20,7 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::{StageId, WriterId};
 use std::any::Any;
 use std::io;
+use std::sync::Arc;
 
 /// Outcome of one read-side step on a single reader (FLOWIP-095d D8 split).
 ///
@@ -98,13 +99,10 @@ where
         // logically at EOF due to a tail-start baseline.
         self.state.clear_reader_baseline_at_tail(index);
 
-        let authored = envelope.authored();
-        let chain_event = (&authored as &dyn Any).downcast_ref::<ChainEvent>();
-        let is_data = chain_event
-            .map(ChainEvent::consumes_data_credit)
-            .unwrap_or(false);
-        if let Some(chain_event) = chain_event {
-            if self.transport_filter_skips(chain_event, stage_id) {
+        let chain_record = (&envelope as &dyn Any).downcast_ref::<JournalRecord<ChainPayload>>();
+        let is_data = chain_record.is_some_and(|record| record.consumes_data_credit());
+        if let Some(record) = chain_record {
+            if self.transport_filter_skips(record, stage_id) {
                 return Ok(ReadStep::Filtered {
                     upstream: stage_id,
                     completed_data_rows: u64::from(is_data),
@@ -112,10 +110,10 @@ where
             }
         }
 
-        let (is_authored_eof, is_drain) = chain_event
-            .map(|chain_event| self.classify_eof_drain(chain_event, stage_id))
+        let (is_authored_eof, is_drain) = chain_record
+            .map(|record| self.classify_eof_drain(record, stage_id))
             .unwrap_or((false, false));
-        let catch_up = match chain_event.map(|chain_event| &chain_event.payload) {
+        let catch_up = match chain_record.map(|record| &record.payload) {
             Some(ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                 generation,
                 stage_key,
@@ -141,7 +139,7 @@ where
         };
         Ok(ReadStep::Head {
             head: HeldHead {
-                envelope: Box::new(envelope),
+                envelope: Arc::new(envelope),
                 is_authored_eof,
                 is_drain,
                 catch_up,
@@ -189,15 +187,18 @@ where
                 .is_some_and(|context| self.is_archived_author(stage_id, context.original_stage_id))
     }
 
-    fn eof_authored_by_upstream(&self, chain_event: &ChainEvent, stage_id: StageId) -> bool {
-        let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
-            &chain_event.payload
-        else {
+    fn eof_authored_by_upstream(
+        &self,
+        provenance: &ChainEventProvenance,
+        payload: &ChainPayload,
+        stage_id: StageId,
+    ) -> bool {
+        let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) = payload else {
             return false;
         };
         writer_id
             .map(|writer| self.writer_matches_upstream(writer, stage_id))
-            .unwrap_or_else(|| self.writer_matches_upstream(chain_event.writer_id, stage_id))
+            .unwrap_or_else(|| self.writer_matches_upstream(provenance.writer_id, stage_id))
     }
 
     /// Whether this row may contribute to the subscribed journal owner's
@@ -209,18 +210,27 @@ where
             &chain_event.payload,
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
         ) {
-            return self.eof_authored_by_upstream(chain_event, stage_id);
+            return self.eof_authored_by_upstream(chain_event, &chain_event.payload, stage_id);
         }
         self.writer_matches_upstream(chain_event.writer_id, stage_id)
             || self.replayed_source_data_matches_upstream(chain_event, stage_id)
     }
 
     /// Detect terminal EOF and drain signals for one upstream reader.
-    fn classify_eof_drain(&self, chain_event: &ChainEvent, stage_id: StageId) -> (bool, bool) {
-        match &chain_event.payload {
-            ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {
-                (self.eof_authored_by_upstream(chain_event, stage_id), false)
-            }
+    fn classify_eof_drain(
+        &self,
+        record: &JournalRecord<ChainPayload>,
+        stage_id: StageId,
+    ) -> (bool, bool) {
+        match &record.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => (
+                self.eof_authored_by_upstream(
+                    &record.envelope.provenance.event,
+                    &record.payload,
+                    stage_id,
+                ),
+                false,
+            ),
             ChainPayload::FlowControl(FlowControlPayload::Drain) => (false, true),
             _ => (false, false),
         }
@@ -241,26 +251,31 @@ where
     /// timing-dependent and break the canonical merge's determinism. Only
     /// behavioural flow control (EOF, drain, watermarks, checkpoints,
     /// pipeline abort) participates in transport order.
-    fn transport_filter_skips(&self, chain_event: &ChainEvent, stage_id: StageId) -> bool {
+    fn transport_filter_skips(
+        &self,
+        record: &JournalRecord<ChainPayload>,
+        stage_id: StageId,
+    ) -> bool {
         if !matches!(self.delivery_filter, DeliveryFilter::TransportOnly) {
             return false;
         }
-        if chain_event.is_transport_excluded_execution() {
+        if matches!(&record.payload, ChainPayload::Execution(payload) if !payload.consumes_data_credit())
+        {
             return true;
         }
-        if let ChainPayload::FlowControl(payload) = &chain_event.payload {
+        if let ChainPayload::FlowControl(payload) = &record.payload {
             if payload.is_reporting_telemetry() {
                 return true;
             }
         }
         if matches!(
-            chain_event.payload,
+            record.payload,
             ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
         ) {
             return true;
         }
-        if chain_event.consumes_data_credit()
-            && !self.data_event_selected_for_stage(stage_id, &chain_event.descriptor())
+        if record.consumes_data_credit()
+            && !self.data_event_selected_for_stage(stage_id, &record_descriptor(record))
         {
             return true;
         }
@@ -452,8 +467,7 @@ where
                 }
             }
         }
-        let original_authored = envelope.authored();
-        let original_chain_event = (&original_authored as &dyn Any).downcast_ref::<ChainEvent>();
+        let original_chain_event = (&**envelope.view() as &dyn Any).downcast_ref::<ChainEvent>();
 
         let normalized_contract_event =
             self.normalized_eof_for_contracts(stage_id, original_chain_event, is_eof);
@@ -645,7 +659,7 @@ where
                 ..
             }) = &chain_event.payload
             {
-                if self.eof_authored_by_upstream(chain_event, stage_id) {
+                if self.eof_authored_by_upstream(chain_event, &chain_event.payload, stage_id) {
                     progress.advertised_writer_seq = *writer_seq;
                     progress.advertised_vector_clock = vector_clock.clone();
                     progress.last_vector_clock = vector_clock.clone();
@@ -663,10 +677,7 @@ where
         }
 
         progress.last_event_id = Some(*envelope.id());
-        if (&envelope.authored() as &dyn Any)
-            .downcast_ref::<ChainEvent>()
-            .is_some()
-        {
+        if (envelope.record() as &dyn Any).is::<JournalRecord<ChainPayload>>() {
             progress.last_vector_clock =
                 Some(envelope.envelope.provenance.journal.vector_clock.clone());
         }

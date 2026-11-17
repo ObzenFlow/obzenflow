@@ -29,7 +29,9 @@ use std::task::{Context, Poll};
 use crate::backpressure::{
     BackpressureReader, BackpressureRegistry, BackpressureWriter, DirectFactAdmission,
 };
-use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{
+    CurrentRunHistory, EffectDeclaration, EffectHistory, EffectPortRegistry, StageConstants,
+};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
@@ -836,6 +838,10 @@ pub(crate) struct TransformResources<H: UnifiedTransformHandler> {
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
     pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
+
+    pub(crate) stage_constants: Option<Arc<StageConstants>>,
+
+    pub(crate) flow_context: Arc<FlowContext>,
 }
 
 pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
@@ -945,6 +951,39 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                     ctx.catch_up.install_history(history.clone()).await;
                     ctx.effect_history = Some(history);
                 }
+
+                let stage_logic_version = ctx
+                    .handler
+                    .as_ref()
+                    .ok_or_else(|| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "transform '{}' has no handler to declare its logic version",
+                            ctx.stage_name
+                        ))
+                    })?
+                    .stage_logic_version()
+                    .to_string();
+                ctx.stage_constants = Some(Arc::new(StageConstants {
+                    flow_id: ctx.flow_id,
+                    stage_id: ctx.stage_id,
+                    stage_key: ctx.stage_name.clone(),
+                    writer_id,
+                    stage_logic_version,
+                    data_journal: ctx.data_journal.clone(),
+                    flow_context: Some(FlowContext::clone(&ctx.flow_context)),
+                    observers: Some(ctx.observers.clone()),
+                    instrumentation: Some(ctx.instrumentation.clone()),
+                    heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
+                    effect_history: ctx.effect_history.clone(),
+                    current_run_history: ctx.current_run_history.clone(),
+                    runtime_execution: ctx.runtime_execution.clone(),
+                    effect_ports: ctx.effect_ports.clone(),
+                    effect_declarations: ctx.effect_declarations.clone(),
+                    output_contract: ctx.output_contract.clone(),
+                    backpressure_readers: ctx.backpressure_readers.values().cloned().collect(),
+                    lineage: ctx.lineage_policy,
+                    catch_up: Some(ctx.catch_up.clone()),
+                }));
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

@@ -424,7 +424,7 @@ mod tests {
     use crate::metrics::instrumentation::StageInstrumentation;
     use obzenflow_core::event::observability::{MeasurementWindow, TimingMeasurements};
     use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{ReaderGeneration, StageId};
+    use obzenflow_core::{JournalRecord, JournalWriterId, ReaderGeneration, StageId};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -843,11 +843,14 @@ mod tests {
         let stage = StageId::new();
         let instrumentation = Arc::new(StageInstrumentation::new());
         instrumentation.bind_observations(scope.flow_id, stage.into(), &execution);
-        instrumentation.record_output_event(&ChainEventFactory::data_event(
-            stage.into(),
-            "business.fact",
-            std::num::NonZeroU32::MIN,
-            serde_json::Value::Null,
+        instrumentation.record_output_event(&JournalRecord::new(
+            JournalWriterId::new(),
+            ChainEventFactory::data_event(
+                stage.into(),
+                "business.fact",
+                std::num::NonZeroU32::MIN,
+                serde_json::Value::Null,
+            ),
         ));
         let before = instrumentation.snapshot();
         assert!(instrumentation

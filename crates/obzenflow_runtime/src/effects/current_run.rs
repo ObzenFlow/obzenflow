@@ -234,8 +234,7 @@ impl Folded {
         if record.causal_coordinate().journal_writer_id.as_journal_id() != journal.id() {
             return Err(journal_failure(CausalError::ConflictingCommitment));
         }
-        let event = record.authored();
-        if let Some(provenance) = &event.effect_provenance {
+        if let Some(provenance) = &record.envelope.provenance.event.effect_provenance {
             let frontier = CausalFrontier::from_record(&record).map_err(journal_failure)?;
             if let Claim::Retain =
                 self.claim(&provenance.cursor, provenance.fact_owner.is_framework())?
@@ -253,10 +252,11 @@ impl Folded {
                 group_id,
                 position,
                 record.envelope.provenance.journal.journal_group_member,
-                event.clone(),
+                record.authored(),
                 &frontier,
             )?;
         }
+        let event = record.into_authored();
         if EffectAttemptStarted::matches_event_type(&event.event_type()) {
             return self.fold_start(position, event);
         }

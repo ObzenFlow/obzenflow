@@ -1746,7 +1746,8 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
             json!({"n": n}),
         );
         last_fact_id = Some(fact.id);
-        instrumentation.record_output_event(&fact);
+        instrumentation
+            .record_output_event(&JournalRecord::new(JournalWriterId::new(), fact.clone()));
     }
 
     let terminal = ChainEventFactory::eof_event_with_kind(
@@ -1832,7 +1833,7 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         NonZeroU32::MIN,
         json!({"n": 1}),
     );
-    instrumentation.record_output_event(&fact);
+    instrumentation.record_output_event(&JournalRecord::new(JournalWriterId::new(), fact.clone()));
 
     let mut terminal = ChainEventFactory::eof_event_with_kind(
         WriterId::from(stage_id),

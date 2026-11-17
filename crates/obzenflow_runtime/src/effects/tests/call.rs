@@ -211,8 +211,8 @@ fn ledger_context(
         mode,
         effect_ports,
     );
-    ctx.effect_declarations = declarations;
-    ctx.output_contract = output_contract_for::<LedgerWritten>();
+    stage_mut(&mut ctx).effect_declarations = declarations;
+    stage_mut(&mut ctx).output_contract = output_contract_for::<LedgerWritten>();
     ctx
 }
 

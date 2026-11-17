@@ -359,14 +359,13 @@ impl EofRead {
     }
 
     pub(crate) fn author(&self) -> Option<(StageId, EofKind)> {
-        let event = self.envelope.authored();
         let ChainPayload::FlowControl(FlowControlPayload::Eof {
             kind, writer_id, ..
-        }) = &event.payload
+        }) = &self.envelope.payload
         else {
             return None;
         };
-        match writer_id.unwrap_or(event.writer_id) {
+        match writer_id.unwrap_or(*self.envelope.writer_id()) {
             WriterId::Stage(stage) => Some((stage, *kind)),
             _ => None,
         }
@@ -653,6 +652,8 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     pub(crate) recorded_order: Option<crate::messaging::upstream_subscription::RecordedOrder>,
 
     pub(crate) catch_up: CatchUpContext,
+
+    pub(crate) flow_context: Arc<FlowContext>,
 }
 
 pub struct JoinContext<H: UnifiedJoinHandler> {

@@ -40,7 +40,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisorDescriptor, SupervisorKind,
 };
-use obzenflow_core::event::provenance::{ExecutionAccounting, FlowContext};
+use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::{AppendOptions, Journal};
@@ -493,20 +493,14 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         if envelope.consumes_data_credit() {
             let checked = guard.check_data(envelope.authored_mut());
             if let Err(detail) = checked {
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: self.stage_id,
-                    stage_type: StageType::Transform,
-                };
+                let flow_context = Arc::clone(&ctx.flow_context);
                 let error_event =
                     ctx.instrumentation
                         .capture_accounting()
                         .attach_to(processing_failure_record(
                             WriterId::from(self.stage_id),
                             &flow_context,
-                            &envelope.authored(),
+                            envelope.view(),
                             ErrorKind::Unknown,
                             detail,
                             ctx.lineage_policy,
@@ -551,7 +545,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         let should_forward = self
             .cycle_guard
             .as_mut()
-            .map(|guard| guard.should_forward_signal(&envelope.authored()))
+            .map(|guard| guard.should_forward_signal(envelope.view()))
             .unwrap_or(true);
 
         if should_forward {

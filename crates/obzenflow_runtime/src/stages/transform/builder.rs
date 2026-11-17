@@ -12,6 +12,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::WriterId;
 
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -19,6 +21,8 @@ use crate::stages::common::control_strategies::{JonestownSignalStrategy, SignalG
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
+use crate::stages::common::supervision::catch_up::CatchUpHandle;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
@@ -144,14 +148,15 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         handler.install_lineage_policy(self.resources.lineage_policy);
         handler.install_observation_recorder(instrumentation.observation_recorder());
         handler.install_writer_id(WriterId::from(self.config.stage_id));
-        let catch_up = crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
-            crate::stages::common::supervision::flow_context_factory::make_flow_context(
-                &self.config.flow_name,
-                &self.resources.flow_id.to_string(),
-                &self.config.stage_name,
-                self.config.stage_id,
-                obzenflow_core::event::context::StageType::Transform,
-            ),
+        let flow_context = Arc::new(make_flow_context(
+            &self.config.flow_name,
+            &self.resources.flow_id.to_string(),
+            &self.config.stage_name,
+            self.config.stage_id,
+            StageType::Transform,
+        ));
+        let catch_up = CatchUpHandle::producing(
+            FlowContext::clone(&flow_context),
             self.resources.data_journal.clone(),
             instrumentation.clone(),
             self.resources.runtime_execution.clone(),
@@ -202,6 +207,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             buffered_terminal_envelope: None,
             heartbeat,
             catch_up,
+            flow_context,
+            stage_constants: None,
         };
 
         let context = TransformContext::new(resources);

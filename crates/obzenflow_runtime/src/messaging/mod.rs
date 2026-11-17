@@ -11,6 +11,7 @@ pub mod upstream_subscription;
 pub mod upstream_subscription_policy;
 
 // Re-export commonly used types
+pub(crate) use delivered_record::record_descriptor;
 pub use delivered_record::DeliveredRecord;
 pub use subscription_poller::{PollResult, SubscriptionPoller};
 pub use system_subscription::SystemSubscription;

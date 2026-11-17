@@ -174,8 +174,8 @@ fn waiting() -> Waiting {
         release: release.clone(),
     }));
     let cursor = EffectCursor::new(
-        ctx.flow_id.to_string(),
-        ctx.stage_key.clone(),
+        ctx.stage.flow_id.to_string(),
+        ctx.stage.stage_key.clone(),
         ctx.input_seq.0,
         0_u32,
     );

@@ -123,7 +123,7 @@ fn allocation_flow(
         .count_window(1)
         .minimum_calls(1)
         .failure_rate_threshold(1.0)
-        .slow_call_duration(Duration::from_millis(1))
+        .slow_call_duration(Duration::from_millis(10))
         .slow_call_rate_threshold(1.0)
         .open_for(Duration::from_secs(60))
         .probes(1);

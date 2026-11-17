@@ -15,7 +15,6 @@ use crate::stages::common::supervision::backpressure_drain::{
 use crate::stages::common::supervision::error_routing::{
     error_row_in_scope, processing_failed, route_to_error_journal,
 };
-use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
     FrameworkObservabilityCommit,
@@ -25,13 +24,13 @@ use crate::stages::observer::dispatch::{
     run_after_handler_observers, run_before_handler_observers,
 };
 use crate::supervised_base::EventLoopDirective;
-use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::TransformSupervisor;
 use crate::stages::transform::fsm::{TransformEvent, TransformResources, TransformState};
@@ -48,14 +47,7 @@ pub(super) async fn dispatch_draining<
         heartbeat.state.mark_draining();
     }
 
-    let flow_id = ctx.flow_id.to_string();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        sup.stage_id,
-        StageType::Transform,
-    );
+    let flow_context = Arc::clone(&ctx.flow_context);
 
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();
@@ -217,33 +209,16 @@ async fn dispatch_draining_inner<
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
             let handler_heartbeat_state = heartbeat_state.clone();
             let effect_context = stage_input_position.and_then(|input_seq| {
-                ctx.writer_id.map(|writer_id| EffectInvocationContext {
-                    flow_id: ctx.flow_id,
-                    stage_id: ctx.stage_id,
-                    stage_key: ctx.stage_name.clone(),
-                    writer_id,
-                    input_seq,
-                    lineage: ctx.lineage_policy,
-                    stage_logic_version: handler.stage_logic_version().to_string(),
-                    data_journal: ctx.data_journal.clone(),
-                    flow_context: Some(flow_context.clone()),
-                    observers: Some(ctx.observers.clone()),
-
-                    instrumentation: Some(ctx.instrumentation.clone()),
-                    heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-                    parent: envelope_clone.clone(),
-                    effect_history: ctx.effect_history.clone(),
-                    current_run_history: ctx.current_run_history.clone(),
-                    runtime_execution: ctx.runtime_execution.clone(),
-                    effect_ports: ctx.effect_ports.clone(),
-                    effect_declarations: ctx.effect_declarations.clone(),
-                    output_contract: ctx.output_contract.clone(),
-                    backpressure_writer: ctx.backpressure_writer.clone(),
-                    backpressure_readers: ctx.backpressure_readers.values().cloned().collect(),
-                    emit_enabled: true,
-                    effect_boundary: None,
-                    catch_up: Some(ctx.catch_up.clone()),
-                })
+                ctx.stage_constants
+                    .clone()
+                    .map(|stage| EffectInvocationContext {
+                        stage,
+                        input_seq,
+                        parent: envelope_clone.clone(),
+                        backpressure_writer: ctx.backpressure_writer.clone(),
+                        emit_enabled: true,
+                        effect_boundary: None,
+                    })
             });
 
             run_before_handler_observers(
@@ -251,12 +226,12 @@ async fn dispatch_draining_inner<
                 ctx.flow_id,
                 flow_context,
                 scope,
-                &envelope.authored(),
+                envelope.view(),
                 observer_input_position,
             );
             let writer_id = WriterId::from(ctx.stage_id);
             let lineage = ctx.lineage_policy;
-            let error_flow_context = flow_context.clone();
+            let error_flow_context = flow_context;
             let transformed_result =
                 process_with_instrumentation(&ctx.instrumentation, || async move {
                     let event = envelope_clone.authored();
@@ -281,8 +256,8 @@ async fn dispatch_draining_inner<
                             }
                             let error_event = processing_failed(
                                 writer_id,
-                                &error_flow_context,
-                                &envelope_clone.authored(),
+                                error_flow_context,
+                                envelope_clone.view(),
                                 &err,
                                 lineage,
                             );
@@ -338,7 +313,7 @@ async fn dispatch_draining_inner<
                 ctx.flow_id,
                 flow_context,
                 scope,
-                &envelope.authored(),
+                envelope.view(),
                 observer_input_position,
                 transformed_events.as_slice(),
             );

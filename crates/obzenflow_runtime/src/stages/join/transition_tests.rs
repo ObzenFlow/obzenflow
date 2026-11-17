@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::JoinPhaseFact;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -40,6 +41,7 @@ use crate::stages::common::supervision::catch_up::test_support::{
     caught_up_through, context, open_at, RecordingJournal,
 };
 use crate::stages::common::supervision::catch_up::{CatchUpAction, CatchUpState};
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::resources_builder::SubscriptionFactory;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::handler_supervised::SupervisorAction;
@@ -109,6 +111,7 @@ impl Join {
         let execution = RuntimeExecution::resume_for_test(ReaderGeneration(2));
         let handler = TypedJoinHandlerAdapter::new(Pricing);
         let empty = SubscriptionFactory::new(HashMap::new()).bind(&[]);
+        let flow_id = FlowId::new();
         let resources = JoinResources {
             handler_state: handler.initial_state(),
             handler: Some(Arc::new(handler)),
@@ -117,7 +120,7 @@ impl Join {
             observers: Default::default(),
             runtime_execution: execution.clone(),
             flow_name: "flow".to_string(),
-            flow_id: FlowId::new(),
+            flow_id,
             reference_stage_id: StageId::new(),
             data_journal: data_journal.clone(),
             error_journal: data_journal,
@@ -155,6 +158,13 @@ impl Join {
             recorded: None,
             recorded_order: None,
             catch_up: context(stage_id, "posted", execution, Some(journal.clone())),
+            flow_context: Arc::new(make_flow_context(
+                "flow",
+                &flow_id.to_string(),
+                "posted",
+                stage_id,
+                StageType::Join,
+            )),
         };
         let supervisor = JoinSupervisor::<Handler> {
             name: "posted".to_string(),

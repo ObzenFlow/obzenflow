@@ -533,9 +533,7 @@ fn effectful_stateful_keeps_only_its_existing_typed_lowerer_and_adapter_boundary
             "{relative} must leave boundary authority for the effectful-stateful adapter"
         );
         assert!(
-            source.contains(
-                ".accumulate(&mut ctx.current_state, event.clone(), effect_context, scope)"
-            ),
+            source.contains(".accumulate(&mut ctx.current_state, event, effect_context, scope)"),
             "{relative} must enter the same adapter-owned accumulation path"
         );
     }

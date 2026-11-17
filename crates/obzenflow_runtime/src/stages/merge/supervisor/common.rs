@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
@@ -43,7 +44,7 @@ pub(super) async fn flush_pending_outputs(ctx: &mut MergeResources) -> Result<Fl
     let Some(mut row) = ctx.pending.take() else {
         return Ok(Flushed::default());
     };
-    let flow_context = ctx.flow_context();
+    let flow_context = Arc::clone(&ctx.flow_context);
     let mut data_outputs = 0;
     while let Some(pending) = row.outputs.pop_front() {
         match drain_one_pending(DrainRequest {
@@ -112,12 +113,12 @@ fn queue_row(
         subscription.last_delivered_stage_input_position(),
         subscription.last_delivered_generation(),
     );
-    let event = envelope.authored();
+    let event_id = *envelope.id();
     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream) {
-        heartbeat.state.record_data_read(upstream, event.id);
-        heartbeat.state.record_last_consumed(event.id);
+        heartbeat.state.record_data_read(upstream, event_id);
+        heartbeat.state.record_last_consumed(event_id);
     }
-    let output = merged_output(ctx, &event)?;
+    let output = merged_output(ctx, envelope.view())?;
     ctx.instrumentation
         .events_processed_total
         .fetch_add(1, Ordering::Relaxed);

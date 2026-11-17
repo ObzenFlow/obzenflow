@@ -16,7 +16,7 @@ use obzenflow_core::{FlowId, JournalId, JournalOwner, TypedPayload};
 use obzenflow_runtime::backpressure::BackpressureWriter;
 use obzenflow_runtime::effects::{
     AnswersEffect, CurrentRunHistory, EffectCommitHandle, EffectInvocationContext, EffectName,
-    EffectPortRegistry, Effects, Port,
+    EffectPortRegistry, Effects, Port, StageConstants,
 };
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::feed_plan::StageOutputContract;
@@ -272,31 +272,32 @@ async fn effect_context(
         matches!(mode, TransactionProbeMode::AppendFailure),
     ));
     let context = EffectInvocationContext {
-        flow_id: FlowId::new(),
-        stage_id,
-        stage_key: "single_use_effect_boundary".to_string(),
-        writer_id,
+        stage: Arc::new(StageConstants {
+            flow_id: FlowId::new(),
+            stage_id,
+            stage_key: "single_use_effect_boundary".to_string(),
+            writer_id,
+            stage_logic_version: "test-v1".to_string(),
+            data_journal: data_journal.clone(),
+            flow_context: None,
+            observers: None,
+            instrumentation: None,
+            heartbeat_state: None,
+            effect_history: None,
+            current_run_history: CurrentRunHistory::new(data_journal),
+            runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
+            effect_ports,
+            effect_declarations: vec![authored_declaration.runtime_projection()],
+            output_contract: StageOutputContract::empty(),
+            backpressure_readers: Vec::new(),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            catch_up: None,
+        }),
         input_seq: StageInputPosition(1),
-        lineage: obzenflow_core::config::LineagePolicy::default(),
-        stage_logic_version: "test-v1".to_string(),
-        data_journal: data_journal.clone(),
-        flow_context: None,
-        observers: None,
-
-        instrumentation: None,
-        heartbeat_state: None,
         parent: parent.into(),
-        effect_history: None,
-        current_run_history: CurrentRunHistory::new(data_journal),
-        runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
-        effect_ports,
-        effect_declarations: vec![authored_declaration.runtime_projection()],
-        output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
-        backpressure_readers: Vec::new(),
         emit_enabled: false,
         effect_boundary: None,
-        catch_up: None,
     };
     (context, ledger)
 }

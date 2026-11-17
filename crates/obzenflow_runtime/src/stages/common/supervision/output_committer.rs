@@ -73,7 +73,7 @@ fn output_contract_summary(output_contract: &StageOutputContract) -> String {
         .join(", ")
 }
 
-fn event_is_authored_by_stage(event: &ChainEvent, flow_context: &FlowContext) -> bool {
+fn writer_is_stage(writer_id: WriterId, flow_context: &FlowContext) -> bool {
     // Sources have no upstream data journal from which they can forward a
     // foreign Data row. Until the source witness pass installs the runtime
     // writer before handler dispatch, raw source handlers may still construct
@@ -86,7 +86,7 @@ fn event_is_authored_by_stage(event: &ChainEvent, flow_context: &FlowContext) ->
         return true;
     }
 
-    if event.writer_id == WriterId::from(flow_context.stage_id) {
+    if writer_id == WriterId::from(flow_context.stage_id) {
         return true;
     }
 
@@ -137,7 +137,7 @@ pub(crate) fn commit_control_output(
             AppendOptions::default().with_capture(capture),
         )
         .await?;
-        instrumentation.record_emitted(&written.authored());
+        instrumentation.record_emitted(&written);
         Ok(written)
     })
 }
@@ -172,7 +172,7 @@ pub(crate) fn commit_error_output(
         )
         .await?;
         if written.consumes_data_credit() {
-            instrumentation.record_error_journal_output_event(&written.authored());
+            instrumentation.record_error_journal_output_event(&written);
         }
         Ok(written)
     })
@@ -832,7 +832,7 @@ impl OutputCommitter<'_> {
         snapshot.project_emission(event);
         if self
             .flow_context
-            .is_none_or(|context| event_is_authored_by_stage(event, context))
+            .is_none_or(|context| writer_is_stage(event.writer_id, context))
         {
             let descriptor = event.descriptor();
             if let Some(count) = snapshot
@@ -875,13 +875,13 @@ impl OutputCommitter<'_> {
                 instrumentation.record_recovery_fact(fact);
             }
             if options.count_output && written.consumes_data_credit() {
-                let authored_here = self.flow_context.is_none_or(|flow_context| {
-                    event_is_authored_by_stage(&written.authored(), flow_context)
-                });
+                let authored_here = self
+                    .flow_context
+                    .is_none_or(|flow_context| writer_is_stage(*written.writer_id(), flow_context));
                 if authored_here {
-                    instrumentation.record_output_event(&written.authored());
+                    instrumentation.record_output_event(written);
                 } else {
-                    instrumentation.record_forwarded_output_event(&written.authored());
+                    instrumentation.record_forwarded_output_event(written);
                 }
             }
         }

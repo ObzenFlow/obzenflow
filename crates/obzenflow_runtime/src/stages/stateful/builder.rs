@@ -4,6 +4,8 @@
 
 //! Builder for stateful stages
 
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::WriterId;
 use std::sync::Arc;
 
@@ -11,6 +13,8 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{JonestownSignalStrategy, SignalGate};
 use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
+use crate::stages::common::supervision::catch_up::CatchUpHandle;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
@@ -139,14 +143,15 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             .emit_interval
             .or_else(|| handler.emit_interval_hint());
         let initial_state = handler.initial_state();
-        let catch_up = crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
-            crate::stages::common::supervision::flow_context_factory::make_flow_context(
-                &self.config.flow_name,
-                &self.resources.flow_id.to_string(),
-                &self.config.stage_name,
-                self.config.stage_id,
-                obzenflow_core::event::context::StageType::Stateful,
-            ),
+        let flow_context = Arc::new(make_flow_context(
+            &self.config.flow_name,
+            &self.resources.flow_id.to_string(),
+            &self.config.stage_name,
+            self.config.stage_id,
+            StageType::Stateful,
+        ));
+        let catch_up = CatchUpHandle::producing(
+            FlowContext::clone(&flow_context),
             self.resources.data_journal.clone(),
             instrumentation.clone(),
             self.resources.runtime_execution.clone(),
@@ -199,6 +204,8 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             backpressure_stall: Default::default(),
             heartbeat,
             catch_up,
+            flow_context,
+            stage_constants: None,
         };
 
         let context = StatefulContext::new(resources);

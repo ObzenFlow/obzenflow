@@ -6,7 +6,6 @@
 
 use crate::backpressure::BackpressureWriter;
 use crate::effects::EffectInvocationContext;
-use crate::feed_plan::StageOutputContract;
 use crate::messaging::DeliveredRecord;
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::{process_with_instrumentation, snapshot_stage_accounting};
@@ -21,7 +20,6 @@ use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction, ControlResolutionInputs,
 };
 use crate::stages::common::supervision::error_routing::processing_failure_record;
-use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
 use crate::stages::common::supervision::output_committer::commit_error_output;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
@@ -33,6 +31,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryOutcome, DeliveryResult};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::provenance::causality_context::{CausalInput, CausalityContext};
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 
@@ -45,6 +44,7 @@ use obzenflow_fsm::StateVariant;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::super::boundary::{
@@ -618,13 +618,7 @@ async fn journal_sink_operation_failure<
     };
     let mut event = payload
         .to_event(writer_id)
-        .with_flow_context(make_flow_context(
-            &ctx.flow_name,
-            &ctx.flow_id.to_string(),
-            &ctx.stage_name,
-            ctx.stage_id,
-            StageType::Sink,
-        ))
+        .with_flow_context(FlowContext::clone(&ctx.flow_context))
         .with_causality(CausalityContext::with_input(CausalInput::of(
             &failed_receipt.envelope.provenance.event,
         )))
@@ -655,13 +649,7 @@ async fn journal_processing_failed<
     let writer_id = ctx
         .writer_id
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &ctx.flow_id.to_string(),
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Sink,
-    );
+    let flow_context = Arc::clone(&ctx.flow_context);
     let event = processing_failure_record(
         writer_id,
         &flow_context,
@@ -695,18 +683,12 @@ async fn journal_policy_evidence<
     for evidence in batch.into_entries() {
         let execution = evidence.into_lifecycle();
         let mut event = ChainEventFactory::execution_event(writer_id, execution)
-            .with_flow_context(make_flow_context(
-                &ctx.flow_name,
-                &ctx.flow_id.to_string(),
-                &ctx.stage_name,
-                ctx.stage_id,
-                StageType::Sink,
-            ))
+            .with_flow_context(FlowContext::clone(&ctx.flow_context))
             .with_causality(CausalityContext::with_input(CausalInput::of(
                 &parent.envelope.provenance.event,
             )))
-            .with_correlation_from(&parent.authored())
-            .with_cycle_state_from(&parent.authored());
+            .with_correlation_from(parent.view())
+            .with_cycle_state_from(parent.view());
         event = event.try_with_composite_activations(parent.composite_activations().to_vec())?;
         event = ctx.instrumentation.capture_accounting().attach_to(event);
         crate::supervised_base::publication::append(
@@ -741,13 +723,7 @@ async fn journal_poisoned_lifecycle<
             },
         ),
     )
-    .with_flow_context(make_flow_context(
-        &ctx.flow_name,
-        &ctx.flow_id.to_string(),
-        &ctx.stage_name,
-        ctx.stage_id,
-        obzenflow_core::event::context::StageType::Sink,
-    ));
+    .with_flow_context(FlowContext::clone(&ctx.flow_context));
     let written =
         crate::supervised_base::publication::append(&ctx.data_journal, event, Default::default())
             .await?;
@@ -771,38 +747,16 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         .as_ref()
         .map(|heartbeat| heartbeat.state.clone());
     let effect_context = stage_input_position.and_then(|input_seq| {
-        ctx.writer_id.map(|writer_id| EffectInvocationContext {
-            flow_id: ctx.flow_id,
-            stage_id: ctx.stage_id,
-            stage_key: ctx.stage_name.clone(),
-            writer_id,
-            input_seq,
-            lineage: ctx.lineage_policy,
-            stage_logic_version: ctx
-                .handler
-                .as_ref()
-                .expect("handler available before cleanup")
-                .stage_logic_version()
-                .to_string(),
-            data_journal: ctx.data_journal.clone(),
-            flow_context: None,
-            observers: Some(ctx.observers.clone()),
-
-            instrumentation: None,
-            heartbeat_state: None,
-            parent: envelope.clone(),
-            effect_history: None,
-            current_run_history: ctx.current_run_history.clone(),
-            runtime_execution: ctx.runtime_execution.clone(),
-            effect_ports: ctx.effect_ports.clone(),
-            effect_declarations: ctx.effect_declarations.clone(),
-            output_contract: StageOutputContract::empty(),
-            backpressure_writer: BackpressureWriter::disabled(),
-            backpressure_readers: ctx.backpressure_readers.values().cloned().collect(),
-            emit_enabled: false,
-            effect_boundary: None,
-            catch_up: None,
-        })
+        ctx.stage_constants
+            .clone()
+            .map(|stage| EffectInvocationContext {
+                stage,
+                input_seq,
+                parent: envelope.clone(),
+                backpressure_writer: BackpressureWriter::disabled(),
+                emit_enabled: false,
+                effect_boundary: None,
+            })
     });
     let scope = match (ctx.receipt_classification.as_mut(), upstream_stage) {
         (Some(classification), Some(upstream)) => {
@@ -1056,7 +1010,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             ctx.instrumentation.record_error(error.kind());
             last_chain = journal_processing_failed(
                 ctx,
-                &envelope.authored(),
+                envelope.view(),
                 &current_receipt,
                 error.message(),
                 error.kind(),
@@ -1066,7 +1020,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         RetainedAttemptDisposition::OperationFailure(failure) => {
             let operation = journal_sink_operation_failure(
                 ctx,
-                &envelope.authored(),
+                envelope.view(),
                 &current_receipt,
                 SinkOperationPhase::Write(failure.phase()),
                 failure.error(),
@@ -1076,7 +1030,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             ctx.instrumentation.record_error(failure.error().kind());
             last_chain = journal_processing_failed(
                 ctx,
-                &envelope.authored(),
+                envelope.view(),
                 &operation,
                 failure.error().message(),
                 failure.error().kind(),
@@ -1138,19 +1092,13 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             },
             _ => return Err("invalid sink observer state".into()),
         };
-        let flow_context = make_flow_context(
-            &ctx.flow_name,
-            &ctx.flow_id.to_string(),
-            &ctx.stage_name,
-            ctx.stage_id,
-            StageType::Sink,
-        );
+        let flow_context = Arc::clone(&ctx.flow_context);
         run_sink_delivery_observers(
             &ctx.observers,
             ctx.flow_id,
             &flow_context,
             scope,
-            &envelope.authored(),
+            envelope.view(),
             observer_input_position,
             observer_outcome,
         );
@@ -1216,14 +1164,7 @@ async fn journal_delivery_receipt<
     payload: DeliveryOutcome,
     scope: MiddlewareExecutionScope,
 ) -> Result<DeliveredRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
-    let flow_id = ctx.flow_id.to_string();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Sink,
-    );
+    let flow_context = FlowContext::clone(&ctx.flow_context);
 
     let writer_id = WriterId::from(ctx.stage_id);
     let delivery_event = journalled_delivery_event(
@@ -1233,8 +1174,8 @@ async fn journal_delivery_receipt<
         payload,
     )
     .with_flow_context(flow_context)
-    .with_correlation_from(&parent_envelope.authored())
-    .with_cycle_state_from(&parent_envelope.authored());
+    .with_correlation_from(parent_envelope.view())
+    .with_cycle_state_from(parent_envelope.view());
     let delivery_event = delivery_event
         .try_with_composite_activations(parent_envelope.composite_activations().to_vec())?;
 
@@ -1244,15 +1185,18 @@ async fn journal_delivery_receipt<
     let mut settlement = subscription.take_receipt_settlement(&mut ctx.contract_state);
     let (written, settlement) = crate::supervised_base::publication::commit(async move {
         let event = super::super::with_committed_receipt_snapshot(delivery_event, &instrumentation);
-        let written = data_journal
-            .append(
-                event,
-                AppendOptions::from_record(Some(&parent))?
-                    .with_capture(instrumentation.journal_capture(Some(scope), vec![(1, false)])),
-            )
-            .await?;
-        instrumentation.record_output_event(&written.authored());
-        if let Some((seq, event_id, vector_clock)) = settlement.record(&written.authored()) {
+        let written = DeliveredRecord::from(
+            data_journal
+                .append(
+                    event,
+                    AppendOptions::from_record(Some(&parent))?.with_capture(
+                        instrumentation.journal_capture(Some(scope), vec![(1, false)]),
+                    ),
+                )
+                .await?,
+        );
+        instrumentation.record_output_event(&written);
+        if let Some((seq, event_id, vector_clock)) = settlement.record(&written) {
             instrumentation.record_receipted_position(seq.0, event_id, vector_clock);
         }
         Ok((written, settlement))
@@ -1260,5 +1204,5 @@ async fn journal_delivery_receipt<
     .await?;
     subscription.restore_receipt_settlement(&mut ctx.contract_state, settlement);
     super::super::observe_committed_delivery(ctx, parent_envelope, &written);
-    Ok(written.into())
+    Ok(written)
 }

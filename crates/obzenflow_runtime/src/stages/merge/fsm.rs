@@ -16,7 +16,7 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, ReaderGeneration, StageId, WriterId};
+use obzenflow_core::{ChainEvent, ReaderGeneration, StageId, WriterId};
 use obzenflow_fsm::{FsmAction, FsmContext, FsmError, Transition};
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter, StallEpisode};
@@ -33,7 +33,6 @@ use crate::stages::common::supervision::backpressure_drain::PendingOutput;
 use crate::stages::common::supervision::catch_up::{
     frontier_step, CatchUpAction, CatchUpContext, CatchUpState,
 };
-use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::merges::MergeStrategyKind;
@@ -225,8 +224,6 @@ pub(crate) struct MergeInput {
 pub(crate) struct MergeResources {
     pub(crate) stage_id: StageId,
     pub(crate) stage_name: String,
-    pub(crate) flow_name: String,
-    pub(crate) flow_id: FlowId,
     pub(crate) strategy: MergeStrategyKind,
     pub(crate) writer_id: Option<WriterId>,
     pub(crate) runtime_execution: crate::execution::RuntimeExecution,
@@ -251,6 +248,8 @@ pub(crate) struct MergeResources {
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
     pub(crate) catch_up: CatchUpContext,
+
+    pub(crate) flow_context: Arc<FlowContext>,
 }
 
 /// A merge machine's context. A dispatch or an action holds the resources while it runs.
@@ -263,13 +262,7 @@ impl FsmContext for MergeContext {}
 
 impl MergeResources {
     pub(crate) fn flow_context(&self) -> FlowContext {
-        make_flow_context(
-            &self.flow_name,
-            &self.flow_id.to_string(),
-            &self.stage_name,
-            self.stage_id,
-            StageType::Merge,
-        )
+        FlowContext::clone(&self.flow_context)
     }
 }
 

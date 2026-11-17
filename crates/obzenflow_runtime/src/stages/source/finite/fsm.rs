@@ -792,6 +792,7 @@ pub(crate) mod tests {
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::journal::Journal;
+    use obzenflow_core::JournalWriterId;
     use obzenflow_core::StageId as CoreStageId;
     use serde_json::json;
     use std::sync::atomic::AtomicU8;
@@ -1281,27 +1282,33 @@ pub(crate) mod tests {
             .unwrap()
             .writer_id
             .expect("source should have a writer id");
-        ctx.instrumentation
-            .record_output_event(&ChainEventFactory::data_event(
+        ctx.instrumentation.record_output_event(&JournalRecord::new(
+            JournalWriterId::new(),
+            ChainEventFactory::data_event(
                 source_writer_id,
                 "test.a",
                 std::num::NonZeroU32::MIN,
                 json!({}),
-            ));
-        ctx.instrumentation
-            .record_output_event(&ChainEventFactory::data_event(
+            ),
+        ));
+        ctx.instrumentation.record_output_event(&JournalRecord::new(
+            JournalWriterId::new(),
+            ChainEventFactory::data_event(
                 source_writer_id,
                 "test.a",
                 std::num::NonZeroU32::MIN,
                 json!({}),
-            ));
-        ctx.instrumentation
-            .record_output_event(&ChainEventFactory::data_event(
+            ),
+        ));
+        ctx.instrumentation.record_output_event(&JournalRecord::new(
+            JournalWriterId::new(),
+            ChainEventFactory::data_event(
                 source_writer_id,
                 "test.b",
                 std::num::NonZeroU32::MIN,
                 json!({}),
-            ));
+            ),
+        ));
 
         // Send EOF with breaker closed
         ctx.resources_mut()

@@ -138,13 +138,21 @@ async fn build_cycle_entry_harness<
         instrumentation.clone(),
         runtime_execution.clone(),
     );
+    let flow_id = FlowId::new();
+    let flow_context = Arc::new(make_flow_context(
+        "cycle_test_flow",
+        &flow_id.to_string(),
+        "t",
+        t,
+        StageType::Transform,
+    ));
     let resources = TransformResources {
         handler: Some(handler),
         stage_id: t,
         stage_name: "t".to_string(),
         observers: crate::stages::observer::StageObserverBundle::default(),
         flow_name: "cycle_test_flow".to_string(),
-        flow_id: FlowId::new(),
+        flow_id,
         data_journal: data_journal.clone(),
         effect_history: None,
         current_run_history: crate::effects::CurrentRunHistory::new(data_journal.clone()),
@@ -181,6 +189,8 @@ async fn build_cycle_entry_harness<
         buffered_terminal_envelope: None,
         heartbeat: None,
         catch_up,
+        flow_context,
+        stage_constants: None,
     };
 
     let mut ctx = TransformContext::new(resources);
@@ -516,13 +526,21 @@ async fn build_transform_harness<
         instrumentation.clone(),
         runtime_execution.clone(),
     );
+    let flow_id = FlowId::new();
+    let flow_context = Arc::new(make_flow_context(
+        "bp_test_flow",
+        &flow_id.to_string(),
+        "t",
+        t,
+        StageType::Transform,
+    ));
     let resources = TransformResources {
         handler: Some(handler),
         stage_id: t,
         stage_name: "t".to_string(),
         observers: crate::stages::observer::StageObserverBundle::default(),
         flow_name: "bp_test_flow".to_string(),
-        flow_id: FlowId::new(),
+        flow_id,
         data_journal: data_journal.clone(),
         effect_history: None,
         current_run_history: crate::effects::CurrentRunHistory::new(data_journal.clone()),
@@ -559,6 +577,8 @@ async fn build_transform_harness<
         buffered_terminal_envelope: None,
         heartbeat: None,
         catch_up,
+        flow_context,
+        stage_constants: None,
     };
 
     let mut ctx = TransformContext::new(resources);

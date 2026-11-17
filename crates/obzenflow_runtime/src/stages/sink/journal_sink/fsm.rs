@@ -10,8 +10,9 @@
 
 use super::journalled_delivery_event;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectPortRegistry};
+use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectPortRegistry, StageConstants};
 use crate::execution::RuntimeExecution;
+use crate::feed_plan::StageOutputContract;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::{DeliveredRecord, UpstreamSubscription};
@@ -484,6 +485,10 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
 
     pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 
+    pub(crate) stage_constants: Option<Arc<StageConstants>>,
+
+    pub(crate) flow_context: Arc<FlowContext>,
+
     pub(crate) receipt_classification: Option<super::receipts::SinkReceiptClassification>,
 
     /// Set once a failed transition has durable lifecycle evidence. Failure
@@ -600,6 +605,39 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         ctx.receipt_classification = Some(classification.with_settled(settled));
                     }
                 }
+
+                let stage_logic_version = ctx
+                    .handler
+                    .as_ref()
+                    .ok_or_else(|| {
+                        FsmError::HandlerError(format!(
+                            "sink '{}' has no handler to declare its logic version",
+                            ctx.stage_name
+                        ))
+                    })?
+                    .stage_logic_version()
+                    .to_string();
+                ctx.stage_constants = Some(Arc::new(StageConstants {
+                    flow_id: ctx.flow_id,
+                    stage_id: ctx.stage_id,
+                    stage_key: ctx.stage_name.clone(),
+                    writer_id,
+                    stage_logic_version,
+                    data_journal: ctx.data_journal.clone(),
+                    flow_context: None,
+                    observers: Some(ctx.observers.clone()),
+                    instrumentation: None,
+                    heartbeat_state: None,
+                    effect_history: None,
+                    current_run_history: ctx.current_run_history.clone(),
+                    runtime_execution: ctx.runtime_execution.clone(),
+                    effect_ports: ctx.effect_ports.clone(),
+                    effect_declarations: ctx.effect_declarations.clone(),
+                    output_contract: StageOutputContract::empty(),
+                    backpressure_readers: ctx.backpressure_readers.values().cloned().collect(),
+                    lineage: ctx.lineage_policy,
+                    catch_up: None,
+                }));
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -1115,8 +1153,8 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         payload,
     )
     .with_flow_context(flow_ctx)
-    .with_correlation_from(&parent_envelope.authored())
-    .with_cycle_state_from(&parent_envelope.authored());
+    .with_correlation_from(parent_envelope.view())
+    .with_cycle_state_from(parent_envelope.view());
     let evt = evt
         .try_with_composite_activations(parent_envelope.composite_activations().to_vec())
         .map_err(|error| FsmError::HandlerError(error.to_string()))?;
@@ -1130,16 +1168,18 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         .map(|subscription| subscription.take_receipt_settlement(&mut ctx.contract_state));
     let (written, settlement) = publication::commit(async move {
         let event = super::with_committed_receipt_snapshot(evt, &instrumentation);
-        let written = data_journal
-            .append(
-                event,
-                AppendOptions::from_record(Some(&parent))?
-                    .with_capture(instrumentation.journal_capture(None, vec![(1, false)])),
-            )
-            .await?;
-        instrumentation.record_output_event(&written.authored());
+        let written = DeliveredRecord::from(
+            data_journal
+                .append(
+                    event,
+                    AppendOptions::from_record(Some(&parent))?
+                        .with_capture(instrumentation.journal_capture(None, vec![(1, false)])),
+                )
+                .await?,
+        );
+        instrumentation.record_output_event(&written);
         if let Some(settlement) = &mut settlement {
-            if let Some((seq, event_id, vector_clock)) = settlement.record(&written.authored()) {
+            if let Some((seq, event_id, vector_clock)) = settlement.record(&written) {
                 instrumentation.record_receipted_position(seq.0, event_id, vector_clock);
             }
         }
@@ -1224,12 +1264,14 @@ mod tests {
     use super::super::handle::{JournalSinkHandle, JournalSinkHandleExt};
     use crate::metrics::instrumentation::StageInstrumentation;
     use crate::stages::common::stage_lifecycle::{LifecycleExit, StageMilestone};
+    use crate::stages::common::supervision::flow_context_factory::make_flow_context;
     use crate::stages::resources_builder::SubscriptionFactory;
     use crate::supervised_base::{
         ChannelBuilder, HandleBuilder, HandlerSupervisedWithExternalEvents, SupervisorHandle,
         SupervisorTaskBuilder,
     };
     use futures::FutureExt;
+    use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::provenance::FlowContext;
     use obzenflow_core::event::ChainPayload;
     use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
@@ -1278,6 +1320,7 @@ mod tests {
         let data = Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
         let instrumentation = Arc::new(StageInstrumentation::new());
         *probe.instrumentation.lock().unwrap() = Some(instrumentation.clone());
+        let flow_id = FlowId::new();
         let resources = super::JournalSinkResources {
             handler: Some(AuditSink(probe)),
             stage_id,
@@ -1285,7 +1328,7 @@ mod tests {
             receipt_destination: "audit_sink".into(),
             default_delivery_method: DeliveryMethod::Noop,
             flow_name: "projection_flow".into(),
-            flow_id: FlowId::new(),
+            flow_id,
             data_journal: data.clone(),
             error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
             current_run_history: crate::effects::CurrentRunHistory::new(data.clone()),
@@ -1322,6 +1365,14 @@ mod tests {
             receipt_classification: None,
             failure_lifecycle_recorded: false,
             failure_causal_event_id: None,
+            flow_context: Arc::new(make_flow_context(
+                "projection_flow",
+                &flow_id.to_string(),
+                "audit_sink",
+                stage_id,
+                StageType::Sink,
+            )),
+            stage_constants: None,
         };
         resources.instrumentation.bind_observations(
             resources.flow_id,

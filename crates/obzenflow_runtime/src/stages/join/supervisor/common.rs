@@ -31,6 +31,7 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
+use std::sync::Arc;
 
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainEventFactory;
@@ -76,7 +77,7 @@ pub(super) async fn read_control<H: UnifiedJoinHandler>(
         _ => None,
     };
     if watermark.is_none() && observed.is_some() {
-        if let Some(signal_snapshot) = signal_snapshot(observed, &envelope.authored()) {
+        if let Some(signal_snapshot) = signal_snapshot(observed, envelope.view()) {
             observe_join_input(
                 ctx,
                 ctx.runtime_execution.dispatch_scope(
@@ -191,18 +192,11 @@ pub(super) async fn dead_letter_reference<H: UnifiedJoinHandler>(
     delivery: Option<&JoinDeliverySnapshot>,
     error: &HandlerError,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let input = envelope.authored();
     let record = error_row_in_scope(
         processing_failed(
             WriterId::from(ctx.stage_id),
-            &make_flow_context(
-                &ctx.flow_name,
-                &ctx.flow_id.to_string(),
-                &ctx.stage_name,
-                ctx.stage_id,
-                StageType::Join,
-            ),
-            &input,
+            &ctx.flow_context,
+            envelope.view(),
             error,
             ctx.lineage_policy,
         ),
@@ -226,14 +220,7 @@ pub(super) async fn flush_pending_outputs<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinResources<H>,
 ) -> Result<FlushOutcome, Box<dyn std::error::Error + Send + Sync>> {
-    let flow_id = ctx.flow_id.to_string();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Join,
-    );
+    let flow_context = Arc::clone(&ctx.flow_context);
 
     while let Some(pending) = ctx.pending_outputs.pop_front() {
         match drain_one_pending(DrainRequest {
@@ -280,14 +267,7 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());
     }
-    let flow_id = ctx.flow_id.to_string();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Join,
-    );
+    let flow_context = Arc::clone(&ctx.flow_context);
     let occurrence = match (delivery, signal) {
         (Some(delivery), None) => JoinObserverOccurrence::Delivery(delivery),
         (None, Some(signal)) => JoinObserverOccurrence::Signal(signal),
@@ -308,14 +288,7 @@ pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());
     }
-    let flow_id = ctx.flow_id.to_string();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Join,
-    );
+    let flow_context = Arc::clone(&ctx.flow_context);
     let occurrence = match (delivery, signal) {
         (Some(delivery), None) => JoinObserverOccurrence::Delivery(delivery),
         (None, Some(signal)) => JoinObserverOccurrence::Signal(signal),

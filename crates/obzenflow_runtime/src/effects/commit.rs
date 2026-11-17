@@ -434,7 +434,7 @@ pub(super) fn build_effect_attempt_started_event(
 ) -> Result<ChainEvent, EffectError> {
     let mut event = ChainEventFactory::derived_execution_event(
         writer_id,
-        &parent.authored(),
+        parent.view(),
         ExecutionPayload::EffectAttemptStarted(started.clone()),
         lineage,
     );
@@ -444,7 +444,7 @@ pub(super) fn build_effect_attempt_started_event(
         Some(started.attempt),
     );
     event.processing.event_time = composite_monotonic_event_time(
-        &parent.authored(),
+        parent.view(),
         deterministic_effect_record_event_time(&started.cursor)
             .saturating_add(u64::from(started.attempt.get())),
     );
@@ -472,7 +472,7 @@ pub(super) fn build_effect_recovery_abandoned_event(
 ) -> Result<ChainEvent, EffectError> {
     let mut event = ChainEventFactory::derived_execution_event(
         writer_id,
-        &parent.authored(),
+        parent.view(),
         ExecutionPayload::EffectRecoveryAbandoned(abandoned.clone()),
         lineage,
     );
@@ -482,7 +482,7 @@ pub(super) fn build_effect_recovery_abandoned_event(
         None,
     );
     event.processing.event_time = composite_monotonic_event_time(
-        &parent.authored(),
+        parent.view(),
         deterministic_effect_record_event_time(&abandoned.cursor).saturating_add(999),
     );
     event = event.with_effect_provenance(EffectProvenance {
@@ -562,7 +562,7 @@ pub(super) fn build_domain_effect_success_facts(
             origin: origin.clone(),
         };
 
-        let mut event = fact.into_derived_event(writer_id, &parent.authored(), lineage);
+        let mut event = fact.into_derived_event(writer_id, parent.view(), lineage);
         event.id = deterministic_payload_event_id(
             record.cursor.recorded_flow_id.as_str(),
             record.cursor.stage_key.as_str(),
@@ -571,7 +571,7 @@ pub(super) fn build_domain_effect_success_facts(
             &event.descriptor(),
         );
         event.processing.event_time = composite_monotonic_event_time(
-            &parent.authored(),
+            parent.view(),
             deterministic_event_time(
                 StageInputPosition(record.cursor.input_seq.get()),
                 output_ordinal,
@@ -663,14 +663,14 @@ pub(super) fn build_effect_record_event(
     let provenance = EffectProvenance::from_record(&record, EffectFactOwner::Framework);
     let mut event = ChainEventFactory::derived_execution_event(
         writer_id,
-        &parent.authored(),
+        parent.view(),
         ExecutionPayload::EffectRecord(record.clone()),
         lineage,
     )
     .with_effect_provenance(provenance);
     event.id = deterministic_effect_record_event_id(&record.cursor, &event.descriptor());
     event.processing.event_time = composite_monotonic_event_time(
-        &parent.authored(),
+        parent.view(),
         deterministic_effect_record_event_time(&record.cursor),
     );
     Ok(event)
