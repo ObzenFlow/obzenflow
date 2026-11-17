@@ -85,7 +85,7 @@ impl<E: crate::supervised_base::with_external_events::ExternalControlEvent + Sen
 }
 
 use crate::backpressure::{BackpressureWriter, StallEpisode};
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::handler_error::StageFatal;
@@ -850,7 +850,7 @@ pub(crate) struct SourceDrain<'a> {
     pub backpressure_writer: &'a BackpressureWriter,
     pub backpressure_pulse: &'a mut BackpressureActivityPulse,
     pub backpressure_stall: &'a mut StallEpisode,
-    pub output_contract: Option<&'a StageOutputContract>,
+    pub output_contract: Option<&'a OutcomeContract>,
 }
 
 pub(crate) async fn drain_pending_outputs_sync(drain: SourceDrain<'_>) -> Result<bool, BoxError> {

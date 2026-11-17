@@ -87,13 +87,13 @@ impl PayloadTypeDescriptor {
     }
 }
 
-/// Stage output contract known to the runtime.
+/// Outcome contract known to the runtime.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StageOutputContract {
+pub struct OutcomeContract {
     pub outputs: Vec<PayloadTypeDescriptor>,
 }
 
-impl StageOutputContract {
+impl OutcomeContract {
     pub fn empty() -> Self {
         Self {
             outputs: Vec::new(),
@@ -197,13 +197,13 @@ pub struct LogicalFeed {
 /// Flow-scoped output contracts and logical feeds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeedPlan {
-    pub stage_output_contracts: HashMap<StageId, StageOutputContract>,
+    pub outcome_contracts: HashMap<StageId, OutcomeContract>,
     pub feeds: Vec<LogicalFeed>,
 }
 
 impl FeedPlan {
     pub fn new(
-        mut stage_output_contracts: HashMap<StageId, StageOutputContract>,
+        mut outcome_contracts: HashMap<StageId, OutcomeContract>,
         mut feeds: Vec<LogicalFeed>,
     ) -> Self {
         feeds.sort_by(|left, right| {
@@ -220,19 +220,19 @@ impl FeedPlan {
         });
 
         for feed in &feeds {
-            if let Some(contract) = stage_output_contracts.get_mut(&feed.key.upstream_stage) {
+            if let Some(contract) = outcome_contracts.get_mut(&feed.key.upstream_stage) {
                 contract.mark_routable(&feed.key.selected_payload_key);
             }
         }
 
         Self {
-            stage_output_contracts,
+            outcome_contracts,
             feeds,
         }
     }
 
-    pub fn output_contract(&self, stage_id: StageId) -> Option<&StageOutputContract> {
-        self.stage_output_contracts.get(&stage_id)
+    pub fn output_contract(&self, stage_id: StageId) -> Option<&OutcomeContract> {
+        self.outcome_contracts.get(&stage_id)
     }
 
     pub fn input_feeds(&self, downstream_stage: StageId) -> Vec<LogicalFeed> {
@@ -269,7 +269,7 @@ mod tests {
         let mut contracts = HashMap::new();
         contracts.insert(
             upstream,
-            StageOutputContract::single(PayloadTypeDescriptor::from_type_hint(
+            OutcomeContract::single(PayloadTypeDescriptor::from_type_hint(
                 type_hint.clone(),
                 FactVisibility::Unrouted,
             )),
@@ -309,7 +309,7 @@ mod tests {
             visibility: FactVisibility::Routable,
         };
         let mut descriptor = payload.descriptor().unwrap();
-        let contract = StageOutputContract::single(payload);
+        let contract = OutcomeContract::single(payload);
         assert!(contract.contains_descriptor(&descriptor));
         descriptor.payload_schema_version = std::num::NonZeroU32::MIN;
         assert!(!contract.contains_descriptor(&descriptor));

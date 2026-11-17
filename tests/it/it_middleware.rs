@@ -13,10 +13,4 @@ mod replay_testkit {
     pub use self::{ordered_journal::*, unsynced_application::*, unsynced_context::*};
 }
 
-#[path = "../support/exported_jsonl"]
-mod exported_jsonl {
-    mod chain;
-    pub use self::chain::*;
-}
-
 mod middleware;

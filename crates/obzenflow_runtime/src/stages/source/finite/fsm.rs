@@ -28,7 +28,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::backpressure::BackpressureWriter;
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
@@ -385,10 +385,10 @@ pub struct FiniteSourceResources<H> {
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
 
-    /// Declared stage output contract used by the shared output commit path.
-    pub output_contract: StageOutputContract,
+    /// Declared outcome contract used by the shared output commit path.
+    pub output_contract: OutcomeContract,
 
-    /// Pending stage outputs blocked on downstream credits (FLOWIP-086k).
+    /// Pending outputs blocked on downstream credits (FLOWIP-086k).
     pub(crate) pending_outputs:
         VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
@@ -419,7 +419,7 @@ pub struct FiniteSourceContextInit {
     pub instrumentation: Arc<StageInstrumentation>,
     pub control_strategy: Arc<dyn CompletionGate>,
     pub backpressure_writer: BackpressureWriter,
-    pub output_contract: StageOutputContract,
+    pub output_contract: OutcomeContract,
 }
 
 impl<H> FiniteSourceResources<H> {
@@ -1116,7 +1116,7 @@ pub(crate) mod tests {
                         instrumentation: Arc::new(StageInstrumentation::new()),
                         control_strategy: Arc::new(crate::stages::source::strategies::JonestownSourceStrategy),
                         backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
-                        output_contract: StageOutputContract::empty(),
+                        output_contract: OutcomeContract::empty(),
                     });
                     ctx.instrumentation.bind_observations(ctx.resources.as_ref().unwrap().flow_id, WriterId::from(stage_id), &ctx.resources.as_ref().unwrap().runtime_execution);
                     assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Created");
@@ -1257,7 +1257,7 @@ pub(crate) mod tests {
                 instrumentation: instrumentation.clone(),
                 control_strategy,
                 backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
-                output_contract: StageOutputContract::empty(),
+                output_contract: OutcomeContract::empty(),
             })
         };
 
@@ -1428,7 +1428,7 @@ pub(crate) mod tests {
                     state: Arc::new(AtomicU8::new(1)), // open: would poison if consulted
                 }),
                 backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
-                output_contract: StageOutputContract::empty(),
+                output_contract: OutcomeContract::empty(),
             });
 
             FiniteSourceAction::<DummySource>::AllocateResources
@@ -1508,7 +1508,7 @@ pub(crate) mod tests {
                     crate::stages::source::strategies::JonestownSourceStrategy,
                 ),
                 backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
-                output_contract: StageOutputContract::empty(),
+                output_contract: OutcomeContract::empty(),
             });
             FiniteSourceAction::<DummySource>::AllocateResources
                 .execute(&mut ctx)

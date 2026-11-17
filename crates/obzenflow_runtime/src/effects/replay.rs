@@ -457,7 +457,7 @@ pub(super) fn effect_record_group_materialization(
 }
 
 pub(super) fn is_routable_output_fact(
-    output_contract: Option<&StageOutputContract>,
+    output_contract: Option<&OutcomeContract>,
     descriptor: &obzenflow_core::EventDescriptor,
 ) -> bool {
     match output_contract {

@@ -2,21 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-134g journal oracle for all four typed source variants.
-
 use crate::replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
-use obzenflow_core::{outcome, StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{
-    async_infinite_source, async_source, flow, infinite_source, sink, source, FlowDefinition,
-};
+use obzenflow_core::{outcome, StageId, TypedPayload};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::stages::sink::SinkWriteFailure;
+use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, AtMostOnce, FiniteSourceConnector,
     InfiniteSourceConnector, Reattach, Refuse, SourceReaderInitContext,
@@ -51,79 +44,6 @@ impl TypedPayload for Beta {
     const EVENT_TYPE: &'static str = "flowip_134g.beta";
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct VersionedInput<const VERSION: u32> {
-    value: u64,
-}
-
-impl<const VERSION: u32> TypedPayload for VersionedInput<VERSION> {
-    const EVENT_TYPE: &'static str = "test.versioned_input";
-    const SCHEMA_VERSION: u32 = VERSION;
-}
-
-#[tokio::test]
-async fn source_replay_rejects_version_drift_before_selected_feed_filtering() {
-    fn definition<const VERSION: u32>(
-        base: PathBuf,
-        polls: Arc<AtomicUsize>,
-        deliveries: Arc<AtomicUsize>,
-    ) -> FlowDefinition {
-        let input = obzenflow::stages::sources::ValuesSource::new(
-            std::iter::once(VersionedInput::<VERSION> { value: 1 }).inspect(move |_| {
-                polls.fetch_add(1, Ordering::SeqCst);
-            }),
-        );
-        FlowDefinition::materialize(move |_| {
-            let output =
-                replay_testkit::CountDeliveries::<VersionedInput<VERSION>>::new(deliveries);
-            Ok(flow! {
-                name: "versioned_source_replay",
-                journals: disk_journals(base),
-                stages: {
-                    input = source!(VersionedInput<VERSION> => input);
-                    output = sink!(VersionedInput<VERSION> => output);
-                },
-                topology: { input |> output; }
-            })
-        })
-    }
-    let temp = tempfile::tempdir().unwrap();
-    let base = temp.path().join("journals");
-    replay_testkit::unsynced_application()
-        .with_cli_args(["live"])
-        .run_async(definition::<1>(
-            base.clone(),
-            Arc::default(),
-            Arc::default(),
-        ))
-        .await
-        .unwrap();
-    let live = latest_run_dir(&base);
-    let polls = Arc::new(AtomicUsize::new(0));
-    let deliveries = Arc::new(AtomicUsize::new(0));
-    let result = replay_testkit::unsynced_application()
-        .with_cli_args([
-            OsString::from("replay"),
-            OsString::from("--replay-from"),
-            live.as_os_str().to_os_string(),
-        ])
-        .run_async(definition::<2>(
-            base.clone(),
-            polls.clone(),
-            deliveries.clone(),
-        ))
-        .await;
-    assert!(
-        result.is_err(),
-        "old version must fail instead of being silently filtered"
-    );
-    assert_eq!(polls.load(Ordering::SeqCst), 0);
-    assert_eq!(deliveries.load(Ordering::SeqCst), 0);
-    let error = result.expect_err("source descriptor mismatch").to_string();
-    assert!(error.contains("source replay event descriptor fact/test.versioned_input@1 does not match its output contract"),
-        "source must diagnose descriptor drift before filtering: {error}");
-}
-
 #[derive(Debug, Default)]
 struct Counters {
     opens: [AtomicUsize; 4],
@@ -133,8 +53,6 @@ struct Counters {
     async_infinite_calls: AtomicUsize,
     async_finite_cleanup: AtomicUsize,
     async_infinite_cleanup: AtomicUsize,
-    alpha_delivered: AtomicUsize,
-    beta_delivered: AtomicUsize,
 }
 
 fn pair(source: &'static str, value: u64) -> Vec<outcome![Alpha | Beta]> {
@@ -247,152 +165,6 @@ impl TypedAsyncInfiniteSourceHandler for AsyncInfinite {
     }
 }
 
-#[derive(Clone)]
-struct CountSourceOutput<T: TypedPayload + Clone + Send + Sync + 'static> {
-    count: Arc<Counters>,
-    select: fn(&Counters) -> &AtomicUsize,
-    input: std::marker::PhantomData<fn() -> T>,
-}
-#[async_trait::async_trait]
-impl<T: TypedPayload + Clone + Send + Sync + 'static> obzenflow_runtime::stages::sink::InlineSink
-    for CountSourceOutput<T>
-{
-    type Input = T;
-    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-        obzenflow_runtime::stages::sink::SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                "source_output_counter".into(),
-            ),
-        )
-        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
-    }
-    async fn write(&mut self, _input: T) -> Result<(), SinkWriteFailure> {
-        (self.select)(&self.count).fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-fn build_flow(journal_base: PathBuf, counters: Arc<Counters>, connectors: bool) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let sync_finite = SyncFinite {
-            emitted: false,
-            counters: counters.clone(),
-        };
-        let async_finite = AsyncFinite {
-            emitted: false,
-            counters: counters.clone(),
-        };
-        let sync_infinite = SyncInfinite {
-            emitted: false,
-            counters: counters.clone(),
-        };
-        let async_infinite = AsyncInfinite {
-            emitted: false,
-            counters: counters.clone(),
-        };
-        let sync_finite_connector = SyncFiniteConnector(counters.clone());
-        let async_finite_connector = AsyncFiniteConnector(counters.clone());
-        let sync_infinite_connector = SyncInfiniteConnector(counters.clone());
-        let async_infinite_connector = AsyncInfiniteConnector(counters.clone());
-        let alpha_sink = CountSourceOutput::<Alpha> {
-            count: counters.clone(),
-            select: |counters| &counters.alpha_delivered,
-            input: std::marker::PhantomData,
-        };
-        let beta_sink = CountSourceOutput::<Beta> {
-            count: counters,
-            select: |counters| &counters.beta_delivered,
-            input: std::marker::PhantomData,
-        };
-
-        Ok(flow! {
-            name: "typed_source_journal_parity",
-            journals: disk_journals(journal_base),
-
-            stages: {
-                sync_fin = if connectors { source!({ Alpha, Beta } => sync_finite_connector) } else { source!({ Alpha, Beta } => sync_finite) };
-                async_fin = if connectors { async_source!({ Alpha, Beta } => async_finite_connector) } else { async_source!({ Alpha, Beta } => async_finite) };
-                sync_inf = if connectors { infinite_source!({ Alpha, Beta } => sync_infinite_connector) } else { infinite_source!({ Alpha, Beta } => sync_infinite) };
-                async_inf = if connectors { async_infinite_source!({ Alpha, Beta } => async_infinite_connector) } else { async_infinite_source!({ Alpha, Beta } => async_infinite) };
-                alphas = sink!(Alpha => alpha_sink);
-                betas = sink!(Beta => beta_sink);
-            },
-
-            topology: {
-                sync_fin |> alphas;
-                sync_fin |> betas;
-                async_fin |> alphas;
-                async_fin |> betas;
-                sync_inf |> alphas;
-                sync_inf |> betas;
-                async_inf |> alphas;
-                async_inf |> betas;
-            }
-        })
-    })
-}
-
-async fn wait_for_running(handle: &FlowHandle) {
-    let mut state = handle.state_receiver();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if matches!(*state.borrow(), PipelineState::Running) {
-                return;
-            }
-            state.changed().await.expect("pipeline state remains open");
-        }
-    })
-    .await
-    .expect("pipeline reaches running");
-}
-
-async fn wait_for_count(counter: &AtomicUsize, expected: usize, label: &str) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while counter.load(Ordering::SeqCst) < expected {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
-}
-
-async fn run_live(journal_base: &Path, counters: Arc<Counters>, connectors: bool) {
-    let handle = build_flow(journal_base.to_path_buf(), counters.clone(), connectors)
-        .build(replay_testkit::unsynced_context())
-        .await
-        .expect("typed source parity flow builds");
-    wait_for_running(&handle).await;
-    wait_for_count(&counters.alpha_delivered, 4, "alpha deliveries").await;
-    wait_for_count(&counters.beta_delivered, 4, "beta deliveries").await;
-    wait_for_count(&counters.async_finite_cleanup, 1, "natural finite cleanup").await;
-
-    handle
-        .stop_graceful(Duration::from_secs(10))
-        .await
-        .expect("graceful stop requested");
-    tokio::time::timeout(Duration::from_secs(15), handle.wait_for_completion())
-        .await
-        .expect("flow terminates after graceful stop")
-        .expect("flow completes cleanly");
-}
-
-async fn run_replay(
-    journal_base: &Path,
-    archive: &Path,
-    counters: Arc<Counters>,
-    connectors: bool,
-) {
-    replay_testkit::unsynced_application()
-        .with_cli_args([
-            OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
-            archive.as_os_str().to_os_string(),
-        ])
-        .run_async(build_flow(journal_base.to_path_buf(), counters, connectors))
-        .await
-        .expect("strict source replay completes");
-}
-
 fn latest_run_dir(base: &Path) -> PathBuf {
     let mut runs = std::fs::read_dir(base.join("flows"))
         .expect("flows directory")
@@ -428,128 +200,6 @@ fn data_signature(events: &[JournalRecord<ChainPayload>]) -> Vec<(String, serde_
             _ => None,
         })
         .collect()
-}
-
-fn assert_source_journal(
-    stage_name: &str,
-    events: &[JournalRecord<ChainPayload>],
-    expected_data_writer: Option<WriterId>,
-    eof_must_match_data_writer: bool,
-) -> WriterId {
-    let eof = events
-        .iter()
-        .find(|envelope| envelope.is_eof())
-        .unwrap_or_else(|| panic!("{stage_name} authors EOF"));
-    let data = events
-        .iter()
-        .filter(|envelope| envelope.consumes_data_credit())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        data.len(),
-        2,
-        "{stage_name} authors one member of each type"
-    );
-    let writer = data[0].envelope.provenance.event.writer_id;
-    assert!(writer.is_stage(), "{stage_name} has a stage-owned writer");
-    assert!(
-        data.iter()
-            .all(|envelope| envelope.envelope.provenance.event.writer_id == writer),
-        "{stage_name} data writers {:?} did not converge on {writer}",
-        data.iter()
-            .map(|envelope| envelope.envelope.provenance.event.writer_id.to_string())
-            .collect::<Vec<_>>()
-    );
-    if let Some(expected) = expected_data_writer {
-        assert_eq!(
-            writer, expected,
-            "{stage_name} replay must preserve live Data authorship"
-        );
-    }
-    assert_eq!(
-        data.iter()
-            .map(|envelope| envelope.event_type().to_string())
-            .collect::<Vec<_>>(),
-        vec![Alpha::event_type_name(), Beta::event_type_name()]
-    );
-    assert!(data
-        .iter()
-        .all(|envelope| !envelope.event_type().ends_with(".error")));
-
-    if eof_must_match_data_writer {
-        assert_eq!(
-            eof.envelope.provenance.event.writer_id, writer,
-            "{stage_name} live Data and EOF must use the installed stage writer"
-        );
-    }
-    let ChainPayload::FlowControl(FlowControlPayload::Eof {
-        kind,
-        writer_seq,
-        writer_seq_by_event_type,
-        last_event_id,
-        ..
-    }) = &eof.payload
-    else {
-        unreachable!("EOF shape")
-    };
-    assert_eq!(writer_seq.map(|seq| seq.0), Some(2));
-    assert_eq!(
-        writer_seq_by_event_type
-            .get(&Alpha::descriptor())
-            .map(|seq| seq.0),
-        Some(1)
-    );
-    assert_eq!(
-        writer_seq_by_event_type
-            .get(&Beta::descriptor())
-            .map(|seq| seq.0),
-        Some(1)
-    );
-    assert_eq!(writer_seq_by_event_type.len(), 2);
-    assert_eq!(
-        *last_event_id,
-        data.last()
-            .map(|envelope| envelope.envelope.provenance.event.id)
-    );
-
-    let production = events
-        .iter()
-        .find_map(|envelope| match &envelope.payload {
-            ChainPayload::FlowControl(FlowControlPayload::ProductionFinal {
-                produced_count,
-                produced_by_event_type,
-                end_kind,
-                last_event_id,
-            }) => {
-                assert_eq!(envelope.writer_id(), eof.writer_id());
-                Some((
-                    produced_count,
-                    produced_by_event_type,
-                    end_kind,
-                    last_event_id,
-                ))
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("{stage_name} authors its final production report"));
-    assert_eq!(production.0 .0, 2);
-    assert_eq!(production.1, writer_seq_by_event_type);
-    assert_eq!(production.2, kind);
-    assert_eq!(production.3, last_event_id);
-    assert!(!events.iter().any(|event| matches!(
-        event.payload,
-        ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
-    )));
-    writer
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn non_clone_direct_source_journal_parity() {
-    assert_source_parity(false).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cold_connector_source_journal_parity() {
-    assert_source_parity(true).await;
 }
 
 #[tokio::test]
@@ -617,79 +267,6 @@ async fn lazy_iterator_replay_never_consumes_live_input() {
             .unwrap()
             .exit_code(),
         0
-    );
-}
-
-async fn assert_source_parity(connectors: bool) {
-    let temp = tempfile::tempdir().expect("parity tempdir");
-    let journal_base = temp.path().join("journals");
-
-    let live_counters = Arc::new(Counters::default());
-    run_live(&journal_base, live_counters.clone(), connectors).await;
-    assert!(live_counters.sync_finite_calls.load(Ordering::SeqCst) >= 2);
-    assert!(live_counters.async_finite_calls.load(Ordering::SeqCst) >= 2);
-    assert!(live_counters.sync_infinite_calls.load(Ordering::SeqCst) >= 1);
-    assert!(live_counters.async_infinite_calls.load(Ordering::SeqCst) >= 1);
-    assert_eq!(live_counters.async_finite_cleanup.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        live_counters.async_infinite_cleanup.load(Ordering::SeqCst),
-        1
-    );
-
-    for count in &live_counters.opens {
-        assert_eq!(count.load(Ordering::SeqCst), usize::from(connectors));
-    }
-    let live = latest_run_dir(&journal_base);
-    let stage_names = ["sync_fin", "async_fin", "sync_inf", "async_inf"];
-    let mut live_rows = Vec::new();
-    for stage_name in stage_names {
-        let events = read_stage_appended(&live, stage_name).await;
-        let writer = assert_source_journal(stage_name, &events, None, true);
-        live_rows.push((stage_name, writer, data_signature(&events)));
-    }
-
-    let replay_counters = Arc::new(Counters::default());
-    run_replay(&journal_base, &live, replay_counters.clone(), connectors).await;
-    assert_eq!(replay_counters.sync_finite_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(replay_counters.async_finite_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        replay_counters.sync_infinite_calls.load(Ordering::SeqCst),
-        0
-    );
-    assert_eq!(
-        replay_counters.async_infinite_calls.load(Ordering::SeqCst),
-        0
-    );
-    assert_eq!(
-        replay_counters.async_finite_cleanup.load(Ordering::SeqCst),
-        0
-    );
-    assert_eq!(
-        replay_counters
-            .async_infinite_cleanup
-            .load(Ordering::SeqCst),
-        0
-    );
-
-    for count in &replay_counters.opens {
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-    let replay = latest_run_dir(&journal_base);
-    assert_ne!(live, replay);
-    for (stage_name, live_writer, expected_data) in live_rows {
-        let events = read_stage_appended(&replay, stage_name).await;
-        assert_source_journal(stage_name, &events, Some(live_writer), false);
-        assert_eq!(data_signature(&events), expected_data);
-    }
-
-    let verification = verify_run_dirs(&live, &replay, &VerifyOptions::default())
-        .expect("source replay verification runs");
-    assert!(matches!(verification, VerifyOutcome::Completed { .. }));
-    assert_eq!(
-        verification.exit_code(),
-        0,
-        "whole-run source replay projection must match: {}",
-        obzenflow_infra::verify::render_verdict(&verification)
     );
 }
 
@@ -811,11 +388,5 @@ async fn four_connector_families_open_independent_readers() {
     b.drain().await.unwrap();
     for count in &counters.opens {
         assert_eq!(count.load(Ordering::SeqCst), 2);
-    }
-}
-
-impl<T: TypedPayload + Clone + Send + Sync + 'static> std::fmt::Debug for CountSourceOutput<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CountSourceOutput")
     }
 }

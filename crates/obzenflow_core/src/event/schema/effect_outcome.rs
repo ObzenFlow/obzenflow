@@ -8,7 +8,7 @@
 //! `outcome![...]` list of the facts it may answer with. The answer lowers to
 //! flat named `Data` facts for the journal and is rebuilt from the recorded
 //! fact group on replay. It is never persisted as a wrapper event and never
-//! the stage output contract.
+//! its stage's outcome contract.
 
 use super::member_set::FactList;
 use super::outcome::Outcome;

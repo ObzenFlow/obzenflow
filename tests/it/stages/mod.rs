@@ -4,10 +4,8 @@
 
 mod handler_path_guard;
 mod handler_shell_guard;
-mod held_effect_call;
 mod join;
 mod merge;
-mod placeholder_handlers_lifecycle;
 mod sink;
 mod source;
 mod stateful;

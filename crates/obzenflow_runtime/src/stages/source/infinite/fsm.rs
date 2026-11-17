@@ -28,7 +28,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::backpressure::BackpressureWriter;
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
@@ -390,10 +390,10 @@ pub struct InfiniteSourceResources<H> {
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
 
-    /// Declared stage output contract used by the shared output commit path.
-    pub output_contract: StageOutputContract,
+    /// Declared outcome contract used by the shared output commit path.
+    pub output_contract: OutcomeContract,
 
-    /// Pending stage outputs blocked on downstream credits (FLOWIP-086k).
+    /// Pending outputs blocked on downstream credits (FLOWIP-086k).
     pub(crate) pending_outputs:
         VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
@@ -424,7 +424,7 @@ pub struct InfiniteSourceContextInit {
     pub instrumentation: Arc<StageInstrumentation>,
     pub control_strategy: Arc<dyn CompletionGate>,
     pub backpressure_writer: BackpressureWriter,
-    pub output_contract: StageOutputContract,
+    pub output_contract: OutcomeContract,
 }
 
 impl<H> InfiniteSourceResources<H> {

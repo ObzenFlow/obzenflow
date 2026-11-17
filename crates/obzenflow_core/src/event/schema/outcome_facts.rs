@@ -176,7 +176,7 @@ where
 /// Exactness rule (FLOWIP-120m): any fact in the group that does not match
 /// `T` is `UnexpectedFact`; an all-matching group of zero is `MissingFact`
 /// and of more than one is `DuplicateFact`. The recorded group is the
-/// carrier's facts and nothing else, so a foreign fact is corruption, never
+/// outcome's facts and nothing else, so a foreign fact is corruption, never
 /// something to skip.
 fn decode_fact<T>(facts: &[TypedFact]) -> Result<T, OutcomeError>
 where
@@ -322,10 +322,10 @@ mod tests {
         );
     }
 
-    /// Hand-written sum carrier: the manual-carrier doctrine for FLOWIP-120m.
-    /// One persisted fact per variant, exact fail-closed reconstruction. The
-    /// `effect_outcome!` macro generates this shape; the hand-written form
-    /// stays here as the documented pattern.
+    /// Hand-written sum outcome: the manual outcome pattern for FLOWIP-120m.
+    /// One persisted fact per variant, exact fail-closed reconstruction.
+    /// `outcome![...]` generates this shape; the hand-written form stays here
+    /// as the documented pattern.
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum HandWrittenSum {
         First(First),
@@ -375,18 +375,18 @@ mod tests {
     }
 
     #[test]
-    fn hand_written_sum_carrier_is_exact() {
-        for carrier in [
+    fn hand_written_sum_outcome_round_trips() {
+        for outcome in [
             HandWrittenSum::First(First { value: 3 }),
             HandWrittenSum::Second(Second {
                 label: "declined".to_string(),
             }),
         ] {
-            let facts = carrier.clone().into_facts().expect("variant serializes");
+            let facts = outcome.clone().into_facts().expect("variant serializes");
             assert_eq!(facts.len(), 1);
             let reconstructed =
                 HandWrittenSum::try_from_facts(&facts).expect("variant reconstructs");
-            assert_eq!(reconstructed, carrier);
+            assert_eq!(reconstructed, outcome);
         }
 
         let empty: Vec<TypedFact> = Vec::new();
@@ -418,7 +418,7 @@ mod tests {
         ));
     }
 
-    /// Hand-written product carrier: exact multiset reconstruction.
+    /// Hand-written product outcome: exact multiset reconstruction.
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct HandWrittenProduct {
         first: First,
@@ -454,18 +454,18 @@ mod tests {
     }
 
     #[test]
-    fn hand_written_product_carrier_requires_multiset_equality() {
-        let carrier = HandWrittenProduct {
+    fn product_outcome_multiset_mismatch_refused() {
+        let outcome = HandWrittenProduct {
             first: First { value: 9 },
             second: Second {
                 label: "audit".to_string(),
             },
         };
-        let facts = carrier.clone().into_facts().expect("product serializes");
+        let facts = outcome.clone().into_facts().expect("product serializes");
         assert_eq!(facts.len(), 2);
         assert_eq!(
             HandWrittenProduct::try_from_facts(&facts).expect("product reconstructs"),
-            carrier
+            outcome
         );
 
         let missing = vec![TypedFact::from_payload(First { value: 9 }).expect("first")];
@@ -487,7 +487,7 @@ mod tests {
             Err(OutcomeError::DuplicateFact { .. })
         ));
 
-        let mut with_unknown = carrier.into_facts().expect("product serializes");
+        let mut with_unknown = outcome.into_facts().expect("product serializes");
         with_unknown.push(TypedFact {
             payload_schema_version: std::num::NonZeroU32::MIN,
             event_type: EventType::from("fact.unknown"),

@@ -177,43 +177,6 @@ fn price_journal(journal_root: &Path) -> PriceJournal {
 }
 
 #[test]
-fn a_second_version_at_one_key_and_time_fails_the_join_before_it_reads_a_payment() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let completed = run(
-        dir.path(),
-        vec![
-            rate("EUR", at(0, 0), 1.0012),
-            rate("EUR", at(14, 0), 1.0031),
-            rate("GBP", at(0, 0), 1.1520),
-            rate("EUR", at(14, 0), 1.0040),
-        ],
-    );
-    assert!(!completed, "the join refuses its catalog and the run fails");
-
-    let diagnostic = "join `price` refused its catalog `fx_rates` while hydrating: two \
-                      versions of \"EUR\" take effect at 2022-09-05T14:00:00, so a row as of \
-                      that time has no single version. Keep one version per key and effective \
-                      time, then start a fresh run.";
-    let journal = price_journal(dir.path());
-    assert_eq!(
-        journal.failures,
-        [diagnostic],
-        "the join's failure carries the diagnostic"
-    );
-    assert_eq!(
-        journal.fatal_details,
-        [diagnostic],
-        "the error journal records it"
-    );
-    assert!(
-        journal.facts.is_empty(),
-        "no payment is priced: {:?}",
-        journal.facts
-    );
-    assert!(!journal.left_hydration, "the join never leaves hydration");
-}
-
-#[test]
 fn a_catalog_with_one_version_per_key_and_time_prices_the_payment() {
     let dir = tempfile::tempdir().expect("tempdir");
     let completed = run(

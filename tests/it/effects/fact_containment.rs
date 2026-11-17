@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use obzenflow_core::{event::payloads::delivery_payload::DeliveryMethod, TypedPayload};
 use obzenflow_dsl::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
 use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
-use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
@@ -135,31 +135,6 @@ impl EffectfulTransformHandler for PerformTransform {
     }
 }
 
-#[obzenflow::command]
-#[derive(Clone, Debug)]
-struct EmitOnlyTransform;
-
-#[async_trait]
-impl EffectfulTransformHandler for EmitOnlyTransform {
-    type Input = ContainmentInput;
-    type Output = ContainmentOutput;
-
-    async fn process(
-        &self,
-        input: ContainmentInput,
-        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        fx.emit(ContainmentOutput { value: input.value })
-            .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(fx.complete()?)
-    }
-
-    fn stage_logic_version(&self) -> &str {
-        "containment-emit-only-v1"
-    }
-}
-
 #[derive(Debug)]
 struct DropSink<T>(std::marker::PhantomData<fn() -> T>);
 
@@ -254,33 +229,6 @@ fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
     })
 }
 
-/// An effect-free `Input -> Output` stage has no declarations, so containment
-/// has nothing to check and the build proceeds.
-fn empty_effects_flow(journal_base: PathBuf) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = OneShotSource::new();
-        let effectful_handler = EmitOnlyTransform;
-        let drops_handler = DropSink::<ContainmentOutput>::new();
-
-        Ok(flow! {
-            name: "effect_fact_containment_empty_effects",
-            journals: disk_journals(journal_base),
-
-            stages: {
-                inputs = source!(ContainmentInput => inputs_handler);
-                effectful = effectful_transform!(
-                    ContainmentInput -> { ContainmentOutput } => effectful_handler);
-                drops = sink!(ContainmentOutput => drops_handler);
-            },
-
-            topology: {
-                inputs |> effectful;
-                effectful |> drops;
-            }
-        })
-    })
-}
-
 #[tokio::test]
 async fn undeclared_effect_fact_fails_build_before_io() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -305,7 +253,7 @@ async fn undeclared_effect_fact_fails_build_before_io() {
 
 /// Two distinct member types colliding on `EVENT_TYPE`: the derive's const
 /// member guard rejects this shape at compile time (FLOWIP-120z), so the
-/// carrier is hand-written to model an erased or buggy marshalling path,
+/// outcome is hand-written to model an erased or buggy marshalling path,
 /// and this remains the flow build's half of the FLOWIP-120m ambiguity
 /// rejection.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -351,7 +299,7 @@ impl obzenflow_core::OutcomeFacts for CollidingOutcome {
         // Reconstruction is ambiguous by construction; the flow-build
         // rejection this fixture exercises exists so this is never reached.
         Err(obzenflow_core::OutcomeError::SerializationFailed(
-            "colliding carrier reconstruction is ambiguous by construction".to_string(),
+            "colliding outcome reconstruction is ambiguous by construction".to_string(),
         ))
     }
 }
@@ -459,7 +407,7 @@ fn colliding_event_type_flow(journal_base: PathBuf) -> FlowDefinition {
 }
 
 #[tokio::test]
-async fn duplicate_event_type_across_carrier_members_is_rejected_at_build() {
+async fn outcome_members_shared_event_type_refused() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -474,16 +422,4 @@ async fn duplicate_event_type_across_carrier_members_is_rejected_at_build() {
         message.contains("distinct event types"),
         "expected the FLOWIP-120m event-type collision rejection, got: {message}"
     );
-}
-
-#[tokio::test]
-async fn stages_with_empty_effects_skip_containment() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let journal_base = temp.path().join("journals");
-
-    crate::replay_testkit::unsynced_application()
-        .with_cli_args(["obzenflow"])
-        .run_async(empty_effects_flow(journal_base))
-        .await
-        .expect("a stage with no effect declarations must build and run");
 }

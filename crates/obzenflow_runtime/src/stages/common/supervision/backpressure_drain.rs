@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::backpressure::{
     BackpressureWriter, DirectFactLease, LimitingEdgeDetail, StallEpisode, StallVerdict,
 };
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::output_committer::{CommitOptions, OutputCommitter};
@@ -100,7 +100,7 @@ pub(crate) struct DrainRequest<'a> {
     pub backpressure_writer: &'a BackpressureWriter,
     pub backpressure_pulse: &'a mut BackpressureActivityPulse,
     pub backpressure_stall: &'a mut StallEpisode,
-    pub output_contract: Option<&'a StageOutputContract>,
+    pub output_contract: Option<&'a OutcomeContract>,
     pub pending_outputs: &'a mut VecDeque<PendingOutput>,
 }
 

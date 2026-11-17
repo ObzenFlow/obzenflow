@@ -32,7 +32,7 @@ use crate::backpressure::{
 use crate::effects::{
     CurrentRunHistory, EffectDeclaration, EffectHistory, EffectPortRegistry, StageConstants,
 };
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -796,8 +796,8 @@ pub(crate) struct TransformResources<H: UnifiedTransformHandler> {
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
 
-    /// Declared stage output contract used by the shared output commit path.
-    pub output_contract: StageOutputContract,
+    /// Declared outcome contract used by the shared output commit path.
+    pub output_contract: OutcomeContract,
 
     /// Backpressure readers keyed by upstream stage ID (FLOWIP-086k).
     pub backpressure_readers: HashMap<StageId, BackpressureReader>,

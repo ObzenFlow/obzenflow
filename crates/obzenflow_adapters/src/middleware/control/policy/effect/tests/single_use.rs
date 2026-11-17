@@ -19,7 +19,7 @@ use obzenflow_runtime::effects::{
     EffectPortRegistry, Effects, Port, StageConstants,
 };
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
-use obzenflow_runtime::feed_plan::StageOutputContract;
+use obzenflow_runtime::feed_plan::OutcomeContract;
 use obzenflow_runtime::messaging::upstream_subscription::StageInputPosition;
 use serde_json::json;
 
@@ -288,7 +288,7 @@ async fn effect_context(
             runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
             effect_ports,
             effect_declarations: vec![authored_declaration.runtime_projection()],
-            output_contract: StageOutputContract::empty(),
+            output_contract: OutcomeContract::empty(),
             backpressure_readers: Vec::new(),
             lineage: obzenflow_core::config::LineagePolicy::default(),
             catch_up: None,

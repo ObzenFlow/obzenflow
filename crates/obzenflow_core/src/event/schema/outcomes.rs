@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Stage outputs.
+//! Outcomes.
 //!
 //! A typed transform returns one fact, an `outcome![...]` list or
 //! [`Outcomes`], each of which lowers to flat named facts through the
@@ -15,26 +15,26 @@ use super::outcome_facts::{OutcomeError, OutcomeFacts, TypedFact, TypedFactType}
 use super::outcome_list::{OutcomeOr, SingleFactCases};
 use super::typed_payload::TypedPayload;
 
-/// Lowering-only carrier for zero or more facts of one payload type.
+/// Lowering-only outcome of zero or more facts of one payload type.
 ///
 /// `Outcomes<T>` supplies dynamic cardinality without turning `Vec<T>` into
-/// framework vocabulary. The carrier is never persisted: each contained value
+/// framework vocabulary. The outcome is never persisted: each contained value
 /// lowers directly to a `T` fact in insertion order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcomes<T>(Vec<T>);
 
 impl<T: TypedPayload> Outcomes<T> {
-    /// Return a carrier that lowers to no facts.
+    /// Return an outcome that lowers to no facts.
     pub fn none() -> Self {
         Self(Vec::new())
     }
 
-    /// Return a carrier that lowers to one fact.
+    /// Return an outcome that lowers to one fact.
     pub fn one(value: T) -> Self {
         Self(vec![value])
     }
 
-    /// Return a carrier that lowers all supplied values in iteration order.
+    /// Return an outcome that lowers all supplied values in iteration order.
     pub fn many(values: impl IntoIterator<Item = T>) -> Self {
         Self(values.into_iter().collect())
     }

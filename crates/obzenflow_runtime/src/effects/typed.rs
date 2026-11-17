@@ -192,11 +192,11 @@ where
         self.core.emit(fact).await
     }
 
-    pub(crate) async fn emit_carrier<C>(&mut self, carrier: C) -> Result<(), EffectError>
+    pub(crate) async fn emit_outcome<O>(&mut self, outcome: O) -> Result<(), EffectError>
     where
-        C: obzenflow_core::event::schema::OutcomeFacts,
+        O: obzenflow_core::event::schema::OutcomeFacts,
     {
-        let facts = carrier
+        let facts = outcome
             .into_facts()
             .map_err(|error| EffectError::Serialization(error.to_string()))?;
         self.core.emit_typed_facts(facts).await

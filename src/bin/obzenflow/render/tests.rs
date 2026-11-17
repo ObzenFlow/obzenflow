@@ -37,10 +37,10 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
             "sensor.reading",
         )
     } else {
-        ("classify", "Transform", "stage_output", "sensor.classified")
+        ("classify", "Transform", "fact", "sensor.classified")
     };
     serde_json::from_value(json!({
-        "version": 3,
+        "version": 4,
         "run": {"flow_id": id(10), "pipeline_writer_id": {"type":"System", "id":id(11)}},
         "journal": {"id":id(stage), "kind":"data", "stage":{"key":key, "id":id(stage), "stage_type":stage_type,"is_effectful":false}},
         "position":event,
@@ -1943,12 +1943,12 @@ fn failed_processing_remains_distinct_from_a_successfully_produced_fact() {
 
 fn join_row(event: u64, event_kind: &str, event_type: &str, payload: Value) -> RunRecord {
     let kind = if event_kind == "fact" {
-        "stage_output"
+        "fact"
     } else {
         "execution"
     };
     serde_json::from_value(json!({
-        "version": 3,
+        "version": 4,
         "run": {"flow_id": id(10), "pipeline_writer_id": {"type":"System", "id":id(11)}},
         "journal": {"id":id(5), "kind":"data", "stage":{"key":"posted", "id":id(5), "stage_type":"Join","is_effectful":false}},
         "position":event,

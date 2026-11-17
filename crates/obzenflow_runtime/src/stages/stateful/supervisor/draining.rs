@@ -117,7 +117,7 @@ pub(super) async fn dispatch_draining<
         sup.subscription = ctx.subscription.take();
     }
 
-    // Drain any pending stage outputs first (FLOWIP-086k).
+    // Drain any pending outputs first (FLOWIP-086k).
     while let Some(pending) = ctx.pending_outputs.pop_front() {
         match drain_one_pending(DrainRequest {
             pending,
@@ -810,7 +810,7 @@ pub(super) async fn drain_final_output<
     }
 
     let flow_context = Arc::clone(&ctx.flow_context);
-    // Drain any pending stage outputs first (FLOWIP-086k).
+    // Drain any pending outputs first (FLOWIP-086k).
     while let Some(pending) = ctx.pending_outputs.pop_front() {
         match drain_one_pending(DrainRequest {
             pending,
@@ -859,7 +859,7 @@ mod tests {
     use crate::backpressure::{BackpressurePlan, BackpressureRegistry, BackpressureWriter};
     use crate::effects::{CurrentRunHistory, EffectPortRegistry};
     use crate::execution::{RuntimeExecution, RuntimeMode};
-    use crate::feed_plan::StageOutputContract;
+    use crate::feed_plan::OutcomeContract;
     use crate::id_conversions::StageIdExt;
     use crate::message_bus::FsmMessageBus;
     use crate::metrics::instrumentation::StageInstrumentation;
@@ -1189,7 +1189,7 @@ mod tests {
             last_data_event_time: None,
             emit_interval: None,
             backpressure_writer: registry.writer(stage),
-            output_contract: StageOutputContract::empty(),
+            output_contract: OutcomeContract::empty(),
             backpressure_readers: HashMap::from([(upstream, registry.reader(upstream, stage))]),
             pending_outputs: VecDeque::new(),
             pending_transition: None,

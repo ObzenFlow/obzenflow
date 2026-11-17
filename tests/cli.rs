@@ -1024,7 +1024,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         for row in rows {
             match row.kind {
                 RunRecordKind::SourceFact
-                | RunRecordKind::StageOutput
+                | RunRecordKind::Fact
                 | RunRecordKind::Effect
                 | RunRecordKind::Delivery => {}
                 _ => continue,
@@ -1404,7 +1404,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             matches!(
                 row.kind,
                 RunRecordKind::SourceFact
-                    | RunRecordKind::StageOutput
+                    | RunRecordKind::Fact
                     | RunRecordKind::Effect
                     | RunRecordKind::Delivery
             )
@@ -1496,7 +1496,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         if matches!(
             row.kind,
             RunRecordKind::SourceFact
-                | RunRecordKind::StageOutput
+                | RunRecordKind::Fact
                 | RunRecordKind::Effect
                 | RunRecordKind::Delivery
         ) {

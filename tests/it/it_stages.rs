@@ -4,8 +4,6 @@
 
 #[path = "../support/replay_testkit"]
 mod replay_testkit {
-    mod bootstrap;
-    mod count_deliveries;
     mod discard;
     mod eof_clock;
     mod failures;
@@ -19,11 +17,9 @@ mod replay_testkit {
     mod unsynced_candidate;
     mod unsynced_config;
     mod unsynced_context;
-    mod verdicts;
     pub use self::{
-        bootstrap::*, count_deliveries::*, discard::*, eof_clock::*, failures::*, journal::*,
-        manifest::*, ordered_journal::*, run_dir::*, stage_journal::*, stage_writer::*,
-        unsynced_application::*, unsynced_candidate::*, unsynced_context::*, verdicts::*,
+        discard::*, eof_clock::*, failures::*, journal::*, manifest::*, ordered_journal::*,
+        run_dir::*, stage_journal::*, unsynced_application::*, unsynced_context::*,
     };
 }
 

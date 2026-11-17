@@ -263,7 +263,7 @@ async fn handle_reference_envelope<
                         events.as_mut_slice(),
                     )
                     .await?;
-                    write_stage_outputs_and_ack(
+                    write_outputs_and_ack(
                         subscription,
                         ctx,
                         JoinSubscriptionSide::Reference,
@@ -490,7 +490,7 @@ async fn handle_stream_envelope<
                     if let Some(kind) = framework_eof {
                         events.push(ChainEventFactory::eof_event_with_kind(writer_id, kind));
                     }
-                    write_stage_outputs_and_ack(
+                    write_outputs_and_ack(
                         subscription,
                         ctx,
                         JoinSubscriptionSide::Stream,
@@ -1199,7 +1199,7 @@ async fn select_and_record<
     deliver_recorded(sup, state_name, ctx, side, index).await
 }
 
-async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
+async fn write_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     ctx: &mut JoinResources<H>,
     side: JoinSubscriptionSide,

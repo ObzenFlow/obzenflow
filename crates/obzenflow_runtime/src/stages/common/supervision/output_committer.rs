@@ -52,11 +52,11 @@ use obzenflow_core::journal::{Journal, JournalCapture};
 use obzenflow_core::{ChainEvent, WriterId};
 
 use crate::backpressure::{BackpressureReservation, BackpressureWriter, DirectFactClaim};
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::metrics::instrumentation::{CaptureProjection, RuntimeCapture, StageInstrumentation};
 use crate::stages::common::heartbeat::HeartbeatState;
 
-fn output_contract_summary(output_contract: &StageOutputContract) -> String {
+fn output_contract_summary(output_contract: &OutcomeContract) -> String {
     output_contract
         .outputs
         .iter()
@@ -258,7 +258,7 @@ pub(crate) struct CommitOptions {
     /// drain's non-data branch and the unrouted effect-record path leave it
     /// `false`, matching their behaviour before Step 1.
     pub count_output: bool,
-    /// Validate `Data` event types against the stage output contract before
+    /// Validate `Data` event types against the outcome contract before
     /// committing. The pending-output drain enables this and runs the same
     /// validation before credit reservation. Framework-owned effect/capture
     /// compatibility facts leave it disabled until typed domain outcome facts
@@ -318,7 +318,7 @@ pub(crate) struct OutputCommitter<'a> {
     pub heartbeat_state: Option<&'a Arc<HeartbeatState>>,
     /// Runtime output contract for stage-authored domain `Data` facts. Absent
     /// on reserved framework append paths and legacy callers.
-    pub output_contract: Option<&'a StageOutputContract>,
+    pub output_contract: Option<&'a OutcomeContract>,
     /// Physical-row accounting for direct `Data` facts. Pending-output drains
     /// leave this absent because they own an enforced or replay-scoped
     /// reservation outside the commit helper.
@@ -342,7 +342,7 @@ struct OwnedOutputCommitter {
     pub heartbeat_state: Option<Arc<HeartbeatState>>,
     /// Runtime output contract for stage-authored domain `Data` facts. Absent
     /// on reserved framework append paths and legacy callers.
-    pub output_contract: Option<StageOutputContract>,
+    pub output_contract: Option<OutcomeContract>,
     /// Physical-row accounting for direct `Data` facts. Pending-output drains
     /// leave this absent because they own an enforced or replay-scoped
     /// reservation outside the commit helper.
@@ -927,7 +927,7 @@ impl OutputCommitter<'_> {
 
         let declared = output_contract_summary(output_contract);
         Err(format!(
-            "Data output event type `{event_type}` is not declared in the stage output contract (declared: [{declared}])"
+            "Data output event type `{event_type}` is not declared in the outcome contract (declared: [{declared}])"
         )
         .into())
     }

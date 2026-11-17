@@ -1239,7 +1239,7 @@ macro_rules! __obzenflow_transform_typed {
     }};
     // -- exact input, real handler, explicit output contract --
     // FLOWIP-120b Option B keeps the flat output contract in the arrow's
-    // type-signature position; the handler-side carrier is never named in the
+    // type-signature position; the handler-side outcome is never named in the
     // flow.
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;

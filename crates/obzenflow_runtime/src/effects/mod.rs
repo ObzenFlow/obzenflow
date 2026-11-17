@@ -37,7 +37,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::backpressure::BackpressureWriter;
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;

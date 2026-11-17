@@ -140,11 +140,11 @@ pub struct EdgeTypingMismatch {
     pub suggested_fix: String,
 }
 
-/// An effect may produce a fact outside its stage's output contract.
+/// An effect may produce a fact outside its stage's outcome contract.
 #[derive(Debug, Error)]
 #[error(
     "Stage '{stage_name}': effect '{effect_type}' may produce fact '{fact}', which is not a \
-     member of the stage output contract {contract}. Add it to the arrow (unconditional \
+     member of the outcome contract {contract}. Add it to the arrow (unconditional \
      producer-side containment check)."
 )]
 pub struct EffectFactNotInContract {
@@ -159,7 +159,7 @@ pub struct EffectFactNotInContract {
 #[error(
     "Stage '{stage_name}': effect '{effect_type}' declares two outcome members with the same \
      event type `{event_type}` ('{first_member}' and '{second_member}'). Dispatch is by \
-     event type, so carrier members must have distinct event types."
+     event type, so outcome members must have distinct event types."
 )]
 pub struct DuplicateEffectOutcomeFactEventType {
     pub stage_name: String,

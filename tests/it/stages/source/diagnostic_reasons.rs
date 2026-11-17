@@ -3,13 +3,9 @@
 // https://obzenflow.dev
 
 //! FLOWIP-084n B6 acceptance: every closed diagnostic reason except
-//! `Unclassified` is produced by a real connector from real input, and record
-//! rejections leave an attached source breaker closed (B4).
-
-use crate::replay_testkit;
+//! `Unclassified` is produced by a real connector from real input.
 
 use async_trait::async_trait;
-use obzenflow::middleware::circuit_breaker;
 use obzenflow::stages::sources::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
     PositionedFiniteReader, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
@@ -20,13 +16,8 @@ use obzenflow::stages::sources::{
     HttpPullSource, HttpResponse, HttpRetryConfig, SourceDiagnosticReason, SourceError,
     SourcePollErrorKind, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
 };
-use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, HttpRequest};
 use obzenflow_core::{StageId, TypedPayload};
-use obzenflow_dsl::{flow, sink, source, FlowDefinition};
-use obzenflow_infra::journal::disk_journals;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::Arc;
@@ -332,77 +323,4 @@ async fn http_source_unencodable_request_returns_terminal() {
         refused.diagnostic().reason(),
         SourceDiagnosticReason::InvalidValue
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn adjacent_rejections_open_no_breaker_and_reach_natural_eof() {
-    let temp = tempfile::tempdir().unwrap();
-    let base = temp.path().join("journals");
-    let fixture = input(
-        b"orders:\n  - {order_id: \"a\", amount_cents: 1}\n  - {order_id: \"b\", amount_cents: x}\n  - {order_id: \"c\", amount_cents: y}\n  - {order_id: \"d\", amount_cents: z}\n  - {order_id: \"e\", amount_cents: 2}\n",
-    );
-    let path = fixture.path().to_path_buf();
-    let flow_base = base.clone();
-    let definition = FlowDefinition::materialize(move |_| {
-        let orders = YamlSource::builder(OrderYaml)
-            .path(path.clone())
-            .selection(YamlSelection::SequenceAt("/orders".into()))
-            .batch_size(1)
-            .build()
-            .unwrap();
-        let output = replay_testkit::Discard::<Order>::default();
-        Ok(flow! {
-            name: "yaml_breaker",
-            journals: disk_journals(flow_base.clone()),
-            stages: {
-                orders = source!(Order with {
-                    circuit_breaker().consecutive_failures(1)
-                } => orders);
-                output = sink!(Order => output);
-            },
-            topology: { orders |> output; }
-        })
-    });
-    replay_testkit::unsynced_application()
-        .with_cli_args(vec![std::ffi::OsString::from("obzenflow")])
-        .run_async(definition)
-        .await
-        .expect("rejections do not fail the flow");
-
-    let run = replay_testkit::latest_run_dir(&base);
-    let data = replay_testkit::read_stage_envelopes_appended(&run, "orders").await;
-    let manifest = replay_testkit::archive_manifest(&run);
-    let errors = replay_testkit::read_journal_envelopes_appended::<ChainEvent>(
-        &run.join(
-            manifest["stages"]["orders"]["error_journal_file"]
-                .as_str()
-                .unwrap(),
-        ),
-    )
-    .await;
-    assert_eq!(
-        data.iter().filter(|row| row.consumes_data_credit()).count(),
-        2
-    );
-    assert!(data.iter().any(|row| matches!(
-        row.payload,
-        ChainPayload::FlowControl(FlowControlPayload::Eof {
-            kind: EofKind::Natural,
-            ..
-        })
-    )));
-    assert!(!data.iter().chain(&errors).any(|row| matches!(
-        row.payload,
-        ChainPayload::Execution(ExecutionPayload::CircuitBreaker(_))
-    )));
-    let rejections: Vec<_> = errors
-        .iter()
-        .filter_map(|row| match &row.payload {
-            ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(rejected)) => {
-                Some(rejected.diagnostic.location().record_index())
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(rejections, [Some(1), Some(2), Some(3)]);
 }

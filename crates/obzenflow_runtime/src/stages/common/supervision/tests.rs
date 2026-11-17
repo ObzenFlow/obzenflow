@@ -11,7 +11,7 @@ use super::flow_context_factory::make_flow_context;
 use crate::backpressure::{
     BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter, StallEpisode,
 };
-use crate::feed_plan::{FactVisibility, PayloadTypeDescriptor, StageOutputContract};
+use crate::feed_plan::{FactVisibility, OutcomeContract, PayloadTypeDescriptor};
 use crate::id_conversions::StageIdExt;
 use crate::messaging::upstream_subscription::EofOutcome;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -1090,8 +1090,8 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
     );
 }
 
-fn output_contract_for_event_type(event_type: &str) -> StageOutputContract {
-    StageOutputContract {
+fn output_contract_for_event_type(event_type: &str) -> OutcomeContract {
+    OutcomeContract {
         outputs: vec![PayloadTypeDescriptor {
             event_kind: Some(obzenflow_core::event::payloads::chain_payload::EventKind::Fact),
             type_hint: TypeHintInfo::exact("test::Declared"),
@@ -2279,7 +2279,7 @@ struct RecordedBacklogHandoff {
     pulse: BackpressureActivityPulse,
     stall: StallEpisode,
     pending_outputs: VecDeque<PendingOutput>,
-    output_contract: StageOutputContract,
+    output_contract: OutcomeContract,
 }
 
 impl RecordedBacklogHandoff {

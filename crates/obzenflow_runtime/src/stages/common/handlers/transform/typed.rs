@@ -55,7 +55,7 @@ impl<O> TypedTransformInvocation<O> {
     }
 }
 
-/// Pure typed transform surface whose returned carrier is the handler's
+/// Pure typed transform surface whose returned outcome is the handler's
 /// exhaustive output contract.
 #[diagnostic::on_unimplemented(
     message = "this transform handler does not witness its arrow contract",
@@ -82,7 +82,7 @@ pub trait TypedTransformHandler: Send + Sync {
     }
 }
 
-/// Adapter lowering a typed output carrier through the ordinary transform
+/// Adapter lowering a typed outcome through the ordinary transform
 /// pending-output path. It never commits directly.
 #[doc(hidden)]
 #[derive(Clone, Debug)]
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_lowers_carrier_fields_in_order_as_derived_events() {
+    fn adapter_lowers_outcome_in_order() {
         let upstream_writer_id = WriterId::from(StageId::new());
         let transform_writer_id = WriterId::from(StageId::new());
         let parent = ChainEventFactory::data_event(

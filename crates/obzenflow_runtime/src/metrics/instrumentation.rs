@@ -632,7 +632,7 @@ impl StageInstrumentation {
 
     /// Note a committed output record and increment the emitted counter.
     ///
-    /// Use this for data/delivery records that represent stage outputs. Do not
+    /// Use this for data/delivery records that represent a stage's outputs. Do not
     /// use it for observability-only records (e.g. metrics heartbeats).
     pub fn record_output_event(&self, record: &JournalRecord<ChainPayload>) {
         self.record_emitted(record);
@@ -741,7 +741,7 @@ impl StageInstrumentation {
     }
 
     /// The most-recent per-invocation processing duration. The output committer
-    /// reads this to stamp `processing_info.processing_time` on stage outputs
+    /// reads this to stamp `processing_info.processing_time` on a stage's outputs
     /// (FLOWIP-115f), replacing the deleted `TimingMiddleware` observer.
     pub fn last_processing_time(&self) -> Option<MetricsDuration> {
         self.last_processing_time_available

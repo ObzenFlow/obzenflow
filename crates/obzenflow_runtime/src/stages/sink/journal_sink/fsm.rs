@@ -12,7 +12,7 @@ use super::journalled_delivery_event;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectPortRegistry, StageConstants};
 use crate::execution::RuntimeExecution;
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::{DeliveredRecord, UpstreamSubscription};
@@ -633,7 +633,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     runtime_execution: ctx.runtime_execution.clone(),
                     effect_ports: ctx.effect_ports.clone(),
                     effect_declarations: ctx.effect_declarations.clone(),
-                    output_contract: StageOutputContract::empty(),
+                    output_contract: OutcomeContract::empty(),
                     backpressure_readers: ctx.backpressure_readers.values().cloned().collect(),
                     lineage: ctx.lineage_policy,
                     catch_up: None,

@@ -11,7 +11,7 @@ use crate::backpressure::{
 use crate::effects::{
     BindingAuthorityFault, BindingMismatchKind, EffectPortRegistry, LogicalEffectBindingName,
 };
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::id_conversions::StageIdExt;
 use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::control_strategies::JonestownSignalStrategy;
@@ -174,7 +174,7 @@ async fn build_cycle_entry_harness<
         instrumentation,
         upstream_subscription_factory,
         backpressure_writer: registry.writer(t),
-        output_contract: StageOutputContract::empty(),
+        output_contract: OutcomeContract::empty(),
         backpressure_readers,
         pending_outputs: std::collections::VecDeque::new(),
         pending_parent: None,
@@ -562,7 +562,7 @@ async fn build_transform_harness<
         instrumentation,
         upstream_subscription_factory,
         backpressure_writer: registry.writer(t),
-        output_contract: StageOutputContract::empty(),
+        output_contract: OutcomeContract::empty(),
         backpressure_readers,
         pending_outputs: std::collections::VecDeque::new(),
         pending_parent: None,

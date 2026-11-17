@@ -20,7 +20,7 @@ use obzenflow_core::{ChainEvent, ReaderGeneration, StageId, WriterId};
 use obzenflow_fsm::{FsmAction, FsmContext, FsmError, Transition};
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter, StallEpisode};
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::messaging::upstream_subscription::{
     ContractConfig, ContractsWiring, EofOutcome, ReaderFrontier, ReaderProgress,
 };
@@ -241,7 +241,7 @@ pub(crate) struct MergeResources {
 
     pub(crate) backpressure_writer: BackpressureWriter,
     pub(crate) backpressure_readers: HashMap<StageId, BackpressureReader>,
-    pub(crate) output_contract: StageOutputContract,
+    pub(crate) output_contract: OutcomeContract,
     pub(crate) pending: Option<PendingRow>,
     pub(crate) backpressure_pulse: BackpressureActivityPulse,
     pub(crate) backpressure_stall: StallEpisode,

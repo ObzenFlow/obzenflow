@@ -20,7 +20,7 @@ use super::fsm::{
 use super::supervisor::MergeSupervisor;
 use crate::backpressure::BackpressureWriter;
 use crate::execution::{RuntimeExecution, RuntimeMode};
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::messaging::upstream_subscription::ReaderFrontier;
 use crate::messaging::DeliveredRecord;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -67,7 +67,7 @@ impl Merge {
             held_producers: Vec::new(),
             backpressure_writer: BackpressureWriter::disabled(),
             backpressure_readers: HashMap::new(),
-            output_contract: StageOutputContract::empty(),
+            output_contract: OutcomeContract::empty(),
             pending: None,
             backpressure_pulse: BackpressureActivityPulse::new(),
             backpressure_stall: Default::default(),

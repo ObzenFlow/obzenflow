@@ -18,7 +18,7 @@ use super::handle::{MergeHandle, MergeHandleExt};
 use super::supervisor::MergeSupervisor;
 use crate::backpressure::BackpressureWriter;
 use crate::execution::{RuntimeExecution, RuntimeMode};
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::JonestownSignalStrategy;
@@ -74,7 +74,7 @@ fn fixture() -> Fixture {
         held_producers: vec![live_id],
         backpressure_writer: BackpressureWriter::disabled(),
         backpressure_readers: HashMap::new(),
-        output_contract: StageOutputContract::empty(),
+        output_contract: OutcomeContract::empty(),
         pending: None,
         backpressure_pulse: BackpressureActivityPulse::new(),
         backpressure_stall: Default::default(),

@@ -343,7 +343,7 @@ fn replayed(record: &RunRecord) -> bool {
 fn uses_inputs(record: &RunRecord) -> bool {
     matches!(
         record.kind,
-        RunRecordKind::StageOutput
+        RunRecordKind::Fact
             | RunRecordKind::CompositeData
             | RunRecordKind::Effect
             | RunRecordKind::Delivery

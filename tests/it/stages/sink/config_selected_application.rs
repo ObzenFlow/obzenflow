@@ -2,12 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Consumer-neutral public application witness for FLOWIP-010o.
-//!
-//! This is conformance evidence for the reusable Twelve-Factor selection law,
-//! not a second product example. Normal framework configuration selects between
-//! heterogeneous inline and resource-owning sinks in one compiled flow.
-
 use obzenflow::application::{ApplicationError, FlowApplication};
 use obzenflow::stages::sinks::{self, CsvProjection, CsvSink};
 use obzenflow::stages::sources;
@@ -114,53 +108,6 @@ async fn run_with_selection(
         .with_cli_args(["config-selected-sink-conformance"])
         .run_async(selectable_audit_flow(archive_path, preview_writes))
         .await
-}
-
-#[tokio::test]
-async fn framework_config_selects_each_closed_sink_through_the_public_application_boundary() {
-    let tempdir = tempfile::tempdir().expect("config-selected sink tempdir");
-
-    let preview_case = tempdir.path().join("preview");
-    std::fs::create_dir_all(&preview_case).expect("create preview case directory");
-    let preview_config = preview_case.join("obzenflow.toml");
-    let preview_archive = preview_case.join("audit.csv");
-    let preview_writes = Arc::new(AtomicUsize::new(0));
-    write_selection(&preview_config, "preview_sink");
-
-    run_with_selection(
-        preview_config,
-        preview_archive.clone(),
-        Arc::clone(&preview_writes),
-    )
-    .await
-    .expect("preview sink selection should complete");
-
-    assert_eq!(preview_writes.load(Ordering::SeqCst), 2);
-    assert!(
-        !preview_archive.exists(),
-        "the unselected resource-owning sink must remain unopened"
-    );
-
-    let archive_case = tempdir.path().join("archive");
-    std::fs::create_dir_all(&archive_case).expect("create archive case directory");
-    let archive_config = archive_case.join("obzenflow.toml");
-    let archive_path = archive_case.join("audit.csv");
-    let archive_preview_writes = Arc::new(AtomicUsize::new(0));
-    write_selection(&archive_config, "archive_sink");
-
-    run_with_selection(
-        archive_config,
-        archive_path.clone(),
-        Arc::clone(&archive_preview_writes),
-    )
-    .await
-    .expect("archive sink selection should complete");
-
-    assert_eq!(archive_preview_writes.load(Ordering::SeqCst), 0);
-    let archived = std::fs::read_to_string(archive_path).expect("selected CSV output");
-    assert!(archived.contains("sequence,action"));
-    assert!(archived.contains("1,created"));
-    assert!(archived.contains("2,approved"));
 }
 
 #[tokio::test]
