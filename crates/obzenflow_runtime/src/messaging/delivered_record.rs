@@ -96,6 +96,7 @@ mod tests {
     use obzenflow_core::id::CompositeId;
     use obzenflow_core::{JournalWriterId, StageId};
     use serde_json::json;
+    use std::slice;
 
     #[test]
     fn dispatch_enrichment_preserves_original_committed_evidence() {
@@ -117,11 +118,11 @@ mod tests {
         );
         delivered
             .authored_mut()
-            .try_extend_composite_activations(std::slice::from_ref(&activation))
+            .try_extend_composite_activations(slice::from_ref(&activation))
             .unwrap();
         assert_eq!(
             delivered.authored().composite_activations(),
-            std::slice::from_ref(&activation)
+            slice::from_ref(&activation)
         );
 
         let deferred = delivered.clone();
@@ -138,17 +139,17 @@ mod tests {
             CompositeActivationContext::new(CompositeId::new("second"), *rerouted.id(), "in", 8);
         rerouted
             .authored_mut()
-            .try_extend_composite_activations(std::slice::from_ref(&second))
+            .try_extend_composite_activations(slice::from_ref(&second))
             .unwrap();
         assert!(!Arc::ptr_eq(rerouted.view(), deferred.view()));
         assert!(Arc::ptr_eq(&rerouted.record, &deferred.record));
         assert_eq!(
             deferred.view().composite_activations(),
-            std::slice::from_ref(&activation)
+            slice::from_ref(&activation)
         );
         assert_eq!(
             delivered.composite_activations(),
-            std::slice::from_ref(&activation)
+            slice::from_ref(&activation)
         );
         assert_eq!(rerouted.composite_activations().len(), 2);
         assert!(rerouted.record().composite_activations().is_empty());

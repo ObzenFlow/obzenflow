@@ -39,6 +39,7 @@ use obzenflow_core::event::{ChainPayload, StageFatalCode, StageFatalReason};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope, StageId};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::task::Poll;
 
 fn direct_fatal(
@@ -103,7 +104,7 @@ pub(super) async fn start_if_eligible<
     let future_envelope = envelope.clone();
     let error_envelope = envelope.clone();
     let lineage = ctx.lineage_policy;
-    let error_flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let error_flow_context = Arc::clone(&ctx.flow_context);
     let event = envelope.authored();
     let event_id = event.id;
     let effect_context = EffectInvocationContext {

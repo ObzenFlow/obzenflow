@@ -35,6 +35,7 @@ use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::super::fsm::{PendingTransition, StatefulEvent, StatefulResources, StatefulState};
@@ -58,7 +59,7 @@ pub(super) async fn dispatch_accumulating<
         "stateful: Accumulating state - starting event loop iteration"
     );
 
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();
     }
@@ -609,7 +610,7 @@ pub(super) async fn dispatch_emitting<
     sup: &mut StatefulSupervisor<H>,
     ctx: &mut StatefulResources<H>,
 ) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
     // Generation None: emit is not a delivery, so the scope follows the
     // stage frontier (FLOWIP-120n).
     let observer_scope =

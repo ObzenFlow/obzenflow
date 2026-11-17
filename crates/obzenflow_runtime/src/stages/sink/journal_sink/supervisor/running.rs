@@ -44,6 +44,7 @@ use obzenflow_fsm::StateVariant;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::super::boundary::{
@@ -648,7 +649,7 @@ async fn journal_processing_failed<
     let writer_id = ctx
         .writer_id
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
     let event = processing_failure_record(
         writer_id,
         &flow_context,
@@ -1091,7 +1092,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             },
             _ => return Err("invalid sink observer state".into()),
         };
-        let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+        let flow_context = Arc::clone(&ctx.flow_context);
         run_sink_delivery_observers(
             &ctx.observers,
             ctx.flow_id,

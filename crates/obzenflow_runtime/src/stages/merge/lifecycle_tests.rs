@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::FutureExt;
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
@@ -24,6 +25,7 @@ use crate::stages::common::control_strategies::JonestownSignalStrategy;
 use crate::stages::common::stage_handle::FORCE_SHUTDOWN_MESSAGE;
 use crate::stages::common::stage_lifecycle::{LifecycleExit, StageMilestone};
 use crate::stages::common::supervision::catch_up::test_support::context;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::merges::MergeStrategyKind;
 use crate::stages::resources_builder::SubscriptionFactory;
 use crate::stages::source::finite::fsm::tests::TestJournal;
@@ -55,8 +57,6 @@ fn fixture() -> Fixture {
     let resources = MergeResources {
         stage_id,
         stage_name: "trades".to_string(),
-        flow_name: "flow".to_string(),
-        flow_id,
         strategy: MergeStrategyKind::ThenLive,
         writer_id: None,
         runtime_execution: execution.clone(),
@@ -80,6 +80,13 @@ fn fixture() -> Fixture {
         backpressure_stall: Default::default(),
         heartbeat: None,
         catch_up: context(stage_id, "trades", execution, None),
+        flow_context: Arc::new(make_flow_context(
+            "flow",
+            &flow_id.to_string(),
+            "trades",
+            stage_id,
+            StageType::Merge,
+        )),
     };
     let (sender, receiver, watcher) = ChannelBuilder::new().build(MergeState::Created);
     let supervisor = HandlerSupervisedWithExternalEvents::new(

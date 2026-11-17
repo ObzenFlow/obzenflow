@@ -36,6 +36,7 @@ use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::TransformSupervisor;
@@ -64,7 +65,7 @@ pub(super) async fn dispatch_running<
         "transform: Running state - starting event loop iteration"
     );
 
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
 
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();

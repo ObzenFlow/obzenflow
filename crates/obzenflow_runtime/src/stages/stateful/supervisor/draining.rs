@@ -34,6 +34,7 @@ use obzenflow_core::{StageId, WriterId};
 use obzenflow_fsm::StateVariant;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::messaging::{DeliveredRecord, PollResult};
@@ -105,7 +106,7 @@ pub(super) async fn dispatch_draining<
         heartbeat.state.mark_draining();
     }
 
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
     // FLOWIP-120r: per-event observer dispatch scope (distinct from the frozen
     // scope each pending output now carries through the drain).
     // Generation None: drain follows the stage frontier (FLOWIP-120n).
@@ -641,7 +642,7 @@ pub(super) async fn produce_final_output<
         heartbeat.state.mark_draining();
     }
 
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
     // FLOWIP-120r: per-event observer dispatch scope (distinct from the frozen
     // scope each pending output now carries through the drain).
     // Generation None: drain follows the stage frontier (FLOWIP-120n).
@@ -808,7 +809,7 @@ pub(super) async fn drain_final_output<
         heartbeat.state.mark_draining();
     }
 
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
     // Drain any pending stage outputs first (FLOWIP-086k).
     while let Some(pending) = ctx.pending_outputs.pop_front() {
         match drain_one_pending(DrainRequest {
@@ -879,6 +880,7 @@ mod tests {
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
     use obzenflow_core::event::provenance::causality_context::CausalInput;
+    use obzenflow_core::event::provenance::FlowContext;
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::event::{StageFatalCode, StageFatalReason};
@@ -1147,7 +1149,7 @@ mod tests {
             StageType::Stateful,
         ));
         let catch_up = CatchUpHandle::producing(
-            obzenflow_core::event::provenance::FlowContext::clone(&flow_context),
+            FlowContext::clone(&flow_context),
             data_journal.clone(),
             instrumentation.clone(),
             runtime_execution.clone(),

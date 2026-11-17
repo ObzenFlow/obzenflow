@@ -18,6 +18,7 @@ use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{ChainEvent, FlowId, StageId};
+use std::sync::Arc;
 
 /// A diagnostic failure in an observer, never a failure of the observed work.
 pub type ObserverError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -37,7 +38,7 @@ pub struct JoinDeliverySnapshot {
     side: JoinSide,
     delivered_source_stage_id: StageId,
     delivered_stage_input_position: StageInputPosition,
-    input: ChainEvent,
+    input: Arc<ChainEvent>,
     reference_high_water: VectorClock,
 }
 
@@ -53,7 +54,7 @@ impl JoinDeliverySnapshot {
             side,
             delivered_source_stage_id,
             delivered_stage_input_position,
-            input: input_envelope.authored(),
+            input: Arc::clone(input_envelope.view()),
             reference_high_water,
         }
     }

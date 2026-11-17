@@ -31,6 +31,7 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
+use std::sync::Arc;
 
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainEventFactory;
@@ -219,7 +220,7 @@ pub(super) async fn flush_pending_outputs<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinResources<H>,
 ) -> Result<FlushOutcome, Box<dyn std::error::Error + Send + Sync>> {
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
 
     while let Some(pending) = ctx.pending_outputs.pop_front() {
         match drain_one_pending(DrainRequest {
@@ -266,7 +267,7 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());
     }
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
     let occurrence = match (delivery, signal) {
         (Some(delivery), None) => JoinObserverOccurrence::Delivery(delivery),
         (None, Some(signal)) => JoinObserverOccurrence::Signal(signal),
@@ -287,7 +288,7 @@ pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());
     }
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
     let occurrence = match (delivery, signal) {
         (Some(delivery), None) => JoinObserverOccurrence::Delivery(delivery),
         (None, Some(signal)) => JoinObserverOccurrence::Signal(signal),

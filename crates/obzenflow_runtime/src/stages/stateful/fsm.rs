@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{
+    CurrentRunHistory, EffectDeclaration, EffectHistory, EffectPortRegistry, StageConstants,
+};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{
     ContractConfig, ContractsWiring, ReaderProgress, StageInputPosition,
@@ -609,7 +611,7 @@ pub struct StatefulResources<H: UnifiedStatefulHandler> {
 
     pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 
-    pub(crate) stage_constants: Option<Arc<crate::effects::StageConstants>>,
+    pub(crate) stage_constants: Option<Arc<StageConstants>>,
 
     pub(crate) flow_context: Arc<FlowContext>,
 }
@@ -745,7 +747,7 @@ impl<H: UnifiedStatefulHandler + Clone + Send + Sync + 'static> StatefulAction<H
                     })?
                     .stage_logic_version()
                     .to_string();
-                ctx.stage_constants = Some(Arc::new(crate::effects::StageConstants {
+                ctx.stage_constants = Some(Arc::new(StageConstants {
                     flow_id: ctx.flow_id,
                     stage_id: ctx.stage_id,
                     stage_key: ctx.stage_name.clone(),

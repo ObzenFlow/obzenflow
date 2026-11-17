@@ -19,6 +19,7 @@ use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_fsm::StateVariant;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::common::{self, FlushOutcome};
@@ -1213,7 +1214,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
         return Ok(());
     }
 
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
 
     // FLOWIP-120n: freeze the position-derived execution scope onto each
     // deferred output. The triggering side's delivered generation rides

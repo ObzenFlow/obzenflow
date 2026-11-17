@@ -10,8 +10,9 @@
 
 use super::journalled_delivery_event;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectPortRegistry};
+use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectPortRegistry, StageConstants};
 use crate::execution::RuntimeExecution;
+use crate::feed_plan::StageOutputContract;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::{DeliveredRecord, UpstreamSubscription};
@@ -484,7 +485,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
 
     pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 
-    pub(crate) stage_constants: Option<Arc<crate::effects::StageConstants>>,
+    pub(crate) stage_constants: Option<Arc<StageConstants>>,
 
     pub(crate) flow_context: Arc<FlowContext>,
 
@@ -616,7 +617,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     })?
                     .stage_logic_version()
                     .to_string();
-                ctx.stage_constants = Some(Arc::new(crate::effects::StageConstants {
+                ctx.stage_constants = Some(Arc::new(StageConstants {
                     flow_id: ctx.flow_id,
                     stage_id: ctx.stage_id,
                     stage_key: ctx.stage_name.clone(),
@@ -632,7 +633,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     runtime_execution: ctx.runtime_execution.clone(),
                     effect_ports: ctx.effect_ports.clone(),
                     effect_declarations: ctx.effect_declarations.clone(),
-                    output_contract: crate::feed_plan::StageOutputContract::empty(),
+                    output_contract: StageOutputContract::empty(),
                     backpressure_readers: ctx.backpressure_readers.values().cloned().collect(),
                     lineage: ctx.lineage_policy,
                     catch_up: None,
@@ -1263,12 +1264,14 @@ mod tests {
     use super::super::handle::{JournalSinkHandle, JournalSinkHandleExt};
     use crate::metrics::instrumentation::StageInstrumentation;
     use crate::stages::common::stage_lifecycle::{LifecycleExit, StageMilestone};
+    use crate::stages::common::supervision::flow_context_factory::make_flow_context;
     use crate::stages::resources_builder::SubscriptionFactory;
     use crate::supervised_base::{
         ChannelBuilder, HandleBuilder, HandlerSupervisedWithExternalEvents, SupervisorHandle,
         SupervisorTaskBuilder,
     };
     use futures::FutureExt;
+    use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::provenance::FlowContext;
     use obzenflow_core::event::ChainPayload;
     use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
@@ -1362,15 +1365,13 @@ mod tests {
             receipt_classification: None,
             failure_lifecycle_recorded: false,
             failure_causal_event_id: None,
-            flow_context: Arc::new(
-                crate::stages::common::supervision::flow_context_factory::make_flow_context(
-                    "projection_flow",
-                    &flow_id.to_string(),
-                    "audit_sink",
-                    stage_id,
-                    obzenflow_core::event::context::StageType::Sink,
-                ),
-            ),
+            flow_context: Arc::new(make_flow_context(
+                "projection_flow",
+                &flow_id.to_string(),
+                "audit_sink",
+                stage_id,
+                StageType::Sink,
+            )),
             stage_constants: None,
         };
         resources.instrumentation.bind_observations(

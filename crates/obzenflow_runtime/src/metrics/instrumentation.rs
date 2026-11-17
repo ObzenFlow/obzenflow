@@ -12,6 +12,7 @@ use crate::control_plane::{
     NoControlPlane, RateLimiterSnapshotter,
 };
 use crate::execution::RuntimeExecution;
+use crate::messaging::record_descriptor;
 use hdrhistogram::Histogram;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::journal_record::JournalRecord;
@@ -603,7 +604,7 @@ impl StageInstrumentation {
             Some(envelope.envelope.provenance.journal.vector_clock.clone());
         if let Some(record) = (envelope as &dyn Any).downcast_ref::<JournalRecord<ChainPayload>>() {
             if record.consumes_data_credit() {
-                let event_type = crate::messaging::record_descriptor(record);
+                let event_type = record_descriptor(record);
                 let mut counts = self.data_reader_seq_by_upstream_event_type.write().unwrap();
                 *counts.entry((upstream_stage, event_type)).or_insert(0) += 1;
             }
@@ -636,7 +637,7 @@ impl StageInstrumentation {
     pub fn record_output_event(&self, record: &JournalRecord<ChainPayload>) {
         self.record_emitted(record);
         if record.consumes_data_credit() {
-            let event_type = crate::messaging::record_descriptor(record);
+            let event_type = record_descriptor(record);
             let mut frontier = self.authored_data_frontier.write().unwrap();
             frontier.writer_seq = frontier.writer_seq.saturating_add(1);
             *frontier
@@ -1048,12 +1049,8 @@ mod tests {
             serde_json::json!({}),
         );
 
-        instrumentation.record_error_journal_output_event(
-            &obzenflow_core::event::JournalRecord::new(
-                obzenflow_core::JournalWriterId::new(),
-                event,
-            ),
-        );
+        instrumentation
+            .record_error_journal_output_event(&JournalRecord::new(JournalWriterId::new(), event));
 
         let snapshot = instrumentation.snapshot();
         assert_eq!(snapshot.accounting.events_emitted_total, 1);

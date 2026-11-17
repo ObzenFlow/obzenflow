@@ -31,6 +31,7 @@ use obzenflow_core::event::payloads::delivery_payload::{
 };
 use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope, WriterId};
+use std::sync::Arc;
 
 /// Dispatch provenance belongs to the input, not to the later write or
 /// lifecycle operation that happens to settle a buffered receipt.
@@ -63,7 +64,7 @@ pub(super) fn observe_committed_delivery<H: UnifiedSinkHandler>(
         return;
     };
     let input = parent.view();
-    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+    let flow_context = Arc::clone(&ctx.flow_context);
     let observation_context = SinkDeliverySuccessContext::new(
         ctx.flow_id,
         &flow_context,

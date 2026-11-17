@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::JoinPhaseFact;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -40,6 +41,7 @@ use crate::stages::common::supervision::catch_up::test_support::{
     caught_up_through, context, open_at, RecordingJournal,
 };
 use crate::stages::common::supervision::catch_up::{CatchUpAction, CatchUpState};
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::resources_builder::SubscriptionFactory;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::handler_supervised::SupervisorAction;
@@ -156,15 +158,13 @@ impl Join {
             recorded: None,
             recorded_order: None,
             catch_up: context(stage_id, "posted", execution, Some(journal.clone())),
-            flow_context: Arc::new(
-                crate::stages::common::supervision::flow_context_factory::make_flow_context(
-                    "flow",
-                    &flow_id.to_string(),
-                    "posted",
-                    stage_id,
-                    obzenflow_core::event::context::StageType::Join,
-                ),
-            ),
+            flow_context: Arc::new(make_flow_context(
+                "flow",
+                &flow_id.to_string(),
+                "posted",
+                stage_id,
+                StageType::Join,
+            )),
         };
         let supervisor = JoinSupervisor::<Handler> {
             name: "posted".to_string(),

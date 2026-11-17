@@ -15,6 +15,8 @@ use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedWithExternalEvents,
     SupervisorBuilder, SupervisorTaskBuilder,
 };
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
@@ -24,6 +26,7 @@ use super::fsm::{JoinContext, JoinPlan, JoinResources, JoinState, LiveReads};
 use super::handle::JoinHandle;
 use super::supervisor::JoinSupervisor;
 use crate::stages::common::supervision::catch_up::CatchUpContext;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 
 /// Error type for join builder
 #[derive(Debug, thiserror::Error)]
@@ -192,15 +195,13 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
         handler.install_lineage_policy(self.resources.lineage_policy);
         handler.install_writer_id(WriterId::from(self.config.stage_id));
         let handler_state = handler.initial_state();
-        let flow_context = Arc::new(
-            crate::stages::common::supervision::flow_context_factory::make_flow_context(
-                &self.config.flow_name,
-                &self.resources.flow_id.to_string(),
-                &self.config.stage_name,
-                self.config.stage_id,
-                obzenflow_core::event::context::StageType::Join,
-            ),
-        );
+        let flow_context = Arc::new(make_flow_context(
+            &self.config.flow_name,
+            &self.resources.flow_id.to_string(),
+            &self.config.stage_name,
+            self.config.stage_id,
+            StageType::Join,
+        ));
         let resources = JoinResources {
             handler: Some(Arc::new(handler)),
             handler_state,
@@ -252,7 +253,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             recorded,
             recorded_order: None,
             catch_up: CatchUpContext::producing(
-                obzenflow_core::event::provenance::FlowContext::clone(&flow_context),
+                FlowContext::clone(&flow_context),
                 self.resources.data_journal.clone(),
                 instrumentation.clone(),
                 self.resources.runtime_execution.clone(),

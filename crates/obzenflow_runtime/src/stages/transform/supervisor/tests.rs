@@ -139,15 +139,13 @@ async fn build_cycle_entry_harness<
         runtime_execution.clone(),
     );
     let flow_id = FlowId::new();
-    let flow_context = Arc::new(
-        crate::stages::common::supervision::flow_context_factory::make_flow_context(
-            "cycle_test_flow",
-            &flow_id.to_string(),
-            "t",
-            t,
-            obzenflow_core::event::context::StageType::Transform,
-        ),
-    );
+    let flow_context = Arc::new(make_flow_context(
+        "cycle_test_flow",
+        &flow_id.to_string(),
+        "t",
+        t,
+        StageType::Transform,
+    ));
     let resources = TransformResources {
         handler: Some(handler),
         stage_id: t,
@@ -529,15 +527,13 @@ async fn build_transform_harness<
         runtime_execution.clone(),
     );
     let flow_id = FlowId::new();
-    let flow_context = Arc::new(
-        crate::stages::common::supervision::flow_context_factory::make_flow_context(
-            "bp_test_flow",
-            &flow_id.to_string(),
-            "t",
-            t,
-            obzenflow_core::event::context::StageType::Transform,
-        ),
-    );
+    let flow_context = Arc::new(make_flow_context(
+        "bp_test_flow",
+        &flow_id.to_string(),
+        "t",
+        t,
+        StageType::Transform,
+    ));
     let resources = TransformResources {
         handler: Some(handler),
         stage_id: t,

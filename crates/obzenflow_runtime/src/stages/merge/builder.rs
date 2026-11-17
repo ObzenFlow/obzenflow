@@ -10,11 +10,15 @@ use crate::messaging::upstream_subscription::ReaderSelectionPolicy;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ProcessingContext, SignalGate};
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
+use crate::stages::common::supervision::catch_up::CatchUpContext;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedWithExternalEvents,
     SupervisorBuilder, SupervisorTaskBuilder,
 };
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 
@@ -127,11 +131,17 @@ impl SupervisorBuilder for MergeBuilder {
             }))
         };
 
+        let flow_context = Arc::new(make_flow_context(
+            &self.config.flow_name,
+            &self.resources.flow_id.to_string(),
+            &self.config.stage_name,
+            self.config.stage_id,
+            StageType::Merge,
+        ));
+
         let resources = MergeResources {
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
-            flow_name: self.config.flow_name.clone(),
-            flow_id: self.resources.flow_id,
             strategy: self.config.strategy,
             writer_id: None,
             runtime_execution: self.resources.runtime_execution.clone(),
@@ -153,18 +163,13 @@ impl SupervisorBuilder for MergeBuilder {
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
             backpressure_stall: Default::default(),
             heartbeat,
-            catch_up: crate::stages::common::supervision::catch_up::CatchUpContext::producing(
-                crate::stages::common::supervision::flow_context_factory::make_flow_context(
-                    &self.config.flow_name,
-                    &self.resources.flow_id.to_string(),
-                    &self.config.stage_name,
-                    self.config.stage_id,
-                    obzenflow_core::event::context::StageType::Merge,
-                ),
+            catch_up: CatchUpContext::producing(
+                FlowContext::clone(&flow_context),
                 self.resources.data_journal.clone(),
                 instrumentation.clone(),
                 self.resources.runtime_execution.clone(),
             ),
+            flow_context,
         };
 
         let context = MergeContext::new(resources);

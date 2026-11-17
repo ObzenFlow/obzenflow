@@ -5,7 +5,7 @@
 use super::boundary::PhysicalCallOutcome;
 use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
 use super::*;
-use crate::execution::UnrecordedEffect;
+use crate::execution::{ExecutionPosition, UnrecordedEffect};
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use obzenflow_core::event::payloads::effect_payload::{
     CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
@@ -438,7 +438,7 @@ impl EffectsCore {
     /// The refusal for a cursor without any recorded attempt, or `None` when
     /// this position performs it live (FLOWIP-134i B13).
     fn unrecorded_effect_error(&mut self, cursor: EffectCursor) -> Option<EffectError> {
-        let at = crate::execution::ExecutionPosition {
+        let at = ExecutionPosition {
             stage_id: self.ctx.stage.stage_id,
             position: self.ctx.input_seq,
             // The effect context carries no generation; the effect-miss
@@ -559,13 +559,15 @@ impl EffectsCore {
     }
 
     pub(crate) fn is_replaying(&self) -> bool {
-        let reconstructing = self.ctx.stage.runtime_execution.is_reconstructing(
-            crate::execution::ExecutionPosition {
-                stage_id: self.ctx.stage.stage_id,
-                position: self.ctx.input_seq,
-                generation: None,
-            },
-        );
+        let reconstructing =
+            self.ctx
+                .stage
+                .runtime_execution
+                .is_reconstructing(ExecutionPosition {
+                    stage_id: self.ctx.stage.stage_id,
+                    position: self.ctx.input_seq,
+                    generation: None,
+                });
         if !reconstructing {
             return false;
         }

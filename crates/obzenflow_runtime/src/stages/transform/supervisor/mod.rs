@@ -493,7 +493,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         if envelope.consumes_data_credit() {
             let checked = guard.check_data(envelope.authored_mut());
             if let Err(detail) = checked {
-                let flow_context = std::sync::Arc::clone(&ctx.flow_context);
+                let flow_context = Arc::clone(&ctx.flow_context);
                 let error_event =
                     ctx.instrumentation
                         .capture_accounting()
