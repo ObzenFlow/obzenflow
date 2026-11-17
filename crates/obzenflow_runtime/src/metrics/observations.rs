@@ -843,11 +843,14 @@ mod tests {
         let stage = StageId::new();
         let instrumentation = Arc::new(StageInstrumentation::new());
         instrumentation.bind_observations(scope.flow_id, stage.into(), &execution);
-        instrumentation.record_output_event(&ChainEventFactory::data_event(
-            stage.into(),
-            "business.fact",
-            std::num::NonZeroU32::MIN,
-            serde_json::Value::Null,
+        instrumentation.record_output_event(&obzenflow_core::event::JournalRecord::new(
+            obzenflow_core::JournalWriterId::new(),
+            ChainEventFactory::data_event(
+                stage.into(),
+                "business.fact",
+                std::num::NonZeroU32::MIN,
+                serde_json::Value::Null,
+            ),
         ));
         let before = instrumentation.snapshot();
         assert!(instrumentation

@@ -97,9 +97,15 @@ pub(crate) struct ReceiptSettlement {
 }
 
 impl ReceiptSettlement {
-    pub(crate) fn record(&mut self, receipt: &ChainEvent) -> Option<(SeqNo, EventId, VectorClock)> {
+    pub(crate) fn record(
+        &mut self,
+        receipt: &DeliveredRecord<ChainPayload>,
+    ) -> Option<(SeqNo, EventId, VectorClock)> {
+        if !self.receipt_aware {
+            return None;
+        }
         record_receipt(
-            receipt,
+            receipt.view(),
             &self.owner_label,
             self.receipt_aware,
             self.reader_stage,
@@ -218,7 +224,7 @@ pub(super) struct ReaderSlot<T: JournalEvent> {
 /// specially (tiebreak-only ordering, exhaustion at delivery) without
 /// re-deriving it on the delivery side.
 pub(super) struct HeldHead<T: JournalEvent> {
-    pub(super) envelope: Box<JournalRecord<T::Payload>>,
+    pub(super) envelope: Arc<JournalRecord<T::Payload>>,
     pub(super) is_authored_eof: bool,
     pub(super) is_drain: bool,
     /// The announced generation when this head is a catch-up watermark

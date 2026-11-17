@@ -1282,25 +1282,34 @@ pub(crate) mod tests {
             .writer_id
             .expect("source should have a writer id");
         ctx.instrumentation
-            .record_output_event(&ChainEventFactory::data_event(
-                source_writer_id,
-                "test.a",
-                std::num::NonZeroU32::MIN,
-                json!({}),
+            .record_output_event(&obzenflow_core::event::JournalRecord::new(
+                obzenflow_core::JournalWriterId::new(),
+                ChainEventFactory::data_event(
+                    source_writer_id,
+                    "test.a",
+                    std::num::NonZeroU32::MIN,
+                    json!({}),
+                ),
             ));
         ctx.instrumentation
-            .record_output_event(&ChainEventFactory::data_event(
-                source_writer_id,
-                "test.a",
-                std::num::NonZeroU32::MIN,
-                json!({}),
+            .record_output_event(&obzenflow_core::event::JournalRecord::new(
+                obzenflow_core::JournalWriterId::new(),
+                ChainEventFactory::data_event(
+                    source_writer_id,
+                    "test.a",
+                    std::num::NonZeroU32::MIN,
+                    json!({}),
+                ),
             ));
         ctx.instrumentation
-            .record_output_event(&ChainEventFactory::data_event(
-                source_writer_id,
-                "test.b",
-                std::num::NonZeroU32::MIN,
-                json!({}),
+            .record_output_event(&obzenflow_core::event::JournalRecord::new(
+                obzenflow_core::JournalWriterId::new(),
+                ChainEventFactory::data_event(
+                    source_writer_id,
+                    "test.b",
+                    std::num::NonZeroU32::MIN,
+                    json!({}),
+                ),
             ));
 
         // Send EOF with breaker closed

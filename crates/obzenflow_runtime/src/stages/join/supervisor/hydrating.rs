@@ -86,8 +86,7 @@ pub(super) async fn dispatch_hydrating<
                     }
                 }
                 payload if payload.consumes_data_credit() => {
-                    let event = envelope.authored();
-                    let event_id = event.id;
+                    let event_id = *envelope.id();
                     let reference_stage_id = ctx.reference_stage_id;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let upstream_stage = subscription.last_delivered_upstream_stage();
@@ -129,7 +128,7 @@ pub(super) async fn dispatch_hydrating<
                         .expect("handler available before cleanup")
                         .process_reference(
                             &mut ctx.handler_state,
-                            event.clone(),
+                            envelope.authored(),
                             reference_stage_id,
                             writer_id,
                             scope,

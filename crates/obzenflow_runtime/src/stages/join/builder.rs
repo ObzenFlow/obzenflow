@@ -192,6 +192,15 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
         handler.install_lineage_policy(self.resources.lineage_policy);
         handler.install_writer_id(WriterId::from(self.config.stage_id));
         let handler_state = handler.initial_state();
+        let flow_context = Arc::new(
+            crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                &self.config.flow_name,
+                &self.resources.flow_id.to_string(),
+                &self.config.stage_name,
+                self.config.stage_id,
+                obzenflow_core::event::context::StageType::Join,
+            ),
+        );
         let resources = JoinResources {
             handler: Some(Arc::new(handler)),
             handler_state,
@@ -243,17 +252,12 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             recorded,
             recorded_order: None,
             catch_up: CatchUpContext::producing(
-                crate::stages::common::supervision::flow_context_factory::make_flow_context(
-                    &self.config.flow_name,
-                    &self.resources.flow_id.to_string(),
-                    &self.config.stage_name,
-                    self.config.stage_id,
-                    obzenflow_core::event::context::StageType::Join,
-                ),
+                obzenflow_core::event::provenance::FlowContext::clone(&flow_context),
                 self.resources.data_journal.clone(),
                 instrumentation.clone(),
                 self.resources.runtime_execution.clone(),
             ),
+            flow_context,
         };
 
         let context = JoinContext::new(resources);

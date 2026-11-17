@@ -1823,32 +1823,37 @@ fn invocation_context_with_mode(
     let catch_up = stage_catch_up(stage_id, journal.clone(), runtime_execution.clone());
     let current_run_history = CurrentRunHistory::new(journal.clone());
     EffectInvocationContext {
-        flow_id: FlowId::new(),
-        stage_id,
-        stage_key: "effect_stage".to_string(),
-        writer_id: WriterId::from(stage_id),
+        stage: Arc::new(StageConstants {
+            flow_id: FlowId::new(),
+            stage_id,
+            stage_key: "effect_stage".to_string(),
+            writer_id: WriterId::from(stage_id),
+            stage_logic_version: "test-v1".to_string(),
+            data_journal: journal,
+            flow_context: None,
+            observers: None,
+            instrumentation: None,
+            heartbeat_state: None,
+            effect_history,
+            current_run_history,
+            runtime_execution,
+            effect_ports: fixtures().registry.merged_with(&effect_ports),
+            effect_declarations: fixture_declarations(),
+            output_contract: StageOutputContract::empty(),
+            backpressure_readers: Vec::new(),
+            lineage: LineagePolicy::default(),
+            catch_up: Some(catch_up),
+        }),
         input_seq: StageInputPosition(1),
-        lineage: LineagePolicy::default(),
-        stage_logic_version: "test-v1".to_string(),
-        data_journal: journal,
-        flow_context: None,
-        observers: None,
-
-        instrumentation: None,
-        heartbeat_state: None,
         parent: parent.into(),
-        effect_history,
-        current_run_history,
-        runtime_execution,
-        effect_ports: fixtures().registry.merged_with(&effect_ports),
-        effect_declarations: fixture_declarations(),
-        output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
-        backpressure_readers: Vec::new(),
         emit_enabled: false,
         effect_boundary: None,
-        catch_up: Some(catch_up),
     }
+}
+
+pub(super) fn stage_mut(context: &mut EffectInvocationContext) -> &mut StageConstants {
+    Arc::get_mut(&mut context.stage).expect("a test context holds its only stage handle")
 }
 
 fn stage_catch_up(
@@ -1871,12 +1876,13 @@ fn stage_catch_up(
 }
 
 fn set_execution(ctx: &mut EffectInvocationContext, execution: crate::execution::RuntimeExecution) {
-    ctx.catch_up = Some(stage_catch_up(
-        ctx.stage_id,
-        ctx.data_journal.clone(),
+    let stage = stage_mut(ctx);
+    stage.catch_up = Some(stage_catch_up(
+        stage.stage_id,
+        stage.data_journal.clone(),
         execution.clone(),
     ));
-    ctx.runtime_execution = execution;
+    stage.runtime_execution = execution;
 }
 
 fn transactional_invocation_context_with_mode(
@@ -1896,7 +1902,9 @@ fn transactional_invocation_context_with_mode(
         effect_runtime_mode,
         effect_ports.merged_with(&ledger_ports),
     );
-    context.effect_declarations.push(declaration);
+    stage_mut(&mut context)
+        .effect_declarations
+        .push(declaration);
     context
 }
 
@@ -1922,7 +1930,7 @@ fn zero_slot_named_invocation_context_with_mode(
         effect_runtime_mode,
         effect_ports,
     );
-    context
+    stage_mut(&mut context)
         .effect_declarations
         .push(EffectDeclaration::named(binding));
     context
@@ -1943,7 +1951,7 @@ fn named_affine_invocation_context_with_mode(
         effect_runtime_mode,
         effect_ports,
     );
-    context
+    stage_mut(&mut context)
         .effect_declarations
         .push(EffectDeclaration::named_at_least_once(binding));
     context
@@ -2236,7 +2244,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
     );
     let cursor = EffectCursor::new(
         "archived_flow",
-        in_doubt_ctx.stage_key.clone(),
+        in_doubt_ctx.stage.stage_key.clone(),
         in_doubt_ctx.input_seq.0,
         0_u32,
     );
@@ -2246,7 +2254,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
     };
     let descriptor = descriptor_for_effect(
         &affine,
-        in_doubt_ctx.stage_logic_version.clone(),
+        in_doubt_ctx.stage.stage_logic_version.clone(),
         AffineCountingEffect::EFFECT_TYPE,
         AffineCountingEffect::SCHEMA_VERSION,
         obzenflow_core::EffectBindingIdentity::Portless,
@@ -2262,11 +2270,11 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
         causal_input_id: parent.envelope.provenance.event.id,
     };
     let start = build_effect_attempt_started_event(
-        in_doubt_ctx.writer_id,
+        in_doubt_ctx.stage.writer_id,
         &in_doubt_ctx.parent,
         started,
         descriptor,
-        in_doubt_ctx.lineage,
+        in_doubt_ctx.stage.lineage,
     )
     .expect("Start event");
     let archived_start = EffectHistory::from_cursor_history_for_test(
@@ -2283,7 +2291,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
         },
     )
     .expect("archived in-doubt history is valid");
-    in_doubt_ctx.effect_history = Some(Arc::new(archived_start));
+    stage_mut(&mut in_doubt_ctx).effect_history = Some(Arc::new(archived_start));
     let mut in_doubt = EffectsCore::new(in_doubt_ctx);
     let in_doubt_error = in_doubt
         .preflight_next_effect_cursor_is_empty()
@@ -2433,7 +2441,7 @@ async fn assert_scope_matrix_hit(
     ctx.backpressure_writer =
         BackpressureWriter::disabled().with_direct_fact_admission(admission.clone());
     assert_eq!(
-        direct_fact_scope(&runtime_execution, ctx.stage_id),
+        direct_fact_scope(&runtime_execution, ctx.stage.stage_id),
         expected_scope
     );
 
@@ -2480,10 +2488,10 @@ async fn assert_scope_matrix_executable(
     ctx.backpressure_writer =
         BackpressureWriter::disabled().with_direct_fact_admission(admission.clone());
     assert_eq!(
-        direct_fact_scope(&runtime_execution, ctx.stage_id),
+        direct_fact_scope(&runtime_execution, ctx.stage.stage_id),
         obzenflow_core::MiddlewareExecutionScope::ResumeHandler
     );
-    let effect_stage = ctx.stage_id;
+    let effect_stage = ctx.stage.stage_id;
 
     let effect_calls = calls.clone();
     let mut effects = EffectsCore::new(ctx);
@@ -2851,7 +2859,7 @@ async fn emit_rejects_fact_type_outside_stage_output_contract() {
         None,
     );
     ctx.emit_enabled = true;
-    ctx.output_contract = output_contract_for::<FirstOutput>();
+    stage_mut(&mut ctx).output_contract = output_contract_for::<FirstOutput>();
     let mut effects = EffectsCore::new(ctx);
 
     let err = effects
@@ -2881,7 +2889,7 @@ async fn emit_commits_declared_fact_type_immediately() {
         None,
     );
     ctx.emit_enabled = true;
-    ctx.output_contract = output_contract_for::<FirstOutput>();
+    stage_mut(&mut ctx).output_contract = output_contract_for::<FirstOutput>();
     let mut effects = EffectsCore::new(ctx);
 
     effects
@@ -2924,7 +2932,7 @@ async fn typed_completion_reports_direct_facts_in_commit_order() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
     ctx.emit_enabled = true;
-    ctx.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut ctx).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<FirstOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
@@ -2961,7 +2969,7 @@ async fn typed_completion_counts_effect_outcome_facts() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
-    ctx.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut ctx).output_contract = output_contract_for::<CountingOutput>();
     let calls = Arc::new(AtomicUsize::new(0));
     let mut effects = Effects::<CountingOutput, Allowed<(CountingEffect, ())>>::new(ctx);
 
@@ -2996,7 +3004,7 @@ async fn typed_emit_remains_durable_when_handler_later_errors() {
         None,
     );
     ctx.emit_enabled = true;
-    ctx.output_contract = output_contract_for::<FirstOutput>();
+    stage_mut(&mut ctx).output_contract = output_contract_for::<FirstOutput>();
     let mut effects = Effects::<FirstOutput, Allowed<()>>::new(ctx);
 
     effects.emit(FirstOutput { value: 9 }).await.unwrap();
@@ -3027,7 +3035,7 @@ async fn effectful_stateful_folds_committed_facts_before_returning_decide_error(
         crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
-    effect_context.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut effect_context).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<FirstOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
@@ -3093,7 +3101,7 @@ async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged()
         crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
-    effect_context.output_contract = output_contract_for::<FirstOutput>();
+    stage_mut(&mut effect_context).output_contract = output_contract_for::<FirstOutput>();
 
     let mut adapter = EffectfulStatefulHandlerAdapter::new(
         SingleFactErrorStateful {
@@ -3167,7 +3175,7 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
         None,
     );
     repeatable_context.emit_enabled = true;
-    repeatable_context.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut repeatable_context).output_contract = output_contract_for::<CountingOutput>();
     let repeatable_calls = Arc::new(AtomicUsize::new(0));
     let (repeatable_boundary, repeatable_entries) = recording_entry_point_boundary();
     let mut repeatable = EffectfulStatefulHandlerAdapter::new(
@@ -3213,7 +3221,7 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
         &ledger,
     );
     transactional_context.emit_enabled = true;
-    transactional_context.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut transactional_context).output_contract = output_contract_for::<CountingOutput>();
     let (transactional_boundary, transactional_entries) = recording_entry_point_boundary();
     let mut transactional = EffectfulStatefulHandlerAdapter::new(
         TransactionalBoundaryStateful { ledger },
@@ -3247,7 +3255,7 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
         None,
     );
     affine_context.emit_enabled = true;
-    affine_context.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut affine_context).output_contract = output_contract_for::<CountingOutput>();
     let affine_calls = Arc::new(AtomicUsize::new(0));
     let (affine_boundary, affine_entries) = recording_entry_point_boundary();
     let mut affine = EffectfulStatefulHandlerAdapter::new(
@@ -3294,7 +3302,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
         None,
     );
     live_context.emit_enabled = true;
-    live_context.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut live_context).output_contract = output_contract_for::<CountingOutput>();
     let live_calls = Arc::new(AtomicUsize::new(0));
     let (live_boundary, live_entries) = recording_entry_point_boundary();
     let mut live = EffectfulStatefulHandlerAdapter::new(
@@ -3330,7 +3338,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
         EffectPortRegistry::new(),
     );
     catch_up_context.emit_enabled = true;
-    catch_up_context.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut catch_up_context).output_contract = output_contract_for::<CountingOutput>();
     let catch_up_calls = Arc::new(AtomicUsize::new(0));
     let (catch_up_boundary, catch_up_entries) = recording_entry_point_boundary();
     let mut catch_up = EffectfulStatefulHandlerAdapter::new(
@@ -3366,7 +3374,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
         EffectPortRegistry::new(),
     );
     miss_context.emit_enabled = true;
-    miss_context.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut miss_context).output_contract = output_contract_for::<CountingOutput>();
     let miss_calls = Arc::new(AtomicUsize::new(0));
     let (miss_boundary, miss_entries) = recording_entry_point_boundary();
     let mut miss = EffectfulStatefulHandlerAdapter::new(
@@ -3412,7 +3420,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
         None,
     );
     live_context.emit_enabled = true;
-    live_context.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut live_context).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<CountingOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
@@ -3472,7 +3480,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
         EffectPortRegistry::new(),
     );
     resume_context.emit_enabled = true;
-    resume_context.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut resume_context).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<CountingOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
@@ -3528,7 +3536,7 @@ async fn effectful_stateful_apply_error_takes_precedence() {
         crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
-    effect_context.output_contract = output_contract_for::<FirstOutput>();
+    stage_mut(&mut effect_context).output_contract = output_contract_for::<FirstOutput>();
 
     let mut adapter = EffectfulStatefulHandlerAdapter::new(
         SingleFactErrorStateful {
@@ -3581,7 +3589,7 @@ async fn effectful_stateful_second_apply_error_names_the_second_committed_fact()
         crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
-    effect_context.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut effect_context).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<FirstOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
@@ -3633,8 +3641,8 @@ async fn direct_emit_tracks_honest_over_window_physical_debt() {
         parent_envelope(WriterId::from(stage_id)),
         None,
     );
-    ctx.stage_id = stage_id;
-    ctx.writer_id = WriterId::from(stage_id);
+    stage_mut(&mut ctx).stage_id = stage_id;
+    stage_mut(&mut ctx).writer_id = WriterId::from(stage_id);
     ctx.backpressure_writer = registry.writer(stage_id);
     ctx.emit_enabled = true;
     let mut effects = EffectsCore::new(ctx);
@@ -3674,8 +3682,8 @@ async fn failed_direct_append_releases_tracked_position_without_writer_advance()
         downstream,
     });
     let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
-    ctx.stage_id = stage_id;
-    ctx.writer_id = WriterId::from(stage_id);
+    stage_mut(&mut ctx).stage_id = stage_id;
+    stage_mut(&mut ctx).writer_id = WriterId::from(stage_id);
     ctx.backpressure_writer = registry.writer(stage_id);
     ctx.emit_enabled = true;
     let mut effects = EffectsCore::new(ctx);
@@ -3705,7 +3713,7 @@ async fn emit_rejects_routed_fanout_beyond_contract_member_bound() {
         None,
     );
     ctx.emit_enabled = true;
-    ctx.output_contract = output_contract_for::<FirstOutput>();
+    stage_mut(&mut ctx).output_contract = output_contract_for::<FirstOutput>();
     let mut effects = EffectsCore::new(ctx);
 
     effects
@@ -3850,9 +3858,9 @@ async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut live_ctx = invocation_context(live_journal.clone(), parent.clone(), None);
     live_ctx.emit_enabled = true;
-    live_ctx.output_contract =
+    stage_mut(&mut live_ctx).output_contract =
         output_contract_for_many(vec![output_descriptor_for::<CountingOutput>()]);
-    let live_flow_id = live_ctx.flow_id.to_string();
+    let live_flow_id = live_ctx.stage.flow_id.to_string();
     let mut live = EffectsCore::new(live_ctx);
 
     let declaration = EffectDeclaration::named(&fixtures().recorded_reply);
@@ -3917,7 +3925,7 @@ async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut replay_ctx = invocation_context(replay_journal.clone(), parent, Some(history));
     replay_ctx.emit_enabled = true;
-    replay_ctx.output_contract =
+    stage_mut(&mut replay_ctx).output_contract =
         output_contract_for_many(vec![output_descriptor_for::<CountingOutput>()]);
     let mut replay = EffectsCore::new(replay_ctx);
 
@@ -3968,7 +3976,7 @@ async fn adapter_history_fixture(
     let parent = crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input);
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let live_ctx = invocation_context(journal.clone(), parent.clone(), None);
-    let recorded_flow_id = live_ctx.flow_id.to_string();
+    let recorded_flow_id = live_ctx.stage.flow_id.to_string();
     let mut live = EffectsCore::new(live_ctx);
     live.perform(CountingEffect {
         binding: bound(),
@@ -4065,7 +4073,7 @@ async fn run_consume_one_adapter(
 
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut context = invocation_context(journal, parent.clone(), Some(history));
-    context.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut context).output_contract = output_contract_for::<CountingOutput>();
     let adapter = EffectfulTransformHandlerAdapter::new(
         ConsumeOneEffectThenSettle { calls, settlement },
         Arc::new(AbortingBoundary),
@@ -4110,7 +4118,7 @@ async fn run_caught_binding_fault_adapter(
         registry,
         &declared_binding,
     );
-    context.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut context).output_contract = output_contract_for::<CountingOutput>();
     let calls = Arc::new(AtomicUsize::new(0));
     let adapter = EffectfulTransformHandlerAdapter::new(
         CatchBindingFaultThenSettle {
@@ -4187,7 +4195,7 @@ async fn run_stateful_binding_fault_adapter(
         registry,
         &declared_binding,
     );
-    context.output_contract = output_contract_for::<CountingOutput>();
+    stage_mut(&mut context).output_contract = output_contract_for::<CountingOutput>();
     let valid_calls = Arc::new(AtomicUsize::new(0));
     let mismatched_calls = Arc::new(AtomicUsize::new(0));
     let apply_calls = Arc::new(AtomicUsize::new(0));
@@ -4364,10 +4372,10 @@ async fn effect_and_capture_rows_reconstruct_identical_debt_without_waiting() {
     let parent = parent_envelope(WriterId::from(live_stage));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut live_ctx = invocation_context(live_journal.clone(), parent.clone(), None);
-    live_ctx.stage_id = live_stage;
-    live_ctx.writer_id = WriterId::from(live_stage);
+    stage_mut(&mut live_ctx).stage_id = live_stage;
+    stage_mut(&mut live_ctx).writer_id = WriterId::from(live_stage);
     live_ctx.backpressure_writer = live_registry.writer(live_stage);
-    let live_flow_id = live_ctx.flow_id.to_string();
+    let live_flow_id = live_ctx.stage.flow_id.to_string();
     let mut live = EffectsCore::new(live_ctx);
 
     live.perform(CountingEffect {
@@ -4409,8 +4417,8 @@ async fn effect_and_capture_rows_reconstruct_identical_debt_without_waiting() {
             mode,
             EffectPortRegistry::new(),
         );
-        ctx.stage_id = stage_id;
-        ctx.writer_id = WriterId::from(stage_id);
+        stage_mut(&mut ctx).stage_id = stage_id;
+        stage_mut(&mut ctx).writer_id = WriterId::from(stage_id);
         ctx.backpressure_writer = registry.writer(stage_id);
         let mut reconstructed = EffectsCore::new(ctx);
 
@@ -4450,11 +4458,11 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
     let parent = parent_envelope(WriterId::from(stage_id));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut live_ctx = invocation_context(live_journal.clone(), parent.clone(), None);
-    live_ctx.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut live_ctx).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<FirstOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
-    let live_flow_id = live_ctx.flow_id.to_string();
+    let live_flow_id = live_ctx.stage.flow_id.to_string();
     let mut live_effects = EffectsCore::new(live_ctx);
 
     let live_output = live_effects
@@ -4545,7 +4553,7 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
     );
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut replay_ctx = invocation_context(replay_journal.clone(), parent, Some(history));
-    replay_ctx.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut replay_ctx).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<FirstOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
@@ -4589,11 +4597,11 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut live_ctx = invocation_context(live_journal.clone(), parent.clone(), None);
     live_ctx.emit_enabled = true;
-    live_ctx.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut live_ctx).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<CountingOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
-    let live_flow_id = live_ctx.flow_id.to_string();
+    let live_flow_id = live_ctx.stage.flow_id.to_string();
     let mut live_effects = EffectsCore::new(live_ctx);
 
     let live_output = live_effects
@@ -4644,7 +4652,7 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut replay_ctx = invocation_context(replay_journal.clone(), parent, Some(history));
     replay_ctx.emit_enabled = true;
-    replay_ctx.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut replay_ctx).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<CountingOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
@@ -4700,7 +4708,7 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
         Some(replay_of_replay_history),
     );
     replay_of_replay_ctx.emit_enabled = true;
-    replay_of_replay_ctx.output_contract = output_contract_for_many(vec![
+    stage_mut(&mut replay_of_replay_ctx).output_contract = output_contract_for_many(vec![
         output_descriptor_for::<CountingOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
@@ -5007,7 +5015,7 @@ async fn perform_rejects_undeclared_effect_before_execution() {
         parent_envelope(WriterId::from(stage_id)),
         None,
     );
-    ctx.effect_declarations.clear();
+    stage_mut(&mut ctx).effect_declarations.clear();
     let mut effects = EffectsCore::new(ctx);
 
     let err = effects
@@ -5065,8 +5073,8 @@ async fn strict_replay_rejects_undeclared_effect_before_history_lookup() {
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
     );
-    ctx.stage_logic_version = "test-v2".to_string();
-    ctx.effect_declarations.clear();
+    stage_mut(&mut ctx).stage_logic_version = "test-v2".to_string();
+    stage_mut(&mut ctx).effect_declarations.clear();
     let mut replay = EffectsCore::new(ctx);
 
     let err = replay
@@ -5102,7 +5110,7 @@ async fn capture_is_exempt_from_declared_effect_list() {
         parent_envelope(WriterId::from(stage_id)),
         None,
     );
-    ctx.effect_declarations.clear();
+    stage_mut(&mut ctx).effect_declarations.clear();
     let mut effects = EffectsCore::new(ctx);
 
     let captured: u64 = effects
@@ -5585,7 +5593,7 @@ async fn transactional_effect_missing_port_fails_before_execute() {
         EffectRuntimeMode::Live,
         EffectPortRegistry::new(),
     );
-    context
+    stage_mut(&mut context)
         .effect_declarations
         .push(transactional_declaration(&ledger));
     let mut effects = EffectsCore::new(context);
@@ -5910,10 +5918,10 @@ async fn concurrent_fan_out_shares_resolver_verdict_but_not_fatal_latches() {
                 ports,
                 &binding,
             );
-            context.flow_id = shared_flow;
-            context.stage_id = shared_stage;
-            context.stage_key = "fan_out_consumer".to_string();
-            context.writer_id = WriterId::from(shared_stage);
+            stage_mut(&mut context).flow_id = shared_flow;
+            stage_mut(&mut context).stage_id = shared_stage;
+            stage_mut(&mut context).stage_key = "fan_out_consumer".to_string();
+            stage_mut(&mut context).writer_id = WriterId::from(shared_stage);
             context.input_seq = StageInputPosition(position);
             context
         };
@@ -6375,7 +6383,7 @@ async fn transform_adapter_reconstruction_refusal_supersedes_every_handler_settl
             let calls = Arc::new(AtomicUsize::new(0));
             let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
             let mut context = invocation_context(journal.clone(), parent.clone(), Some(history));
-            context.output_contract = output_contract_for::<CountingOutput>();
+            stage_mut(&mut context).output_contract = output_contract_for::<CountingOutput>();
             let adapter = EffectfulTransformHandlerAdapter::new(
                 CatchRefusalThenSettle {
                     label,
@@ -6771,11 +6779,12 @@ fn attach_effect_observer(
         ObserverBinding::effect("effect-outcome-proof", effect_type, observer)
             .expect("effect observer binding is valid"),
     );
-    ctx.observers = Some(
+    let stage = stage_mut(ctx);
+    stage.observers = Some(
         StageObserverBundle::compose_checked(
-            &ctx.stage_key,
+            &stage.stage_key,
             ObserverTarget::Transform {
-                effects: &ctx.effect_declarations,
+                effects: &stage.effect_declarations,
             },
             bindings,
         )
@@ -7796,7 +7805,8 @@ async fn sequential_prepared_calls_record_only_the_last_physical_outcome() {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut ctx = invocation_context(journal.clone(), parent_envelope(stage.into()), None);
         ctx.effect_boundary = Some(Arc::new(TwoPreparedCallsBoundary));
-        ctx.effect_declarations
+        stage_mut(&mut ctx)
+            .effect_declarations
             .push(EffectDeclaration::named(&fixtures().alternating_outcome));
 
         let result = EffectsCore::new(ctx)
@@ -7932,7 +7942,8 @@ async fn local_preparation_failure_is_distinct_and_capture_failure_has_no_termin
         let stage = StageId::new();
         let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
         let mut ctx = invocation_context(journal.clone(), parent_envelope(stage.into()), None);
-        ctx.effect_declarations
+        stage_mut(&mut ctx)
+            .effect_declarations
             .push(EffectDeclaration::named(&fixtures().preparation_failure));
         if guarded {
             ctx.effect_boundary = Some(Arc::new(CountingBoundary {
@@ -8699,37 +8710,38 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
                     ports: EffectPortRegistry| {
         let current_run_history = CurrentRunHistory::new(journal.clone());
         EffectInvocationContext {
-            flow_id,
-            stage_id,
-            stage_key: "effect_stage".to_string(),
-            writer_id,
+            stage: Arc::new(StageConstants {
+                flow_id,
+                stage_id,
+                stage_key: "effect_stage".to_string(),
+                writer_id,
+                stage_logic_version: "test-v1".to_string(),
+                data_journal: journal,
+                flow_context: None,
+                observers: None,
+                instrumentation: None,
+                heartbeat_state: None,
+                effect_history: None,
+                current_run_history,
+                runtime_execution: crate::execution::RuntimeExecution::new(
+                    crate::execution::RuntimeMode::Live,
+                    None,
+                ),
+                effect_ports: fixtures().registry.merged_with(&ports),
+                effect_declarations: vec![
+                    EffectDeclaration::named(&fixtures().counting),
+                    transactional.clone(),
+                ],
+                output_contract: StageOutputContract::empty(),
+                backpressure_readers: Vec::new(),
+                lineage: LineagePolicy::default(),
+                catch_up: None,
+            }),
             input_seq: StageInputPosition(1),
-            lineage: LineagePolicy::default(),
-            stage_logic_version: "test-v1".to_string(),
-            data_journal: journal,
-            flow_context: None,
-            observers: None,
-
-            instrumentation: None,
-            heartbeat_state: None,
             parent: parent.clone().into(),
-            effect_history: None,
-            current_run_history,
-            runtime_execution: crate::execution::RuntimeExecution::new(
-                crate::execution::RuntimeMode::Live,
-                None,
-            ),
-            effect_ports: fixtures().registry.merged_with(&ports),
-            effect_declarations: vec![
-                EffectDeclaration::named(&fixtures().counting),
-                transactional.clone(),
-            ],
-            output_contract: StageOutputContract::empty(),
             backpressure_writer: BackpressureWriter::disabled(),
-            backpressure_readers: Vec::new(),
             emit_enabled: false,
             effect_boundary: boundary,
-            catch_up: None,
         }
     };
 
@@ -8942,8 +8954,8 @@ async fn once_every_archived_action_is_reproduced_a_miss_crosses_and_runs_live()
     let history = EffectHistory::from_records("archived_flow", Vec::new()).expect("empty history");
     let calls = Arc::new(AtomicUsize::new(0));
     let ctx = resumed_context(journal.clone(), history, 1);
-    let stage_id = ctx.stage_id;
-    let execution = ctx.runtime_execution.clone();
+    let stage_id = ctx.stage.stage_id;
+    let execution = ctx.stage.runtime_execution.clone();
     let mut effects = EffectsCore::new(ctx);
     assert!(
         !effects.is_replaying(),
@@ -9099,7 +9111,11 @@ async fn reconstruction_reauthors_a_recorded_crossing_before_the_action_it_ancho
         EffectPortRegistry::new(),
     );
     ctx.emit_enabled = true;
-    let catch_up = ctx.catch_up.clone().expect("the stage's catch-up machine");
+    let catch_up = ctx
+        .stage
+        .catch_up
+        .clone()
+        .expect("the stage's catch-up machine");
     let mut effects = EffectsCore::new(ctx);
     effects
         .emit(CountingOutput { value: 1 })

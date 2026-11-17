@@ -171,6 +171,16 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
                 .map(super::receipts::SinkReceiptClassification::new),
             failure_lifecycle_recorded: false,
             failure_causal_event_id: None,
+            flow_context: Arc::new(
+                crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                    &self.config.flow_name,
+                    &self.resources.flow_id.to_string(),
+                    &self.config.stage_name,
+                    self.config.stage_id,
+                    obzenflow_core::event::context::StageType::Sink,
+                ),
+            ),
+            stage_constants: None,
         };
 
         let context = JournalSinkContext::new(resources);

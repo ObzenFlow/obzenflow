@@ -15,7 +15,6 @@ use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, DrainOutcome, DrainRequest, PendingOutput,
 };
 use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
-use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
     FrameworkObservabilityCommit,
@@ -27,7 +26,6 @@ use crate::stages::observer::dispatch::{
 };
 use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::{publication, EventLoopDirective};
-use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainPayload;
@@ -107,14 +105,7 @@ pub(super) async fn dispatch_draining<
         heartbeat.state.mark_draining();
     }
 
-    let flow_id = ctx.flow_id.to_string();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        sup.stage_id,
-        StageType::Stateful,
-    );
+    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
     // FLOWIP-120r: per-event observer dispatch scope (distinct from the frozen
     // scope each pending output now carries through the drain).
     // Generation None: drain follows the stage frontier (FLOWIP-120n).
@@ -187,12 +178,11 @@ pub(super) async fn dispatch_draining<
 
                 if envelope.consumes_data_credit() {
                     // Accumulate data events during draining, synchronously.
-                    let event = envelope.authored();
-                    let event_id = event.id;
+                    let event_id = *envelope.id();
                     let upstream_stage = subscription.last_delivered_upstream_stage();
 
                     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
-                        if event.consumes_data_credit() {
+                        if envelope.consumes_data_credit() {
                             heartbeat.state.record_data_read(upstream, event_id);
                         }
                     }
@@ -218,7 +208,7 @@ pub(super) async fn dispatch_draining<
                     let observer_ctx = StatefulObserverContext::new(
                         ctx.flow_id,
                         &flow_context,
-                        Some(&event),
+                        Some(envelope.view().as_ref()),
                         stage_input_position,
                     );
                     run_stateful_before_accumulate_observers(&ctx.observers, scope, &observer_ctx);
@@ -229,40 +219,20 @@ pub(super) async fn dispatch_draining<
                         .expect("handler available before cleanup"))
                     .clone();
                     let effect_context = stage_input_position.and_then(|input_seq| {
-                        ctx.writer_id.map(|writer_id| EffectInvocationContext {
-                            flow_id: ctx.flow_id,
-                            stage_id: ctx.stage_id,
-                            stage_key: ctx.stage_name.clone(),
-                            writer_id,
-                            input_seq,
-                            lineage: ctx.lineage_policy,
-                            stage_logic_version: handler.stage_logic_version().to_string(),
-                            data_journal: ctx.data_journal.clone(),
-                            flow_context: Some(flow_context.clone()),
-                            observers: Some(ctx.observers.clone()),
-
-                            instrumentation: Some(ctx.instrumentation.clone()),
-                            heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-                            parent: envelope.clone(),
-                            effect_history: ctx.effect_history.clone(),
-                            current_run_history: ctx.current_run_history.clone(),
-                            runtime_execution: ctx.runtime_execution.clone(),
-                            effect_ports: ctx.effect_ports.clone(),
-                            effect_declarations: ctx.effect_declarations.clone(),
-                            output_contract: ctx.output_contract.clone(),
-                            backpressure_writer: ctx.backpressure_writer.clone(),
-                            backpressure_readers: ctx
-                                .backpressure_readers
-                                .values()
-                                .cloned()
-                                .collect(),
-                            emit_enabled: true,
-                            effect_boundary: None,
-                            catch_up: Some(ctx.catch_up.clone()),
-                        })
+                        ctx.stage_constants
+                            .clone()
+                            .map(|stage| EffectInvocationContext {
+                                stage,
+                                input_seq,
+                                parent: envelope.clone(),
+                                backpressure_writer: ctx.backpressure_writer.clone(),
+                                emit_enabled: true,
+                                effect_boundary: None,
+                            })
                     });
+                    let event = envelope.authored();
                     let accumulate_result = handler
-                        .accumulate(&mut ctx.current_state, event.clone(), effect_context, scope)
+                        .accumulate(&mut ctx.current_state, event, effect_context, scope)
                         .await;
                     if let Err(err) = &accumulate_result {
                         if let Some(fatal) = err.as_fatal() {
@@ -302,7 +272,7 @@ pub(super) async fn dispatch_draining<
                         if let Some(directive) = super::contract_violation_directive::<H>(
                             err,
                             "draining",
-                            &event,
+                            envelope.view(),
                             &ctx.stage_name,
                         ) {
                             let duration = start.elapsed();
@@ -348,7 +318,7 @@ pub(super) async fn dispatch_draining<
                             processing_failed(
                                 WriterId::from(ctx.stage_id),
                                 &flow_context,
-                                &event,
+                                envelope.view(),
                                 &err,
                                 ctx.lineage_policy,
                             ),
@@ -397,7 +367,7 @@ pub(super) async fn dispatch_draining<
                                     .effect_history
                                     .as_ref()
                                     .map(|history| history.recorded_flow_id().as_str())
-                                    .unwrap_or(flow_id.as_str()),
+                                    .unwrap_or(flow_context.flow_id.as_str()),
                                 stage_key: &ctx.stage_name,
                                 input_seq: ctx.last_input_position.unwrap_or(
                                     crate::messaging::upstream_subscription::StageInputPosition(0),
@@ -416,7 +386,7 @@ pub(super) async fn dispatch_draining<
                                     let observer_ctx = StatefulObserverContext::new(
                                         ctx.flow_id,
                                         &flow_context,
-                                        Some(&event),
+                                        Some(envelope.view().as_ref()),
                                         stage_input_position,
                                     );
                                     run_stateful_after_emit_observers(
@@ -671,14 +641,7 @@ pub(super) async fn produce_final_output<
         heartbeat.state.mark_draining();
     }
 
-    let flow_id = ctx.flow_id.to_string();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Stateful,
-    );
+    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
     // FLOWIP-120r: per-event observer dispatch scope (distinct from the frozen
     // scope each pending output now carries through the drain).
     // Generation None: drain follows the stage frontier (FLOWIP-120n).
@@ -734,7 +697,7 @@ pub(super) async fn produce_final_output<
                     .effect_history
                     .as_ref()
                     .map(|history| history.recorded_flow_id().as_str())
-                    .unwrap_or(flow_id.as_str()),
+                    .unwrap_or(flow_context.flow_id.as_str()),
                 stage_key: &ctx.stage_name,
                 input_seq: ctx.last_input_position.unwrap_or(
                     crate::messaging::upstream_subscription::StageInputPosition(0),
@@ -757,11 +720,11 @@ pub(super) async fn produce_final_output<
                 let observer_parent = ctx
                     .last_consumed_envelope
                     .as_ref()
-                    .map(|envelope| envelope.authored());
+                    .map(|envelope| envelope.view().as_ref());
                 let observer_ctx = StatefulObserverContext::new(
                     ctx.flow_id,
                     &flow_context,
-                    observer_parent.as_ref(),
+                    observer_parent,
                     ctx.last_input_position,
                 );
                 run_stateful_after_emit_observers(
@@ -845,14 +808,7 @@ pub(super) async fn drain_final_output<
         heartbeat.state.mark_draining();
     }
 
-    let flow_id = ctx.flow_id.to_string();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Stateful,
-    );
+    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
     // Drain any pending stage outputs first (FLOWIP-086k).
     while let Some(pending) = ctx.pending_outputs.pop_front() {
         match drain_one_pending(DrainRequest {
@@ -912,6 +868,7 @@ mod tests {
         StatefulEmission, TypedStatefulHandler, TypedStatefulHandlerAdapter,
     };
     use crate::stages::common::supervision::catch_up::CatchUpHandle;
+    use crate::stages::common::supervision::flow_context_factory::make_flow_context;
     use crate::stages::observer::StageObserverBundle;
     use crate::stages::resources_builder::SubscriptionFactory;
     use crate::stages::stateful::fsm::{StatefulAction, StatefulContext};
@@ -919,6 +876,7 @@ mod tests {
     use crate::testing::causal_fixture;
     use async_trait::async_trait;
     use obzenflow_core::config::LineagePolicy;
+    use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
     use obzenflow_core::event::provenance::causality_context::CausalInput;
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -1181,14 +1139,15 @@ mod tests {
         let instrumentation = Arc::new(StageInstrumentation::new());
         let runtime_execution = RuntimeExecution::new(RuntimeMode::Live, None);
         let flow_id = FlowId::new();
+        let flow_context = Arc::new(make_flow_context(
+            "drain_flow",
+            &flow_id.to_string(),
+            "total",
+            stage,
+            StageType::Stateful,
+        ));
         let catch_up = CatchUpHandle::producing(
-            make_flow_context(
-                "drain_flow",
-                &flow_id.to_string(),
-                "total",
-                stage,
-                StageType::Stateful,
-            ),
+            obzenflow_core::event::provenance::FlowContext::clone(&flow_context),
             data_journal.clone(),
             instrumentation.clone(),
             runtime_execution.clone(),
@@ -1237,6 +1196,8 @@ mod tests {
             backpressure_stall: Default::default(),
             heartbeat: None,
             catch_up,
+            flow_context,
+            stage_constants: None,
         });
         StatefulAction::AllocateResources
             .execute(&mut context)

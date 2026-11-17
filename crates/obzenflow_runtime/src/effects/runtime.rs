@@ -439,13 +439,13 @@ impl EffectsCore {
     /// this position performs it live (FLOWIP-134i B13).
     fn unrecorded_effect_error(&mut self, cursor: EffectCursor) -> Option<EffectError> {
         let at = crate::execution::ExecutionPosition {
-            stage_id: self.ctx.stage_id,
+            stage_id: self.ctx.stage.stage_id,
             position: self.ctx.input_seq,
             // The effect context carries no generation; the effect-miss
             // decision is positional (FLOWIP-120n F7).
             generation: None,
         };
-        match self.ctx.runtime_execution.missing_outcome(at) {
+        match self.ctx.stage.runtime_execution.missing_outcome(at) {
             UnrecordedEffect::Execute => None,
             UnrecordedEffect::Corrupt => {
                 Some(self.refuse(ReconstructionRefusal::Unrecorded { cursor }))
@@ -471,7 +471,7 @@ impl EffectsCore {
     {
         let configured = self.project_bound_effect::<E>()?;
         let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
-        let recorded = match self.ctx.effect_history.as_ref() {
+        let recorded = match self.ctx.stage.effect_history.as_ref() {
             Some(history) if declaration.has_recorded_bindings() => history
                 .recorded_descriptor_hash(&self.next_cursor())
                 .cloned(),
@@ -490,7 +490,7 @@ impl EffectsCore {
             };
             let descriptor = descriptor_for_effect(
                 &effect,
-                self.ctx.stage_logic_version.clone(),
+                self.ctx.stage.stage_logic_version.clone(),
                 E::EFFECT_TYPE,
                 E::SCHEMA_VERSION,
                 binding.identity(),
@@ -555,24 +555,23 @@ impl EffectsCore {
 
     /// The stage key for completion diagnostics (FLOWIP-120z).
     pub(crate) fn stage_key(&self) -> &str {
-        &self.ctx.stage_key
+        &self.ctx.stage.stage_key
     }
 
     pub(crate) fn is_replaying(&self) -> bool {
-        let reconstructing =
-            self.ctx
-                .runtime_execution
-                .is_reconstructing(crate::execution::ExecutionPosition {
-                    stage_id: self.ctx.stage_id,
-                    position: self.ctx.input_seq,
-                    generation: None,
-                });
+        let reconstructing = self.ctx.stage.runtime_execution.is_reconstructing(
+            crate::execution::ExecutionPosition {
+                stage_id: self.ctx.stage.stage_id,
+                position: self.ctx.input_seq,
+                generation: None,
+            },
+        );
         if !reconstructing {
             return false;
         }
         match (
-            self.ctx.runtime_execution.resume_control(),
-            self.ctx.effect_history.as_ref(),
+            self.ctx.stage.runtime_execution.resume_control(),
+            self.ctx.stage.effect_history.as_ref(),
         ) {
             (Some(_), Some(history)) => history.actions().reproducing(&self.next_cursor()),
             (Some(_), None) => false,
@@ -582,16 +581,17 @@ impl EffectsCore {
 
     fn namespace(&self) -> String {
         self.ctx
+            .stage
             .effect_history
             .as_ref()
             .map(|history| history.recorded_flow_id().to_string())
-            .unwrap_or_else(|| self.ctx.flow_id.to_string())
+            .unwrap_or_else(|| self.ctx.stage.flow_id.to_string())
     }
 
     fn next_cursor(&self) -> EffectCursor {
         EffectCursor::new(
             self.namespace(),
-            self.ctx.stage_key.clone(),
+            self.ctx.stage.stage_key.clone(),
             self.ctx.input_seq.0,
             self.next_effect_ordinal,
         )
@@ -599,16 +599,16 @@ impl EffectsCore {
 
     fn take_action(&mut self, offered: super::RecordedAction) -> Result<ActionPlan, EffectError> {
         let actions = match (
-            self.ctx.runtime_execution.resume_control(),
-            self.ctx.effect_history.as_ref(),
+            self.ctx.stage.runtime_execution.resume_control(),
+            self.ctx.stage.effect_history.as_ref(),
         ) {
             (None, _) => return Ok(ActionPlan::Unchecked),
-            (Some(control), Some(history)) if !control.stage_is_live(self.ctx.stage_id) => {
+            (Some(control), Some(history)) if !control.stage_is_live(self.ctx.stage.stage_id) => {
                 history.actions().clone()
             }
             (Some(_), _) => return Ok(ActionPlan::Live),
         };
-        let stage = obzenflow_core::StageKey::from(self.ctx.stage_key.clone());
+        let stage = obzenflow_core::StageKey::from(self.ctx.stage.stage_key.clone());
         let departure = match actions.take(&offered.key()) {
             super::ActionCheck::Reproduce => return Ok(ActionPlan::Reproduce),
             super::ActionCheck::Live => return Ok(ActionPlan::Live),
@@ -626,7 +626,7 @@ impl EffectsCore {
     }
 
     async fn cross_before_live_action(&mut self) -> Result<(), EffectError> {
-        if self.ctx.runtime_execution.resume_control().is_none() {
+        if self.ctx.stage.runtime_execution.resume_control().is_none() {
             return Ok(());
         }
         self.send_catch_up(CatchUpEvent::RecordedActionsExhausted)
@@ -639,6 +639,7 @@ impl EffectsCore {
     ) -> Result<(), EffectError> {
         let Some(generation) = self
             .ctx
+            .stage
             .effect_history
             .as_ref()
             .and_then(|history| history.actions().crossing_before(&row))
@@ -650,10 +651,10 @@ impl EffectsCore {
     }
 
     async fn send_catch_up(&mut self, event: CatchUpEvent) -> Result<(), EffectError> {
-        let Some(catch_up) = self.ctx.catch_up.clone() else {
+        let Some(catch_up) = self.ctx.stage.catch_up.clone() else {
             return Err(EffectError::Execution(format!(
                 "stage '{}' has no catch-up machine to cross with",
-                self.ctx.stage_key
+                self.ctx.stage.stage_key
             )));
         };
         let disposition = crate::supervised_base::publication::with_snapshot(
@@ -687,14 +688,14 @@ impl EffectsCore {
                         archived.flow_context.flow_id.clone(),
                         archived.flow_context.stage_id,
                     ),
-                    None => match self.ctx.runtime_execution.archive_for_io() {
+                    None => match self.ctx.stage.runtime_execution.archive_for_io() {
                         Some(archive) => (
                             archive.archive_flow_id().to_string(),
                             archive
-                                .archived_stage_id(&self.ctx.stage_key)
-                                .unwrap_or(self.ctx.stage_id),
+                                .archived_stage_id(&self.ctx.stage.stage_key)
+                                .unwrap_or(self.ctx.stage.stage_id),
                         ),
-                        None => (self.ctx.flow_id.to_string(), self.ctx.stage_id),
+                        None => (self.ctx.stage.flow_id.to_string(), self.ctx.stage.stage_id),
                     },
                 };
                 event.replay_context = Some(obzenflow_core::event::provenance::ReplayContext {
@@ -741,8 +742,8 @@ impl EffectsCore {
         &mut self,
     ) -> Option<crate::stages::common::handler_error::StageFatal> {
         let resumed_next = match (
-            self.ctx.runtime_execution.resume_control(),
-            self.ctx.effect_history.as_ref(),
+            self.ctx.stage.runtime_execution.resume_control(),
+            self.ctx.stage.effect_history.as_ref(),
         ) {
             (Some(_), Some(history)) => history.actions().next_unreproduced(),
             _ => None,
@@ -759,7 +760,7 @@ impl EffectsCore {
             }
         };
         if let Some(expected) = resumed_next {
-            let stage = obzenflow_core::StageKey::from(self.ctx.stage_key.clone());
+            let stage = obzenflow_core::StageKey::from(self.ctx.stage.stage_key.clone());
             return Some(super::ActionDeparture::skipped(stage, None, expected).stage_fatal());
         }
         let effect_type = match &selection {
@@ -792,6 +793,7 @@ impl EffectsCore {
         let cursor = self.next_cursor();
         let archived = self
             .ctx
+            .stage
             .effect_history
             .as_ref()
             .map(|history| history.cursor_history(&cursor))
@@ -809,8 +811,9 @@ impl EffectsCore {
     ) -> Result<EffectCursorHistory, EffectError> {
         match self
             .ctx
+            .stage
             .current_run_history
-            .cursor_history(&self.ctx.data_journal, cursor)
+            .cursor_history(&self.ctx.stage.data_journal, cursor)
             .await
         {
             Ok(history) => Ok(history),
@@ -840,7 +843,7 @@ impl EffectsCore {
         effect_type: &str,
         outcome: crate::stages::observer::EffectObserverOutcome,
     ) {
-        let Some(observers) = self.ctx.observers.as_ref() else {
+        let Some(observers) = self.ctx.stage.observers.as_ref() else {
             return;
         };
         if observers.effect().is_none() {
@@ -848,9 +851,9 @@ impl EffectsCore {
         }
         crate::stages::observer::dispatch::run_effect_observers(
             observers,
-            self.ctx.flow_id,
-            self.ctx.stage_id,
-            &self.ctx.stage_key,
+            self.ctx.stage.flow_id,
+            self.ctx.stage.stage_id,
+            &self.ctx.stage.stage_key,
             MiddlewareExecutionScope::LiveEffectBoundary,
             effect_type,
             outcome,
@@ -924,7 +927,7 @@ impl EffectsCore {
             return Ok(());
         }
 
-        let limit = self.ctx.output_contract.routable_member_count();
+        let limit = self.ctx.stage.output_contract.routable_member_count();
         if limit == 0 {
             return Ok(());
         }
@@ -936,7 +939,7 @@ impl EffectsCore {
         if next > limit {
             return Err(EffectError::Execution(format!(
                 "stage `{}` authored {next} routed facts for one input, exceeding the FLOWIP-120b v1 bounded fanout limit of {limit} routable output contract members",
-                self.ctx.stage_key
+                self.ctx.stage.stage_key
             )));
         }
 
@@ -947,7 +950,7 @@ impl EffectsCore {
         facts
             .iter()
             .filter(|fact| {
-                is_routable_output_fact(Some(&self.ctx.output_contract), &fact.descriptor())
+                is_routable_output_fact(Some(&self.ctx.stage.output_contract), &fact.descriptor())
             })
             .count()
     }
@@ -993,32 +996,36 @@ impl EffectsCore {
         self.gate_authoring()?;
         if !self.ctx.emit_enabled {
             return Err(EffectError::EmitUnsupported {
-                stage_key: self.ctx.stage_key.clone(),
+                stage_key: self.ctx.stage.stage_key.clone(),
             });
         }
 
         let descriptor = fact.descriptor();
         let event_type = fact.event_type.as_str().to_string();
-        if !self.ctx.output_contract.is_empty()
-            && !self.ctx.output_contract.contains_descriptor(&descriptor)
+        if !self.ctx.stage.output_contract.is_empty()
+            && !self
+                .ctx
+                .stage
+                .output_contract
+                .contains_descriptor(&descriptor)
         {
             return Err(EffectError::UndeclaredOutput {
-                stage_key: self.ctx.stage_key.clone(),
+                stage_key: self.ctx.stage.stage_key.clone(),
                 event_type,
             });
         }
         let routed_fact =
-            is_routable_output_fact(Some(&self.ctx.output_contract), &descriptor) as usize;
+            is_routable_output_fact(Some(&self.ctx.stage.output_contract), &descriptor) as usize;
         self.ensure_routed_fanout_capacity(routed_fact)?;
 
         let recorded_flow_id = self.namespace();
         let output_ordinal = self.reserve_output_ordinal()?;
-        let parent = self.ctx.parent.authored();
+        let parent = self.ctx.parent.view().as_ref();
         let mut event = stamp_output_event(
-            fact.into_derived_event(self.ctx.writer_id, &parent, self.ctx.lineage),
-            &parent,
+            fact.into_derived_event(self.ctx.stage.writer_id, parent, self.ctx.stage.lineage),
+            parent,
             &recorded_flow_id,
-            &self.ctx.stage_key,
+            &self.ctx.stage.stage_key,
             self.ctx.input_seq,
             output_ordinal,
         );
@@ -1028,6 +1035,7 @@ impl EffectsCore {
         })?;
         let held = self
             .ctx
+            .stage
             .effect_history
             .as_ref()
             .is_some_and(|history| history.actions().holds_fact(&event.id));
@@ -1054,12 +1062,12 @@ impl EffectsCore {
         }
         let committed_event = event.clone();
         let committer = OutputCommitter {
-            data_journal: &self.ctx.data_journal,
-            flow_context: self.ctx.flow_context.as_ref(),
+            data_journal: &self.ctx.stage.data_journal,
+            flow_context: self.ctx.stage.flow_context.as_ref(),
 
-            instrumentation: self.ctx.instrumentation.as_ref(),
-            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
-            output_contract: Some(&self.ctx.output_contract),
+            instrumentation: self.ctx.stage.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.stage.heartbeat_state.as_ref(),
+            output_contract: Some(&self.ctx.stage.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
@@ -1145,7 +1153,7 @@ impl EffectsCore {
 
         let descriptor = descriptor_for_effect(
             &effect,
-            self.ctx.stage_logic_version.clone(),
+            self.ctx.stage.stage_logic_version.clone(),
             E::EFFECT_TYPE,
             E::SCHEMA_VERSION,
             declaration.binding_identity(),
@@ -1153,7 +1161,7 @@ impl EffectsCore {
         let descriptor_hash = descriptor_hash(&descriptor)?;
         let cursor = EffectCursor::new(
             self.namespace(),
-            self.ctx.stage_key.clone(),
+            self.ctx.stage.stage_key.clone(),
             self.ctx.input_seq.0,
             effect_ordinal,
         );
@@ -1163,6 +1171,7 @@ impl EffectsCore {
         ))?;
         let cursor_coordinator = self
             .ctx
+            .stage
             .runtime_execution
             .effect_cursor_coordinator()
             .clone();
@@ -1170,6 +1179,7 @@ impl EffectsCore {
         let mut prior_attempts = Vec::new();
         let archived = self
             .ctx
+            .stage
             .effect_history
             .as_ref()
             .map(|history| history.cursor_history(&cursor))
@@ -1300,7 +1310,12 @@ impl EffectsCore {
                         )),
                     )));
                 };
-                if !self.ctx.runtime_execution.in_doubt_authorizes_attempt() {
+                if !self
+                    .ctx
+                    .stage
+                    .runtime_execution
+                    .in_doubt_authorizes_attempt()
+                {
                     tracing::debug!(
                         ?cursor,
                         highest_started_attempt = highest_started_attempt.get(),
@@ -1428,9 +1443,9 @@ impl EffectsCore {
             let started = started.clone();
             let slot = outcome_slot.clone();
             let failure = failure_slot.clone();
-            let writer_id = self.ctx.writer_id;
-            let parent_event = self.ctx.parent.authored();
-            let lineage = self.ctx.lineage;
+            let writer_id = self.ctx.stage.writer_id;
+            let parent_event = Arc::clone(self.ctx.parent.view());
+            let lineage = self.ctx.stage.lineage;
             let base_context = binding_context;
             RepeatableEffectOperation::new_with_lifecycle(move |lifecycle| {
                 let started = started.clone();
@@ -1476,7 +1491,7 @@ impl EffectsCore {
         };
 
         let report = boundary
-            .around_repeatable_effect(&identity, &self.ctx.parent.authored(), operation)
+            .around_repeatable_effect(&identity, self.ctx.parent.view(), operation)
             .await;
         if let Some(error) = progress.failure() {
             return Err(error);
@@ -1633,11 +1648,11 @@ impl EffectsCore {
             causal_input_id,
         };
         let mut start_event = build_effect_attempt_started_event(
-            self.ctx.writer_id,
+            self.ctx.stage.writer_id,
             &self.ctx.parent,
             started,
             descriptor.clone(),
-            self.ctx.lineage,
+            self.ctx.stage.lineage,
         )?;
         self.mark_lineage(&mut start_event, RowLineage::Live);
 
@@ -1651,17 +1666,17 @@ impl EffectsCore {
             let start_committed = start_committed.clone();
             let mut start = Some(AffineStart {
                 event: start_event,
-                data_journal: self.ctx.data_journal.clone(),
-                flow_context: self.ctx.flow_context.clone(),
-                instrumentation: self.ctx.instrumentation.clone(),
-                heartbeat_state: self.ctx.heartbeat_state.clone(),
+                data_journal: self.ctx.stage.data_journal.clone(),
+                flow_context: self.ctx.stage.flow_context.clone(),
+                instrumentation: self.ctx.stage.instrumentation.clone(),
+                heartbeat_state: self.ctx.stage.heartbeat_state.clone(),
                 backpressure_writer: self.ctx.backpressure_writer.clone(),
                 parent: self.ctx.parent.clone(),
                 causal: self.causal.clone(),
             });
-            let writer_id = self.ctx.writer_id;
-            let parent_event = self.ctx.parent.authored();
-            let lineage = self.ctx.lineage;
+            let writer_id = self.ctx.stage.writer_id;
+            let parent_event = Arc::clone(self.ctx.parent.view());
+            let lineage = self.ctx.stage.lineage;
             let base_context = binding_context;
             let effect = Arc::new(effect);
             AffineEffectOperation::new_with_lifecycle(highest_prior_attempt, move |lifecycle| {
@@ -1714,7 +1729,7 @@ impl EffectsCore {
         let report = match self.ctx.effect_boundary.clone() {
             Some(boundary) => {
                 boundary
-                    .around_affine_effect(&identity, &self.ctx.parent.authored(), operation)
+                    .around_affine_effect(&identity, self.ctx.parent.view(), operation)
                     .await
             }
             None => operation.execute().await.into_report(Vec::new()),
@@ -1739,6 +1754,7 @@ impl EffectsCore {
                     // here would create a terminal without its required
                     // Start and turn a journal cut into a false known result.
                     self.ctx
+                        .stage
                         .runtime_execution
                         .effect_cursor_coordinator()
                         .poison(cursor);
@@ -1851,11 +1867,11 @@ impl EffectsCore {
             .as_ref()
             .map(|provenance| provenance.cursor.clone());
         let committer = OutputCommitter {
-            data_journal: &self.ctx.data_journal,
-            flow_context: self.ctx.flow_context.as_ref(),
+            data_journal: &self.ctx.stage.data_journal,
+            flow_context: self.ctx.stage.flow_context.as_ref(),
 
-            instrumentation: self.ctx.instrumentation.as_ref(),
-            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+            instrumentation: self.ctx.stage.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.stage.heartbeat_state.as_ref(),
             output_contract: None,
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
@@ -1873,6 +1889,7 @@ impl EffectsCore {
         {
             if let Some(cursor) = cursor {
                 self.ctx
+                    .stage
                     .runtime_execution
                     .effect_cursor_coordinator()
                     .poison(cursor);
@@ -1903,10 +1920,10 @@ impl EffectsCore {
                     origin: None,
                 };
                 let mut event = build_effect_record_event(
-                    self.ctx.writer_id,
+                    self.ctx.stage.writer_id,
                     &self.ctx.parent,
                     record,
-                    self.ctx.lineage,
+                    self.ctx.stage.lineage,
                 )?;
                 event
                     .effect_provenance
@@ -1936,9 +1953,9 @@ impl EffectsCore {
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
         let mut committed_events = build_domain_effect_success_facts(
             EffectFactAuthoring {
-                writer_id: self.ctx.writer_id,
+                writer_id: self.ctx.stage.writer_id,
                 parent: &self.ctx.parent,
-                lineage: self.ctx.lineage,
+                lineage: self.ctx.stage.lineage,
                 cursor: cursor.clone(),
                 descriptor_hash,
                 descriptor,
@@ -2015,10 +2032,10 @@ impl EffectsCore {
             origin: None,
         };
         let mut event = build_effect_record_event(
-            self.ctx.writer_id,
+            self.ctx.stage.writer_id,
             &self.ctx.parent,
             record,
-            self.ctx.lineage,
+            self.ctx.stage.lineage,
         )?;
         event
             .effect_provenance
@@ -2087,10 +2104,10 @@ impl EffectsCore {
             origin: None,
         };
         let record_event = build_effect_record_event(
-            self.ctx.writer_id,
+            self.ctx.stage.writer_id,
             &self.ctx.parent,
             record,
-            self.ctx.lineage,
+            self.ctx.stage.lineage,
         )?;
         let abandoned = EffectRecoveryAbandoned {
             cursor: cursor.clone(),
@@ -2104,11 +2121,11 @@ impl EffectsCore {
             retry: reason.retry,
         };
         let abandoned_event = build_effect_recovery_abandoned_event(
-            self.ctx.writer_id,
+            self.ctx.stage.writer_id,
             &self.ctx.parent,
             abandoned,
             descriptor,
-            self.ctx.lineage,
+            self.ctx.stage.lineage,
         )?;
         self.commit_terminal_group(
             &cursor,
@@ -2183,10 +2200,10 @@ impl EffectsCore {
             origin: None,
         };
         let mut event = build_effect_record_event(
-            self.ctx.writer_id,
+            self.ctx.stage.writer_id,
             &self.ctx.parent,
             record,
-            self.ctx.lineage,
+            self.ctx.stage.lineage,
         )?;
         self.stamp_idempotency_key(&mut event);
         self.commit_terminal_group(
@@ -2232,10 +2249,10 @@ impl EffectsCore {
             origin: None,
         };
         let mut event = build_effect_record_event(
-            self.ctx.writer_id,
+            self.ctx.stage.writer_id,
             &self.ctx.parent,
             record,
-            self.ctx.lineage,
+            self.ctx.stage.lineage,
         )?;
         self.stamp_idempotency_key(&mut event);
         self.commit_terminal_group(
@@ -2288,7 +2305,7 @@ impl EffectsCore {
                 CAPTURE_EFFECT_TYPE,
                 label,
                 1,
-                self.ctx.stage_logic_version.clone(),
+                self.ctx.stage.stage_logic_version.clone(),
                 hash_json_value(&Value::String(label.to_string()))?,
             ),
             RecordedValue::Settlement => EffectDescriptor::new(
@@ -2302,7 +2319,7 @@ impl EffectsCore {
         let descriptor_hash = descriptor_hash(&descriptor)?;
         let cursor = EffectCursor::new(
             self.namespace(),
-            self.ctx.stage_key.clone(),
+            self.ctx.stage.stage_key.clone(),
             self.ctx.input_seq.0,
             effect_ordinal,
         );
@@ -2315,7 +2332,7 @@ impl EffectsCore {
             },
         })?;
 
-        if let Some(history) = self.ctx.effect_history.clone() {
+        if let Some(history) = self.ctx.stage.effect_history.clone() {
             let held = history.find_group(&cursor);
             let selection = if held.is_some() {
                 EffectHistorySelection::Hit(Vec::new())
@@ -2429,19 +2446,19 @@ impl EffectsCore {
         };
         let commit: EffectCommitHandle<E::Outcome, E::OutcomeSemantics> =
             EffectCommitHandle::new(EffectCommitHandleParams {
-                writer_id: self.ctx.writer_id,
-                data_journal: self.ctx.data_journal.clone(),
-                flow_context: self.ctx.flow_context.clone(),
-                instrumentation: self.ctx.instrumentation.clone(),
-                heartbeat_state: self.ctx.heartbeat_state.clone(),
-                output_contract: self.ctx.output_contract.clone(),
+                writer_id: self.ctx.stage.writer_id,
+                data_journal: self.ctx.stage.data_journal.clone(),
+                flow_context: self.ctx.stage.flow_context.clone(),
+                instrumentation: self.ctx.stage.instrumentation.clone(),
+                heartbeat_state: self.ctx.stage.heartbeat_state.clone(),
+                output_contract: self.ctx.stage.output_contract.clone(),
                 backpressure_writer: self.ctx.backpressure_writer.clone(),
                 parent: self.ctx.parent.clone(),
                 cursor: cursor.clone(),
                 descriptor_hash: descriptor_hash.clone(),
                 descriptor: descriptor.clone(),
                 output_ordinal,
-                lineage: self.ctx.lineage,
+                lineage: self.ctx.stage.lineage,
                 defer_persistence: self.ctx.effect_boundary.is_some(),
             });
         let commit_observer = commit.clone();
@@ -2518,7 +2535,7 @@ impl EffectsCore {
         let expected_provenance = operation.provenance();
 
         let report = boundary
-            .around_single_use_effect(&identity, &self.ctx.parent.authored(), operation)
+            .around_single_use_effect(&identity, self.ctx.parent.view(), operation)
             .await;
         let (outcome, control_events) = match report.into_parts(&expected_provenance) {
             Ok(parts) => parts,
@@ -2824,6 +2841,7 @@ impl EffectsCore {
         let binding = declaration.binding();
         let views = self
             .ctx
+            .stage
             .effect_ports
             .scoped_view(binding.registration, binding.slots())
             .map_err(|error| {
@@ -2849,8 +2867,8 @@ impl EffectsCore {
         };
         let binding_context = EffectContext {
             is_replaying: false,
-            flow_id: self.ctx.flow_id,
-            stage_key: self.ctx.stage_key.clone(),
+            flow_id: self.ctx.stage.flow_id,
+            stage_key: self.ctx.stage.stage_key.clone(),
             input_seq: self.ctx.input_seq,
             ports: views.ports,
             transaction: None,
@@ -2864,21 +2882,22 @@ impl EffectsCore {
         committed_waits: u32,
     ) -> (InputHolds, EffectProgress) {
         let holds = InputHolds::new(
-            self.ctx.backpressure_readers.iter().cloned(),
-            self.ctx.heartbeat_state.clone(),
+            self.ctx.stage.backpressure_readers.iter().cloned(),
+            self.ctx.stage.heartbeat_state.clone(),
         );
         let progress = EffectProgress::journal(ProgressJournal {
             cursor: cursor.clone(),
             committed_waits: std::sync::atomic::AtomicU32::new(committed_waits),
-            data_journal: self.ctx.data_journal.clone(),
-            flow_context: self.ctx.flow_context.clone(),
-            instrumentation: self.ctx.instrumentation.clone(),
-            heartbeat_state: self.ctx.heartbeat_state.clone(),
+            data_journal: self.ctx.stage.data_journal.clone(),
+            flow_context: self.ctx.stage.flow_context.clone(),
+            instrumentation: self.ctx.stage.instrumentation.clone(),
+            heartbeat_state: self.ctx.stage.heartbeat_state.clone(),
             backpressure_writer: self.ctx.backpressure_writer.clone(),
             parent: self.ctx.parent.clone(),
             causal: self.causal.clone(),
             coordinator: self
                 .ctx
+                .stage
                 .runtime_execution
                 .effect_cursor_coordinator()
                 .clone(),
@@ -2892,17 +2911,17 @@ impl EffectsCore {
         lineage: RowLineage<'_>,
     ) -> Result<(), EffectError> {
         let mut event = build_effect_record_event(
-            self.ctx.writer_id,
+            self.ctx.stage.writer_id,
             &self.ctx.parent,
             record,
-            self.ctx.lineage,
+            self.ctx.stage.lineage,
         )?;
         self.stamp_idempotency_key(&mut event);
         self.mark_lineage(&mut event, lineage);
         crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
             append_effect_record(
-                &self.ctx.data_journal,
+                &self.ctx.stage.data_journal,
                 event,
                 &self.ctx.parent,
                 &self.ctx.backpressure_writer,
@@ -2979,10 +2998,10 @@ impl EffectsCore {
                     origin: None,
                 };
                 let mut event = build_effect_record_event(
-                    self.ctx.writer_id,
+                    self.ctx.stage.writer_id,
                     &self.ctx.parent,
                     record,
-                    self.ctx.lineage,
+                    self.ctx.stage.lineage,
                 )?;
                 self.stamp_idempotency_key(&mut event);
                 self.commit_terminal_group(
@@ -3019,9 +3038,9 @@ impl EffectsCore {
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
         let mut events = build_domain_effect_success_facts(
             EffectFactAuthoring {
-                writer_id: self.ctx.writer_id,
+                writer_id: self.ctx.stage.writer_id,
                 parent: &self.ctx.parent,
-                lineage: self.ctx.lineage,
+                lineage: self.ctx.stage.lineage,
                 cursor,
                 descriptor_hash,
                 descriptor,
@@ -3038,11 +3057,11 @@ impl EffectsCore {
             self.causal.clone(),
             append_domain_effect_success_facts(
                 &OutputCommitter {
-                    data_journal: &self.ctx.data_journal,
-                    flow_context: self.ctx.flow_context.as_ref(),
-                    instrumentation: self.ctx.instrumentation.as_ref(),
-                    heartbeat_state: self.ctx.heartbeat_state.as_ref(),
-                    output_contract: Some(&self.ctx.output_contract),
+                    data_journal: &self.ctx.stage.data_journal,
+                    flow_context: self.ctx.stage.flow_context.as_ref(),
+                    instrumentation: self.ctx.stage.instrumentation.as_ref(),
+                    heartbeat_state: self.ctx.stage.heartbeat_state.as_ref(),
+                    output_contract: Some(&self.ctx.stage.output_contract),
                     backpressure_writer: Some(&self.ctx.backpressure_writer),
                     observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
                 },
@@ -3078,9 +3097,9 @@ impl EffectsCore {
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
         let mut committed_events = build_domain_effect_success_facts(
             EffectFactAuthoring {
-                writer_id: self.ctx.writer_id,
+                writer_id: self.ctx.stage.writer_id,
                 parent: &self.ctx.parent,
-                lineage: self.ctx.lineage,
+                lineage: self.ctx.stage.lineage,
                 cursor: cursor.clone(),
                 descriptor_hash,
                 descriptor,
@@ -3135,12 +3154,12 @@ impl EffectsCore {
         }
         let group_id = effect_outcome_group_id(cursor);
         let committer = OutputCommitter {
-            data_journal: &self.ctx.data_journal,
-            flow_context: self.ctx.flow_context.as_ref(),
+            data_journal: &self.ctx.stage.data_journal,
+            flow_context: self.ctx.stage.flow_context.as_ref(),
 
-            instrumentation: self.ctx.instrumentation.as_ref(),
-            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
-            output_contract: Some(&self.ctx.output_contract),
+            instrumentation: self.ctx.stage.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.stage.heartbeat_state.as_ref(),
+            output_contract: Some(&self.ctx.stage.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
@@ -3151,6 +3170,7 @@ impl EffectsCore {
         .await
         {
             self.ctx
+                .stage
                 .runtime_execution
                 .effect_cursor_coordinator()
                 .poison(cursor.clone());
@@ -3188,11 +3208,11 @@ impl EffectsCore {
             .collect();
         let group_id = effect_escape_controls_group_id(cursor, attempt);
         let committer = OutputCommitter {
-            data_journal: &self.ctx.data_journal,
-            flow_context: self.ctx.flow_context.as_ref(),
+            data_journal: &self.ctx.stage.data_journal,
+            flow_context: self.ctx.stage.flow_context.as_ref(),
 
-            instrumentation: self.ctx.instrumentation.as_ref(),
-            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+            instrumentation: self.ctx.stage.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.stage.heartbeat_state.as_ref(),
             output_contract: None,
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope,
@@ -3204,6 +3224,7 @@ impl EffectsCore {
         .await
         {
             self.ctx
+                .stage
                 .runtime_execution
                 .effect_cursor_coordinator()
                 .poison(cursor.clone());
@@ -3239,10 +3260,10 @@ impl EffectsCore {
             .collect();
         let group_id = effect_recovery_progress_group_id(cursor, wait);
         let committer = OutputCommitter {
-            data_journal: &self.ctx.data_journal,
-            flow_context: self.ctx.flow_context.as_ref(),
-            instrumentation: self.ctx.instrumentation.as_ref(),
-            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+            data_journal: &self.ctx.stage.data_journal,
+            flow_context: self.ctx.stage.flow_context.as_ref(),
+            instrumentation: self.ctx.stage.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.stage.heartbeat_state.as_ref(),
             output_contract: None,
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope: MiddlewareExecutionScope::StrictReplayHandler,
@@ -3254,6 +3275,7 @@ impl EffectsCore {
         .await
         {
             self.ctx
+                .stage
                 .runtime_execution
                 .effect_cursor_coordinator()
                 .poison(cursor.clone());
@@ -3270,11 +3292,11 @@ impl EffectsCore {
     ) -> Result<(), EffectError> {
         for started in &history.attempts {
             let mut event = build_effect_attempt_started_event(
-                self.ctx.writer_id,
+                self.ctx.stage.writer_id,
                 &self.ctx.parent,
                 started.clone(),
                 descriptor.clone(),
-                self.ctx.lineage,
+                self.ctx.stage.lineage,
             )?;
             let archived = self.history_shape(
                 history.attempt_events.get(&started.attempt).ok_or_else(|| {
@@ -3356,9 +3378,9 @@ impl EffectsCore {
                 let output_ordinal = self.reserve_output_ordinals(facts.len())?;
                 let mut events = build_domain_effect_success_facts(
                     EffectFactAuthoring {
-                        writer_id: self.ctx.writer_id,
+                        writer_id: self.ctx.stage.writer_id,
                         parent: &self.ctx.parent,
-                        lineage: self.ctx.lineage,
+                        lineage: self.ctx.stage.lineage,
                         cursor: cursor.clone(),
                         descriptor_hash,
                         descriptor: descriptor.clone(),
@@ -3392,10 +3414,10 @@ impl EffectsCore {
             EffectRecordMaterialization::FrameworkRecords(records) => {
                 for record in records {
                     let mut event = build_effect_record_event(
-                        self.ctx.writer_id,
+                        self.ctx.stage.writer_id,
                         &self.ctx.parent,
                         record,
-                        self.ctx.lineage,
+                        self.ctx.stage.lineage,
                     )?;
                     event
                         .effect_provenance
@@ -3419,11 +3441,11 @@ impl EffectsCore {
 
         if let Some(abandoned) = history.abandonment.clone() {
             let mut event = build_effect_recovery_abandoned_event(
-                self.ctx.writer_id,
+                self.ctx.stage.writer_id,
                 &self.ctx.parent,
                 abandoned,
                 descriptor,
-                self.ctx.lineage,
+                self.ctx.stage.lineage,
             )?;
             self.history_shape(restore_archived_terminal_identity(&mut event, history))?;
             entries.push(AtomicCommitEntry {

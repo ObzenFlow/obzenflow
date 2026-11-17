@@ -23,10 +23,8 @@ pub mod supervisor;
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::DeliveredRecord;
 use crate::stages::common::handlers::UnifiedSinkHandler;
-use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::dispatch::run_sink_delivered_observers;
 use crate::stages::observer::SinkDeliverySuccessContext;
-use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{
     DeliveryOutcome, DeliveryPayload, DeliveryResult, DeliverySubject, SinkAuditPayload,
     SinkLifecycleOperation,
@@ -64,18 +62,12 @@ pub(super) fn observe_committed_delivery<H: UnifiedSinkHandler>(
     else {
         return;
     };
-    let input = parent.authored();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &ctx.flow_id.to_string(),
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Sink,
-    );
+    let input = parent.view();
+    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
     let observation_context = SinkDeliverySuccessContext::new(
         ctx.flow_id,
         &flow_context,
-        &input,
+        input,
         observation.position,
         receipt,
     );

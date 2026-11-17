@@ -10,9 +10,8 @@ use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, DrainOutcome, DrainRequest, PendingOutput,
 };
 use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
-use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::{publication, EventLoopDirective};
-use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::AppendOptions;
@@ -189,8 +188,7 @@ async fn handle_reference_envelope<
             }
         }
         payload if payload.consumes_data_credit() => {
-            let event = envelope.authored();
-            let event_id = event.id;
+            let event_id = *envelope.id();
             let source_id = ctx.reference_stage_id;
             let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             let scope = ctx.runtime_execution.dispatch_scope(
@@ -228,7 +226,7 @@ async fn handle_reference_envelope<
                 .expect("handler available before cleanup")
                 .process_reference(
                     &mut ctx.handler_state,
-                    event.clone(),
+                    envelope.authored(),
                     source_id,
                     writer_id,
                     scope,
@@ -412,8 +410,7 @@ async fn handle_stream_envelope<
                 .last_delivered_upstream_stage()
                 .ok_or("No delivered upstream recorded for stream event")?;
             let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
-            let event = envelope.authored();
-            let event_id = event.id;
+            let event_id = *envelope.id();
             let scope = ctx.runtime_execution.dispatch_scope(
                 ctx.stage_id,
                 subscription.last_delivered_stage_input_position(),
@@ -452,7 +449,7 @@ async fn handle_stream_envelope<
                 .expect("handler available before cleanup")
                 .process_stream(
                     &mut ctx.handler_state,
-                    event.clone(),
+                    envelope.authored(),
                     source_id,
                     writer_id,
                     scope,
@@ -521,14 +518,8 @@ async fn handle_stream_envelope<
                     let mut error_event = error_row_in_scope(
                         processing_failed(
                             WriterId::from(ctx.stage_id),
-                            &make_flow_context(
-                                &ctx.flow_name,
-                                &ctx.flow_id.to_string(),
-                                &ctx.stage_name,
-                                ctx.stage_id,
-                                StageType::Join,
-                            ),
-                            &envelope.authored(),
+                            &ctx.flow_context,
+                            envelope.view(),
                             &err,
                             ctx.lineage_policy,
                         ),
@@ -913,20 +904,13 @@ async fn append_join_selection<H: UnifiedJoinHandler>(
     input_delivered_count: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
-    let flow_id = ctx.flow_id.to_string();
     let event = ChainEventFactory::input_selected_event(
         writer_id,
         input,
         delivered_count,
         input_delivered_count,
     )
-    .with_flow_context(make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Join,
-    ));
+    .with_flow_context(FlowContext::clone(&ctx.flow_context));
     publication::append(&ctx.data_journal, event, Default::default()).await?;
     Ok(())
 }
@@ -1229,14 +1213,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
         return Ok(());
     }
 
-    let flow_id = ctx.flow_id.to_string();
-    let flow_context = make_flow_context(
-        &ctx.flow_name,
-        &flow_id,
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Join,
-    );
+    let flow_context = std::sync::Arc::clone(&ctx.flow_context);
 
     // FLOWIP-120n: freeze the position-derived execution scope onto each
     // deferred output. The triggering side's delivered generation rides

@@ -70,16 +70,18 @@ pub(super) async fn start_if_eligible<
     let input_position = input_position.ok_or_else(|| {
         "generated direct-fact input has no deterministic stage input position".to_string()
     })?;
-    let writer_id = ctx
-        .writer_id
+    let stage = ctx
+        .stage_constants
+        .clone()
         .ok_or_else(|| "generated direct-fact input has no stage writer id".to_string())?;
+    let writer_id = stage.writer_id;
 
     run_before_handler_observers(
         &ctx.observers,
         ctx.flow_id,
         flow_context,
         scope,
-        &envelope.authored(),
+        envelope.view(),
         input_position,
     );
 
@@ -101,35 +103,16 @@ pub(super) async fn start_if_eligible<
     let future_envelope = envelope.clone();
     let error_envelope = envelope.clone();
     let lineage = ctx.lineage_policy;
-    let error_flow_context = flow_context.clone();
+    let error_flow_context = std::sync::Arc::clone(&ctx.flow_context);
     let event = envelope.authored();
     let event_id = event.id;
     let effect_context = EffectInvocationContext {
-        flow_id: ctx.flow_id,
-        stage_id: ctx.stage_id,
-        stage_key: ctx.stage_name.clone(),
-        writer_id,
+        stage,
         input_seq: input_position,
-        lineage: ctx.lineage_policy,
-        stage_logic_version: handler.stage_logic_version().to_string(),
-        data_journal: ctx.data_journal.clone(),
-        flow_context: Some(flow_context.clone()),
-        observers: Some(ctx.observers.clone()),
-
-        instrumentation: Some(ctx.instrumentation.clone()),
-        heartbeat_state: handler_heartbeat_state.clone(),
         parent: future_envelope,
-        effect_history: ctx.effect_history.clone(),
-        current_run_history: ctx.current_run_history.clone(),
-        runtime_execution: ctx.runtime_execution.clone(),
-        effect_ports: ctx.effect_ports.clone(),
-        effect_declarations: ctx.effect_declarations.clone(),
-        output_contract: ctx.output_contract.clone(),
         backpressure_writer: effect_writer,
-        backpressure_readers: ctx.backpressure_readers.values().cloned().collect(),
         emit_enabled: true,
         effect_boundary: None,
-        catch_up: Some(ctx.catch_up.clone()),
     };
     let instrumentation_for_future = instrumentation.clone();
     let future = Box::pin(async move {
@@ -151,7 +134,7 @@ pub(super) async fn start_if_eligible<
                     let error_event = processing_failed(
                         writer_id,
                         &error_flow_context,
-                        &error_envelope.authored(),
+                        error_envelope.view(),
                         &error,
                         lineage,
                     );
@@ -268,7 +251,7 @@ async fn finish_success<
         ctx.flow_id,
         flow_context,
         continuation.scope,
-        &continuation.envelope.authored(),
+        continuation.envelope.view(),
         input_position,
         transformed_events.as_slice(),
     );

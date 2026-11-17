@@ -406,7 +406,8 @@ impl EffectHistory {
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
-            actions.observe(&envelope.authored())?;
+            let event = envelope.authored();
+            actions.observe(&event)?;
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
                 causal
                     .entry(effect.cursor.clone())
@@ -435,14 +436,14 @@ impl EffectHistory {
                 grouped_events.entry(group_id.clone()).or_default().push((
                     position,
                     envelope.envelope.provenance.journal.journal_group_member,
-                    envelope.authored(),
+                    event.clone(),
                 ));
             }
             position = position.saturating_add(1);
             if EffectAttemptStarted::matches_event_type(&envelope.event_type()) {
-                let started = EffectAttemptStarted::try_from_event(&envelope.authored())
+                let started = EffectAttemptStarted::try_from_event(&event)
                     .map_err(|error| EffectError::Serialization(error.to_string()))?;
-                validate_attempt_event(&envelope.authored(), &started)?;
+                validate_attempt_event(&event, &started)?;
                 if attempt_positions
                     .insert(
                         (started.cursor.clone(), started.attempt),
@@ -455,10 +456,7 @@ impl EffectHistory {
                         started.cursor, started.attempt
                     )));
                 }
-                attempt_events.insert(
-                    (started.cursor.clone(), started.attempt),
-                    envelope.authored(),
-                );
+                attempt_events.insert((started.cursor.clone(), started.attempt), event);
                 attempts
                     .entry(started.cursor.clone())
                     .or_default()
@@ -466,9 +464,9 @@ impl EffectHistory {
                 continue;
             }
             if EffectRecoveryAbandoned::matches_event_type(&envelope.event_type()) {
-                let abandoned = EffectRecoveryAbandoned::try_from_event(&envelope.authored())
+                let abandoned = EffectRecoveryAbandoned::try_from_event(&event)
                     .map_err(|error| EffectError::Serialization(error.to_string()))?;
-                validate_abandonment_event(&envelope.authored(), &abandoned)?;
+                validate_abandonment_event(&event, &abandoned)?;
                 if abandonments
                     .insert(abandoned.cursor.clone(), abandoned)
                     .is_some()
@@ -479,7 +477,7 @@ impl EffectHistory {
                 }
                 continue;
             }
-            if let Some(record) = effect_record_from_event(&envelope.authored())? {
+            if let Some(record) = effect_record_from_event(&event)? {
                 let provenance = envelope
                     .envelope
                     .provenance

@@ -108,7 +108,9 @@ pub use command::{
 pub use command::{Command, Port, StagePort, SystemName};
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
-pub use context::{EffectContext, EffectInvocationContext, EffectPortMetadataContext};
+pub use context::{
+    EffectContext, EffectInvocationContext, EffectPortMetadataContext, StageConstants,
+};
 pub(crate) use current_run::CurrentRunFailure;
 pub use current_run::CurrentRunHistory;
 pub use obzenflow_core::SystemBindingEvidence;

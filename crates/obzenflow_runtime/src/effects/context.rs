@@ -215,39 +215,43 @@ impl EffectContext {
     }
 }
 
-pub struct EffectInvocationContext {
+/// What every effect invocation of one stage reads, built once per stage.
+pub struct StageConstants {
     pub flow_id: FlowId,
     pub stage_id: StageId,
     pub stage_key: String,
     pub writer_id: WriterId,
-    pub input_seq: StageInputPosition,
     pub stage_logic_version: String,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     pub flow_context: Option<FlowContext>,
     pub observers: Option<crate::stages::observer::StageObserverBundle>,
-
     pub instrumentation: Option<Arc<StageInstrumentation>>,
     pub heartbeat_state: Option<Arc<HeartbeatState>>,
-    pub parent: DeliveredRecord<ChainPayload>,
     pub effect_history: Option<Arc<EffectHistory>>,
     /// The stage's own effect history in this run, folded from `data_journal`.
     pub current_run_history: CurrentRunHistory,
-    /// Runtime execution strategy (FLOWIP-120r): one authority for the
-    /// replay-versus-live decision at the effect boundary.
+    /// The one authority for the replay-versus-live decision at the effect
+    /// boundary.
     pub runtime_execution: crate::execution::RuntimeExecution,
     pub effect_ports: EffectPortRegistry,
     pub effect_declarations: Vec<EffectDeclaration>,
     pub output_contract: StageOutputContract,
-    pub backpressure_writer: BackpressureWriter,
     /// The stage's input edges, whose holds an effect call renews while it
     /// waits between attempts.
     pub backpressure_readers: Vec<crate::backpressure::BackpressureReader>,
-    pub emit_enabled: bool,
-    pub effect_boundary: Option<Arc<dyn EffectBoundary>>,
-    /// FLOWIP-010 §7: build-resolved lineage policy from stage resources,
-    /// consumed as data when effect facts derive from the parent event.
+    /// The lineage policy applied when effect facts derive from the parent
+    /// event.
     pub lineage: obzenflow_core::config::LineagePolicy,
     pub catch_up: Option<crate::stages::common::supervision::catch_up::CatchUpHandle>,
+}
+
+pub struct EffectInvocationContext {
+    pub stage: Arc<StageConstants>,
+    pub input_seq: StageInputPosition,
+    pub parent: DeliveredRecord<ChainPayload>,
+    pub backpressure_writer: BackpressureWriter,
+    pub emit_enabled: bool,
+    pub effect_boundary: Option<Arc<dyn EffectBoundary>>,
 }
 
 impl EffectInvocationContext {
@@ -260,12 +264,13 @@ impl EffectInvocationContext {
         } else {
             "invalid_effect_type"
         };
-        self.effect_declarations
+        self.stage
+            .effect_declarations
             .iter()
             .find(|declaration| declaration.effect_type() == effect_type)
             .cloned()
             .ok_or_else(|| EffectError::UndeclaredEffect {
-                stage_key: self.stage_key.clone(),
+                stage_key: self.stage.stage_key.clone(),
                 effect_type: reported_effect_type.to_string(),
             })
     }
