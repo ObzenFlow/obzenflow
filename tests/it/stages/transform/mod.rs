@@ -4,6 +4,5 @@
 
 mod async_surface_guard;
 mod journal_parity;
-mod regression;
 mod witness_authority;
 mod witness_guard;

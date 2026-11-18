@@ -50,11 +50,11 @@ impl DeliveredOrderProjection {
     /// Project a fan-in stage's delivered order from its output envelopes and
     /// the envelopes of its upstream journals.
     ///
-    /// `stage_outputs` must be in journal append order. Each upstream is
+    /// `outputs` must be in journal append order. Each upstream is
     /// `(stable stage key, envelopes)`. Outputs whose parent is not found in
     /// any upstream (for example framework rows) are skipped.
     pub fn from_envelopes(
-        stage_outputs: &[JournalRecord<ChainPayload>],
+        outputs: &[JournalRecord<ChainPayload>],
         upstreams: &[(String, Vec<JournalRecord<ChainPayload>>)],
     ) -> Self {
         let mut parent_index: HashMap<EventId, &str> = HashMap::new();
@@ -70,7 +70,7 @@ impl DeliveredOrderProjection {
         let mut assigned: HashMap<EventId, (String, u64)> = HashMap::new();
         let mut rows = Vec::new();
 
-        for envelope in stage_outputs {
+        for envelope in outputs {
             let event = &envelope.authored();
             if !event.consumes_data_credit() && !event.is_delivery() {
                 continue;

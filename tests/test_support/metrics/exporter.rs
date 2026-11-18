@@ -542,7 +542,7 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
 
         stages: {
             // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
-            // Use 1001 so the summary is not emitted on the final stage output.
+            // Use 1001 so the summary is not emitted on the final output.
             src = source!(MetricEvent with {
                 circuit_breaker().consecutive_failures(10)
             } => source);

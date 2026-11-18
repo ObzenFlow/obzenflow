@@ -235,7 +235,7 @@ pub struct StageConstants {
     pub runtime_execution: crate::execution::RuntimeExecution,
     pub effect_ports: EffectPortRegistry,
     pub effect_declarations: Vec<EffectDeclaration>,
-    pub output_contract: StageOutputContract,
+    pub output_contract: OutcomeContract,
     /// The stage's input edges, whose holds an effect call renews while it
     /// waits between attempts.
     pub backpressure_readers: Vec<crate::backpressure::BackpressureReader>,

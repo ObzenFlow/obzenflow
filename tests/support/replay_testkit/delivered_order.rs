@@ -12,7 +12,7 @@ pub async fn project_delivered_order(
     stage_key: &str,
     upstream_stage_keys: &[&str],
 ) -> DeliveredOrderProjection {
-    let stage_outputs = read_stage_envelopes(run_dir, stage_key).await;
+    let outputs = read_stage_envelopes(run_dir, stage_key).await;
     let mut upstreams = Vec::new();
     for upstream in upstream_stage_keys {
         upstreams.push((
@@ -20,5 +20,5 @@ pub async fn project_delivered_order(
             read_stage_envelopes(run_dir, upstream).await,
         ));
     }
-    DeliveredOrderProjection::from_envelopes(&stage_outputs, &upstreams)
+    DeliveredOrderProjection::from_envelopes(&outputs, &upstreams)
 }

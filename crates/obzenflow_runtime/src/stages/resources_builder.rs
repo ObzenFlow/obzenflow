@@ -12,7 +12,7 @@ use crate::backpressure::{
 };
 use crate::effects::{EffectDeclaration, EffectPortRegistry};
 use crate::execution::{RuntimeExecution, RuntimeMode};
-use crate::feed_plan::{FeedPlan, LogicalFeed, StageOutputContract};
+use crate::feed_plan::{FeedPlan, LogicalFeed, OutcomeContract};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{
@@ -340,8 +340,8 @@ pub struct StageResources {
     /// Friendly upstream stage names keyed by StageId (for diagnostics/instrumentation)
     pub upstream_stage_names: std::collections::HashMap<StageId, String>,
 
-    /// Stage output contract selected by the flow build (FLOWIP-120b).
-    pub output_contract: StageOutputContract,
+    /// Outcome contract selected by the flow build (FLOWIP-120b).
+    pub output_contract: OutcomeContract,
 
     /// Logical feeds selected for this stage's inbound edges (FLOWIP-120b).
     pub input_feeds: Vec<LogicalFeed>,

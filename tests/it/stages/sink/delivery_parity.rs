@@ -9,17 +9,14 @@ use crate::replay_testkit;
 use async_trait::async_trait;
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{
-    ChainEvent, ChainPayload, JournalRecord, StageFatalCode, StageFatalReason, StageFatalRecorded,
-};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkBufferedOutcome, SinkDescription, SinkWriteContext, SinkWriteFailure,
-    SinkWriteReport, TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::common::HandlerError;
 use obzenflow_runtime::stages::SourceError;
@@ -209,10 +206,6 @@ async fn read_stage_journal(
 
 async fn read_stage(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "data_journal_file").await
-}
-
-async fn read_stage_errors(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
-    read_stage_journal(run_dir, stage_name, "error_journal_file").await
 }
 
 #[derive(Debug, PartialEq)]
@@ -435,173 +428,4 @@ async fn buffered_csv_and_named_sink_have_live_replay_journal_parity() {
         0,
         "live/replay journals must certify as identical"
     );
-}
-
-#[derive(Clone, Debug)]
-struct InvalidBufferedSink;
-
-#[async_trait]
-impl obzenflow_runtime::stages::sink::SinkConnector for InvalidBufferedSink {
-    type Input = SinkRecord;
-    type Writer = Self;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn open(
-        &self,
-        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
-    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
-        Ok(self.clone())
-    }
-}
-
-#[async_trait::async_trait]
-impl obzenflow_runtime::stages::sink::SinkWriter for InvalidBufferedSink {
-    type Input = SinkRecord;
-
-    async fn write(
-        &mut self,
-        _input: Self::Input,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::buffered(
-            SinkBufferedOutcome::accepted_via(DeliveryMethod::Noop, None),
-        ))
-    }
-}
-
-fn build_invalid_flow(journal_base: PathBuf) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let mut records = ValuesSource::new();
-        records.values.truncate(1);
-        let invalid = InvalidBufferedSink;
-        Ok(flow! {
-            name: "typed_sink_invalid_settlement",
-            journals: disk_journals(journal_base),
-
-            stages: {
-                records = source!(SinkRecord => records);
-                invalid = sink!(SinkRecord => invalid);
-            },
-
-            topology: {
-                records |> invalid;
-            }
-        })
-    })
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn invalid_settlement_records_stage_fatal_without_a_delivery_receipt() {
-    let temp = tempfile::tempdir().expect("temporary journal root");
-    let journal_base = temp.path().join("journals");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        replay_testkit::unsynced_application()
-            .with_cli_args(["obzenflow"])
-            .run_async(build_invalid_flow(journal_base.clone())),
-    )
-    .await
-    .expect("invalid settlement terminates promptly");
-    result.expect_err("invalid settlement must fail the flow");
-
-    let run = latest_run_dir(&journal_base);
-    let data = read_stage(&run, "invalid").await;
-    assert!(data
-        .iter()
-        .all(|envelope| { !matches!(envelope.payload, ChainPayload::Delivery(_)) }));
-
-    let fatals = read_stage_errors(&run, "invalid")
-        .await
-        .iter()
-        .filter_map(|envelope| StageFatalRecorded::from_event(&envelope.authored()))
-        .collect::<Vec<_>>();
-    assert_eq!(fatals.len(), 1);
-    assert_eq!(fatals[0].code, StageFatalCode::Protocol);
-    assert_eq!(fatals[0].reason, StageFatalReason::ProtocolInputIntegrity);
-    assert!(fatals[0]
-        .detail
-        .contains("buffered primary outcome without deferring"));
-}
-
-#[derive(Clone, Debug)]
-struct FailingSink {
-    declared: bool,
-}
-
-#[async_trait]
-impl InlineSink for FailingSink {
-    type Input = SinkRecord;
-
-    fn describe(&self) -> SinkDescription {
-        if self.declared {
-            SinkDescription::destination(
-                "declared.failure",
-                DeliveryMethod::Custom("declared_failure".to_string()),
-            )
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-        } else {
-            SinkDescription::method(DeliveryMethod::Custom("declared_failure".to_string()))
-                .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-        }
-    }
-
-    async fn write(&mut self, _input: Self::Input) -> Result<(), SinkWriteFailure> {
-        Err(SinkWriteFailure::current_only(
-            obzenflow_runtime::stages::sink::SinkWritePhase::Execute,
-            obzenflow_runtime::stages::sink::SinkOperationError::other("intentional sink failure"),
-        ))
-    }
-}
-
-fn build_failure_destination_flow(journal_base: PathBuf) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let mut records = ValuesSource::new();
-        records.values.truncate(1);
-        let declared = FailingSink { declared: true };
-        let fallback = FailingSink { declared: false };
-        Ok(flow! {
-            name: "typed_sink_failure_destination",
-            journals: disk_journals(journal_base),
-
-            stages: {
-                records = source!(SinkRecord => records);
-                declared_failure = sink!(SinkRecord => declared);
-                fallback_failure = sink!(SinkRecord => fallback);
-            },
-
-            topology: {
-                records |> declared_failure;
-                records |> fallback_failure;
-            }
-        })
-    })
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn failed_receipts_use_declared_and_final_bound_destinations() {
-    let temp = tempfile::tempdir().expect("temporary journal root");
-    let journal_base = temp.path().join("journals");
-
-    replay_testkit::unsynced_application()
-        .with_cli_args(["obzenflow"])
-        .run_async(build_failure_destination_flow(journal_base.clone()))
-        .await
-        .expect("ordinary sink failures remain per-record outcomes");
-
-    let run = latest_run_dir(&journal_base);
-    let source = read_stage(&run, "records").await;
-    for (stage, destination) in [
-        ("declared_failure", "declared.failure"),
-        ("fallback_failure", "fallback_failure"),
-    ] {
-        let evidence = delivery_evidence(&source, &read_stage(&run, stage).await);
-        assert_eq!(evidence.len(), 1, "{stage}");
-        assert_eq!(evidence[0].destination, destination, "{stage}");
-        assert_eq!(evidence[0].result["result"], "failed", "{stage}");
-        assert_eq!(evidence[0].parent_record, Some(1), "{stage}");
-    }
 }

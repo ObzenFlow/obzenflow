@@ -31,8 +31,7 @@ pub enum IdempotencyKeyPolicy {
 /// Event-sourcing meaning of a successful effect outcome (FLOWIP-120j).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectOutcomeKind {
-    /// The outcome lowers to named business facts in the stage output
-    /// contract.
+    /// The outcome lowers to named business facts in the outcome contract.
     DomainFacts,
     /// The outcome is framework-owned replay material returned to the
     /// handler, never a fact the stage writes.
@@ -158,7 +157,7 @@ pub struct EffectDeclaration {
     /// Event-sourcing meaning selected by the effect type.
     outcome_kind: EffectOutcomeKind,
     /// Public facts this effect may author. Recorded replies project an empty
-    /// set and therefore never enter a stage output contract.
+    /// set and therefore never enter an outcome contract.
     public_outcome_fact_types: Vec<TypedFactType>,
 }
 

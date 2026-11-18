@@ -1564,8 +1564,8 @@ impl Effect for MultiFactEffect {
     }
 }
 
-fn output_contract_for<T: TypedPayload>() -> StageOutputContract {
-    StageOutputContract::single(crate::feed_plan::PayloadTypeDescriptor {
+fn output_contract_for<T: TypedPayload>() -> OutcomeContract {
+    OutcomeContract::single(crate::feed_plan::PayloadTypeDescriptor {
         event_kind: Some(T::EVENT_KIND),
         type_hint: TypeHintInfo::Exact {
             name: std::any::type_name::<T>().to_string(),
@@ -1578,8 +1578,8 @@ fn output_contract_for<T: TypedPayload>() -> StageOutputContract {
 
 fn output_contract_for_many(
     outputs: Vec<crate::feed_plan::PayloadTypeDescriptor>,
-) -> StageOutputContract {
-    StageOutputContract { outputs }
+) -> OutcomeContract {
+    OutcomeContract { outputs }
 }
 
 fn output_descriptor_for<T: TypedPayload>() -> crate::feed_plan::PayloadTypeDescriptor {
@@ -1839,7 +1839,7 @@ fn invocation_context_with_mode(
             runtime_execution,
             effect_ports: fixtures().registry.merged_with(&effect_ports),
             effect_declarations: fixture_declarations(),
-            output_contract: StageOutputContract::empty(),
+            output_contract: OutcomeContract::empty(),
             backpressure_readers: Vec::new(),
             lineage: LineagePolicy::default(),
             catch_up: Some(catch_up),
@@ -2850,7 +2850,7 @@ async fn emit_rejects_contexts_without_output_emission_support() {
 }
 
 #[tokio::test]
-async fn emit_rejects_fact_type_outside_stage_output_contract() {
+async fn emit_outside_outcome_contract_refused() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut ctx = invocation_context(
@@ -8732,7 +8732,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
                     EffectDeclaration::named(&fixtures().counting),
                     transactional.clone(),
                 ],
-                output_contract: StageOutputContract::empty(),
+                output_contract: OutcomeContract::empty(),
                 backpressure_readers: Vec::new(),
                 lineage: LineagePolicy::default(),
                 catch_up: None,

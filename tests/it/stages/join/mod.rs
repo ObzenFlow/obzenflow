@@ -4,5 +4,4 @@
 
 mod as_of;
 mod journal_parity;
-mod then_live;
 mod witness_guard;

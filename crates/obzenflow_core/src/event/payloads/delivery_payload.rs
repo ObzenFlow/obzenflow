@@ -4,8 +4,8 @@
 
 //! Delivery payloads & results for sink stages
 //!
-//! Typed sinks describe delivery through their outcome carriers; the runtime
-//! lowers those outcomes into this durable shape and journals whether delivery
+//! Typed sinks describe delivery through their outcomes; the runtime lowers
+//! those outcomes into this durable shape and journals whether delivery
 //! fully succeeded, partially succeeded, was buffered, or failed.
 
 use chrono::{DateTime, Utc};

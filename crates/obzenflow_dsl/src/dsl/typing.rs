@@ -22,8 +22,8 @@ use obzenflow_runtime::__private::{
     UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
 };
 use obzenflow_runtime::feed_plan::{
-    FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
-    StageOutputContract,
+    FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, OutcomeContract,
+    PayloadTypeDescriptor,
 };
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::pipeline::config::StageConfig;
@@ -1912,7 +1912,7 @@ pub fn derive_feed_plan(
 ) -> FeedPlan {
     let feed_index = internal_feed_index(internal_feeds, name_to_id);
     let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
-    let mut stage_output_contracts: HashMap<StageId, StageOutputContract> = HashMap::new();
+    let mut outcome_contracts: HashMap<StageId, OutcomeContract> = HashMap::new();
 
     for (dsl_name, descriptor) in descriptors {
         let Some(stage_id) = name_to_id.get(dsl_name).copied() else {
@@ -1923,7 +1923,7 @@ pub fn derive_feed_plan(
         let Some(metadata) = descriptor.typing_metadata() else {
             continue;
         };
-        stage_output_contracts.insert(stage_id, output_contract_from_metadata(metadata));
+        outcome_contracts.insert(stage_id, output_contract_from_metadata(metadata));
     }
 
     let mut feeds = Vec::new();
@@ -1999,10 +1999,10 @@ pub fn derive_feed_plan(
         });
     }
 
-    FeedPlan::new(stage_output_contracts, feeds)
+    FeedPlan::new(outcome_contracts, feeds)
 }
 
-fn output_contract_from_metadata(metadata: &StageTypingMetadata) -> StageOutputContract {
+fn output_contract_from_metadata(metadata: &StageTypingMetadata) -> OutcomeContract {
     let outputs: Vec<PayloadTypeDescriptor> = metadata
         .output_contract
         .iter()
@@ -2011,9 +2011,9 @@ fn output_contract_from_metadata(metadata: &StageTypingMetadata) -> StageOutputC
         .collect();
 
     if outputs.is_empty() {
-        StageOutputContract::empty()
+        OutcomeContract::empty()
     } else {
-        StageOutputContract { outputs }
+        OutcomeContract { outputs }
     }
 }
 
@@ -2124,11 +2124,11 @@ pub fn validate_effect_fact_containment(
             .collect();
 
         for declaration in &declarations {
-            // Duplicate event types across carrier members cannot be seen by
-            // the effect_outcome! macro (a macro compares tokens, not
-            // EVENT_TYPE values), so the collision is rejected here, before
-            // any I/O. Dispatch is by event type, so a collision would make
-            // carrier reconstruction ambiguous.
+            // `outcome![...]` refuses outcome members that share an event
+            // type at compile time, but a hand-written `OutcomeFacts` impl
+            // can still declare them, so the collision is rejected here,
+            // before any I/O. Dispatch is by event type, so a collision would
+            // make outcome reconstruction ambiguous.
             let mut members_by_event_type: HashMap<String, String> = HashMap::new();
             for fact in declaration.public_outcome_fact_types() {
                 if let Some(first_member) = members_by_event_type

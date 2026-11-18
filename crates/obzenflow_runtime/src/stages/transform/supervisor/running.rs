@@ -534,7 +534,7 @@ async fn dispatch_running_inner<
                             );
                             // Error-journal events are written immediately; stage-journal
                             // outputs are gated by backpressure.
-                            let mut stage_outputs = std::collections::VecDeque::<
+                            let mut outputs = std::collections::VecDeque::<
                                 crate::stages::common::supervision::backpressure_drain::PendingOutput,
                             >::new();
 
@@ -587,7 +587,7 @@ async fn dispatch_running_inner<
                                     .await
                                     .map_err(|e| format!("Failed to write error event: {e}"))?;
                                 } else {
-                                    stage_outputs.push_back(
+                                    outputs.push_back(
                                         crate::stages::common::supervision::backpressure_drain::PendingOutput {
                         causal: crate::supervised_base::publication::capture(),
                                             event,
@@ -597,7 +597,7 @@ async fn dispatch_running_inner<
                                 }
                             }
 
-                            while let Some(event) = stage_outputs.pop_front() {
+                            while let Some(event) = outputs.pop_front() {
                                 match drain_one_pending(DrainRequest {
                                     pending: event,
                                     flow_context,
@@ -610,7 +610,7 @@ async fn dispatch_running_inner<
                                     backpressure_pulse: &mut ctx.backpressure_pulse,
                                     backpressure_stall: &mut ctx.backpressure_stall,
                                     output_contract: Some(&ctx.output_contract),
-                                    pending_outputs: &mut stage_outputs,
+                                    pending_outputs: &mut outputs,
                                 })
                                 .await?
                                 {
@@ -625,7 +625,7 @@ async fn dispatch_running_inner<
                                         // Queue remaining outputs and retry later (bounded to one input).
                                         ctx.pending_parent = Some(envelope.clone());
                                         ctx.pending_ack_upstream = upstream_stage;
-                                        ctx.pending_outputs = stage_outputs;
+                                        ctx.pending_outputs = outputs;
                                         break;
                                     }
                                 }

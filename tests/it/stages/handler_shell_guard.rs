@@ -299,16 +299,6 @@ fn payment_tutorial_is_proof_free_and_uses_configured_retry() {
     let main = fs::read_to_string(example_root.join("main.rs"))
         .expect("read payment tutorial entry point");
     assert!(main.contains(".run_blocking(flow::build_flow())"));
-
-    let witness =
-        fs::read_to_string(root.join("tests/it/examples/payment_gateway/retry_fixture.rs"))
-            .expect("read test-only payment resilience witness");
-    for required in ["retry()", ".fixed_delay(", "ReleasePolicy::BreakerRecovery"] {
-        assert!(
-            witness.contains(required),
-            "configured test witness must retain positive retry authoring {required:?}"
-        );
-    }
 }
 
 #[test]

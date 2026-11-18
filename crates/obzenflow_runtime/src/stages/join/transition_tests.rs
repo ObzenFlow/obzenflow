@@ -28,7 +28,7 @@ use super::fsm::{
 use super::supervisor::JoinSupervisor;
 use crate::backpressure::BackpressureWriter;
 use crate::execution::RuntimeExecution;
-use crate::feed_plan::StageOutputContract;
+use crate::feed_plan::OutcomeContract;
 use crate::messaging::upstream_subscription::ReaderFrontier;
 use crate::messaging::DeliveredRecord;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -147,7 +147,7 @@ impl Join {
             events_since_last_heartbeat: 0,
             heartbeat_interval: 0,
             backpressure_writer: BackpressureWriter::disabled(),
-            output_contract: StageOutputContract::empty(),
+            output_contract: OutcomeContract::empty(),
             backpressure_readers: HashMap::new(),
             pending_outputs: VecDeque::new(),
             pending_parent: None,

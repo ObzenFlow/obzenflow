@@ -14,6 +14,3 @@ test_harness|crates/obzenflow_dsl/src/dsl/tests/typed_decoration_matrix_test.rs|
 test_harness|crates/obzenflow_dsl/src/dsl/tests/typed_stage_contracts_test.rs|ExactTransform
 test_harness|crates/obzenflow_dsl/src/dsl/tests/composite_substrate_test.rs|Noop
 test_harness|tests/it/middleware/factory_context_injection.rs|TestTransform
-test_harness|tests/it/pipeline/volume.rs|CpuIntensiveStage
-test_harness|tests/it/pipeline/volume.rs|MemoryIntensiveStage
-test_harness|tests/it/pipeline/volume.rs|PassthroughStage

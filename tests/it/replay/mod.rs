@@ -4,6 +4,5 @@
 
 mod catch_up_machine_guard;
 mod determinism_lint;
-mod provenance_labelling;
 mod recorded_order_guard;
 mod verification;

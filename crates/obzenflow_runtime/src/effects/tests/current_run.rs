@@ -150,7 +150,7 @@ impl Window {
                     EffectDeclaration::named_at_least_once(&fixtures().invariant_affine),
                     self.transactional.clone(),
                 ],
-                output_contract: StageOutputContract::empty(),
+                output_contract: OutcomeContract::empty(),
                 backpressure_readers: Vec::new(),
                 lineage: obzenflow_core::config::LineagePolicy::default(),
                 catch_up: None,

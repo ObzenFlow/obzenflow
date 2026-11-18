@@ -35,29 +35,14 @@ test = "stages::sink::csv_termination_contract::crash_fixture_process"
 owner = "crash_before_flush_replays_unreceipted_csv_work_under_truncated_eof subprocess"
 
 [[ignored]]
-binary = "obzenflow::it_ai"
-test = "ai::one_shot_inference::reply_cut_child_process"
-owner = "resume_after_a_durable_reply_reinterprets subprocess"
-
-[[ignored]]
 binary = "obzenflow::cli"
 test = "hosted::child_application"
 owner = "independent_lifetimes subprocess"
 
 [[ignored]]
-binary = "obzenflow::it_examples"
-test = "examples::csv_demo_support_sla::csv_example_child"
-owner = "csv_demo_support_sla interruption subprocess"
-
-[[ignored]]
 binary = "obzenflow::durable_execution_contract"
 test = "durable_execution_contract_child"
 owner = "durable_execution_contract subprocess"
-
-[[ignored]]
-binary = "obzenflow::it_examples"
-test = "examples::product_catalog_enrichment::product_catalog_enrichment_completes"
-owner = "intentional manual rate-limited example proof, outside required acceptance"
 
 [[ignored]]
 binary = "obzenflow::it_examples"
@@ -68,11 +53,6 @@ owner = "manual FLOWIP-080n retained-archive measurement; requires explicit arch
 binary = "obzenflow::it_examples"
 test = "examples::prometheus_demo::measurement::measure_demo_process_completion"
 owner = "manual FLOWIP-080n separate demo integration check; built example and explicit result path required, not Criterion timing evidence"
-
-[[ignored]]
-binary = "obzenflow::it_examples"
-test = "examples::product_catalog_enrichment::explicit_join_topology_current_schema_live_replay_and_rejected_control"
-owner = "intentional manual rate-limited example proof, outside required acceptance"
 
 [[ignored]]
 binary = "xtask::bin/xtask"
@@ -168,13 +148,6 @@ test = "application::flow_application::tests::console_telemetry::console_uses_pr
 lanes = ["production-features"]
 capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]
 rationale = "Startup resolves once, ignores shadowed legacy bind input, and releases Console after a flow-build failure."
-
-[[prerequisites]]
-binary = "obzenflow::it_stages"
-test = "stages::transform::journal_parity::console_preserves_composed_live_replay_journals"
-lanes = ["production-features"]
-capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]
-rationale = "Native application children prove Console preserves fan-out/fan-in identities, errors, EOF and deliveries through current-schema replay."
 
 [[prerequisites]]
 binary = "obzenflow_infra"
@@ -343,6 +316,13 @@ test = "application::flow_application::tests::lifecycle::startup_failure_retains
 lanes = ["production-features","test-support"]
 capabilities = ["temp-files"]
 rationale = "Temporary archive proves not-started outcome and hook cleanup without starting a listener."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::prometheus::hosted_metrics_match_journal_totals"
+lanes = ["production-features"]
+capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Application owns its port-zero listener; a client scrapes /metrics during and after a parked run, using a unique temporary configuration."
 
 [[prerequisites]]
 binary = "obzenflow_infra"
@@ -710,80 +690,10 @@ rationale = "The existing metrics exporter supplies writer registration without 
 
 [[prerequisites]]
 binary = "obzenflow::it_examples"
-test = "examples::prometheus_demo::managed_lifecycle_regressions::framework_terminal_wait_in_a_hook_does_not_fail_a_successful_application"
-lanes = ["production-features"]
-capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
-rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
-
-[[prerequisites]]
-binary = "obzenflow::it_examples"
 test = "examples::prometheus_demo::managed_lifecycle_regressions::invalid_cors_returns_startup_error_and_stops_the_materialised_flow"
 lanes = ["production-features"]
 capabilities = ["target-files"]
 rationale = "Unhosted or pre-bind admission assertions require only unique target-directory configuration and journal fixtures."
-
-[[prerequisites]]
-binary = "obzenflow::it_examples"
-test = "examples::prometheus_demo::managed_lifecycle_regressions::manual_prometheus_example_exports_100_inputs_and_replays_without_a_host"
-lanes = ["production-features"]
-capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
-rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
-
-[[prerequisites]]
-binary = "obzenflow::it_examples"
-test = "examples::prometheus_demo::managed_lifecycle_regressions::prometheus_example_5k_completes_with_reporting_250ms_capture_250ms_export"
-lanes = ["production-features"]
-capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
-rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
-
-[[prerequisites]]
-binary = "obzenflow::it_examples"
-test = "examples::prometheus_demo::managed_lifecycle_regressions::prometheus_example_5k_completes_with_reporting_250ms_capture_500ms_export"
-lanes = ["production-features"]
-capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
-rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
-
-[[prerequisites]]
-binary = "obzenflow::it_examples"
-test = "examples::prometheus_demo::managed_lifecycle_regressions::prometheus_example_5k_completes_with_reporting_500ms_capture_250ms_export"
-lanes = ["production-features"]
-capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
-rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
-
-[[prerequisites]]
-binary = "obzenflow::it_examples"
-test = "examples::prometheus_demo::managed_lifecycle_regressions::prometheus_example_5k_completes_with_sse_and_no_prometheus"
-lanes = ["production-features"]
-capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
-rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
-
-[[prerequisites]]
-binary = "obzenflow::it_examples"
-test = "examples::prometheus_demo::managed_lifecycle_regressions::prometheus_example_5k_completes_without_reporting"
-lanes = ["production-features"]
-capabilities = ["target-files"]
-rationale = "Unhosted 5k live execution and current-schema replay verify the complete cohort and summary receipt using unique target-directory fixtures."
-
-[[prerequisites]]
-binary = "obzenflow::it_examples"
-test = "examples::prometheus_demo::managed_lifecycle_regressions::unhosted_prometheus_example_exports_100_inputs_and_replays_with_final_metrics"
-lanes = ["production-features"]
-capabilities = ["target-files"]
-rationale = "Unhosted or pre-bind admission assertions require only unique target-directory configuration and journal fixtures."
-
-[[prerequisites]]
-binary = "obzenflow::it_examples"
-test = "examples::prometheus_demo::prometheus_demo_host_preserves_data_errors_and_delivery_receipts"
-lanes = ["production-features"]
-capabilities = ["target-files","ipv4-loopback-bind"]
-rationale = "Comparative archive oracle includes a hosted mode; other modes no longer reserve incidental ports."
-
-[[prerequisites]]
-binary = "obzenflow::it_replay"
-test = "replay::verification::golden_path::monitoring_modes_preserve_live_and_replay_journal_outcomes"
-lanes = ["production-features"]
-capabilities = ["target-files","ipv4-loopback-bind"]
-rationale = "Production-feature composition includes hosted metrics plus complete live/replay archive comparisons."
 
 [[prerequisites]]
 binary = "xtask::bin/xtask"

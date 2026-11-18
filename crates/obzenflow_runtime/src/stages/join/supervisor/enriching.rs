@@ -174,7 +174,7 @@ pub(super) async fn dispatch_enriching<
                                 events
                                     .push(ChainEventFactory::eof_event_with_kind(writer_id, kind));
                             }
-                            write_stage_outputs_and_ack(
+                            write_outputs_and_ack(
                                 subscription,
                                 ctx,
                                 source_id,
@@ -301,7 +301,7 @@ pub(super) async fn dispatch_enriching<
     }
 }
 
-async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
+async fn write_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     ctx: &mut JoinResources<H>,
     source_id: obzenflow_core::StageId,

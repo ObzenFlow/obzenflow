@@ -144,7 +144,7 @@ where
             Err(CallFailure::Integrity(error)) => return Err(error),
         };
         let output = self.role.interpret(input, outcome)?;
-        fx.emit_carrier(output).await.map_err(integrity_failure)?;
+        fx.emit_outcome(output).await.map_err(integrity_failure)?;
         fx.complete().map_err(integrity_failure)
     }
 
@@ -217,7 +217,7 @@ where
             Err(CallFailure::Integrity(error)) => return Err(error),
         };
         let output = self.role.interpret(chunk, outcome)?;
-        fx.emit_carrier(output).await.map_err(integrity_failure)?;
+        fx.emit_outcome(output).await.map_err(integrity_failure)?;
         fx.complete().map_err(integrity_failure)
     }
 
@@ -444,7 +444,7 @@ where
         };
         let unavailable = outcome.unavailable().cloned();
         match self.role.interpret(partials, outcome) {
-            Ok(output) => fx.emit_carrier(output).await.map_err(integrity_failure)?,
+            Ok(output) => fx.emit_outcome(output).await.map_err(integrity_failure)?,
             Err(error) => fx
                 .emit(failed(interpret_failure(error, unavailable)?))
                 .await

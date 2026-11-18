@@ -65,6 +65,12 @@ symbols and domain terms such as `at_least_once` are exempt. State one result,
 with no `and`, using technical verbs such as `refused`, `expands`, `returns` and
 `fails`.
 
+`tests/it` holds tests that build a flow with `flow!` and run it, at most one for each
+building block, such as a stage kind, a join or merge strategy, a middleware or an
+observer. Only add one for a building block that has no test yet. Test anything else with
+a unit test in the crate that owns the code, and test crash, resume and replay behaviour
+in `tests/durable_execution_contract.rs`.
+
 ## Pull request guidelines
 
 - Keep changes focused (one feature/fix per PR when possible).

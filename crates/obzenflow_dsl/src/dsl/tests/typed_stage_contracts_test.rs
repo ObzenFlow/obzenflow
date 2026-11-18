@@ -15,7 +15,7 @@ mod tests {
     use obzenflow_runtime::effects::{Effects, StageCompletion};
     use obzenflow_runtime::feed_plan::{
         payload_key_from_type_hint, FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed,
-        PayloadTypeDescriptor, StageOutputContract,
+        OutcomeContract, PayloadTypeDescriptor,
     };
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -898,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn source_output_set_syntax_lowers_to_stage_output_contract() {
+    fn source_output_set_lowers_to_contract() {
         let source = crate::source!(
             name: "multi_output_source",
             { InputEvent, AlternateEvent } => MultiExactSource
@@ -948,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn output_set_syntax_lowers_to_stage_output_contract() {
+    fn output_set_lowers_to_contract() {
         let transform = crate::transform!(
             name: "multi_output_transform",
             InputEvent -> { OutputEvent, AlternateEvent } => placeholder!()
@@ -3701,7 +3701,7 @@ mod tests {
     fn feed_plan_routing(outputs: &[&str], routed: &[&str]) -> (StageId, StageId, FeedPlan) {
         let upstream = StageId::new();
         let reader = StageId::new();
-        let contract = StageOutputContract {
+        let contract = OutcomeContract {
             outputs: outputs
                 .iter()
                 .map(|name| {
