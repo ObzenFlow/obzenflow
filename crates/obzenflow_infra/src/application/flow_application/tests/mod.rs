@@ -21,6 +21,8 @@ use tokio::sync::oneshot;
 #[cfg(all(feature = "tokio-console", tokio_unstable))]
 mod console_telemetry;
 mod lifecycle;
+#[cfg(feature = "prometheus")]
+mod prometheus;
 mod startup;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

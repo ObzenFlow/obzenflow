@@ -692,6 +692,44 @@ fn payment_config(scenario: &Scenario) -> PathBuf {
     path
 }
 
+fn short_stall_config(scenario: &Scenario) -> PathBuf {
+    let path = scenario.root.join("short-stall.toml");
+    std::fs::write(
+        &path,
+        "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 2\nstall_timeout_ms = 500\n",
+    )
+    .expect("write the configuration");
+    path
+}
+
+fn config_args(config: &Path) -> Vec<String> {
+    vec!["--config".into(), config.display().to_string()]
+}
+
+fn assert_no_stall_or_poison(archive: &Archive, name: &str) {
+    for record in &archive.records {
+        let RunRecordData::Chain(row) = &record.record else {
+            continue;
+        };
+        let stage = record
+            .journal
+            .stage
+            .as_ref()
+            .map_or("the pipeline", |stage| stage.key.as_str());
+        match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::Backpressure(stall)) => {
+                panic!("{name}: {stage} stalled: {stall:?}")
+            }
+            ChainPayload::FlowControl(control) => assert_ne!(
+                control.eof_kind(),
+                Some(EofKind::Poison),
+                "{name}: {stage} ended in poison"
+            ),
+            _ => {}
+        }
+    }
+}
+
 impl Scenario {
     fn directory(name: &str) -> PathBuf {
         let root = Path::new(ROOT).join(name);
@@ -2754,6 +2792,44 @@ mod then_live {
         scenario.inputs.join("slow_entries.yaml")
     }
 
+    const QUEUED: [(&str, &str); 4] = [
+        ("a-2", "q-1"),
+        ("a-4", "q-2"),
+        ("a-1", "q-3"),
+        ("a-3", "q-4"),
+    ];
+    const LIVE: [(&str, &str); 2] = [("a-3", "l-1"), ("a-1", "l-2")];
+
+    fn live_entries_input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("live_entries.jsonl")
+    }
+
+    fn write_live_entries(scenario: &Scenario, entries: &[(&str, &str)]) {
+        let staged = scenario.inputs.join("live_entries.staged");
+        for (account, note) in entries {
+            let entry = Entry {
+                account_id: (*account).into(),
+                note: (*note).into(),
+            };
+            append_line(&staged, &entry).expect("stage a live entry");
+        }
+        std::fs::rename(staged, live_entries_input(scenario)).expect("publish the live entries");
+    }
+
+    fn send_live_entries(path: PathBuf, sender: tokio::sync::mpsc::Sender<Entry>) {
+        std::thread::spawn(move || {
+            while !path.exists() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            for entry in read_lines::<Entry>(&path) {
+                if sender.blocking_send(entry).is_err() {
+                    return;
+                }
+            }
+            Box::leak(Box::new(sender));
+        });
+    }
+
     fn write_entries<'a>(path: &Path, entries: impl IntoIterator<Item = (&'a str, &'a str)>) {
         let entries: String = entries
             .into_iter()
@@ -2762,14 +2838,18 @@ mod then_live {
         std::fs::write(path, format!("entries:\n{entries}")).expect("write entries");
     }
 
-    fn fresh(name: &str, graph: Graph) -> Scenario {
-        let scenario = Scenario::for_graph(name, graph);
-        let accounts: String = ACCOUNTS
+    fn write_accounts(scenario: &Scenario, accounts: &[&str]) {
+        let accounts: String = accounts
             .iter()
             .map(|account| format!("  - account_id: \"{account}\"\n"))
             .collect();
-        std::fs::write(accounts_input(&scenario), format!("accounts:\n{accounts}"))
+        std::fs::write(accounts_input(scenario), format!("accounts:\n{accounts}"))
             .expect("write accounts");
+    }
+
+    fn fresh(name: &str, graph: Graph) -> Scenario {
+        let scenario = Scenario::for_graph(name, graph);
+        write_accounts(&scenario, &ACCOUNTS);
         write_entries(&entries_input(&scenario), ENTRIES);
         scenario
     }
@@ -2877,7 +2957,8 @@ mod then_live {
         let batch_tx_input = yaml(EntryYaml, entries_input(scenario), "/entries");
         let (account_sender, live_accounts_input) = tokio::sync::mpsc::channel::<Account>(1);
         let (entry_sender, live_tx_input) = tokio::sync::mpsc::channel::<Entry>(1);
-        Box::leak(Box::new((account_sender, entry_sender)));
+        Box::leak(Box::new(account_sender));
+        send_live_entries(live_entries_input(scenario), entry_sender);
         let live_accounts_input = ChannelSource::new(live_accounts_input);
         let live_tx_input = ChannelSource::new(live_tx_input);
         let journals = scenario.journals();
@@ -3336,6 +3417,88 @@ mod then_live {
         let (code, report) = verify_exit(&resumed, &replayed);
         assert_eq!(code, Some(0), "{name}: {report}");
     }
+
+    fn notes(entries: &[(&str, &str)]) -> Vec<String> {
+        entries.iter().map(|(_, note)| (*note).into()).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_rows_across_resume_post_once() {
+        let name = "then_live_live_rows";
+        let scenario = fresh(name, Graph::ThenLive);
+        write_live_entries(&scenario, &QUEUED);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        let held = |archive: &Archive| {
+            archive.facts::<Entry>("live_tx").count() == QUEUED.len()
+                && Cut::Enriching.holds(archive)
+        };
+        until(&killed, name, held).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        assert!(
+            held(&Archive::read(&killed).await),
+            "{name}: the kill landed while the merge held the queued rows"
+        );
+        remove_input(&live_entries_input(&scenario));
+
+        let queued = notes(&[&ENTRIES[..], &QUEUED[..]].concat());
+        let expected = notes(&[&ENTRIES[..], &QUEUED[..], &LIVE[..]].concat());
+        let child = Child::spawn(&scenario, resume(&killed), None);
+        let resumed = child.run().await;
+        until(&resumed, name, |archive| {
+            postings(archive).len() >= queued.len()
+        })
+        .await;
+        write_live_entries(&scenario, &LIVE);
+        until(&resumed, name, |archive| {
+            postings(archive).len() >= expected.len()
+        })
+        .await;
+        child.signal(Signal::Term);
+        assert!(
+            child.exit().await.success(),
+            "{name}: the resumed run stops"
+        );
+        assert_eq!(
+            postings(&Archive::read(&resumed).await),
+            expected,
+            "{name}: each live row posts once, after every batch row"
+        );
+
+        remove_input(&live_entries_input(&scenario));
+        remove_input(&accounts_input(&scenario));
+        remove_input(&entries_input(&scenario));
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&resumed, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hold_past_ceiling_never_stalls() {
+        let name = "then_live_hold";
+        let scenario = fresh(name, Graph::ThenLive);
+        write_accounts(&scenario, &[&ACCOUNTS[..], &["a-5", "a-6"]].concat());
+        write_live_entries(&scenario, &QUEUED);
+        let expected = notes(&[&ENTRIES[..], &QUEUED[..]].concat());
+        let child = Child::spawn(&scenario, config_args(&short_stall_config(&scenario)), None);
+        let run = child.run().await;
+        until(&run, name, |archive| {
+            postings(archive).len() >= expected.len()
+        })
+        .await;
+        child.signal(Signal::Term);
+        assert!(child.exit().await.success(), "{name}: the run stops");
+        let archive = Archive::read(&run).await;
+        assert_eq!(
+            postings(&archive),
+            expected,
+            "{name}: each row posts once, batch first"
+        );
+        assert_no_stall_or_poison(&archive, name);
+    }
 }
 
 mod concat {
@@ -3506,6 +3669,27 @@ mod concat {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kill_in_the_last_phase_resumes_it_once() {
         row("concat_last_phase", Cut::LastPhase).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hold_past_ceiling_never_stalls() {
+        let name = "concat_hold";
+        let scenario = fresh(name);
+        let run = Child::spawn(&scenario, config_args(&short_stall_config(&scenario)), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&run).await;
+        let expected: Vec<String> = EARLY
+            .iter()
+            .chain(&LATE)
+            .map(|note| (*note).into())
+            .collect();
+        assert_eq!(
+            merged(&archive),
+            expected,
+            "{name}: every note passes the merge once, early before late"
+        );
+        assert_no_stall_or_poison(&archive, name);
     }
 }
 

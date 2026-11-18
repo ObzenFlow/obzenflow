@@ -1299,30 +1299,44 @@ mod tests {
         release_flush: tokio::sync::Notify,
     }
 
-    struct Fixture {
-        handle: JournalSinkHandle<AuditSink>,
+    type Upstream = (StageId, Arc<TestJournal<ChainEvent>>);
+
+    struct Fixture<H: UnifiedSinkHandler = AuditSink> {
+        handle: JournalSinkHandle<H>,
         data: Arc<TestJournal<ChainEvent>>,
-        upstream: Arc<TestJournal<ChainEvent>>,
-        upstream_id: StageId,
+        errors: Arc<TestJournal<ChainEvent>>,
+        upstreams: Vec<Upstream>,
     }
 
-    struct FixtureResources {
-        resources: super::JournalSinkResources<AuditSink>,
+    struct FixtureResources<H: UnifiedSinkHandler = AuditSink> {
+        resources: super::JournalSinkResources<H>,
         data: Arc<TestJournal<ChainEvent>>,
-        upstream: Arc<TestJournal<ChainEvent>>,
-        upstream_id: StageId,
+        errors: Arc<TestJournal<ChainEvent>>,
+        upstreams: Vec<Upstream>,
     }
 
-    fn fixture_resources(probe: Arc<Probe>) -> FixtureResources {
-        let stage_id = StageId::new();
-        let upstream_id = StageId::new();
-        let upstream = Arc::new(TestJournal::new(JournalOwner::stage(upstream_id)));
+    fn sink_resources<H: UnifiedSinkHandler>(
+        handler: H,
+        stage_id: StageId,
+        upstreams: usize,
+    ) -> FixtureResources<H> {
+        let upstreams: Vec<Upstream> = (0..upstreams)
+            .map(|_| {
+                let upstream_id = StageId::new();
+                let journal = Arc::new(TestJournal::new(JournalOwner::stage(upstream_id)));
+                (upstream_id, journal)
+            })
+            .collect();
         let data = Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+        let errors = Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
         let instrumentation = Arc::new(StageInstrumentation::new());
-        *probe.instrumentation.lock().unwrap() = Some(instrumentation.clone());
         let flow_id = FlowId::new();
+        let bound = upstreams
+            .iter()
+            .map(|(id, journal)| (*id, journal.clone() as Arc<dyn Journal<ChainEvent>>))
+            .collect::<Vec<_>>();
         let resources = super::JournalSinkResources {
-            handler: Some(AuditSink(probe)),
+            handler: Some(handler),
             stage_id,
             stage_name: "audit_sink".into(),
             receipt_destination: "audit_sink".into(),
@@ -1330,7 +1344,7 @@ mod tests {
             flow_name: "projection_flow".into(),
             flow_id,
             data_journal: data.clone(),
-            error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+            error_journal: errors.clone(),
             current_run_history: crate::effects::CurrentRunHistory::new(data.clone()),
             runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
             effect_ports: Default::default(),
@@ -1343,10 +1357,7 @@ mod tests {
             terminal_eof_kind: None,
             last_contract_check: None,
             instrumentation,
-            upstream_subscription_factory: SubscriptionFactory::new(HashMap::new()).bind(&[(
-                upstream_id,
-                upstream.clone() as Arc<dyn Journal<ChainEvent>>,
-            )]),
+            upstream_subscription_factory: SubscriptionFactory::new(HashMap::new()).bind(&bound),
             control_strategy: Arc::new(
                 crate::stages::common::control_strategies::JonestownSignalStrategy,
             ),
@@ -1382,21 +1393,29 @@ mod tests {
         FixtureResources {
             resources,
             data,
-            upstream,
-            upstream_id,
+            errors,
+            upstreams,
         }
     }
 
-    fn fixture(probe: Arc<Probe>) -> Fixture {
+    fn fixture_resources(probe: Arc<Probe>) -> FixtureResources {
+        let fixture = sink_resources(AuditSink(probe.clone()), StageId::new(), 1);
+        *probe.instrumentation.lock().unwrap() = Some(fixture.resources.instrumentation.clone());
+        fixture
+    }
+
+    fn spawn<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
+        fixture: FixtureResources<H>,
+    ) -> Fixture<H> {
         let FixtureResources {
             resources,
             data,
-            upstream,
-            upstream_id,
-        } = fixture_resources(probe);
+            errors,
+            upstreams,
+        } = fixture;
         let stage_id = resources.stage_id;
         let context = JournalSinkContext::new(resources);
-        let supervisor = JournalSinkSupervisor::<AuditSink> {
+        let supervisor = JournalSinkSupervisor::<H> {
             name: "sink_audit_sink".into(),
             stage_id,
             subscription: None,
@@ -1426,9 +1445,13 @@ mod tests {
         Fixture {
             handle,
             data,
-            upstream,
-            upstream_id,
+            errors,
+            upstreams,
         }
+    }
+
+    fn fixture(probe: Arc<Probe>) -> Fixture {
+        spawn(fixture_resources(probe))
     }
 
     #[derive(Default)]
@@ -1622,7 +1645,7 @@ mod tests {
             .contains_key(&inputs[1].commitment()));
     }
 
-    async fn activate(fixture: &Fixture) {
+    async fn activate<H: UnifiedSinkHandler + Send + Sync + 'static>(fixture: &Fixture<H>) {
         fixture.handle.initialize().await.unwrap();
         fixture
             .handle
@@ -1784,11 +1807,11 @@ mod tests {
         let probe = Arc::new(Probe::default());
         probe.block_consume.store(true, Ordering::SeqCst);
         let fixture = fixture(probe.clone());
-        fixture
-            .upstream
+        let (upstream_id, upstream) = fixture.upstreams[0].clone();
+        upstream
             .append(
                 ChainEventFactory::data_event(
-                    fixture.upstream_id.into(),
+                    upstream_id.into(),
                     "audit.input",
                     std::num::NonZeroU32::MIN,
                     serde_json::json!({"item": 1}),
@@ -1858,18 +1881,15 @@ mod tests {
         let probe = Arc::new(Probe::default());
         probe.block_flush.store(true, Ordering::SeqCst);
         let fixture = fixture(probe.clone());
-        let mut eof = ChainEventFactory::eof_event(fixture.upstream_id.into(), true);
+        let (upstream_id, upstream) = fixture.upstreams[0].clone();
+        let mut eof = ChainEventFactory::eof_event(upstream_id.into(), true);
         let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
             &mut eof.payload
         else {
             unreachable!()
         };
         *writer_seq = Some(SeqNo(1));
-        fixture
-            .upstream
-            .append(eof, Default::default())
-            .await
-            .unwrap();
+        upstream.append(eof, Default::default()).await.unwrap();
         activate(&fixture).await;
         tokio::time::timeout(Duration::from_secs(2), probe.flushing.notified())
             .await
@@ -1896,7 +1916,7 @@ mod tests {
             .cause
             .contract_failure()
             .expect("retain the consumer's typed decision");
-        assert_eq!(contract.upstream, fixture.upstream_id);
+        assert_eq!(contract.upstream, upstream_id);
         assert_eq!(contract.cause, expected);
         tokio::time::timeout(Duration::from_secs(2), entered.notified())
             .await
@@ -1921,7 +1941,7 @@ mod tests {
                 panic!("contract failure must survive cancellation and repeated joins")
             };
             let contract = failure.cause.contract_failure().unwrap();
-            assert_eq!(contract.upstream, fixture.upstream_id);
+            assert_eq!(contract.upstream, upstream_id);
             assert_eq!(contract.cause, expected);
         }
         let rows = fixture.data.read_all_unordered().await.unwrap();
@@ -2029,5 +2049,398 @@ mod tests {
         let report = apply_terminal_eof_audit_gate(lifecycle_report(EventId::new()), None);
         assert!(report.audit_payload.is_some());
         assert_eq!(report.commit_receipts.len(), 1);
+    }
+
+    use super::super::boundary::{
+        SinkDeliveryAdmission, SinkDeliveryAttemptOutcome, SinkDeliveryBoundary,
+        SinkDeliveryPermit, SinkPolicyEvidenceBatch,
+    };
+    use crate::stages::common::handlers::sink::SinkWriterAdapter;
+    use crate::stages::common::handlers::UnifiedSinkHandler;
+    use crate::stages::sink::{
+        PendingSinkInput, SinkBufferedOutcome, SinkCommitReceipt, SinkOperationError,
+        SinkOperationResult, SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure,
+        SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterLifecycleReport,
+    };
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
+    use obzenflow_core::event::payloads::execution_payload::{
+        ExecutionPayload, StageLifecycleFact,
+    };
+    use obzenflow_core::event::payloads::stage_fatal_payload::StageFatalCode;
+    use obzenflow_core::event::{SinkOperationFailed, StageFatalRecorded};
+    use obzenflow_core::{JournalRecord, TypedPayload};
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct Item {
+        value: u32,
+    }
+
+    impl TypedPayload for Item {
+        const EVENT_TYPE: &'static str = "sink_failure.item";
+    }
+
+    type Calls = Arc<std::sync::Mutex<Vec<String>>>;
+    type Script = fn(u32, SinkWriteContext, &mut Vec<PendingSinkInput>) -> SinkWriteResult;
+
+    struct ScriptedWriter {
+        script: Script,
+        retained: Vec<PendingSinkInput>,
+        calls: Calls,
+    }
+
+    impl ScriptedWriter {
+        fn record(&self, call: String) {
+            self.calls.lock().unwrap().push(call);
+        }
+    }
+
+    impl Drop for ScriptedWriter {
+        fn drop(&mut self) {
+            self.record("drop".into());
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SinkWriter for ScriptedWriter {
+        type Input = Item;
+
+        async fn write(&mut self, input: Item, context: SinkWriteContext) -> SinkWriteResult {
+            self.record(format!("write:{}", input.value));
+            (self.script)(input.value, context, &mut self.retained)
+        }
+
+        async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
+            self.record("flush".into());
+            Ok(SinkWriterLifecycleReport::default())
+        }
+
+        async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
+            self.record("drain".into());
+            Ok(SinkWriterLifecycleReport::default())
+        }
+    }
+
+    fn defer(context: SinkWriteContext, retained: &mut Vec<PendingSinkInput>) -> SinkWriteResult {
+        retained.push(context.defer());
+        Ok(SinkWriteReport::buffered(SinkBufferedOutcome::accepted(
+            None,
+        )))
+    }
+
+    fn commit_all(
+        context: SinkWriteContext,
+        retained: &mut Vec<PendingSinkInput>,
+    ) -> SinkWriteResult {
+        retained.push(context.defer());
+        Ok(
+            SinkWriteReport::buffered(SinkBufferedOutcome::accepted(None)).with_commit_receipts(
+                retained.drain(..).map(|pending| {
+                    SinkCommitReceipt::new(
+                        pending,
+                        SinkTerminalOutcome::success(None).with_items(1),
+                    )
+                }),
+            ),
+        )
+    }
+
+    fn destination_failure() -> SinkOperationError {
+        SinkOperationError::remote("destination failure")
+    }
+
+    fn writer_fixture(
+        script: Script,
+        upstreams: usize,
+        boundary: Option<Arc<dyn SinkDeliveryBoundary>>,
+    ) -> (Fixture<SinkWriterAdapter<ScriptedWriter>>, Calls) {
+        let calls = Calls::default();
+        let stage_id = StageId::new();
+        let writer = ScriptedWriter {
+            script,
+            retained: Vec::new(),
+            calls: calls.clone(),
+        };
+        let handler = SinkWriterAdapter::new(writer, stage_id, DeliveryMethod::Noop);
+        let mut resources = sink_resources(handler, stage_id, upstreams);
+        resources.resources.sink_delivery_boundary = boundary;
+        (spawn(resources), calls)
+    }
+
+    async fn send<H: UnifiedSinkHandler>(fixture: &Fixture<H>, inputs: &[(usize, u32)]) {
+        for (upstream, value) in inputs {
+            let (upstream_id, journal) = &fixture.upstreams[*upstream];
+            let input = Item { value: *value }.to_event((*upstream_id).into());
+            journal.append(input, Default::default()).await.unwrap();
+        }
+    }
+
+    async fn end_inputs<H: UnifiedSinkHandler>(fixture: &Fixture<H>) {
+        use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+        use obzenflow_core::event::types::SeqNo;
+
+        for (upstream_id, journal) in &fixture.upstreams {
+            let written = journal.read_all_unordered().await.unwrap().len() as u64;
+            let mut eof = ChainEventFactory::eof_event((*upstream_id).into(), true);
+            if let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
+                &mut eof.payload
+            {
+                *writer_seq = Some(SeqNo(written));
+            }
+            journal.append(eof, Default::default()).await.unwrap();
+        }
+    }
+
+    async fn input_ids<H: UnifiedSinkHandler>(fixture: &Fixture<H>) -> HashMap<u32, EventId> {
+        let mut ids = HashMap::new();
+        for (_, journal) in &fixture.upstreams {
+            for record in journal.read_all_unordered().await.unwrap() {
+                if let Some(item) = Item::from_event(&record.authored()) {
+                    ids.insert(item.value, *record.id());
+                }
+            }
+        }
+        ids
+    }
+
+    fn parent(record: &JournalRecord<ChainPayload>) -> Option<EventId> {
+        record.authored().causality.parent_ids.first().copied()
+    }
+
+    fn receipt_result(record: &JournalRecord<ChainPayload>) -> Option<&DeliveryResult> {
+        match &record.payload {
+            ChainPayload::Delivery(payload) => Some(&payload.result),
+            _ => None,
+        }
+    }
+
+    fn lifecycle_failures(data: &[JournalRecord<ChainPayload>]) -> Vec<Option<EventId>> {
+        data.iter()
+            .filter_map(|record| match &record.payload {
+                ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                    StageLifecycleFact::Failed {
+                        causal_event_id, ..
+                    },
+                )) => Some(*causal_event_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn operation_fact(errors: &[JournalRecord<ChainPayload>]) -> SinkOperationFailed {
+        errors
+            .iter()
+            .find_map(|record| SinkOperationFailed::from_event(&record.authored()))
+            .expect("an operation fact")
+    }
+
+    #[tokio::test]
+    async fn poisoned_write_chain_appends_in_order() {
+        let (fixture, calls) = writer_fixture(
+            |_, _, _| {
+                Err(SinkWriteFailure::poisoned(
+                    SinkWritePhase::Commit,
+                    destination_failure(),
+                ))
+            },
+            1,
+            None,
+        );
+        send(&fixture, &[(0, 1)]).await;
+        let (operation_begins, release_operation) = fixture
+            .errors
+            .block_matching_append(|event| SinkOperationFailed::from_event(event).is_some());
+        activate(&fixture).await;
+        operation_begins.notified().await;
+        let data = fixture.data.read_all_unordered().await.unwrap();
+        assert!(data
+            .iter()
+            .any(|record| matches!(receipt_result(record), Some(DeliveryResult::Failed { .. }))));
+        assert!(lifecycle_failures(&data).is_empty());
+        release_operation.notify_one();
+        let exit = fixture.handle.wait_for_stage_exit().await;
+        assert!(matches!(exit, LifecycleExit::Failed(_)), "{exit:?}");
+
+        let input = input_ids(&fixture).await[&1];
+        let data = fixture.data.read_all_unordered().await.unwrap();
+        let errors = fixture.errors.read_all_unordered().await.unwrap();
+        let receipt = data
+            .iter()
+            .find(|record| receipt_result(record).is_some())
+            .unwrap();
+        assert!(matches!(
+            receipt_result(receipt),
+            Some(DeliveryResult::Failed { error_type, .. })
+                if error_type == "sink_materialisation_poisoned"
+        ));
+        assert_eq!(parent(receipt), Some(input));
+        let [operation, failed_input] = errors.as_slice() else {
+            panic!("expected the operation fact and the failed input: {errors:?}")
+        };
+        let fact = SinkOperationFailed::from_event(&operation.authored()).unwrap();
+        assert_eq!(fact.failed_delivery_event_id, Some(*receipt.id()));
+        assert_eq!(fact.causal_event_id, Some(input));
+        assert!(matches!(
+            failed_input.payload,
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(_))
+        ));
+        assert_eq!(parent(failed_input), Some(input));
+        assert_eq!(lifecycle_failures(&data), [Some(*failed_input.id())]);
+        assert_eq!(*calls.lock().unwrap(), ["write:1", "drop"]);
+    }
+
+    #[tokio::test]
+    async fn fan_in_rollback_settles_both_upstreams() {
+        let (fixture, calls) = writer_fixture(
+            |value, context, retained| match value {
+                3 => Err(SinkWriteFailure::confirmed_rollback(
+                    SinkWritePhase::Execute,
+                    destination_failure(),
+                )),
+                4 => commit_all(context, retained),
+                _ => defer(context, retained),
+            },
+            2,
+            None,
+        );
+        send(&fixture, &[(0, 1), (1, 2), (0, 3), (1, 4)]).await;
+        end_inputs(&fixture).await;
+        activate(&fixture).await;
+        let exit = fixture.handle.wait_for_stage_exit().await;
+        assert!(matches!(exit, LifecycleExit::Completed(_)), "{exit:?}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["write:1", "write:2", "write:3", "write:4", "flush", "drain", "drop"]
+        );
+
+        let inputs = input_ids(&fixture).await;
+        let data = fixture.data.read_all_unordered().await.unwrap();
+        let settled = data
+            .iter()
+            .filter(|record| matches!(receipt_result(record), Some(DeliveryResult::Success { .. })))
+            .map(parent)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            settled,
+            [Some(inputs[&1]), Some(inputs[&2]), Some(inputs[&4])]
+        );
+        let errors = fixture.errors.read_all_unordered().await.unwrap();
+        assert_eq!(operation_fact(&errors).causal_event_id, Some(inputs[&3]));
+    }
+
+    #[tokio::test]
+    async fn fan_in_poison_commits_no_later_input() {
+        let (fixture, calls) = writer_fixture(
+            |value, context, retained| match value {
+                3 => {
+                    drop(context.defer());
+                    Err(SinkWriteFailure::poisoned_by_deferred(
+                        &retained[1],
+                        SinkWritePhase::Execute,
+                        destination_failure(),
+                    ))
+                }
+                _ => defer(context, retained),
+            },
+            2,
+            None,
+        );
+        send(&fixture, &[(0, 1), (1, 2), (0, 3), (1, 4)]).await;
+        activate(&fixture).await;
+        let exit = fixture.handle.wait_for_stage_exit().await;
+        assert!(matches!(exit, LifecycleExit::Failed(_)), "{exit:?}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["write:1", "write:2", "write:3", "drop"]
+        );
+
+        let inputs = input_ids(&fixture).await;
+        let data = fixture.data.read_all_unordered().await.unwrap();
+        let receipts = data
+            .iter()
+            .filter_map(|record| {
+                receipt_result(record).map(|result| {
+                    (
+                        parent(record),
+                        matches!(result, DeliveryResult::Buffered { .. }),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            receipts,
+            [
+                (Some(inputs[&1]), true),
+                (Some(inputs[&2]), true),
+                (Some(inputs[&3]), false),
+            ]
+        );
+        let errors = fixture.errors.read_all_unordered().await.unwrap();
+        assert_eq!(
+            operation_fact(&errors).operation_subject_event_id,
+            Some(inputs[&2])
+        );
+    }
+
+    struct PanicOnSecondObservation(Arc<AtomicUsize>);
+
+    struct CountedPermit(Arc<AtomicUsize>);
+
+    impl SinkDeliveryPermit for CountedPermit {
+        fn observe(
+            self: Box<Self>,
+            _outcome: &SinkDeliveryAttemptOutcome,
+        ) -> SinkPolicyEvidenceBatch {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 1 {
+                panic!("observation panic sentinel");
+            }
+            SinkPolicyEvidenceBatch::new()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SinkDeliveryBoundary for PanicOnSecondObservation {
+        async fn admit_sink_delivery(&self) -> SinkDeliveryAdmission {
+            SinkDeliveryAdmission::Admitted(Box::new(CountedPermit(self.0.clone())))
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_panic_journals_reported_receipts() {
+        let (fixture, calls) = writer_fixture(
+            |value, context, retained| match value {
+                1 => defer(context, retained),
+                _ => commit_all(context, retained),
+            },
+            1,
+            Some(Arc::new(PanicOnSecondObservation(Arc::default()))),
+        );
+        send(&fixture, &[(0, 1), (0, 2)]).await;
+        activate(&fixture).await;
+        let exit = fixture.handle.wait_for_stage_exit().await;
+        assert!(matches!(exit, LifecycleExit::Failed(_)), "{exit:?}");
+        assert_eq!(*calls.lock().unwrap(), ["write:1", "write:2", "drop"]);
+
+        let data = fixture.data.read_all_unordered().await.unwrap();
+        let receipts = data
+            .iter()
+            .filter(|record| receipt_result(record).is_some())
+            .collect::<Vec<_>>();
+        let results = receipts
+            .iter()
+            .map(|record| match receipt_result(record) {
+                Some(DeliveryResult::Buffered { .. }) => "buffered",
+                Some(DeliveryResult::Success { .. }) => "success",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results, ["buffered", "buffered", "success", "success"]);
+        let errors = fixture.errors.read_all_unordered().await.unwrap();
+        let [fatal] = errors.as_slice() else {
+            panic!("expected one stage fatal: {errors:?}")
+        };
+        let recorded = StageFatalRecorded::from_event(&fatal.authored()).unwrap();
+        assert_eq!(recorded.code, StageFatalCode::Protocol);
+        assert_eq!(parent(fatal), Some(*receipts[3].id()));
+        assert!(!recorded.detail.contains("sentinel"));
     }
 }

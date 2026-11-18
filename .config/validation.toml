@@ -319,6 +319,13 @@ rationale = "Temporary archive proves not-started outcome and hook cleanup witho
 
 [[prerequisites]]
 binary = "obzenflow_infra"
+test = "application::flow_application::tests::prometheus::hosted_metrics_match_journal_totals"
+lanes = ["production-features"]
+capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Application owns its port-zero listener; a client scrapes /metrics during and after a parked run, using a unique temporary configuration."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
 test = "application::flow_application::tests::startup::authentication_admission_failure_prevents_automatic_run"
 lanes = ["production-features","test-support"]
 capabilities = ["temp-files"]
