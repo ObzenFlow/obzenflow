@@ -2,12 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Downstream-style consumer coverage for the root PostgreSQL facade.
-//!
-//! This source intentionally names no driver query or argument type. The
-//! framework client and its bindings are everything an application port's
-//! system needs.
-
 use async_trait::async_trait;
 use obzenflow::effects::postgres::{
     self, default_postgres_client, PostgresClient, PostgresConnection, PostgresStatement,

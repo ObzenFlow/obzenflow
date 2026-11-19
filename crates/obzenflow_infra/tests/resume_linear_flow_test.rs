@@ -325,8 +325,6 @@ async fn memory_replay_from_disk_archive_is_ephemeral() -> Result<()> {
             })
             .await,
         );
-        // Replay makes no call to a sink's system, so the memory run
-        // reconstructs the recorded prefix without one.
         run_memory_replay_to_completion(1, RECORDED, 0).await?;
     }
 
@@ -570,9 +568,6 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
             })
             .await,
         );
-        // The sink makes no call for the settled prefix, and its live calls
-        // follow catch-up, so the live count alone can't race the stop into
-        // catch-up.
         let resumed_observer_calls = Arc::new(AtomicU64::new(0));
         run_until_delivered_with_observer(
             &journal_base,

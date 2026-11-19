@@ -142,7 +142,6 @@ impl EffectfulTransformHandler for PerformsBothEffects {
 #[derive(Clone, Debug, Serialize)]
 struct Delivered;
 
-/// Counts the sink's calls.
 struct CountDeliveries {
     deliveries: Arc<AtomicUsize>,
 }

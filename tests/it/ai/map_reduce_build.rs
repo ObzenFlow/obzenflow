@@ -158,7 +158,6 @@ trait CollectOutPort: Send + Sync {
     fn collect(&self, out: &BuildOnlyOut) -> Result<(), EffectError>;
 }
 
-/// Keeps every output its sink is called with.
 struct Collect {
     rows: Arc<Mutex<Vec<BuildOnlyOut>>>,
 }

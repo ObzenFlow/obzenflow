@@ -4,7 +4,7 @@
 
 //! Wake sources for paused supervisors.
 //!
-//! Live I/O policies (source/effect/sink delivery) compose as boundary
+//! Live I/O policies (source/effect) compose as boundary
 //! middleware. The signal hook lives in [`super::core`] and the completion hook
 //! in the source FSMs.
 

@@ -297,7 +297,6 @@ enum ResumeRow {
     CatchUp { stage_key: String, generation: u64 },
 }
 
-/// The sink calls a run started and never settled.
 async fn unsettled_sink_calls(run: &Path) -> u64 {
     let rows = replay_testkit::read_stage_envelopes_appended(run, "collect").await;
     let started = rows
@@ -510,8 +509,6 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
         0,
         "no effect executed during the failed catch-up"
     );
-    // A resume makes no sink call the recording settled. Only a call the
-    // recording started and never settled may run again before teardown.
     let unsettled = unsettled_sink_calls(&recorded_run).await;
     assert!(
         delivered.load(Ordering::SeqCst) <= unsettled,

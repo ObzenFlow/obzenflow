@@ -75,7 +75,6 @@ impl TypedTransformHandler for Passthrough {
 
 type Delivered = Arc<Mutex<Vec<(u64, Duration)>>>;
 
-/// Records each event's latency when its sink call runs.
 pub struct LatencyRecorder {
     origin: Instant,
     delivered: Delivered,
@@ -95,7 +94,6 @@ impl LatencyRecorder {
     }
 }
 
-/// The sink a latency case ends in.
 pub type Sink = Perform<fn(&Event) -> Event, Event, Event>;
 
 /// One flow's source, sink and the deliveries they share.

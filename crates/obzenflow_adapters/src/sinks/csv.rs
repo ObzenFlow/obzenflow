@@ -113,14 +113,18 @@ impl CsvRegisterPort for CsvRegister {
         } else {
             None
         };
+        let continues_history = ctx.continues_history();
         let layout = self.layout.clone();
         let state = Arc::clone(&self.state);
         let fields = row.fields.clone();
         blocking_io(move || {
             let mut state = state.lock().map_err(|_| poisoned_lock())?;
             if matches!(*state, RegisterState::Closed) {
-                *state =
-                    RegisterState::Open(Box::new(OpenRegister::open(&layout, recorded.as_ref())?));
+                *state = RegisterState::Open(Box::new(OpenRegister::open(
+                    &layout,
+                    recorded.as_ref(),
+                    continues_history,
+                )?));
             }
             let register = match &mut *state {
                 RegisterState::Open(register) => register,
@@ -146,15 +150,30 @@ impl CsvRegisterPort for CsvRegister {
 }
 
 impl OpenRegister {
-    fn open(layout: &CsvLayout, recorded: Option<&Appended>) -> Result<Self, EffectError> {
+    fn open(
+        layout: &CsvLayout,
+        recorded: Option<&Appended>,
+        continues_history: bool,
+    ) -> Result<Self, EffectError> {
         let Some(recorded) = recorded else {
-            let file = OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .truncate(true)
+                .truncate(!continues_history)
                 .open(&layout.path)
                 .map_err(|error| io_failure(&layout.path, error))?;
+            if continues_history
+                && file
+                    .metadata()
+                    .map_err(|error| io_failure(&layout.path, error))?
+                    .len()
+                    > 0
+            {
+                set_aside_tail(&mut file, &layout.path, 0)?;
+                file.rewind()
+                    .map_err(|error| io_failure(&layout.path, error))?;
+            }
             return Ok(Self {
                 file,
                 length: 0,
@@ -238,9 +257,7 @@ impl OpenRegister {
 }
 
 fn set_aside_tail(file: &mut File, path: &Path, length: u64) -> Result<(), EffectError> {
-    let mut tail = Vec::new();
     file.seek(SeekFrom::Start(length))
-        .and_then(|_| file.read_to_end(&mut tail))
         .map_err(|error| io_failure(path, error))?;
     let damage = damage_path(path, length);
     let mut out = OpenOptions::new()
@@ -248,8 +265,8 @@ fn set_aside_tail(file: &mut File, path: &Path, length: u64) -> Result<(), Effec
         .create_new(true)
         .open(&damage)
         .map_err(|error| io_failure(&damage, error))?;
-    out.write_all(&tail)
-        .and_then(|()| out.sync_all())
+    io::copy(file, &mut out)
+        .and_then(|_| out.sync_all())
         .map_err(|error| io_failure(&damage, error))?;
     file.set_len(length)
         .and_then(|()| file.sync_all())
@@ -291,6 +308,20 @@ fn cell(value: Option<&Value>) -> String {
         Some(Value::Bool(flag)) => flag.to_string(),
         Some(other @ (Value::Array(_) | Value::Object(_))) => other.to_string(),
     }
+}
+
+fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
+    let path = &layout.path;
+    let digest = ring::digest::digest(&SHA256, path.as_os_str().as_encoded_bytes());
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let instance = format!("{}.{name}", hex(&digest.as_ref()[..16]));
+    Port::deferred(move || {
+        Ok::<_, EffectPortResolutionError>(CsvRegister {
+            layout: layout.clone(),
+            state: Arc::new(Mutex::new(RegisterState::Closed)),
+        })
+    })
+    .instance(&instance)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -399,26 +430,15 @@ impl<P> CsvSinkBuilder<P> {
                 anyhow::bail!("headers length must match columns length");
             }
         }
-        let instance = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
         let layout = CsvLayout {
             path,
             columns: self.columns,
             headers: self.headers,
             delimiter: self.delimiter,
         };
-        let port = Port::deferred(move || {
-            Ok::<_, EffectPortResolutionError>(CsvRegister {
-                layout: layout.clone(),
-                state: Arc::new(Mutex::new(RegisterState::Closed)),
-            })
-        })
-        .instance(&instance);
         Ok(CsvSink {
             projection: self.projection,
-            port,
+            port: register_port(layout),
         })
     }
 }
@@ -515,11 +535,18 @@ mod tests {
     }
 
     #[test]
+    fn register_directories_distinguish_bindings() {
+        let east = register_port(layout(Path::new("east/register.csv")));
+        let west = register_port(layout(Path::new("west/register.csv")));
+        assert_ne!(east.system_name(), west.system_name());
+    }
+
+    #[test]
     fn new_history_starts_file_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("register.csv");
         std::fs::write(&path, "stale\n").unwrap();
-        let mut register = OpenRegister::open(&layout(&path), None).unwrap();
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
         let appended = register.append(&layout(&path), &fields(1)).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -532,12 +559,12 @@ mod tests {
     fn uncommitted_tail_moved_aside() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("register.csv");
-        let mut register = OpenRegister::open(&layout(&path), None).unwrap();
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
         let recorded = register.append(&layout(&path), &fields(1)).unwrap();
         register.append(&layout(&path), &fields(2)).unwrap();
         drop(register);
 
-        let mut resumed = OpenRegister::open(&layout(&path), Some(&recorded)).unwrap();
+        let mut resumed = OpenRegister::open(&layout(&path), Some(&recorded), true).unwrap();
         resumed.append(&layout(&path), &fields(2)).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -551,11 +578,11 @@ mod tests {
     fn file_changed_since_history_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("register.csv");
-        let mut register = OpenRegister::open(&layout(&path), None).unwrap();
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
         let recorded = register.append(&layout(&path), &fields(1)).unwrap();
         drop(register);
         std::fs::write(&path, "id,name\n9,row-9\n").unwrap();
-        let error = OpenRegister::open(&layout(&path), Some(&recorded))
+        let error = OpenRegister::open(&layout(&path), Some(&recorded), true)
             .err()
             .expect("a changed file is refused");
         assert!(error.to_string().contains("no longer holds"), "{error}");

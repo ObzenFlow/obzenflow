@@ -20,7 +20,6 @@ impl TypedPayload for PaymentAuthorized {
 }
 
 impl PaymentAuthorized {
-    /// Binds the statement parameters configured in `flow.rs`.
     pub(crate) fn bind(&self, bindings: &mut PostgresBindings) {
         bindings
             .bind(self.payment_id)

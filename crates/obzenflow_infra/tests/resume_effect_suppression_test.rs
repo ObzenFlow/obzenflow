@@ -239,15 +239,11 @@ async fn wait_for_settled_sink_calls(run_dir: &Path, target: u64) -> Result<()> 
     .map_err(|_| anyhow!("timeout waiting for the sink's journal to settle {target} calls"))
 }
 
-/// The calls one run made.
 struct RunCalls {
     effects: usize,
     sink: u64,
 }
 
-/// Run one flow instance until the sink's journal settles `expected` calls,
-/// then stop. A resumed run re-commits the calls its recording settled
-/// without making them, so `expected` counts that prefix too.
 async fn run_until_delivered(
     journal_base: &Path,
     first_value: u64,
@@ -360,8 +356,6 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
         "the recording anchors outcome facts at input_seq 1..=K under its own flow id"
     );
 
-    // Resume with two live inputs. The counters are fresh, so any catch-up
-    // re-execution would be visible in the final counts.
     let resumed = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
@@ -431,9 +425,6 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
     Ok(())
 }
 
-/// Tear R1 as a kill during the effectful stage's catch-up would: the stage
-/// keeps its first `kept` re-committed outcomes, the sink no effect row, and
-/// the system log nothing from any reconstruction completion on.
 fn tear_effect_catch_up(r1: &Path, kept: usize) -> Result<()> {
     let manifest = replay_testkit::archive_manifest(r1);
     let journal = |key: &str| {

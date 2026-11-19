@@ -26,7 +26,6 @@ const PAYMENTS_INSERT: &str = "(payment_id, order_id, customer_id, amount_cents)
 #[obzenflow::port]
 #[async_trait]
 pub(crate) trait PaymentStorePort {
-    /// The conflict target makes a repeated call converge on the same row.
     #[effect(type = "payments.store", at_least_once, records = reply)]
     async fn store(&self, payment: &PaymentAuthorized) -> Result<(), EffectError>;
 }

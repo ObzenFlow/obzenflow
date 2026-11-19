@@ -7,10 +7,10 @@
 //! `RateLimiterCore` owns the token bucket, admission counters, deadline
 //! calculation, summary/pulse window state, and snapshot projection for one
 //! protected unit. It is the reusable primitive shared by the source, effect,
-//! sink-delivery, and ingress adapters.
+//! and ingress adapters.
 //!
 //! This file is deliberately free of `ChainEvent`, `MiddlewareContext`,
-//! `MiddlewareExecutionScope`, source/effect/sink policy traits, ingress
+//! `MiddlewareExecutionScope`, source/effect policy traits, ingress
 //! boundary traits, HTTP DTOs, journalling types, and protocol response DTOs
 //! (FLOWIP-115d AC20). It returns plain data; the adapters turn that data into
 //! lifecycle/control facts.

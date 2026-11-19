@@ -469,8 +469,6 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
             })
             .await,
         );
-        // The sink makes no call for the settled prefix, and its live calls
-        // follow catch-up.
         run_until_delivered(&journal_base, &live_ranges, LIVE).await?
     };
     assert_eq!(
@@ -620,8 +618,6 @@ async fn mixed_sources_resume_flips_when_the_eof_arrives_after_the_watermark() -
             })
             .await,
         );
-        // The sink makes no call for the settled prefix, and its live calls
-        // follow catch-up.
         run_until_delivered(&journal_base, &live_ranges, LIVE).await?
     };
     assert_eq!(
@@ -999,7 +995,6 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
             )]
         );
         wait_for_running(&handle).await?;
-        // The sink makes no call for the settled prefix, only for tick 3.
         wait_for_count(&delivered, 1).await?;
         handle.stop_graceful(Duration::from_secs(5)).await?;
         tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
@@ -1101,7 +1096,6 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
             .map_err(|e| anyhow!("resume flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
         sender.send(tick(3)).await?;
-        // The sink makes no call for the settled prefix, only for tick 3.
         wait_for_count(&delivered, 1).await?;
         handle.stop_graceful(Duration::from_secs(5)).await?;
         tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
@@ -1583,8 +1577,6 @@ impl DelayedCountPort for DelayedCount {
     }
 }
 
-/// Wait until the sink's journal in `run` settles `target` calls. A resumed
-/// run re-commits the calls its recording settled, so `target` counts those.
 async fn wait_for_settled_calls(run: &Path, target: usize) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -1667,9 +1659,6 @@ fn lazy_flow(
     })
 }
 
-/// Read lazy orders, paced like the CSV flow, until the sink has made
-/// `deliveries` calls, then stop. A resume makes no call its recording
-/// settled. Returns the run and the lowest offset its reader generated.
 async fn run_lazy_orders(
     journal_base: &Path,
     resume: Option<&Path>,
@@ -2064,8 +2053,6 @@ async fn a_source_resumes_after_its_commits_not_its_reads() -> Result<()> {
     .await
     .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
-    // The cancel cut the sink short of the committed prefix, so the resume
-    // calls the sink for the unsettled part of it too.
     wait_for_settled_calls(
         &replay_testkit::latest_run_dir(&journal_base),
         prefix as usize + 100,

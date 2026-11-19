@@ -141,7 +141,6 @@ trait SleepingPort {
     async fn settle(&self, request: &Settle) -> Result<(), EffectError>;
 }
 
-/// Takes `sleep_per_event` over each sink call.
 struct Sleeper {
     sleep_per_event: Duration,
 }

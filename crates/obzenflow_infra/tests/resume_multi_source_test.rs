@@ -398,9 +398,6 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
         resume_rows(&replay_testkit::read_stage_envelopes_appended(&recorded_run, "merge").await);
     assert_eq!(recorded_merge.len() as u64, RECORDED_DELIVERED);
 
-    // Resume with both sources producing live. The sink makes no call for
-    // the settled prefix, and its live calls follow catch-up, so the live
-    // count alone can't race the stop into catch-up.
     let resumed_calls = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
@@ -641,8 +638,6 @@ async fn a_source_torn_before_crossing_crosses_its_skipped_generation_vacuously(
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(resume_of(r1.clone())).await,
         );
-        // The cut took the sink's calls for a 5..=6 with it, so it makes them
-        // again; the eight recorded inputs reuse theirs.
         run_until_delivered(&journal_base, &quiet, 2).await?
     };
     let r2 = replay_testkit::latest_run_dir(&journal_base);

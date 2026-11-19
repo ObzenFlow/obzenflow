@@ -14,7 +14,7 @@
 //! - [`config`]: configuration validation.
 //! - [`telemetry`]: turns the core's plain-data outputs into durable
 //!   observability `ChainEvent` lifecycle facts.
-//! - [`hook_adapters`]: the carrier-bound source/effect/sink-delivery/ingress
+//! - [`hook_adapters`]: the carrier-bound source/effect/ingress
 //!   adapters.
 //! - [`factory`]: the inert `RateLimiter` value and `rate_limit` constructor; declaration and
 //!   materialization are the sole production placement authority.
@@ -26,7 +26,7 @@
 //! ## Wait mechanism by placement (FLOWIP-114o, FLOWIP-115d)
 //!
 //! The limiter waits in one of two ways, depending on where it is attached. The
-//! async live-I/O units (the effect, source, and sink-delivery boundaries) await
+//! async live-I/O units (the effect and source boundaries) await
 //! their permit through the shared [`admission_core::acquire_admission`] helper
 //! with `tokio::time::sleep`, a cancellable future, so a drain, EOF,
 //! cancellation, or shutdown abandons an in-flight wait. Hosted ingress is
@@ -247,12 +247,6 @@ impl RateLimiterMiddleware {
         }
     }
 
-    /// Shared async token-bucket acquisition. The effect-boundary
-    /// `EffectPolicy::admit`, the source-boundary `SourcePolicy` path, and the
-    /// sink-delivery `SinkPolicy::admit` all delegate here through
-    /// [`admission_core::acquire_admission`], so the live-I/O surfaces share one
-    /// accounting and lifecycle-event implementation. It awaits its permit with
-    /// a cancellable future instead of blocking the worker thread.
     async fn acquire_permit_async(&self, ctx: &mut MiddlewareContext) {
         let writer_id = self.writer_id;
         acquire_admission(&self.core, |info: RateLimitDelayEvent| {

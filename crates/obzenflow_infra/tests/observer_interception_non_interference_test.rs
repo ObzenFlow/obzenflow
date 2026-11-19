@@ -61,8 +61,6 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<Chai
         .unwrap_or_else(|error| panic!("read {stage_key} journal: {error}"))
 }
 
-/// The sink's settled calls. The cursor places a call in its run, so
-/// independent runs compare without it.
 async fn sink_calls(run_dir: &Path) -> Vec<Value> {
     stage_events(run_dir, "delivered")
         .await

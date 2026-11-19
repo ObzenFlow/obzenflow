@@ -2,9 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Checked materialization and admission proofs for the application's summary
-//! policy.
-
 use super::example::summary_delivery::{SingleSummaryDelivery, SingleSummaryDeliveryPolicy};
 use obzenflow::effects::EffectError;
 use obzenflow::middleware::{

@@ -312,7 +312,6 @@ trait CollectRowsPort: Send + Sync {
     fn collect(&self, row: &Row) -> Result<(), EffectError>;
 }
 
-/// Keeps every row its sink is called with.
 struct CollectRows {
     delivered: Arc<Mutex<Vec<Row>>>,
 }
@@ -331,7 +330,6 @@ trait CollectHeldPort: Send + Sync {
     fn collect(&self, held: &HeldValue) -> Result<(), EffectError>;
 }
 
-/// Keeps every held value its sink is called with.
 struct CollectHeld {
     held: Arc<Mutex<Vec<HeldValue>>>,
 }

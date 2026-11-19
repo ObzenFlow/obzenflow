@@ -100,8 +100,8 @@ See [channel and handle contracts](builder.rs), [task ownership](handle.rs),
 
 ## Stage policy boundaries
 
-Live source polls, effects, and sink deliveries run through typed boundary
-middleware. Supervisor loops consume the resulting reports without knowing
+Live source polls and effect calls run through typed boundary middleware.
+Sink stages use the effect boundary. Supervisor loops consume the resulting reports without knowing
 which concrete policy produced them.
 
 Loop-level control hooks live outside this module:

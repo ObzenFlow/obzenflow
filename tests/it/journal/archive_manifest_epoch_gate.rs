@@ -42,7 +42,6 @@ impl ArchiveGatePort for ArchiveGateDestination {
     }
 }
 
-/// A sink whose port resolves on first use; `opens` counts the resolutions.
 fn counting_destination(opens: Arc<AtomicUsize>) -> Perform<fn(&Input) -> Record, Input, Record> {
     perform(record_input as fn(&Input) -> Record).through(Port::deferred(move || {
         opens.fetch_add(1, Ordering::SeqCst);

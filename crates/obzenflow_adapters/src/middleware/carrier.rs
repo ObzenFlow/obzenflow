@@ -461,7 +461,7 @@ pub struct MiddlewareDeclaration {
     pub family_label: &'static str,
     pub capability: MiddlewareCapability,
     /// The surfaces this factory can attach to. A control middleware may span
-    /// several (the rate limiter declares source poll, effect, sink delivery,
+    /// several (the rate limiter declares source poll, effect,
     /// and ingress); contextual binding supplies the concrete
     /// surface and this carrier validates membership. A declaration always
     /// names at least one surface.
@@ -955,7 +955,7 @@ pub struct MiddlewareMaterializationContext<'a> {
     /// The type of the stage being attached to. Source-poll materialization uses
     /// this to choose the FLOWIP-114m charge position (infinite sources charge
     /// pre-poll, finite sources charge after a clean non-empty delivery); the
-    /// effect and sink-delivery surfaces ignore it.
+    /// effect surface ignores it.
     pub stage_type: StageType,
     middleware: &'static str,
     surface: MiddlewareSurfaceKind,

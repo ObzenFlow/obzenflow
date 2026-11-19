@@ -130,8 +130,6 @@ fn build_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let ticker = ReattachingSource(BoundedTicker::new(first_n, count));
         let double = DoubleTransform::new();
-        // A resume makes only the calls its recording didn't settle, so in a
-        // resumed run the counter witnesses exactly the live tail.
         let counting_sink = CountingSink::<Doubled>::new(delivered);
 
         Ok(flow! {
@@ -300,9 +298,6 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
             })
             .await,
         );
-        // The sink makes no call for the settled prefix, and its live calls
-        // follow catch-up, so the live count alone can't race the stop into
-        // catch-up.
         run_until_delivered(&journal_base, R0_EVENTS + 1, R1_LIVE, R1_LIVE).await?;
     }
     let r1 = replay_testkit::latest_run_dir(&journal_base);

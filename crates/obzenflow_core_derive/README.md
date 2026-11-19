@@ -9,7 +9,7 @@ This crate implements ObzenFlow's procedural macros. Application authors use
 | `outcome![...]` | Sorts a list's outcomes by type name, through the hidden macro Core's `outcome!` calls. |
 | `#[obzenflow::command]` | Declares the ports an effectful command works through, with `through = Port` on a unit struct or in `#[port]` fields. |
 | `#[obzenflow::system]` | Names a system on its `impl` of a port. |
-| `#[obzenflow::port]` | Marks a port trait, or the `impl` block of a struct that serves as its own port, so a `Port` takes its port type from the system it is built from. Each method marked `#[effect(type = "...", exactly_once)]` or `at_least_once` declares the effect its request names. |
+| `#[obzenflow::port]` | Marks a port trait, or the `impl` block of a struct that serves as its own port, so a `Port` takes its port type from the system it is built from. Each `#[effect]` method declares one guarantee (`exactly_once`, `at_least_once` or `at_most_once`). A sink method records its reply with `records = reply`. |
 
 ## Application use
 

@@ -234,8 +234,7 @@ pub(crate) struct CommitOptions {
 ///
 /// Only the five wired variants exist. Other stage-runtime appends are
 /// out-of-surface raw appends today: error-journal and error-routed-data writes,
-/// backpressure activity pulses, sink delivery receipts, forwarded sink-boundary
-/// control rows, source/stage lifecycle events, ingress refusal facts, and the
+/// backpressure activity pulses, source/stage lifecycle events, ingress refusal facts, and the
 /// `fx.emit` / domain-effect-outcome / framework-effect-record facts (which flow
 /// through `NonDataStageFact`) each append directly to their journal (and mirror
 /// directly where applicable) rather than through this seam. Routing them through

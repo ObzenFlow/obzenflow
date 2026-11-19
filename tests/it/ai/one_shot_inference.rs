@@ -173,7 +173,6 @@ trait CollectBriefPort: Send + Sync {
     fn collect(&self, brief: &DecisionBrief) -> Result<(), EffectError>;
 }
 
-/// Keeps every brief its sink is called with.
 struct CollectBrief {
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
 }

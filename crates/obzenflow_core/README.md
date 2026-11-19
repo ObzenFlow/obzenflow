@@ -28,7 +28,7 @@ Application facts preserve their JSON values, including scalars, arrays, and nul
 Execution accounting and causal identity belong to provenance. Optional
 `envelope.observability` attachments carry measurements and their capture stamps.
 Changing observation retention does not remove payloads, effect evidence,
-delivery receipts, or atomic membership. Missing measurements remain distinct
+or atomic membership. Missing measurements remain distinct
 from measured zero.
 
 `JOURNAL_SCHEMA_VERSION` is the shared authority for records, framing, and

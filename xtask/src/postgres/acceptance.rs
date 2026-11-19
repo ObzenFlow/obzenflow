@@ -284,15 +284,10 @@ impl TestSession {
                     &self.service,
                 )?;
                 if spec.id == "hn-digest-postgres-treatment" {
-                    child
-                        .env(
-                            "OBZENFLOW_POSTGRES_SCHEMA",
-                            super::config::hn_digest_test_schema(&self.state.run_id),
-                        )
-                        .env(
-                            "OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER",
-                            "postgres_sink",
-                        );
+                    child.env(
+                        "OBZENFLOW_POSTGRES_SCHEMA",
+                        super::config::hn_digest_test_schema(&self.state.run_id),
+                    );
                 }
                 command_status(&mut child, directory, spec.id)
             })();

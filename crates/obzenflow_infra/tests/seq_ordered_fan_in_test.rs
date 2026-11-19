@@ -1039,7 +1039,6 @@ async fn a_resume_continues_the_recorded_prefix_and_its_archive_replays() -> Res
         ))
         .await?;
         inputs.second.send(tx("acct-1", 3)).await?;
-        // The sink makes no call for the settled prefix, only for the live row.
         wait_for_count(&delivered, 1).await?;
         stop(handle).await?;
     }
@@ -1147,7 +1146,6 @@ async fn a_folds_end_of_input_output_lands_where_it_was_recorded() -> Result<()>
         ))
         .await?;
         live.send(live_snapshot(10_000)).await?;
-        // The sink makes no call for the settled prefix, only for the live row.
         wait_for_count(&delivered, 1).await?;
         stop(handle).await?;
     }

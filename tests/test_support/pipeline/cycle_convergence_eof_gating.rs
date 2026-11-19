@@ -384,7 +384,6 @@ trait DoneCounterPort: Send + Sync {
     fn count(&self, seed: &SeedKind) -> Result<(), EffectError>;
 }
 
-/// Counts the sink's calls for `done` events.
 struct DoneCounter {
     done_events: Arc<AtomicU64>,
 }

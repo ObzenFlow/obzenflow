@@ -295,7 +295,6 @@ trait CollectOutputPort: Send + Sync {
     fn collect(&self, output: &ReplayOutput) -> Result<(), EffectError>;
 }
 
-/// Keeps every output its sink is called with. Replay makes no call.
 struct CollectSink {
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 }

@@ -30,7 +30,6 @@ impl TypedPayload for AsyncTestEvent {
 #[derive(Clone, Debug, Serialize)]
 struct Received;
 
-/// Counts the sink's calls.
 struct CountReceived {
     received: Arc<AtomicU64>,
 }

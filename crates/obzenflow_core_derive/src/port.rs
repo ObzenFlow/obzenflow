@@ -20,8 +20,7 @@ const MISSING_GUARANTEE: &str =
                   idempotent, or the method takes `key: &IdempotencyKey` and the other
                   end deduplicates by it, or it takes `tx: EffectCommitHandle<Outcome>`
                   and commits its outcome
-  at_least_once   the call may take effect more than once after a crash; the stage row
-                  accepts that with `.at_least_once::<Request>()`
+  at_least_once   the call may take effect more than once after a crash
   at_most_once    the call takes effect at most once; a call a crash left in doubt is
                   recorded abandoned and never made again";
 

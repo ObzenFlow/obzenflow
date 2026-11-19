@@ -208,7 +208,6 @@ trait CollectEmbeddedPort: Send + Sync {
     fn collect(&self, output: &TicketEmbedded) -> Result<(), EffectError>;
 }
 
-/// Keeps every embedded ticket its sink is called with. Replay makes no call.
 struct CollectEmbedded {
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
 }

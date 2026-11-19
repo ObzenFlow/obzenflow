@@ -119,19 +119,6 @@ pub trait StatefulInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput>
 #[diagnostic::do_not_recommend]
 impl<Input> StatefulInputMatchesArrow<Input> for Input {}
 
-/// Diagnostic facade for equality between a sink connector's authoritative
-/// input and the `sink!` arrow input.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "this sink connector does not witness its declared input",
-    label = "the connector's `Input` does not match the fact type declared before `=>`",
-    note = "implement SinkConnector or InlineSink with Input matching the sink! arrow (FLOWIP-134h)"
-)]
-pub trait SinkInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput> {}
-
-#[diagnostic::do_not_recommend]
-impl<Input> SinkInputMatchesArrow<Input> for Input {}
-
 /// Diagnostic facade for equality between a typed join handler's authoritative
 /// reference type and the `catalog` position of the stage arrow.
 #[doc(hidden)]

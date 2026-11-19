@@ -123,20 +123,6 @@ pub enum UnrecordedEffect {
     RecordingEnded,
 }
 
-/// How a resumed sink's receipts classify one delivery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeliverySettlement {
-    /// Past the settled prefix of a certified edge; the sink never delivered
-    /// this input, so the delivery runs live.
-    FirstDelivery,
-    /// Inside a certified edge's settled prefix; a re-delivery, scoped by its
-    /// generation.
-    Settled,
-    /// Outside a resume, or on an edge that is not certified; the delivery is
-    /// scoped by its generation.
-    Unclassified,
-}
-
 /// Whether descriptor materialisation requires every declared effect port to
 /// be registered. A replay never executes an effect, so it deliberately
 /// permits an empty registry.
@@ -169,19 +155,6 @@ pub trait ExecutionStrategy: std::fmt::Debug + Send + Sync {
         _generation: ReaderGeneration,
     ) -> MiddlewareExecutionScope {
         self.stage_scope(stage)
-    }
-    /// Middleware execution scope for one sink delivery, classified by the
-    /// sink's receipts. Strategies that do not resume ignore the classification.
-    fn sink_delivery_scope(
-        &self,
-        stage: StageId,
-        generation: Option<ReaderGeneration>,
-        _settlement: DeliverySettlement,
-    ) -> MiddlewareExecutionScope {
-        match generation {
-            Some(generation) => self.scope_for_generation(stage, generation),
-            None => self.stage_scope(stage),
-        }
     }
     /// What a cursor without any recorded attempt means at this position.
     fn missing_outcome(&self, at: ExecutionPosition) -> UnrecordedEffect;
@@ -453,18 +426,6 @@ impl ExecutionStrategy for Resume {
             MiddlewareExecutionScope::ResumeHandler
         }
     }
-    fn sink_delivery_scope(
-        &self,
-        stage: StageId,
-        generation: Option<ReaderGeneration>,
-        settlement: DeliverySettlement,
-    ) -> MiddlewareExecutionScope {
-        match (settlement, generation) {
-            (DeliverySettlement::FirstDelivery, _) => MiddlewareExecutionScope::LiveHandler,
-            (_, Some(generation)) => self.scope_for_generation(stage, generation),
-            (_, None) => self.stage_scope(stage),
-        }
-    }
     fn missing_outcome(&self, _at: ExecutionPosition) -> UnrecordedEffect {
         UnrecordedEffect::Execute
     }
@@ -694,17 +655,6 @@ impl RuntimeExecution {
             (None, Some(generation)) => self.strategy.scope_for_generation(stage_id, generation),
             (None, None) => self.stage_scope(stage_id),
         }
-    }
-
-    /// Scope for one sink delivery, classified by the sink's receipts.
-    pub fn sink_delivery_scope(
-        &self,
-        stage_id: StageId,
-        generation: Option<ReaderGeneration>,
-        settlement: DeliverySettlement,
-    ) -> MiddlewareExecutionScope {
-        self.strategy
-            .sink_delivery_scope(stage_id, generation, settlement)
     }
 
     /// Whether positioned work at `at` is reconstructing recorded history.

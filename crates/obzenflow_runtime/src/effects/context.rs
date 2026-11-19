@@ -85,6 +85,11 @@ impl EffectContext {
         self.is_replaying
     }
 
+    /// Whether this call continues an archived history, including one with no recorded reply.
+    pub fn continues_history(&self) -> bool {
+        self.answers.is_some()
+    }
+
     /// The reply this stage last recorded for this effect in the history the
     /// run continues, or `None` for a new history. A system that keeps state
     /// outside the journal, such as a file it appends to, reads it before its

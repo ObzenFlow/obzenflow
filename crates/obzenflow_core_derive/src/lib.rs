@@ -67,7 +67,7 @@ pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Mark a port trait, or the inherent `impl` block of a struct that serves as
 /// its own port, so a `Port` takes its port type from the system it is built
-/// from. Port methods answer with `Result<Outcome, EffectError>`, where the
+/// from. Port methods return `Result<Outcome, EffectError>`. By default the
 /// outcome is one fact or an `outcome![...]` list. A port trait is `Send` and
 /// `Sync`, which the attribute adds when the trait doesn't write them.
 ///
@@ -89,8 +89,9 @@ pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   it. A keyed request implements `Keyed`, and its key is journalled with the
 ///   call.
 /// - `at_least_once`: the call may take effect more than once after a crash.
-///   The stage row accepts that with `.at_least_once::<Request>()` after its
-///   handler, and retry middleware does not repeat it.
+///   An effectful transform or stateful row acknowledges this with
+///   `.at_least_once::<Request>()`. A sink takes the guarantee from its port.
+///   Retry middleware may repeat a call after a definite refusal.
 /// - `at_most_once`: the call takes effect at most once. The runtime records
 ///   each attempt's start before making it, and records an attempt a crash
 ///   left in doubt abandoned instead of making it again.

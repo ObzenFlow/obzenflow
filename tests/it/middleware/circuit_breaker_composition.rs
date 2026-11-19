@@ -2,25 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-115b/115h: a named composition proof for the *built-in* circuit
-//! breaker across all three live-I/O surfaces, with effect-bound recovery.
-//!
-//! A single flow places the built-in breaker on a source poll, on a declared
-//! effect, and on a sink's calls, with a fan-out transform in between so one
-//! source input fans out to several effect attempts and several sink calls
-//! (fan-out) that converge on one sink stage (fan-in). Every derived effect
-//! cursor fails once with a typed timeout, then succeeds on its retry.
-//!
-//! The proof:
-//!   - the built-in breaker binds and composes on source, effect, and sink in
-//!     one flow (it would fail to build otherwise);
-//!   - all six logical effect cursors keep independent retry state and produce
-//!     one scheduled and one succeeded evidence row apiece;
-//!   - fan-in delivers exactly six outputs in deterministic order;
-//!   - strict replay of the same archive reproduces the identical domain outputs
-//!     without re-executing effects; source and sink policies remain suppressed,
-//!     while effect-history settlement rows retain their archived identities.
-
 use crate::replay_testkit;
 
 use async_trait::async_trait;
@@ -221,7 +202,6 @@ trait CollectOutputPort: Send + Sync {
     fn collect(&self, output: &CompOutput) -> Result<(), EffectError>;
 }
 
-/// Keeps every output its sink is called with. Replay makes no call.
 struct CollectSink {
     outputs: Arc<Mutex<Vec<CompOutput>>>,
 }

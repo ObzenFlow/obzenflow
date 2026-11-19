@@ -38,8 +38,6 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
         ..Default::default()
     });
 
-    // Disk journals pass the F13 ephemeral-resume refusal, so the build
-    // reaches the strategy-selection point this guard sits at.
     let base = tempfile::tempdir().expect("tempdir");
     let journals = disk_journals(base.path().to_path_buf());
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {

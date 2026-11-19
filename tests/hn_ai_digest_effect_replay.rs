@@ -237,8 +237,6 @@ trait CollectOutPort: Send + Sync {
     fn collect(&self, output: &DigestOut) -> Result<(), EffectError>;
 }
 
-/// Keeps every digest its sink is called with. Replay makes no call, so a
-/// replayed run keeps nothing.
 struct CollectOut {
     outputs: Arc<Mutex<Vec<DigestOut>>>,
 }
@@ -537,7 +535,6 @@ fn assert_grouping_authorship(
     }
 }
 
-/// One settled sink call, without the cursor that places it in a run.
 #[derive(Debug, PartialEq)]
 struct StableSinkCall {
     effect_type: String,
@@ -1842,12 +1839,12 @@ async fn postgres_output_inserts_one_hn_digest() {
     .expect("reset the isolated HN digest destination");
 
     let temp = tempfile::tempdir().expect("temporary PostgreSQL HN-flow journal root");
-    let journal_base = temp.path().join("journals");
+    let journal_base = temp.path().join("target/hn-ai-digest-logs");
     let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let inputs = config::HnRunInputs {
         max_stories: 5,
         poll_timeout_secs: 10,
-        source_rate_limit: 1_000.0,
+        source_rate_limit: config::DEFAULT_HN_SOURCE_RATE_LIMIT,
         max_stories_per_group: 5,
         interests: Some("runtime protocols".to_string()),
         mode_label: "mock".to_string(),
@@ -1875,12 +1872,11 @@ async fn postgres_output_inserts_one_hn_digest() {
     assert!(server.request_count() > 0);
     assert_eq!(models.call_count(), 2);
 
-    let row_count = sqlx::query_scalar::<_, i64>(&format!(
-        "SELECT COUNT(*) FROM \"{schema}\".hn_digest_summaries"
-    ))
-    .fetch_one(&pool)
-    .await
-    .expect("count the HN digest destination rows");
+    let count_rows = format!("SELECT COUNT(*) FROM \"{schema}\".hn_digest_summaries");
+    let row_count = sqlx::query_scalar::<_, i64>(&count_rows)
+        .fetch_one(&pool)
+        .await
+        .expect("count the HN digest destination rows");
     assert_eq!(row_count, 1);
 
     let row = sqlx::query_as::<
@@ -1932,6 +1928,49 @@ async fn postgres_output_inserts_one_hn_digest() {
     };
     assert_eq!(call.effect_type, "hn.digest.publish");
     assert_eq!(call.outcome["outcome"], "succeeded");
+
+    let mut offline_config = shipped_config("obzenflow.postgres.toml");
+    offline_config["app"]["max_stories"] = 5.into();
+    offline_config["app"]["poll_timeout_secs"] = 10.into();
+    offline_config["app"]
+        .as_table_mut()
+        .expect("app settings")
+        .insert("interests".into(), "runtime protocols".into());
+    offline_config["app"]["digest"]["group_max_stories"] = 5.into();
+    let offline_path = temp.path().join("offline.toml");
+    std::fs::write(&offline_path, toml::to_string(&offline_config).unwrap()).unwrap();
+    let test_binary = std::env::current_exe().unwrap();
+    let example = test_binary
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join("examples")
+        .join(format!("hn_ai_digest_demo{}", std::env::consts::EXE_SUFFIX));
+    let replay = std::process::Command::new(example)
+        .current_dir(temp.path())
+        .env_remove("OBZENFLOW_POSTGRES_URL")
+        .arg("--config")
+        .arg(offline_path)
+        .arg("--replay-from")
+        .arg(&archive)
+        .arg("--verify")
+        .output()
+        .expect("run the HN example built by the PostgreSQL acceptance suite");
+    assert!(
+        replay.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replay_archive = latest_run_dir(&journal_base);
+    assert_ne!(replay_archive, archive);
+    let replayed = stage_envelopes(&replay_archive, "digest_summary").await;
+    assert_eq!(stable_sink_calls(&replayed), calls);
+    let rows_after_replay = sqlx::query_scalar::<_, i64>(&count_rows)
+        .fetch_one(&pool)
+        .await
+        .expect("count the rows after offline replay");
+    assert_eq!(rows_after_replay, row_count);
 }
 
 fn shipped_config(file: &str) -> toml::Table {

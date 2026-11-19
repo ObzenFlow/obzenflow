@@ -52,7 +52,6 @@ impl Cohort {
     }
 }
 
-/// One settled sink call, by its effect type, outcome and consumed input.
 struct SinkCall {
     effect_type: String,
     succeeded: bool,

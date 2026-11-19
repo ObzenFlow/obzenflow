@@ -276,7 +276,7 @@ enum Hold {
     AiSourceAfter(u64),
     AiCall(String),
     PartnerNotice(String),
-    RegisterWrite,
+    RegisterWrite(usize),
 }
 
 async fn hold_until(release: &Path) {
@@ -500,7 +500,7 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
             | Hold::AiSourceAfter(_)
             | Hold::AiCall(_)
             | Hold::PartnerNotice(_)
-            | Hold::RegisterWrite,
+            | Hold::RegisterWrite(_),
         )
         | None => (None, None),
     };
@@ -1356,8 +1356,6 @@ impl Archive {
             .last()
     }
 
-    /// Each settled receipt call's row id and order, through the consumed
-    /// fact, or `None` for the order when this read does not hold that payment.
     fn receipt_orders(&self) -> Vec<(EventId, Option<String>)> {
         let orders: BTreeMap<EventId, String> = self
             .facts::<PaymentAuthorized>("authorize_payment")
@@ -1371,9 +1369,6 @@ impl Archive {
             .collect()
     }
 
-    /// Each settled receipt call's order by call row, for a run that has
-    /// ended. A resume re-commits the calls its recording settled under their
-    /// recorded ids, so a call keeps one row id across a history.
     fn delivered(&self) -> BTreeMap<EventId, String> {
         self.receipt_orders()
             .into_iter()
@@ -1830,8 +1825,6 @@ impl History {
             "{name}: the lineage check over the gateway's call log: {logs:?}"
         );
 
-        // I8: every receipt written at least once; a physical receipt
-        // without its settled call only where a kill cut it.
         let mut lines: BTreeMap<String, usize> = BTreeMap::new();
         for receipt in read_lines::<Receipt>(&self.scenario.receipts()) {
             *lines.entry(receipt.order_id).or_default() += 1;
@@ -2649,8 +2642,6 @@ fn copy_run(run: &Path, into: &Scenario) -> PathBuf {
     std::fs::canonicalize(copy).expect("resolve the copy")
 }
 
-/// The fact a sink's settled successful call consumed, or `None` for any
-/// other row.
 fn settled_input(row: &JournalRecord<ChainPayload>) -> Option<&EventId> {
     match &row.payload {
         ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
@@ -6393,6 +6384,9 @@ mod at_most_once {
             },
             release: scenario.release(),
         }));
+        let retry_notice = obzenflow::middleware::retry()
+            .fixed_delay(Duration::from_millis(1))
+            .max_attempts(2);
         let journals = scenario.journals();
         FlowDefinition::materialize(move |_runtime_config| {
             Ok(flow! {
@@ -6401,7 +6395,7 @@ mod at_most_once {
 
                 stages: {
                     notices = source!(ShipmentNotice => notices_input);
-                    partner = sink!(ShipmentNotice => notify);
+                    partner = sink!(ShipmentNotice with retry_notice => notify);
                 },
 
                 topology: {
@@ -6411,16 +6405,16 @@ mod at_most_once {
         })
     }
 
-    fn starts(archive: &Archive) -> usize {
+    fn start_ordinals(archive: &Archive) -> Vec<u32> {
         archive
             .rows("partner", RunJournalKind::Data)
-            .filter(|row| {
-                matches!(
-                    &row.payload,
-                    ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(_))
-                )
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(start)) => {
+                    Some(start.attempt.get())
+                }
+                _ => None,
             })
-            .count()
+            .collect()
     }
 
     fn settlements(archive: &Archive) -> BTreeMap<String, &'static str> {
@@ -6481,14 +6475,20 @@ mod at_most_once {
             Some(Hold::PartnerNotice(HELD.into())),
         );
         let run = child.run().await;
-        until(&run, name, |archive| {
-            starts(archive) == 3 && history().iter().any(|notice| notice == HELD)
+        until(&run, name, |_| {
+            history().iter().any(|notice| notice == HELD)
         })
         .await;
         child.signal(Signal::Kill);
         assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let interrupted = Archive::read(&run).await;
         assert_eq!(
-            settlements(&Archive::read(&run).await),
+            start_ordinals(&interrupted),
+            [1, 1, 2, 1],
+            "{name}: the refused notice starts a second physical attempt"
+        );
+        assert_eq!(
+            settlements(&interrupted),
             BTreeMap::from([("N-01".into(), "succeeded"), ("N-02".into(), "refused")]),
             "{name}: the held notice has a start and no outcome"
         );
@@ -6539,7 +6539,6 @@ mod csv_register {
     use std::sync::Arc;
 
     const ENTRIES: [&str; 4] = ["R-01", "R-02", "R-03", "R-04"];
-    const HELD_WRITE: usize = 3;
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     struct LedgerEntry {
@@ -6587,7 +6586,7 @@ mod csv_register {
     }
 
     struct HoldAfterWrite {
-        release: Option<PathBuf>,
+        hold: Option<(usize, PathBuf)>,
     }
 
     impl MiddlewareFactory for HoldAfterWrite {
@@ -6617,7 +6616,7 @@ mod csv_register {
             })?;
             Ok(MiddlewareSurfaceAttachment::effect(Arc::new(
                 HoldAfterWritePolicy {
-                    release: self.release.clone(),
+                    hold: self.hold.clone(),
                     writes: AtomicUsize::new(0),
                 },
             )))
@@ -6625,7 +6624,7 @@ mod csv_register {
     }
 
     struct HoldAfterWritePolicy {
-        release: Option<PathBuf>,
+        hold: Option<(usize, PathBuf)>,
         writes: AtomicUsize,
     }
 
@@ -6641,7 +6640,8 @@ mod csv_register {
 
         fn observe(&self, _attempt: &EffectAttemptOutcome<'_>, _context: &mut MiddlewareContext) {
             let write = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
-            if let Some(release) = self.release.as_ref().filter(|_| write == HELD_WRITE) {
+            if let Some((_, release)) = self.hold.as_ref().filter(|(ordinal, _)| *ordinal == write)
+            {
                 while !release.exists() {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -6661,7 +6661,10 @@ mod csv_register {
             .build()
             .expect("the register is configured");
         let hold_after_write = HoldAfterWrite {
-            release: matches!(hold, Some(Hold::RegisterWrite)).then(|| scenario.release()),
+            hold: match hold {
+                Some(Hold::RegisterWrite(write)) => Some((write, scenario.release())),
+                _ => None,
+            },
         };
         let journals = scenario.journals();
         FlowDefinition::materialize(move |_runtime_config| {
@@ -6709,14 +6712,22 @@ mod csv_register {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn csv_register_resume_sets_tail_aside() {
-        let name = "csv_register";
+        check_register_cut("csv_register", 3).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn csv_first_write_preserves_tail() {
+        check_register_cut("csv_register_first", 1).await;
+    }
+
+    async fn check_register_cut(name: &str, held_write: usize) {
         let scenario = fresh(name);
         let file = || std::fs::read_to_string(register_file(&scenario)).unwrap_or_default();
-        let held = rows(&ENTRIES[..HELD_WRITE]);
-        let child = Child::spawn(&scenario, Vec::new(), Some(Hold::RegisterWrite));
+        let held = rows(&ENTRIES[..held_write]);
+        let child = Child::spawn(&scenario, Vec::new(), Some(Hold::RegisterWrite(held_write)));
         let run = child.run().await;
         until(&run, name, |archive| {
-            appended(archive) == HELD_WRITE - 1 && file() == held
+            appended(archive) == held_write - 1 && file() == held
         })
         .await;
         child.signal(Signal::Kill);
@@ -6736,16 +6747,23 @@ mod csv_register {
             rows(&ENTRIES),
             "{name}: the register holds each row once"
         );
-        let recorded = rows(&ENTRIES[..HELD_WRITE - 1]);
+        let recorded = if held_write == 1 {
+            String::new()
+        } else {
+            rows(&ENTRIES[..held_write - 1])
+        };
         let damage = PathBuf::from(format!(
             "{}.{}.damage",
             register_file(&scenario).display(),
             recorded.len()
         ));
-        assert_eq!(damage_files(&scenario), [damage.clone()]);
+        assert_eq!(
+            damage_files(&scenario).as_slice(),
+            std::slice::from_ref(&damage)
+        );
         assert_eq!(
             std::fs::read_to_string(&damage).expect("read the cut tail"),
-            format!("{}\n", ENTRIES[HELD_WRITE - 1]),
+            &held[recorded.len()..],
             "{name}: the cut tail moved into its inert file"
         );
         assert_eq!(appended(&Archive::read(&resumed).await), ENTRIES.len());

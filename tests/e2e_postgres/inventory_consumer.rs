@@ -37,7 +37,6 @@ impl TypedPayload for InventoryLevelChanged {
 #[obzenflow::port]
 #[async_trait]
 trait InventoryStorePort {
-    /// The conflict target makes a repeated call converge on the same row.
     #[effect(type = "inventory.store", at_least_once, records = reply)]
     async fn store(&self, level: &InventoryLevelChanged) -> Result<(), EffectError>;
 }

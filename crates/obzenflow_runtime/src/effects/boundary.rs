@@ -511,9 +511,12 @@ impl SingleUseEffectBoundaryReport {
     }
 }
 
-type AffineCall = Box<dyn FnMut(PhysicalCallLifecycle) -> EffectCall + Send>;
+struct AffineCall {
+    execute: Box<dyn FnMut(u32, PhysicalCallLifecycle) -> EffectCall + Send>,
+    start_each_call: bool,
+}
 
-/// Runtime-minted capability for one at-least-once effect attempt ordinal.
+/// Runtime-minted capability for an affine effect attempt.
 /// It is deliberately non-`Clone`: executing or aborting consumes it, and
 /// only [`AffineEffectExecution::after_definite_no`] hands it back.
 pub struct AffineEffectOperation {
@@ -572,13 +575,20 @@ impl PreparedAffineEffectCall {
 }
 
 impl AffineEffectOperation {
-    pub(super) fn new_with_lifecycle<F, Fut>(highest_prior_attempt: u32, mut call: F) -> Self
+    pub(super) fn new_with_lifecycle<F, Fut>(
+        highest_prior_attempt: u32,
+        safety: EffectSafety,
+        mut call: F,
+    ) -> Self
     where
-        F: FnMut(PhysicalCallLifecycle) -> Fut + Send + 'static,
+        F: FnMut(u32, PhysicalCallLifecycle) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<Vec<ChainEvent>, EffectError>> + Send + 'static,
     {
         Self {
-            call: Box::new(move |lifecycle| Box::pin(call(lifecycle))),
+            call: AffineCall {
+                execute: Box::new(move |prior, lifecycle| Box::pin(call(prior, lifecycle))),
+                start_each_call: safety == EffectSafety::NonIdempotentAtMostOnce,
+            },
             provenance: SingleUseEffectProvenance::new(),
             highest_prior_attempt,
             recovery: AffineRecovery::detached(),
@@ -625,8 +635,9 @@ impl AffineEffectOperation {
         let lifecycle = PhysicalCallLifecycle {
             receipt: receipt.clone(),
         };
+        let prior = self.highest_prior_attempt;
         PreparedAffineEffectCall {
-            future: (self.call)(lifecycle),
+            future: (self.call.execute)(prior, lifecycle),
             call: self.call,
             provenance: self.provenance,
             receipt,
@@ -677,18 +688,25 @@ impl AffineEffectExecution {
         self.highest_prior_attempt.saturating_add(1)
     }
 
-    /// The capability for this attempt ordinal again, only when the call ended
+    /// A retry capability, only when the call ended
     /// in a definite no ([`EffectError::is_definite_no`]). Any other result
     /// comes back unchanged, so no policy can repeat a call that may have
     /// reached its dependency.
     pub fn after_definite_no(self) -> Result<AffineEffectOperation, Box<Self>> {
         match &self.result {
-            Err(error) if error.is_definite_no() => Ok(AffineEffectOperation {
-                call: self.call,
-                provenance: self.provenance,
-                highest_prior_attempt: self.highest_prior_attempt,
-                recovery: self.recovery,
-            }),
+            Err(error) if error.is_definite_no() => {
+                let highest_prior_attempt = if self.call.start_each_call {
+                    self.attempt()
+                } else {
+                    self.highest_prior_attempt
+                };
+                Ok(AffineEffectOperation {
+                    call: self.call,
+                    provenance: self.provenance,
+                    highest_prior_attempt,
+                    recovery: self.recovery,
+                })
+            }
             _ => Err(Box::new(self)),
         }
     }
@@ -901,25 +919,26 @@ mod lifecycle_tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn maybe_failure_returns_no_capability() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let operation = AffineEffectOperation::new_with_lifecycle(0, {
-            let calls = calls.clone();
-            move |lifecycle| {
+        let operation =
+            AffineEffectOperation::new_with_lifecycle(0, EffectSafety::NonIdempotentAtLeastOnce, {
                 let calls = calls.clone();
-                async move {
-                    lifecycle.mark_started();
-                    let error = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                        EffectError::RateLimited {
-                            message: "429 Too Many Requests".to_string(),
-                            retry_after: Duration::ZERO,
-                        }
-                    } else {
-                        EffectError::Timeout("no reply".to_string())
-                    };
-                    lifecycle.mark_completed(PhysicalCallOutcome::Failed);
-                    Err(error)
+                move |_prior, lifecycle| {
+                    let calls = calls.clone();
+                    async move {
+                        lifecycle.mark_started();
+                        let error = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            EffectError::RateLimited {
+                                message: "429 Too Many Requests".to_string(),
+                                retry_after: Duration::ZERO,
+                            }
+                        } else {
+                            EffectError::Timeout("no reply".to_string())
+                        };
+                        lifecycle.mark_completed(PhysicalCallOutcome::Failed);
+                        Err(error)
+                    }
                 }
-            }
-        });
+            });
 
         let Ok(repeated) = operation.execute().await.after_definite_no() else {
             panic!("a rate limit hands back the capability");

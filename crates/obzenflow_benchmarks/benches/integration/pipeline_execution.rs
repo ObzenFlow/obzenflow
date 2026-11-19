@@ -98,7 +98,6 @@ struct Delivered {
     event_id: u64,
 }
 
-/// Records each delivered input ID for the exactly-once check.
 struct DeliveryLog {
     delivered: Arc<Mutex<Vec<u64>>>,
 }
