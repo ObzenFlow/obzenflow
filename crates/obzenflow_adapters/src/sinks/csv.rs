@@ -18,8 +18,9 @@ use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
     Command, DeclaredEffectSet, EffectContext, EffectError, EffectPortResolutionError, Port,
-    PortField, SinkRole,
+    SinkRole,
 };
+use obzenflow_runtime::effects::{SinkBatchDefaults, SinkGroupSystem};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
@@ -104,6 +105,19 @@ struct CsvRegister {
 #[async_trait]
 impl CsvRegisterPort for CsvRegister {
     async fn append(&self, row: &CsvRow, ctx: &EffectContext) -> Result<Appended, EffectError> {
+        self.write_group(std::slice::from_ref(row), ctx)
+            .await
+            .map(|mut replies| replies.remove(0))
+    }
+}
+
+#[async_trait]
+impl SinkGroupSystem<CsvRow> for CsvRegister {
+    async fn write_group(
+        &self,
+        rows: &[CsvRow],
+        ctx: &EffectContext,
+    ) -> Result<Vec<Appended>, EffectError> {
         let closed = matches!(
             *self.state.lock().map_err(|_| poisoned_lock())?,
             RegisterState::Closed
@@ -116,7 +130,7 @@ impl CsvRegisterPort for CsvRegister {
         let continues_history = ctx.continues_history();
         let layout = self.layout.clone();
         let state = Arc::clone(&self.state);
-        let fields = row.fields.clone();
+        let rows = rows.to_vec();
         blocking_io(move || {
             let mut state = state.lock().map_err(|_| poisoned_lock())?;
             if matches!(*state, RegisterState::Closed) {
@@ -133,7 +147,7 @@ impl CsvRegisterPort for CsvRegister {
                 }
                 RegisterState::Closed => unreachable!("a closed register is opened above"),
             };
-            match register.append(&layout, &fields) {
+            match register.append_group(&layout, &rows) {
                 Ok(appended) => Ok(appended),
                 Err(error) => {
                     let reason = format!(
@@ -224,7 +238,23 @@ impl OpenRegister {
         })
     }
 
-    fn append(&mut self, layout: &CsvLayout, fields: &Map<String, Value>) -> io::Result<Appended> {
+    fn append_group(&mut self, layout: &CsvLayout, rows: &[CsvRow]) -> io::Result<Vec<Appended>> {
+        let mut bytes = Vec::new();
+        let mut replies = Vec::with_capacity(rows.len());
+        for row in rows {
+            replies.push(self.encode(layout, &row.fields, &mut bytes)?);
+        }
+        self.file.write_all(&bytes)?;
+        self.file.sync_data()?;
+        Ok(replies)
+    }
+
+    fn encode(
+        &mut self,
+        layout: &CsvLayout,
+        fields: &Map<String, Value>,
+        bytes: &mut Vec<u8>,
+    ) -> io::Result<Appended> {
         let columns = self
             .columns
             .get_or_insert_with(|| {
@@ -233,22 +263,21 @@ impl OpenRegister {
                 columns
             })
             .clone();
-        let mut bytes = Vec::new();
+        let start = bytes.len();
         {
             let mut writer = WriterBuilder::new()
                 .delimiter(layout.delimiter)
-                .from_writer(&mut bytes);
+                .from_writer(&mut *bytes);
             if self.header_written == Written::Nothing {
                 writer.write_record(layout.headers.as_ref().unwrap_or(&columns))?;
             }
             writer.write_record(columns.iter().map(|column| cell(fields.get(column))))?;
             writer.flush()?;
         }
-        self.file.write_all(&bytes)?;
-        self.file.flush()?;
+        let bytes = &bytes[start..];
         self.header_written = Written::Header;
         self.length += bytes.len() as u64;
-        self.digest.update(&bytes);
+        self.digest.update(bytes);
         Ok(Appended {
             length: self.length,
             sha256: hex(self.digest.clone().finish().as_ref()),
@@ -315,7 +344,7 @@ fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
     let digest = ring::digest::digest(&SHA256, path.as_os_str().as_encoded_bytes());
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let instance = format!("{}.{name}", hex(&digest.as_ref()[..16]));
-    Port::deferred(move || {
+    Port::deferred_grouped::<CsvRow, _, _>(move || {
         Ok::<_, EffectPortResolutionError>(CsvRegister {
             layout: layout.clone(),
             state: Arc::new(Mutex::new(RegisterState::Closed)),
@@ -350,6 +379,7 @@ fn no_longer_matches(path: &Path, recorded: &Appended) -> EffectError {
 #[derive(Clone)]
 pub struct CsvSinkBuilder<P> {
     projection: P,
+    batch: SinkBatchDefaults,
     path: Option<PathBuf>,
     columns: Option<Vec<String>>,
     headers: Option<Vec<String>>,
@@ -372,11 +402,27 @@ impl<P> CsvSinkBuilder<P> {
     fn new(projection: P) -> Self {
         Self {
             projection,
+            batch: SinkBatchDefaults::default(),
             path: None,
             columns: None,
             headers: None,
             delimiter: b',',
         }
+    }
+
+    /// Set how many rows the register writes and syncs together by default.
+    pub fn batch_size(mut self, size: usize) -> Result<Self, anyhow::Error> {
+        self.batch.size = Some(
+            std::num::NonZeroUsize::new(size)
+                .ok_or_else(|| anyhow::anyhow!("CSV batch size must be positive"))?,
+        );
+        Ok(self)
+    }
+
+    /// Set how long an open group may wait for more rows. Zero takes only queued rows.
+    pub fn batch_max_wait(mut self, wait: std::time::Duration) -> Self {
+        self.batch.max_wait = Some(wait);
+        self
     }
 
     pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
@@ -438,6 +484,7 @@ impl<P> CsvSinkBuilder<P> {
         };
         Ok(CsvSink {
             projection: self.projection,
+            batch: self.batch,
             port: register_port(layout),
         })
     }
@@ -446,6 +493,7 @@ impl<P> CsvSinkBuilder<P> {
 /// A sink that appends each input, projected by `P`, as one CSV row.
 pub struct CsvSink<P> {
     projection: P,
+    batch: SinkBatchDefaults,
     port: Port<dyn CsvRegisterPort>,
 }
 
@@ -453,6 +501,7 @@ impl<P: Clone> Clone for CsvSink<P> {
     fn clone(&self) -> Self {
         Self {
             projection: self.projection.clone(),
+            batch: self.batch,
             port: self.port.clone(),
         }
     }
@@ -489,8 +538,6 @@ impl<P> Command for CsvSink<P> {
     type Ports = (Port<dyn CsvRegisterPort>, ());
     type AllowedEffects = DeclaredEffectSet<WithMember<CsvRow, EmptySet>>;
 
-    const PORT_FIELDS: &'static [PortField] = &[PortField::Performed];
-
     fn ports(&self) -> Self::Ports {
         (self.port.clone(), ())
     }
@@ -498,6 +545,10 @@ impl<P> Command for CsvSink<P> {
 
 impl<P: CsvProjection> SinkRole<P::Input> for CsvSink<P> {
     type Request = CsvRow;
+
+    fn batch_defaults(&self) -> SinkBatchDefaults {
+        self.batch
+    }
 
     fn prepare(&self, input: &P::Input) -> Result<CsvRow, HandlerError> {
         let row = self.projection.project(input)?;
@@ -547,7 +598,10 @@ mod tests {
         let path = dir.path().join("register.csv");
         std::fs::write(&path, "stale\n").unwrap();
         let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
-        let appended = register.append(&layout(&path), &fields(1)).unwrap();
+        let appended = register
+            .append_group(&layout(&path), &[CsvRow { fields: fields(1) }])
+            .unwrap()
+            .remove(0);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "id,name\n1,row-1\n"
@@ -560,12 +614,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("register.csv");
         let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
-        let recorded = register.append(&layout(&path), &fields(1)).unwrap();
-        register.append(&layout(&path), &fields(2)).unwrap();
+        let recorded = register
+            .append_group(&layout(&path), &[CsvRow { fields: fields(1) }])
+            .unwrap()
+            .remove(0);
+        register
+            .append_group(&layout(&path), &[CsvRow { fields: fields(2) }])
+            .unwrap();
         drop(register);
 
         let mut resumed = OpenRegister::open(&layout(&path), Some(&recorded), true).unwrap();
-        resumed.append(&layout(&path), &fields(2)).unwrap();
+        resumed
+            .append_group(&layout(&path), &[CsvRow { fields: fields(2) }])
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "id,name\n1,row-1\n2,row-2\n"
@@ -579,7 +640,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("register.csv");
         let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
-        let recorded = register.append(&layout(&path), &fields(1)).unwrap();
+        let recorded = register
+            .append_group(&layout(&path), &[CsvRow { fields: fields(1) }])
+            .unwrap()
+            .remove(0);
         drop(register);
         std::fs::write(&path, "id,name\n9,row-9\n").unwrap();
         let error = OpenRegister::open(&layout(&path), Some(&recorded), true)

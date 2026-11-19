@@ -2,11 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Deterministic current-schema records for codec correctness and timing tests.
-//! The stream models a source, a transform that rejects the first input, and an
-//! enricher. Each stage contributes 16 successful records: 48 event IDs and
-//! 17 distinct origins, with downstream records reusing complete source origins.
-
 use chrono::{DateTime, Duration, Utc};
 use obzenflow_core::event::chain_event::CorrelationContext;
 use obzenflow_core::event::context::StageType;
@@ -243,7 +238,6 @@ pub(super) fn record(stage: Stage, index: u64) -> JournalRecord<ChainPayload> {
         }),
         ..RuntimeObservability::default()
     });
-    // Each record's snapshot is stamped separately, after its record.
     observations.runtime_snapshot = Some(RuntimeSnapshot {
         capture: CaptureStamp {
             capture_seq: CaptureSeq(capture.capture_seq.0 + 1),

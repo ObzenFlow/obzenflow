@@ -53,7 +53,7 @@
 //! [`crate::stages::transforms::TypedTransformHandler`], or use helper facades
 //! like [`crate::stages::transforms::map`] for simple one-to-one mappings.
 //!
-//! **Sinks** are where a flow's results leave it. A sink is an effect: its row
+//! **Sinks** are where a flow's results leave it. A sink is an effect. Its row
 //! takes a command that sends one request per input through a port, and the
 //! port method's `#[effect]` states the guarantee. Build the command with
 //! [`crate::effects::perform`], or use a ready-made destination from

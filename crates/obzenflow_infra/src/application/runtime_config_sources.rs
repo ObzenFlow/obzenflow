@@ -5,10 +5,6 @@
 //! Source acquisition for the FLOWIP-010 runtime config snapshot: raw file
 //! tables, canonical env spellings, and the resume-view CLI flags become a
 //! type-validated `CandidateSet`, then the immutable `ResolvedRuntimeConfig`.
-//!
-//! Scoped entries ride the file source only (§2 first-pass lock; DSL
-//! candidates join at flow build). Startup diagnostics keep the
-//! `config error at <path>: ...` currency.
 
 use super::config::{
     ConfigError, FlowConfig, RawAiFamilySection, RawAiModelFields, RawFileStartupConfig,
@@ -290,6 +286,33 @@ fn admit_file_candidates(
         );
     }
 
+    for (scope, path, fields) in std::iter::once((
+        ConfigScope::Flow,
+        "runtime.sink_batches.flow".to_string(),
+        &runtime.sink_batches.flow,
+    ))
+    .chain(runtime.sink_batches.stages.iter().map(|(stage, fields)| {
+        (
+            ConfigScope::stage(stage.as_str()),
+            format!("runtime.sink_batches.stages.{stage}"),
+            fields,
+        )
+    })) {
+        file_u64!(
+            set,
+            obzenflow_runtime::runtime_config::SINK_BATCH_SIZE,
+            scope.clone(),
+            fields.size,
+            &format!("{path}.size")
+        );
+        file_u64!(
+            set,
+            obzenflow_runtime::runtime_config::SINK_BATCH_MAX_WAIT_MS,
+            scope,
+            fields.max_wait_ms,
+            &format!("{path}.max_wait_ms")
+        );
+    }
     let observability = &runtime.observability;
     file_u64!(
         set,

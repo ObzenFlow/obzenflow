@@ -3,12 +3,6 @@
 // https://obzenflow.dev
 
 //! Application-owned protection for the one final analytics dashboard.
-//!
-//! The summary fold emits at EOF, so its sink needs at most one live call to
-//! the console. A second admission is a wiring or emission error and must not
-//! print another dashboard. This is a per-materialization attempt budget, not
-//! durable deduplication, so admission spends it even if the call fails or is
-//! cancelled. Replay makes no call to the console, so it never spends the budget.
 
 use async_trait::async_trait;
 use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
@@ -58,7 +52,6 @@ impl MiddlewareFactory for SingleSummaryDelivery {
     }
 }
 
-/// The budget one materialization of [`SingleSummaryDelivery`] spends.
 pub(crate) struct SingleSummaryDeliveryPolicy {
     admitted: AtomicBool,
 }

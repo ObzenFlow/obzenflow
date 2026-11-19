@@ -150,8 +150,6 @@ impl StageInstrumentation {
     }
 
     fn capture_runtime_snapshot(&self, packet: ObservabilityContext) -> Option<RuntimeSnapshot> {
-        // Read the diagnostic family together or omit it. These locks are not
-        // needed for terminal accounting or the actual reader frontier.
         let consumed_id = self.last_consumed_event_id.try_read().ok()?;
         let consumed_writer = self.last_consumed_writer.try_read().ok()?;
         let consumed_clock = self.last_consumed_vector_clock.try_read().ok()?;

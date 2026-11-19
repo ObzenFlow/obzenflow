@@ -74,7 +74,7 @@ mod tests {
 
     fn fixture_declaration() -> EffectDeclaration {
         let system = Port::to(FixturePort);
-        AnswersEffect::<<FixtureRequest as EffectName>::Effect>::declaration(&system, None)
+        AnswersEffect::<<FixtureRequest as EffectName>::Effect>::declaration(&system)
             .expect("fixture declaration")
     }
 

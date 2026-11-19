@@ -4,7 +4,6 @@
 
 use super::binding::is_system_name;
 use super::call::{call_port_slot, Call, CallRequest};
-use super::declaration::EffectDeclarationSyntax;
 use super::ports::SystemPort;
 use super::{
     Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectError, EffectName,
@@ -200,6 +199,17 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         Self::answered_by::<T>(SystemPort::deferred::<P>(Arc::new(move || {
             resolver().map(|system| <PortImpl<T> as ServesPort<P, T>>::coerce(Arc::new(system)))
         })))
+    }
+
+    #[doc(hidden)]
+    pub fn deferred_grouped<R, T, F>(resolver: F) -> Self
+    where
+        R: super::SinkRequest<Port = P>,
+        T: SystemName + super::SinkGroupSystem<R>,
+        PortImpl<T>: ServesPort<P, T>,
+        F: Fn() -> Result<T, EffectPortResolutionError> + Send + Sync + 'static,
+    {
+        Self::answered_by::<T>(SystemPort::grouped::<P, R, T, F>(resolver))
     }
 
     fn answered_by<T: SystemName>(port: SystemPort) -> Self {
@@ -485,18 +495,6 @@ impl<P: ?Sized + Send + Sync + 'static> StagePort for Port<P> {}
 impl<E: NamedEffect> sealed::StagePort for EffectBinding<E> {}
 impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 
-/// How a command holds one of its ports, as its diagnostics name it.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PortField {
-    /// A `#[port]` field, by its name.
-    Named(&'static str),
-    /// A field `through` generated, by the name of its port.
-    Through(&'static str),
-    /// The one port of a `perform` command, which allows only its one request.
-    Performed,
-}
-
 /// A command: an effectful handler that declares the ports it works through.
 /// `#[obzenflow::command(through = P)]` on a unit struct implements it, as does
 /// `#[obzenflow::command]` on a struct that marks each field holding a port
@@ -710,9 +708,6 @@ pub trait Command {
     type AllowedEffects: EffectSet;
 
     #[doc(hidden)]
-    const PORT_FIELDS: &'static [PortField] = &[];
-
-    #[doc(hidden)]
     fn ports(&self) -> Self::Ports;
 }
 
@@ -805,32 +800,6 @@ where
 {
 }
 
-/// How a stage row acknowledges an at-least-once effect.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcknowledgedSafety {
-    AtLeastOnce,
-}
-
-/// One `.at_least_once::<R>()` decoration.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy)]
-pub struct EffectAcknowledgement {
-    effect_type: &'static str,
-    written: &'static str,
-    safety: AcknowledgedSafety,
-}
-
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` is an AI effect; an `ai!` row is itself the acknowledgement for its AI effect",
-    label = "only `ai!` performs and acknowledges this effect",
-    note = "AI effects are performed by `ai!`; the model comes from [ai.*] configuration"
-)]
-pub trait RowAcknowledgedEffect: Effect {}
-
-impl<E: NamedEffect> RowAcknowledgedEffect for E {}
-
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "an effectful handler cannot perform an AI effect",
@@ -865,71 +834,23 @@ where
 {
 }
 
-impl EffectAcknowledgement {
-    pub fn at_least_once<N>(written: &'static str) -> Self
-    where
-        N: EffectName,
-        N::Effect: RowAcknowledgedEffect,
-    {
-        Self {
-            effect_type: <N::Effect as Effect>::EFFECT_TYPE,
-            written,
-            safety: AcknowledgedSafety::AtLeastOnce,
-        }
-    }
-
-    fn decoration(&self) -> String {
-        match self.safety {
-            AcknowledgedSafety::AtLeastOnce => format!(".at_least_once::<{}>()", self.written),
-        }
-    }
-}
-
-fn declaration_syntax(acknowledged: Option<AcknowledgedSafety>) -> EffectDeclarationSyntax {
-    match acknowledged {
-        None => EffectDeclarationSyntax::Bare,
-        Some(AcknowledgedSafety::AtLeastOnce) => EffectDeclarationSyntax::AtLeastOnce,
-    }
-}
-
-/// A refusal found while declaring a stage's effects from its handler.
+/// A failure to register the system behind a command's port.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StageEffectsError {
-    UnperformedAcknowledgement {
-        effect_type: &'static str,
-        decoration: String,
-    },
-    RepeatedAcknowledgement {
-        effect_type: &'static str,
-    },
-    Registration {
-        source: EffectBindingBuildError,
-    },
-}
+pub struct StageEffectsError(EffectBindingBuildError);
 
 impl StageEffectsError {
     pub fn for_stage(&self, stage: &str) -> String {
-        match self {
-            Self::UnperformedAcknowledgement {
-                effect_type,
-                decoration,
-            } => format!(
-                "Effectful stage '{stage}' acknowledges `{effect_type}`, which its handler does not perform; remove `{decoration}`"
-            ),
-            Self::RepeatedAcknowledgement { effect_type } => format!(
-                "Effectful stage '{stage}' acknowledges `{effect_type}` more than once"
-            ),
-            Self::Registration { source } => {
-                format!("Effectful stage '{stage}' cannot register its system: {source}")
-            }
-        }
+        format!(
+            "Effectful stage '{stage}' cannot register its system: {}",
+            self.0
+        )
     }
 }
 
 impl From<EffectBindingBuildError> for StageEffectsError {
     fn from(source: EffectBindingBuildError) -> Self {
-        Self::Registration { source }
+        Self(source)
     }
 }
 
@@ -937,10 +858,7 @@ impl From<EffectBindingBuildError> for StageEffectsError {
 #[doc(hidden)]
 pub trait AnswersEffect<E: Effect> {
     #[doc(hidden)]
-    fn declaration(
-        &self,
-        acknowledged: Option<AcknowledgedSafety>,
-    ) -> Result<EffectDeclaration, StageEffectsError>;
+    fn declaration(&self) -> Result<EffectDeclaration, StageEffectsError>;
 }
 
 impl<P, R> AnswersEffect<Call<R>> for Port<P>
@@ -948,10 +866,7 @@ where
     P: ?Sized + Send + Sync + 'static,
     R: CallRequest<Port = P>,
 {
-    fn declaration(
-        &self,
-        acknowledged: Option<AcknowledgedSafety>,
-    ) -> Result<EffectDeclaration, StageEffectsError> {
+    fn declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {
         super::binding::validate_effect_type(R::EFFECT_TYPE)
             .map_err(|_| EffectBindingBuildError::InvalidEffectType)?;
         let binding =
@@ -960,20 +875,14 @@ where
                 .finish()?;
         Ok(EffectDeclaration::for_binding::<Call<R>>(
             binding.declaration_binding(),
-            declaration_syntax(acknowledged),
-        )
-        .allowed_by_port_field())
+        ))
     }
 }
 
 impl<E: NamedEffect> AnswersEffect<E> for EffectBinding<E> {
-    fn declaration(
-        &self,
-        acknowledged: Option<AcknowledgedSafety>,
-    ) -> Result<EffectDeclaration, StageEffectsError> {
+    fn declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {
         Ok(EffectDeclaration::for_binding::<E>(
             self.declaration_binding(),
-            declaration_syntax(acknowledged),
         ))
     }
 }
@@ -996,23 +905,12 @@ pub struct PortAfter<Index>(PhantomData<fn() -> Index>);
 )]
 pub trait FindPort<N: EffectName, Index> {
     #[doc(hidden)]
-    const POSITION: usize;
-
-    #[doc(hidden)]
-    fn found_declaration(
-        &self,
-        acknowledged: Option<AcknowledgedSafety>,
-    ) -> Result<EffectDeclaration, StageEffectsError>;
+    fn found_declaration(&self) -> Result<EffectDeclaration, StageEffectsError>;
 }
 
 impl<N: EffectName, S: AnswersEffect<N::Effect>, Rest> FindPort<N, PortFound> for (S, Rest) {
-    const POSITION: usize = 0;
-
-    fn found_declaration(
-        &self,
-        acknowledged: Option<AcknowledgedSafety>,
-    ) -> Result<EffectDeclaration, StageEffectsError> {
-        self.0.declaration(acknowledged)
+    fn found_declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {
+        self.0.declaration()
     }
 }
 
@@ -1020,13 +918,8 @@ impl<N: EffectName, S: AnswersEffect<N::Effect>, Rest> FindPort<N, PortFound> fo
 impl<N: EffectName, S, Rest: FindPort<N, Index>, Index> FindPort<N, PortAfter<Index>>
     for (S, Rest)
 {
-    const POSITION: usize = 1 + Rest::POSITION;
-
-    fn found_declaration(
-        &self,
-        acknowledged: Option<AcknowledgedSafety>,
-    ) -> Result<EffectDeclaration, StageEffectsError> {
-        self.1.found_declaration(acknowledged)
+    fn found_declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {
+        self.1.found_declaration()
     }
 }
 
@@ -1105,8 +998,6 @@ pub trait DeclareEffects<Ports, Mask, Index> {
     #[doc(hidden)]
     fn declarations(
         ports: &Ports,
-        fields: &[PortField],
-        acknowledgements: &[EffectAcknowledgement],
         out: &mut Vec<EffectDeclaration>,
     ) -> Result<(), StageEffectsError>;
 }
@@ -1114,12 +1005,7 @@ pub trait DeclareEffects<Ports, Mask, Index> {
 impl<Ports, Mask> DeclareEffects<Ports, Mask, ()> for EmptySet {
     type Marked = Mask;
 
-    fn declarations(
-        _: &Ports,
-        _: &[PortField],
-        _: &[EffectAcknowledgement],
-        _: &mut Vec<EffectDeclaration>,
-    ) -> Result<(), StageEffectsError> {
+    fn declarations(_: &Ports, _: &mut Vec<EffectDeclaration>) -> Result<(), StageEffectsError> {
         Ok(())
     }
 }
@@ -1136,58 +1022,24 @@ where
 
     fn declarations(
         ports: &Ports,
-        fields: &[PortField],
-        acknowledgements: &[EffectAcknowledgement],
         out: &mut Vec<EffectDeclaration>,
     ) -> Result<(), StageEffectsError> {
-        let acknowledged = acknowledgements
-            .iter()
-            .find(|acknowledgement| {
-                acknowledgement.effect_type == <N::Effect as Effect>::EFFECT_TYPE
-            })
-            .map(|acknowledgement| acknowledgement.safety);
-        let field = fields.get(Ports::POSITION).copied();
-        out.push(
-            ports
-                .found_declaration(acknowledged)?
-                .written_as::<N>()
-                .held_in_field(field),
-        );
-        Rest::declarations(ports, fields, acknowledgements, out)
+        out.push(ports.found_declaration()?);
+        Rest::declarations(ports, out)
     }
 }
 
 fn declare_stage_effects<Set, Ports, Index>(
     ports: &Ports,
-    fields: &[PortField],
-    acknowledgements: &[EffectAcknowledgement],
 ) -> Result<Vec<EffectDeclaration>, StageEffectsError>
 where
     Set: EffectSet,
     Ports: PortList,
     Set::Members: DeclareEffects<Ports, Ports::Unmarked, Index>,
 {
-    for (position, acknowledgement) in acknowledgements.iter().enumerate() {
-        if acknowledgements[..position]
-            .iter()
-            .any(|earlier| earlier.effect_type == acknowledgement.effect_type)
-        {
-            return Err(StageEffectsError::RepeatedAcknowledgement {
-                effect_type: acknowledgement.effect_type,
-            });
-        }
-        if !Set::effect_types().contains(&acknowledgement.effect_type) {
-            return Err(StageEffectsError::UnperformedAcknowledgement {
-                effect_type: acknowledgement.effect_type,
-                decoration: acknowledgement.decoration(),
-            });
-        }
-    }
     let mut declarations = Vec::new();
     <Set::Members as DeclareEffects<Ports, Ports::Unmarked, Index>>::declarations(
         ports,
-        fields,
-        acknowledgements,
         &mut declarations,
     )?;
     Ok(declarations)
@@ -1196,7 +1048,6 @@ where
 #[doc(hidden)]
 pub fn effectful_transform_effects<H, Index>(
     handler: &H,
-    acknowledgements: &[EffectAcknowledgement],
 ) -> Result<Vec<EffectDeclaration>, StageEffectsError>
 where
     H: EffectfulTransformHandler,
@@ -1208,17 +1059,12 @@ where
         Index,
     >>::Marked: EveryPortAnswers,
 {
-    declare_stage_effects::<H::AllowedEffects, H::Ports, Index>(
-        &handler.ports(),
-        H::PORT_FIELDS,
-        acknowledgements,
-    )
+    declare_stage_effects::<H::AllowedEffects, H::Ports, Index>(&handler.ports())
 }
 
 #[doc(hidden)]
 pub fn effectful_stateful_effects<H, Index>(
     handler: &H,
-    acknowledgements: &[EffectAcknowledgement],
 ) -> Result<Vec<EffectDeclaration>, StageEffectsError>
 where
     H: EffectfulStatefulHandler,
@@ -1230,9 +1076,5 @@ where
         Index,
     >>::Marked: EveryPortAnswers,
 {
-    declare_stage_effects::<H::AllowedEffects, H::Ports, Index>(
-        &handler.ports(),
-        H::PORT_FIELDS,
-        acknowledgements,
-    )
+    declare_stage_effects::<H::AllowedEffects, H::Ports, Index>(&handler.ports())
 }

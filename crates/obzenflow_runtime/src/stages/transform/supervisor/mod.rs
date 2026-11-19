@@ -13,6 +13,7 @@ mod closing;
 mod direct_fact_continuation;
 mod draining;
 mod running;
+pub(crate) mod sink_batch;
 #[cfg(test)]
 mod tests;
 
@@ -64,7 +65,6 @@ pub(crate) struct TransformSupervisor<
     /// Stage ID
     pub(crate) stage_id: StageId,
 
-    /// The stage's role in the topology: a transform, or a sink.
     pub(crate) stage_type: StageType,
 
     /// Subscription to upstream events (supervisor-owned to avoid borrow conflicts).

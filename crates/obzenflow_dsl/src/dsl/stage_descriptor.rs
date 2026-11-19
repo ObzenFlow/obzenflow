@@ -25,10 +25,7 @@ use obzenflow_runtime::stages::observer::{
     observer_shell_surfaces_for_stage as runtime_observer_shell_surfaces_for_stage, ObserverSurface,
 };
 use obzenflow_runtime::{
-    effects::{
-        EffectBoundary, EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
-        StageEffectsError,
-    },
+    effects::{EffectBoundary, EffectDeclaration, EffectPortRegistry, StageEffectsError},
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
 };
@@ -600,6 +597,10 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     }
 
     /// The open-key limit this stage enforces, as the run manifest records it.
+    fn sink_batch_defaults(&self) -> Option<obzenflow_runtime::effects::SinkBatchDefaults> {
+        None
+    }
+
     fn max_open_keys(&self) -> Option<u64> {
         None
     }
@@ -671,34 +672,6 @@ pub(crate) fn validate_authored_effect_declarations(
         if !effect_types.insert(declaration.effect_type()) {
             return Err(format!(
                 "Effectful stage '{stage_name}' declares effect '{}' more than once",
-                declaration.effect_type()
-            ));
-        }
-
-        declaration
-            .validate_safety_syntax()
-            .map_err(|error| format!("Effectful stage '{stage_name}' {error}"))?;
-
-        if matches!(declaration.safety(), EffectSafety::NonIdempotentRequiresKey)
-            && !matches!(
-                declaration.idempotency_key_policy(),
-                IdempotencyKeyPolicy::Required
-            )
-        {
-            return Err(format!(
-                "Effectful stage '{stage_name}' declares non-idempotent effect '{}' without an idempotency-key strategy",
-                declaration.effect_type()
-            ));
-        }
-
-        if matches!(declaration.safety(), EffectSafety::NonIdempotentAtLeastOnce)
-            && !matches!(
-                declaration.idempotency_key_policy(),
-                IdempotencyKeyPolicy::AtLeastOnceAcknowledged
-            )
-        {
-            return Err(format!(
-                "Effectful stage '{stage_name}' performs paid non-idempotent effect '{}' without acknowledging it",
                 declaration.effect_type()
             ));
         }
@@ -1573,6 +1546,7 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     ai_sections: Vec<(&'static str, &'static str)>,
     policy_owner: obzenflow_adapters::middleware::ProtectedUnitOwner,
     role: StageType,
+    batch_defaults: Option<obzenflow_runtime::effects::SinkBatchDefaults>,
 }
 
 impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
@@ -1584,18 +1558,9 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
         effects: Result<Vec<EffectDeclaration>, StageEffectsError>,
         middleware: Vec<Box<dyn MiddlewareFactory>>,
     ) -> Self {
-        let mut descriptor = Self::new(
-            name,
-            handler,
-            effects.map(|effects| {
-                effects
-                    .into_iter()
-                    .map(EffectDeclaration::sent_by_sink_row)
-                    .collect()
-            }),
-            middleware,
-        );
+        let mut descriptor = Self::new(name, handler, effects, middleware);
         descriptor.role = StageType::Sink;
+        descriptor.batch_defaults = Some(Default::default());
         descriptor
     }
 
@@ -1648,7 +1613,16 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             ai_sections: Vec::new(),
             policy_owner: obzenflow_adapters::middleware::ProtectedUnitOwner::Stage,
             role: StageType::Transform,
+            batch_defaults: None,
         }
+    }
+
+    pub(crate) fn with_batch_defaults(
+        mut self,
+        defaults: obzenflow_runtime::effects::SinkBatchDefaults,
+    ) -> Self {
+        self.batch_defaults = Some(defaults);
+        self
     }
 
     pub(crate) fn with_policy_owner(mut self, composite: &str) -> Self {
@@ -1757,6 +1731,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
     fn set_name(&mut self, name: String) {
         self.name = name;
+    }
+
+    fn sink_batch_defaults(&self) -> Option<obzenflow_runtime::effects::SinkBatchDefaults> {
+        self.batch_defaults
     }
 
     fn stage_type(&self) -> StageType {
@@ -1942,6 +1920,22 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         .with_observer_bindings(observers.into_bindings());
         transform_config.control_strategy = Some(control_strategy);
         transform_config.cycle_guard = config.cycle_guard;
+
+        if self.role == StageType::Sink {
+            use obzenflow_runtime::runtime_config::{SINK_BATCH_MAX_WAIT_MS, SINK_BATCH_SIZE};
+            let scope = obzenflow_core::config::ConfigScope::stage(config.name.as_str());
+            let setting = |key| {
+                config
+                    .effective_config
+                    .get(key, &scope)
+                    .and_then(|entry| entry.value.as_u64())
+                    .ok_or_else(|| format!("missing sink setting {key} for {}", config.name))
+            };
+            transform_config.sink_batch = Some((
+                setting(SINK_BATCH_SIZE)? as usize,
+                std::time::Duration::from_millis(setting(SINK_BATCH_MAX_WAIT_MS)?),
+            ));
+        }
 
         let mut effectful_handler =
             EffectfulTransformHandlerAdapter::new(self.handler, effect_boundary);
@@ -2862,7 +2856,8 @@ mod tests {
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::effects::{
         BoundEffect, Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse, EffectContext,
-        EffectError, EffectPortSlotSet, EffectRegistrationBuilder, LogicalEffectBindingName, Named,
+        EffectError, EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety,
+        IdempotencyKeyPolicy, LogicalEffectBindingName, Named,
     };
     use obzenflow_runtime::message_bus::FsmMessageBus;
     use obzenflow_runtime::stages::common::handlers::source::traits::FiniteSourceHandler;
@@ -2981,36 +2976,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct BarePaidEffect {
-        binding: EffectBindingUse<Self>,
-    }
-
-    zero_slot_fixture!(BarePaidEffect);
-
-    #[async_trait]
-    impl Effect for BarePaidEffect {
-        const EFFECT_TYPE: &'static str = "obzenflow.ai.chat_completion";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
-        type BindingMode = Named<SafetyBindingEvidence>;
-
-        type Outcome = ();
-        type OutcomeSemantics = obzenflow_runtime::effects::RecordedReply;
-
-        fn label(&self) -> &str {
-            "bare_paid"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            json!({})
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-            Ok(())
-        }
-    }
-
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(super) struct SafetyBindingEvidence;
 
@@ -3034,6 +2999,7 @@ mod tests {
             1 => "test.safety.requires_key",
             2 => "test.safety.at_least_once",
             3 => "test.safety.transactional",
+            4 => "test.safety.at_most_once",
             _ => panic!("unknown test safety class"),
         };
         const SCHEMA_VERSION: u32 = 1;
@@ -3042,6 +3008,7 @@ mod tests {
             1 => EffectSafety::NonIdempotentRequiresKey,
             2 => EffectSafety::NonIdempotentAtLeastOnce,
             3 => EffectSafety::Transactional,
+            4 => EffectSafety::NonIdempotentAtMostOnce,
             _ => panic!("unknown test safety class"),
         };
         type BindingMode = Named<SafetyBindingEvidence>;
@@ -3127,114 +3094,39 @@ mod tests {
     }
 
     #[test]
-    fn effect_declaration_validation_requires_explicit_at_least_once_acknowledgement() {
-        let declaration =
-            EffectDeclaration::named(&zero_slot_binding::<BarePaidEffect>("bare_paid"));
-
-        let error = validate_effect_declarations(
-            "standalone_chat",
-            &[declaration],
-            &EffectPortRegistry::new(),
-            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
-        )
-        .expect_err("a bare paid effect must be rejected");
-        assert_eq!(
-            error,
-            "Effectful stage 'standalone_chat' performs at-least-once effect \
-             'obzenflow.ai.chat_completion' without acknowledging it; add \
-             `.at_least_once::<BarePaidEffect>()` after the handler"
-        );
-    }
-
-    #[test]
-    fn safety_wrappers_never_reclassify_effects_and_every_mismatch_is_rejected() {
-        let idempotent = safety_binding::<0>();
-        let requires_key = safety_binding::<1>();
-        let at_least_once = safety_binding::<2>();
-        let transactional = safety_binding::<3>();
-
-        let mismatches = [
+    fn declarations_bare_preserve_port_guarantees() {
+        let declarations = [
             (
-                EffectDeclaration::named_at_least_once(&idempotent),
+                EffectDeclaration::named(&safety_binding::<0>()),
                 EffectSafety::Idempotent,
-                "acknowledges `test.safety.idempotent` as at-least-once, but its effect method is `exactly_once`",
             ),
             (
-                EffectDeclaration::named_at_least_once(&requires_key),
+                EffectDeclaration::named(&safety_binding::<1>()),
                 EffectSafety::NonIdempotentRequiresKey,
-                "acknowledges `test.safety.requires_key` as at-least-once, but its effect method is `exactly_once`",
             ),
             (
-                EffectDeclaration::named_at_least_once(&transactional),
+                EffectDeclaration::named(&safety_binding::<2>()),
+                EffectSafety::NonIdempotentAtLeastOnce,
+            ),
+            (
+                EffectDeclaration::named(&safety_binding::<3>()),
                 EffectSafety::Transactional,
-                "acknowledges `test.safety.transactional` as at-least-once, but its effect method is `exactly_once`",
+            ),
+            (
+                EffectDeclaration::named(&safety_binding::<4>()),
+                EffectSafety::NonIdempotentAtMostOnce,
             ),
         ];
-        assert_eq!(
-            EffectDeclaration::named(&at_least_once).safety(),
-            EffectSafety::NonIdempotentAtLeastOnce
-        );
-
-        for (declaration, authoritative_safety, expected) in mismatches {
-            assert_eq!(
-                declaration.safety(),
-                authoritative_safety,
-                "a lexical wrapper must never rewrite Effect::SAFETY"
-            );
-            let error = validate_effect_declarations(
-                "safety_mismatch",
+        for (declaration, safety) in declarations {
+            assert_eq!(declaration.safety(), safety);
+            validate_effect_declarations(
+                "declared_guarantee",
                 &[declaration],
                 &EffectPortRegistry::new(),
                 obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
             )
-            .expect_err("a wrapper/safety mismatch must fail descriptor construction");
-            assert!(error.contains(expected), "unexpected diagnostic: {error}");
+            .expect("the effect type declares its safety");
         }
-    }
-
-    #[test]
-    fn required_safety_wrappers_are_enforced_and_matching_forms_are_coherent() {
-        let at_least_once = safety_binding::<2>();
-        let transactional = safety_binding::<3>();
-
-        let error = validate_effect_declarations(
-            "missing_safety_wrapper",
-            &[EffectDeclaration::named(&at_least_once)],
-            &EffectPortRegistry::new(),
-            obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
-        )
-        .expect_err("an at-least-once effect must be acknowledged");
-        assert!(
-            error.contains("add `.at_least_once::<NamedSafetyEffect<2>>()` after the handler"),
-            "unexpected diagnostic: {error}"
-        );
-
-        let acknowledged = EffectDeclaration::named_at_least_once(&at_least_once);
-        assert_eq!(
-            acknowledged.safety(),
-            EffectSafety::NonIdempotentAtLeastOnce
-        );
-        assert_eq!(
-            acknowledged.idempotency_key_policy(),
-            IdempotencyKeyPolicy::AtLeastOnceAcknowledged
-        );
-        validate_effect_declarations(
-            "matching_at_least_once",
-            &[acknowledged],
-            &EffectPortRegistry::new(),
-            obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
-        )
-        .expect("the matching at_least_once wrapper is valid");
-
-        let transactional = EffectDeclaration::named(&transactional);
-        assert_eq!(transactional.safety(), EffectSafety::Transactional);
-        validate_effect_declarations(
-            "unacknowledged_transactional",
-            &[transactional],
-            &EffectPortRegistry::new(),
-            obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
-        )
-        .expect("a transactional effect is exactly once and needs no acknowledgement");
     }
 
     #[derive(Clone, Debug)]

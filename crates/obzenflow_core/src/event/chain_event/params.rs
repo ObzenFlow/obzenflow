@@ -69,6 +69,7 @@ pub struct CircuitBreakerOpenedEventParams {
 
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerAttemptSettledEventParams {
+    pub member_cursors: Vec<EffectCursor>,
     pub unit: StageKey,
     pub cursor: EffectCursor,
     pub attempt: u32,

@@ -615,6 +615,7 @@ pub(crate) struct RawFileRuntimeConfig {
     pub(crate) flow: RawRuntimeFlowScope,
     pub(crate) stages: BTreeMap<String, RawRuntimeStageScope>,
     pub(crate) backpressure: RawBackpressureConfig,
+    pub(crate) sink_batches: RawSinkBatches,
     pub(crate) observability: RawObservabilityConfig,
     pub(crate) ai: RawRuntimeAiConfig,
 }
@@ -671,6 +672,20 @@ pub(crate) struct RawRuntimeFlowScope {
 pub(crate) struct RawRuntimeStageScope {
     pub(crate) max_lineage_depth: Option<i64>,
     pub(crate) heartbeat_interval: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawSinkBatches {
+    pub(crate) flow: RawSinkBatchFields,
+    pub(crate) stages: BTreeMap<String, RawSinkBatchFields>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawSinkBatchFields {
+    pub(crate) size: Option<i64>,
+    pub(crate) max_wait_ms: Option<i64>,
 }
 
 /// `[runtime.backpressure]` with the §4c nested edge layout.

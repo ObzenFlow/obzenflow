@@ -6285,6 +6285,16 @@ mod ai_digest {
     }
 }
 
+fn sink_group_config(scenario: &Scenario, size: usize) -> Vec<String> {
+    let path = scenario.root.join(format!("sink-{size}.toml"));
+    std::fs::write(
+        &path,
+        format!("[runtime.sink_batches.flow]\nsize = {size}\nmax_wait_ms = 30000\n"),
+    )
+    .unwrap();
+    vec!["--config".into(), path.display().to_string()]
+}
+
 mod at_most_once {
     use super::*;
     use obzenflow::effects::RetryDisposition;
@@ -6462,6 +6472,49 @@ mod at_most_once {
                 ),
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn group_interruption_abandons_started_notice() {
+        let scenario = fresh("grouped_partner");
+        let cfg = sink_group_config(&scenario, 4);
+        let child = Child::spawn(
+            &scenario,
+            cfg.clone(),
+            Some(Hold::PartnerNotice(NOTICES[0].into())),
+        );
+        let run = child.run().await;
+        until(&run, "first grouped notice", |_| {
+            read_lines::<String>(&partner_log(&scenario)) == [NOTICES[0]]
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success());
+        let interrupted = Archive::read(&run).await;
+        assert_eq!(start_ordinals(&interrupted), [1]);
+        assert!(settlements(&interrupted).is_empty());
+        let resumed = Child::spawn(&scenario, [resume(&run), cfg].concat(), None)
+            .completed()
+            .await;
+        let acted = read_lines::<String>(&partner_log(&scenario));
+        assert_eq!(acted, ["N-01", "N-03", "N-04"]);
+        let settled = settlements(&Archive::read(&resumed).await);
+        assert_eq!(
+            settled,
+            BTreeMap::from([
+                ("N-01".into(), "abandoned"),
+                ("N-02".into(), "refused"),
+                ("N-03".into(), "succeeded"),
+                ("N-04".into(), "succeeded")
+            ])
+        );
+        check("grouped_partner", &acted, &settled);
+        let candidate = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        assert_eq!(read_lines::<String>(&partner_log(&scenario)), acted);
+        let (code, report) = verify_exit(&resumed, &candidate);
+        assert_eq!(code, Some(0), "{report}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6708,6 +6761,103 @@ mod csv_register {
             .collect();
         files.sort();
         files
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grouped_register_interruption_recovers_rows() {
+        let scenario = fresh("grouped_register");
+        let file = || std::fs::read_to_string(register_file(&scenario)).unwrap_or_default();
+        let config = sink_group_config(&scenario, 256);
+        let held = rows(&ENTRIES);
+        let child = Child::spawn(&scenario, config.clone(), Some(Hold::RegisterWrite(1)));
+        let run = child.run().await;
+        until(&run, "group write before records", |archive| {
+            file() == held && appended(archive) == 0
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success());
+        assert_eq!(appended(&Archive::read(&run).await), 0);
+        let resumed = Child::spawn(&scenario, [resume(&run), config].concat(), None)
+            .completed()
+            .await;
+        assert_eq!(file(), held);
+        let damage = damage_files(&scenario);
+        assert_eq!(damage.len(), 1);
+        assert_eq!(std::fs::read_to_string(&damage[0]).unwrap(), held);
+        let archive = Archive::read(&resumed).await;
+        let records: Vec<_> = archive
+            .rows("register", RunJournalKind::Data)
+            .filter(|r| settled_input(r).is_some())
+            .collect();
+        assert_eq!(records.len(), ENTRIES.len());
+        let parents: BTreeSet<_> = records
+            .iter()
+            .map(|row| row.envelope.provenance.event.causality.parent_ids[0])
+            .collect();
+        assert_eq!(parents.len(), ENTRIES.len());
+        let frames: BTreeSet<_> = records
+            .iter()
+            .map(|row| {
+                row.envelope
+                    .provenance
+                    .journal
+                    .journal_group_id
+                    .as_deref()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(frames.len(), 1);
+        remove_input(&input(&scenario));
+        let candidate = Child::spawn(
+            &scenario,
+            [replay(&resumed), sink_group_config(&scenario, 64)].concat(),
+            None,
+        )
+        .completed()
+        .await;
+        assert_eq!(file(), held);
+        assert_eq!(damage_files(&scenario), damage);
+        let (code, report) = verify_exit(&resumed, &candidate);
+        assert_eq!(code, Some(0), "{report}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn group_size_change_replay_matches() {
+        let scenario = fresh("group_size_change");
+        let baseline = Child::spawn(&scenario, sink_group_config(&scenario, 2), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&baseline).await;
+        let mut frames = BTreeMap::new();
+        for row in archive
+            .rows("register", RunJournalKind::Data)
+            .filter(|r| settled_input(r).is_some())
+        {
+            let frame = row
+                .envelope
+                .provenance
+                .journal
+                .journal_group_id
+                .as_ref()
+                .unwrap();
+            *frames.entry(frame).or_insert(0) += 1;
+        }
+        assert_eq!(frames.values().copied().collect::<Vec<_>>(), [2, 2]);
+        let file = register_file(&scenario);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rows(&ENTRIES));
+        std::fs::rename(&file, scenario.root.join("live.csv")).unwrap();
+        remove_input(&input(&scenario));
+        let candidate = Child::spawn(
+            &scenario,
+            [replay(&baseline), sink_group_config(&scenario, 64)].concat(),
+            None,
+        )
+        .completed()
+        .await;
+        let (code, report) = verify_exit(&baseline, &candidate);
+        assert_eq!(code, Some(0), "{report}");
+        assert!(!file.exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]

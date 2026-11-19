@@ -469,9 +469,6 @@ where
                 })
                 .collect();
 
-            // Selected-feed chains intentionally start with the transport
-            // contract only. Divergence predicates still use the physical edge
-            // chain until that contract gains explicit selected-feed semantics.
             self.contract_feed_chains = self
                 .readers
                 .iter()

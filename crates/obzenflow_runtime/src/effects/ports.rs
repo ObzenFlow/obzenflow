@@ -22,6 +22,7 @@ type ErasedValue = Arc<dyn Any + Send + Sync>;
 
 #[derive(Clone)]
 struct ErasedResolvedEffectPort {
+    group: Option<ErasedValue>,
     port: ErasedValue,
     metadata: ErasedValue,
 }
@@ -177,9 +178,34 @@ impl SystemPort {
         Self {
             coordinate: BindingCoordinate::mint(),
             recipe: PortRecipe::Eager(ErasedResolvedEffectPort {
+                group: None,
                 port: Arc::new(port),
                 metadata: Arc::new(Arc::new(NoPortMetadata)),
             }),
+        }
+    }
+
+    pub(super) fn grouped<P, R, S, F>(resolver: F) -> Self
+    where
+        P: ?Sized + Send + Sync + 'static,
+        R: super::SinkRequest<Port = P>,
+        S: super::SinkGroupSystem<R>,
+        super::PortImpl<S>: super::ServesPort<P, S>,
+        F: Fn() -> Result<S, EffectPortResolutionError> + Send + Sync + 'static,
+    {
+        let erased: ErasedResolver = Arc::new(move || {
+            let system = Arc::new(resolver()?);
+            let port = <super::PortImpl<S> as super::ServesPort<P, S>>::coerce(system.clone());
+            let group: Arc<dyn super::SinkGroupSystem<R>> = system;
+            Ok(ErasedResolvedEffectPort {
+                port: Arc::new(port),
+                metadata: Arc::new(Arc::new(NoPortMetadata)),
+                group: Some(Arc::new(group)),
+            })
+        });
+        Self {
+            coordinate: BindingCoordinate::mint(),
+            recipe: PortRecipe::Deferred(erased),
         }
     }
 
@@ -190,6 +216,7 @@ impl SystemPort {
         let erased: ErasedResolver = Arc::new(move || {
             let port = resolver()?;
             Ok(ErasedResolvedEffectPort {
+                group: None,
                 port: Arc::new(port),
                 metadata: Arc::new(Arc::new(NoPortMetadata)),
             })
@@ -353,6 +380,7 @@ impl<E: BoundEffect> EffectRegistrationBuilder<E> {
         M: Send + Sync + 'static,
     {
         ErasedResolvedEffectPort {
+            group: None,
             port: Arc::new(resolved.port),
             metadata: Arc::new(resolved.metadata),
         }
@@ -708,8 +736,8 @@ impl EffectPortRegistry {
                 slot.requirement.metadata_type_id,
                 slot.requirement.label,
             );
-            ports.insert(key, resolved.port);
-            metadata.insert(key, resolved.metadata);
+            metadata.insert(key, resolved.metadata.clone());
+            ports.insert(key, resolved);
         }
         Ok(EffectPortViews {
             ports: EffectPortView { resolved: ports },
@@ -765,10 +793,26 @@ impl std::fmt::Debug for EffectPortRegistry {
 
 #[derive(Clone, Default)]
 pub(super) struct EffectPortView {
-    resolved: HashMap<(TypeId, TypeId, &'static str), ErasedValue>,
+    resolved: HashMap<(TypeId, TypeId, &'static str), ErasedResolvedEffectPort>,
 }
 
 impl EffectPortView {
+    pub(super) fn group<R: super::SinkRequest>(
+        &self,
+    ) -> Option<Arc<dyn super::SinkGroupSystem<R>>> {
+        let slot = super::call::call_port_slot::<R>();
+        self.resolved
+            .get(&(
+                TypeId::of::<R::Port>(),
+                TypeId::of::<NoPortMetadata>(),
+                slot.label(),
+            ))?
+            .group
+            .as_ref()?
+            .downcast_ref::<Arc<dyn super::SinkGroupSystem<R>>>()
+            .cloned()
+    }
+
     pub(super) fn get<P, M>(&self, slot: EffectPortSlot<P, M>) -> Option<Arc<P>>
     where
         P: ?Sized + Send + Sync + 'static,
@@ -776,6 +820,7 @@ impl EffectPortView {
     {
         self.resolved
             .get(&(TypeId::of::<P>(), TypeId::of::<M>(), slot.label()))?
+            .port
             .downcast_ref::<Arc<P>>()
             .cloned()
     }

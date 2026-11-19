@@ -49,6 +49,15 @@ pub(crate) fn commit<T: JournalEvent>(
     options: &AppendOptions<T>,
     records: &[JournalRecord<T::Payload>],
 ) -> Result<JournalRecord<T::Payload>, JournalError> {
+    commit_member(id, event, options.frontier.member(0)?, records)
+}
+
+pub(crate) fn commit_member<T: JournalEvent>(
+    id: JournalId,
+    event: T,
+    frontier: &obzenflow_core::event::CausalFrontier,
+    records: &[JournalRecord<T::Payload>],
+) -> Result<JournalRecord<T::Payload>, JournalError> {
     let run_id = records.first().map_or_else(
         || FlowId::from(*id.as_ulid()),
         |record| record.envelope.provenance.journal.run_id,
@@ -59,7 +68,7 @@ pub(crate) fn commit<T: JournalEvent>(
         CausalCoordinate::new(id.into()),
         *event.id(),
         previous.as_ref(),
-        &options.frontier,
+        frontier,
     )?;
     JournalRecord::commit_event(
         event,

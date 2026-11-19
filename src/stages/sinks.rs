@@ -7,9 +7,8 @@
 //! A sink is an effect. Its row takes a command, as an effectful transform's
 //! row does, and the command sends one request per input through a port. The
 //! port method's `#[effect]` states the guarantee, so the row states none, and
-//! the method is marked `records = reply`, because a sink's outcome feeds no
-//! other stage. Replay makes no call to a sink's system, and a resume makes only
-//! the calls the recording didn't settle.
+//! the method is marked `records = reply`. Replay makes no call to a sink's
+//! system, and a resume makes only the calls the recording didn't settle.
 //!
 //! ```
 //! use obzenflow::effects::{perform, EffectError, Port};
@@ -56,12 +55,12 @@
 //!
 //! Each sends its request through a port and system the framework declares,
 //! and [`ConsoleSink::through`], [`TracingSink::through`] and
-//! [`CsvSinkBuilder::through`] send it through another system instead. TSV is
-//! the CSV builder's `.tab_delimited()`.
+//! [`CsvSink::through`] send it through another system instead. TSV is the CSV
+//! builder's `.tab_delimited()`.
 //!
 //! The console and tracing writes are `at_least_once`, so a crash between the
-//! write and its record can repeat a line. The CSV register is `exactly_once`:
-//! it checks its file against the recorded length and digest before its first
+//! write and its record can repeat a line. The CSV register is `exactly_once`.
+//! It checks its file against the recorded length and digest before its first
 //! append, and moves any unrecorded tail aside to `<path>.<length>.damage`.
 //!
 //! ## PostgreSQL
@@ -72,8 +71,9 @@
 //! `at_least_once`.
 
 pub use obzenflow_adapters::sinks::{
-    Appended, ConsoleFormatError, ConsoleOutput, ConsolePort, ConsoleSink, CsvProjection,
-    CsvRegisterPort, CsvRow, CsvSink, CsvSinkBuilder, DebugFormatter, DiscardPort, DiscardSink,
-    Discarded, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
-    SnapshotTableFormatter, TableFormatter, TracingLevel, TracingOutput, TracingPort, TracingSink,
+    Appended, ConsoleFormatError, ConsoleOutput, ConsolePort, ConsoleSink, ConsoleTablePort,
+    CsvProjection, CsvRegisterPort, CsvRow, CsvSink, CsvSinkBuilder, DebugFormatter, DiscardPort,
+    DiscardSink, Discarded, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
+    SnapshotTableFormatter, TableConsoleSink, TableFormatter, TableRow, TracingLevel,
+    TracingOutput, TracingPort, TracingSink,
 };

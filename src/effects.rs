@@ -26,8 +26,8 @@ pub use obzenflow_runtime::effects::{
 pub use obzenflow_runtime::effects::{
     __async_trait, assert_port_answer, AtLeastOnce, AtMostOnce, Call, CallRequest, CallSafety,
     DeclaredEffectSet, DomainFacts, EffectList, FieldsEffects, Idempotent, KeyRule, NarrowedPort,
-    PortAnswer, PortEffects, PortField, PortImpl, PortReply, PortServesRequest, RecordedReply,
-    RequestList, RequiresKey, ServesPort, Transactional, WholePort,
+    PortAnswer, PortEffects, PortImpl, PortReply, PortServesRequest, RecordedReply, RequestList,
+    RequiresKey, ServesPort, Transactional, WholePort,
 };
 
 /// Building blocks for simulated outside systems: a call log that answers a

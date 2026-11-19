@@ -164,7 +164,7 @@ where
 
 fn missing_effect_fact_descriptor() -> Box<dyn StageDescriptor> {
     let handler = PerformTransform::new();
-    let effects = effectful_transform_effects(&handler, &[]);
+    let effects = effectful_transform_effects(&handler);
     erased_effectful_descriptor(
         "effectful",
         handler,
@@ -340,7 +340,7 @@ impl EffectfulTransformHandler for CollidingTransform {
 
 fn colliding_effect_descriptor() -> Box<dyn StageDescriptor> {
     let handler = CollidingTransform::new();
-    let effects = effectful_transform_effects(&handler, &[]);
+    let effects = effectful_transform_effects(&handler);
     erased_effectful_descriptor(
         "effectful",
         handler,

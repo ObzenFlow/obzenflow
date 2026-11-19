@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
-    Command, DeclaredEffectSet, EffectError, Port, PortField, SinkRole,
+    Command, DeclaredEffectSet, EffectContext, EffectError, Port, SinkBatchDefaults,
+    SinkGroupSystem, SinkRole,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
@@ -130,7 +131,7 @@ where
     }
 }
 
-/// A one-row table per item, with fixed columns and row extraction.
+/// Extracts an ordered row of cells from each item for the configured columns.
 pub struct TableFormatter<T, E> {
     columns: Vec<String>,
     extractor: E,
@@ -567,6 +568,7 @@ fn console_port(destination: OutputDestination) -> Port<dyn ConsolePort> {
 /// A sink that writes each input to the console, formatted by `F`.
 pub struct ConsoleSink<T, F = JsonFormatter> {
     formatter: F,
+    destination: Option<OutputDestination>,
     port: Port<dyn ConsolePort>,
     _phantom: PhantomData<fn() -> T>,
 }
@@ -578,6 +580,7 @@ where
     fn clone(&self) -> Self {
         Self {
             formatter: self.formatter.clone(),
+            destination: self.destination,
             port: self.port.clone(),
             _phantom: PhantomData,
         }
@@ -602,6 +605,7 @@ where
     pub fn new(formatter: F) -> Self {
         Self {
             formatter,
+            destination: Some(OutputDestination::Stdout),
             port: console_port(OutputDestination::Stdout),
             _phantom: PhantomData,
         }
@@ -610,6 +614,7 @@ where
 
 impl<T, F> ConsoleSink<T, F> {
     pub fn to_stderr(mut self) -> Self {
+        self.destination = Some(OutputDestination::Stderr);
         self.port = console_port(OutputDestination::Stderr);
         self
     }
@@ -617,6 +622,7 @@ impl<T, F> ConsoleSink<T, F> {
     /// Write through another system that answers `ConsolePort`, such as a
     /// test port.
     pub fn through(mut self, port: Port<dyn ConsolePort>) -> Self {
+        self.destination = None;
         self.port = port;
         self
     }
@@ -625,8 +631,6 @@ impl<T, F> ConsoleSink<T, F> {
 impl<T, F> Command for ConsoleSink<T, F> {
     type Ports = (Port<dyn ConsolePort>, ());
     type AllowedEffects = DeclaredEffectSet<WithMember<ConsoleOutput, EmptySet>>;
-
-    const PORT_FIELDS: &'static [PortField] = &[PortField::Performed];
 
     fn ports(&self) -> Self::Ports {
         (self.port.clone(), ())
@@ -644,6 +648,145 @@ where
         self.formatter
             .format(input)
             .map_err(|error| HandlerError::Validation(error.to_string()))
+    }
+}
+
+/// Ordered cells contributed by one input to a console table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TableRow {
+    pub cells: Vec<String>,
+}
+
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[async_trait]
+pub trait ConsoleTablePort {
+    /// Write the cells from one input. The built-in table system renders a whole group together.
+    #[effect(type = "obzenflow.console.table_row", at_least_once, records = reply)]
+    async fn write_row(&self, row: &TableRow, ctx: &EffectContext) -> Result<(), EffectError>;
+}
+
+struct ConsoleTable {
+    columns: Vec<String>,
+    max_width: usize,
+    destination: OutputDestination,
+}
+
+#[obzenflow_runtime::effects::system("console-table", effects = obzenflow_runtime::effects)]
+#[async_trait]
+impl ConsoleTablePort for ConsoleTable {
+    async fn write_row(&self, row: &TableRow, ctx: &EffectContext) -> Result<(), EffectError> {
+        self.write_group(std::slice::from_ref(row), ctx)
+            .await
+            .map(|_| ())
+    }
+}
+
+#[async_trait]
+impl SinkGroupSystem<TableRow> for ConsoleTable {
+    async fn write_group(
+        &self,
+        rows: &[TableRow],
+        _: &EffectContext,
+    ) -> Result<Vec<()>, EffectError> {
+        let cells: Vec<_> = rows.iter().map(|row| &row.cells).collect();
+        let frame = render_table(&self.columns, &cells, self.max_width);
+        write_output(self.destination, &ConsoleOutput::Text(frame)).await?;
+        Ok(vec![(); rows.len()])
+    }
+}
+
+/// A sink that contributes one row per input to the current console table.
+pub struct TableConsoleSink<T, E> {
+    formatter: TableFormatter<T, E>,
+    port: Port<dyn ConsoleTablePort>,
+    batch: SinkBatchDefaults,
+}
+
+impl<T, E: Clone> Clone for TableConsoleSink<T, E> {
+    fn clone(&self) -> Self {
+        Self {
+            formatter: self.formatter.clone(),
+            port: self.port.clone(),
+            batch: self.batch,
+        }
+    }
+}
+
+impl<T, E> std::fmt::Debug for TableConsoleSink<T, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TableConsoleSink")
+            .field("port", &self.port)
+            .field("batch", &self.batch)
+            .finish()
+    }
+}
+
+impl<T, E> ConsoleSink<T, TableFormatter<T, E>> {
+    /// Use the table port with this default number of rows per table.
+    pub fn batch_size(self, size: usize) -> Result<TableConsoleSink<T, E>, ConsoleFormatError> {
+        let size = std::num::NonZeroUsize::new(size)
+            .ok_or_else(|| ConsoleFormatError::new("console table batch size must be positive"))?;
+        let destination = self.destination.ok_or_else(|| {
+            ConsoleFormatError::new("select the table system with through() after batch_size()")
+        })?;
+        let columns = self.formatter.columns.clone();
+        let max_width = self.formatter.max_col_width;
+        let port = Port::deferred_grouped::<TableRow, _, _>(move || {
+            Ok(ConsoleTable {
+                columns: columns.clone(),
+                max_width,
+                destination,
+            })
+        });
+        Ok(TableConsoleSink {
+            formatter: self.formatter,
+            port,
+            batch: SinkBatchDefaults {
+                size: Some(size),
+                max_wait: None,
+            },
+        })
+    }
+}
+
+impl<T, E> TableConsoleSink<T, E> {
+    /// Set how long an open group may wait for more rows. Zero takes only queued rows.
+    pub fn batch_max_wait(mut self, wait: std::time::Duration) -> Self {
+        self.batch.max_wait = Some(wait);
+        self
+    }
+
+    pub fn through(mut self, port: Port<dyn ConsoleTablePort>) -> Self {
+        self.port = port;
+        self
+    }
+}
+
+impl<T, E> Command for TableConsoleSink<T, E> {
+    type Ports = (Port<dyn ConsoleTablePort>, ());
+    type AllowedEffects = DeclaredEffectSet<WithMember<TableRow, EmptySet>>;
+
+    fn ports(&self) -> Self::Ports {
+        (self.port.clone(), ())
+    }
+}
+
+impl<T, E> SinkRole<T> for TableConsoleSink<T, E>
+where
+    T: TypedPayload + Send + Sync + 'static,
+    E: Fn(&T) -> Vec<String> + Clone + Send + Sync + 'static,
+{
+    type Request = TableRow;
+
+    fn prepare(&self, input: &T) -> Result<TableRow, HandlerError> {
+        self.formatter
+            .prepare_row(input)
+            .map(|cells| TableRow { cells })
+            .map_err(|error| HandlerError::Validation(error.to_string()))
+    }
+
+    fn batch_defaults(&self) -> SinkBatchDefaults {
+        self.batch
     }
 }
 

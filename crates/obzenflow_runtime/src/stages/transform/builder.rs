@@ -162,6 +162,11 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             self.resources.runtime_execution.clone(),
         );
         let resources = TransformResources {
+            sink_batch: self
+                .config
+                .sink_batch
+                .filter(|(size, _)| *size > 1)
+                .map(|(size, wait)| super::supervisor::sink_batch::SinkBatch::new(size, wait)),
             handler: Some(handler),
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),

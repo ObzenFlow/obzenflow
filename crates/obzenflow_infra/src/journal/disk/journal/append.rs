@@ -8,7 +8,7 @@ use chrono::Utc;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::provenance::{JournalGroupMember, JournalProvenance};
-use obzenflow_core::event::{CausalCoordinate, CausalFrontier, JournalClock, JournalEvent};
+use obzenflow_core::event::{CausalCoordinate, JournalClock, JournalEvent};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_runtime::runtime_config::JournalSync;
 use std::fs::File as StdFile;
@@ -144,7 +144,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
     pub(super) async fn append_record(
         &self,
         event: T,
-        frontier: &CausalFrontier,
+        frontier: &obzenflow_core::journal::AppendFrontiers,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
         let mut records = self.commit_frame(None, vec![event], frontier).await?;
@@ -155,7 +155,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        frontier: &CausalFrontier,
+        frontier: &obzenflow_core::journal::AppendFrontiers,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
         obzenflow_core::journal::limits::validate_group_size(events.len())?;
@@ -175,7 +175,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         &self,
         group_id: Option<&str>,
         events: Vec<T>,
-        frontier: &CausalFrontier,
+        frontier: &obzenflow_core::journal::AppendFrontiers,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         if self.poisoned.load(Ordering::SeqCst) {
             return Err(JournalError::Implementation {
@@ -218,7 +218,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
                 CausalCoordinate::new(self.journal_id.into()),
                 *event.id(),
                 latest.as_ref().or(last_commit.as_ref()),
-                frontier,
+                frontier.member(index)?,
             )?;
             let (authored, payload) = event.into_parts();
             envelopes.push(

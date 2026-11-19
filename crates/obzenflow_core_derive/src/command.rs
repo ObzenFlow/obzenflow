@@ -61,7 +61,6 @@ impl Parse for CommandArgs {
 struct HeldPort {
     ty: Type,
     accessor: TokenStream,
-    field: TokenStream,
     listed: Option<Vec<Type>>,
 }
 
@@ -107,11 +106,9 @@ fn expand_through(
     let effects_path = effects.tokens();
     let field = field_name(port);
     let ty: Type = parse_quote!(#effects_path::Port<dyn #port>);
-    let port_name = port_label(port);
     let held = [HeldPort {
         ty: ty.clone(),
         accessor: quote!(self.#field),
-        field: quote!(#effects_path::PortField::Through(#port_name)),
         listed: None,
     }];
     let fields: syn::FieldsNamed = parse_quote!({ #field: #ty });
@@ -137,7 +134,6 @@ fn expand_through(
 }
 
 fn expand_fields(effects: &EffectsPath, command: ItemStruct) -> Result<TokenStream, syn::Error> {
-    let effects_path = effects.tokens();
     let mut held = Vec::new();
     let mut written: Vec<String> = Vec::new();
     for (position, field) in command.fields.iter().enumerate() {
@@ -164,17 +160,16 @@ fn expand_fields(effects: &EffectsPath, command: ItemStruct) -> Result<TokenStre
         }
         written.push(compact);
         let listed = listed_requests(mark)?;
-        let (name, accessor) = match &field.ident {
-            Some(ident) => (ident.unraw().to_string(), quote!(self.#ident)),
+        let accessor = match &field.ident {
+            Some(ident) => quote!(self.#ident),
             None => {
                 let index = Index::from(position);
-                (position.to_string(), quote!(self.#index))
+                quote!(self.#index)
             }
         };
         held.push(HeldPort {
             ty: field.ty.clone(),
             accessor,
-            field: quote!(#effects_path::PortField::Named(#name)),
             listed,
         });
     }
@@ -195,7 +190,6 @@ fn command_impl(effects: &EffectsPath, command: &ItemStruct, held: &[HeldPort]) 
         ty,
         accessor,
         listed,
-        ..
     } in held.iter().rev()
     {
         ports_type = quote!((#ty, #ports_type));
@@ -212,7 +206,6 @@ fn command_impl(effects: &EffectsPath, command: &ItemStruct, held: &[HeldPort]) 
         };
         allowed = quote!((#field, #allowed));
     }
-    let fields = held.iter().map(|port| &port.field);
     let body = if held.is_empty() {
         quote!({})
     } else {
@@ -249,8 +242,6 @@ fn command_impl(effects: &EffectsPath, command: &ItemStruct, held: &[HeldPort]) 
             type AllowedEffects = #effects::DeclaredEffectSet<
                 <#allowed as #effects::FieldsEffects>::Members,
             >;
-
-            const PORT_FIELDS: &'static [#effects::PortField] = &[#(#fields),*];
 
             fn ports(&self) -> Self::Ports #body
         }
@@ -433,10 +424,6 @@ mod tests {
             ),
             "{expanded}"
         );
-        assert!(
-            expanded.contains("PortField :: Through (\"RiskEnginePort\")"),
-            "{expanded}"
-        );
     }
 
     #[test]
@@ -541,10 +528,6 @@ mod tests {
             "{expanded}"
         );
         assert!(
-            expanded.contains("PortField :: Named (\"warehouse_port\")"),
-            "{expanded}"
-        );
-        assert!(
             expanded.contains("WholePort < Port < dyn WarehousePort > >"),
             "{expanded}"
         );
@@ -598,10 +581,6 @@ mod tests {
             ),
         );
         assert!(expanded.contains("self . 1"), "{expanded}");
-        assert!(
-            expanded.contains("PortField :: Named (\"1\")"),
-            "{expanded}"
-        );
     }
 
     #[test]

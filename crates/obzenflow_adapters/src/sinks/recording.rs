@@ -9,9 +9,7 @@
 
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{
-    Command, DeclaredEffectSet, EffectError, Port, PortField, SinkRole,
-};
+use obzenflow_runtime::effects::{Command, DeclaredEffectSet, EffectError, Port, SinkRole};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
 use serde_json::Value;
@@ -160,8 +158,6 @@ impl<T> Command for RecordingSink<T> {
     type Ports = (Port<dyn RecordingPort>, ());
     type AllowedEffects = DeclaredEffectSet<WithMember<RecordedInput, EmptySet>>;
 
-    const PORT_FIELDS: &'static [PortField] = &[PortField::Performed];
-
     fn ports(&self) -> Self::Ports {
         (self.port.clone(), ())
     }
@@ -259,8 +255,6 @@ impl<T> std::fmt::Debug for CountingSink<T> {
 impl<T> Command for CountingSink<T> {
     type Ports = (Port<dyn CountingPort>, ());
     type AllowedEffects = DeclaredEffectSet<WithMember<Counted, EmptySet>>;
-
-    const PORT_FIELDS: &'static [PortField] = &[PortField::Performed];
 
     fn ports(&self) -> Self::Ports {
         (self.port.clone(), ())

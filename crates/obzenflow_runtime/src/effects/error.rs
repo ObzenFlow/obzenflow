@@ -304,8 +304,9 @@ impl EffectError {
         }
     }
 
-    /// Whether a replay recorded this call rejected because its request no
-    /// longer matches the recording, without calling any system.
+    /// Whether a replay recorded this call rejected, without calling any
+    /// system, because its request differs from the recording or the
+    /// recording holds no call there.
     pub fn is_replay_rejection(&self) -> bool {
         matches!(
             self,

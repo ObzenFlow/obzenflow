@@ -444,6 +444,10 @@ impl CircuitBreakerMiddleware {
         &self.unit
     }
 
+    pub(in crate::middleware::control) fn needs_probe(&self) -> bool {
+        self.current_state() != CircuitState::Closed
+    }
+
     fn current_state(&self) -> CircuitState {
         CircuitState::from(self.state.load(Ordering::SeqCst))
     }

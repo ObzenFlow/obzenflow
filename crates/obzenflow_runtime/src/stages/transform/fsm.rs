@@ -712,6 +712,7 @@ impl<H> std::fmt::Debug for TransformAction<H> {
 
 /// Context for transform handlers - contains everything actions need
 pub(crate) struct TransformResources<H: UnifiedTransformHandler> {
+    pub(crate) sink_batch: Option<super::supervisor::sink_batch::SinkBatch>,
     /// The handler instance (owned - allows `drain(&mut self)` without locks)
     pub handler: Option<H>,
 

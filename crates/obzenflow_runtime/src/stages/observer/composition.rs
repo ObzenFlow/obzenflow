@@ -1100,12 +1100,12 @@ mod tests {
     fn declared_effect(effect_type: &'static str) -> EffectDeclaration {
         let system = Port::to(FixturePort);
         match effect_type {
-            "effect.a" => AnswersEffect::<<DeclaredRequestA as EffectName>::Effect>::declaration(
-                &system, None,
-            ),
-            "effect.b" => AnswersEffect::<<DeclaredRequestB as EffectName>::Effect>::declaration(
-                &system, None,
-            ),
+            "effect.a" => {
+                AnswersEffect::<<DeclaredRequestA as EffectName>::Effect>::declaration(&system)
+            }
+            "effect.b" => {
+                AnswersEffect::<<DeclaredRequestB as EffectName>::Effect>::declaration(&system)
+            }
             _ => panic!("unknown observer fixture effect"),
         }
         .expect("fixture declaration")

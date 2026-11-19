@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+mod sink_group;
 use super::boundary::PhysicalCallOutcome;
 use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
 use super::*;
@@ -11,6 +12,7 @@ use obzenflow_core::event::payloads::effect_payload::{
     CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
 };
 use obzenflow_core::MiddlewareExecutionScope;
+pub(super) use sink_group::SinkGroup;
 
 /// Slot a guarded execution future fills with the real typed outcome, so
 /// `perform` records from its own state rather than boundary-returned events.
@@ -70,7 +72,31 @@ struct AffineStart {
 }
 
 impl AffineStart {
-    async fn commit(&self, attempt: u32) -> Result<(), EffectError> {
+    fn new(
+        core: &EffectsCore,
+        effect: &PreparedLiveEffect,
+        prior: &[EffectAttemptStarted],
+    ) -> Self {
+        Self {
+            cursor: effect.cursor.clone(),
+            descriptor_hash: effect.descriptor_hash.clone(),
+            descriptor: effect.descriptor.clone(),
+            causal_input_id: prior
+                .first()
+                .map_or(core.ctx.parent.view().id, |s| s.causal_input_id),
+            writer_id: core.ctx.stage.writer_id,
+            lineage: core.ctx.stage.lineage,
+            data_journal: core.ctx.stage.data_journal.clone(),
+            flow_context: core.ctx.stage.flow_context.clone(),
+            instrumentation: core.ctx.stage.instrumentation.clone(),
+            heartbeat_state: core.ctx.stage.heartbeat_state.clone(),
+            backpressure_writer: core.ctx.backpressure_writer.clone(),
+            parent: core.ctx.parent.clone(),
+            causal: core.causal.clone(),
+        }
+    }
+
+    fn event(&self, attempt: u32) -> Result<ChainEvent, EffectError> {
         let started = EffectAttemptStarted {
             cursor: self.cursor.clone(),
             descriptor_hash: self.descriptor_hash.clone(),
@@ -87,6 +113,11 @@ impl AffineStart {
             self.lineage,
         )?;
         event.replay_context = None;
+        Ok(event)
+    }
+
+    async fn commit(&self, attempt: u32) -> Result<(), EffectError> {
+        let event = self.event(attempt)?;
         let committer = OutputCommitter {
             data_journal: &self.data_journal,
             flow_context: self.flow_context.as_ref(),
@@ -120,6 +151,17 @@ struct PreparedLiveEffect {
     descriptor: EffectDescriptor,
     binding_context: EffectContext,
     committed_waits: u32,
+}
+
+struct LiveCall {
+    effect: PreparedLiveEffect,
+    prior_attempts: Vec<EffectAttemptStarted>,
+    guard: super::history::EffectCursorGuard,
+}
+
+enum SelectedCall<T> {
+    Reproduced(T),
+    Live(Box<LiveCall>),
 }
 
 fn split_invariant_control_events(
@@ -356,6 +398,8 @@ impl AuthoringHalt {
 /// escape exists.
 pub(crate) struct EffectsCore {
     causal: obzenflow_core::event::CausalFrontier,
+    first_group_input: Option<u64>,
+    sink_outcomes: Option<Mutex<Vec<AtomicCommitEntry>>>,
     ctx: EffectInvocationContext,
     next_effect_ordinal: EffectOrdinal,
     next_output_ordinal: EffectOutputOrdinal,
@@ -372,6 +416,8 @@ impl EffectsCore {
     pub(crate) fn new(ctx: EffectInvocationContext) -> Self {
         Self {
             causal: crate::supervised_base::publication::capture(),
+            first_group_input: None,
+            sink_outcomes: None,
             ctx,
             next_effect_ordinal: EffectOrdinal::new(0),
             next_output_ordinal: EffectOutputOrdinal::new(0),
@@ -875,7 +921,11 @@ impl EffectsCore {
             .ctx
             .stage
             .current_run_history
-            .cursor_history(&self.ctx.stage.data_journal, cursor)
+            .group_cursor_history(
+                &self.ctx.stage.data_journal,
+                cursor,
+                self.first_group_input.unwrap_or(cursor.input_seq.get()),
+            )
             .await
         {
             Ok(history) => Ok(history),
@@ -905,6 +955,9 @@ impl EffectsCore {
         effect_type: &str,
         outcome: crate::stages::observer::EffectObserverOutcome,
     ) {
+        if self.sink_outcomes.is_some() {
+            return;
+        }
         let Some(observers) = self.ctx.stage.observers.as_ref() else {
             return;
         };
@@ -1162,9 +1215,28 @@ impl EffectsCore {
     where
         E: Effect,
     {
+        let declaration = self.authorise_call(&effect)?;
+        let result = Box::pin(self.perform_authorised(effect, declaration.clone())).await;
+        self.check_binding_result::<E, _>(&declaration, result)
+    }
+
+    fn check_binding_result<E: Effect, T>(
+        &mut self,
+        declaration: &EffectDeclaration,
+        result: Result<T, EffectError>,
+    ) -> Result<T, EffectError> {
+        if let Err(error) = &result {
+            if let Some(fault) = self.binding_fault_for_error::<E>(declaration, error) {
+                return Err(self.latch_binding_fault(fault));
+            }
+        }
+        result
+    }
+
+    fn authorise_call<E: Effect>(&mut self, effect: &E) -> Result<EffectDeclaration, EffectError> {
         self.gate_authoring()?;
         let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
-        let invocation = <E::BindingMode as EffectBindingMode<E>>::invocation_binding(&effect);
+        let invocation = <E::BindingMode as EffectBindingMode<E>>::invocation_binding(effect);
         let chosen = declaration
             .bindings()
             .find(|binding| binding.compare_invocation(&invocation).is_ok())
@@ -1185,20 +1257,14 @@ impl EffectsCore {
             return Err(self.latch_binding_fault(fault));
         }
 
-        let result = Box::pin(self.perform_authorised(effect, declaration.clone())).await;
-        if let Err(error) = &result {
-            if let Some(fault) = self.binding_fault_for_error::<E>(&declaration, error) {
-                return Err(self.latch_binding_fault(fault));
-            }
-        }
-        result
+        Ok(declaration)
     }
 
-    async fn perform_authorised<E>(
+    async fn select_call<E>(
         &mut self,
-        effect: E,
+        effect: &E,
         declaration: EffectDeclaration,
-    ) -> Result<E::Outcome, EffectError>
+    ) -> Result<SelectedCall<E::Outcome>, EffectError>
     where
         E: Effect,
     {
@@ -1218,7 +1284,7 @@ impl EffectsCore {
         let effect_ordinal = self.reserve_effect_ordinal()?;
 
         let descriptor = descriptor_for_effect(
-            &effect,
+            effect,
             self.ctx.stage.stage_logic_version.clone(),
             E::EFFECT_TYPE,
             E::SCHEMA_VERSION,
@@ -1241,7 +1307,7 @@ impl EffectsCore {
             .runtime_execution
             .effect_cursor_coordinator()
             .clone();
-        let _cursor_guard = cursor_coordinator.lock(&cursor).await?;
+        let cursor_guard = cursor_coordinator.lock(&cursor).await?;
         let mut prior_attempts = Vec::new();
         let archived = self
             .ctx
@@ -1317,7 +1383,7 @@ impl EffectsCore {
                     .as_ref()
                     .is_err_and(|error| !matches!(error, EffectError::RecordedFailure { .. }))
                 {
-                    return output_result;
+                    return output_result.map(SelectedCall::Reproduced);
                 }
                 let materialization =
                     self.history_shape(effect_record_group_materialization(&record_refs))?;
@@ -1358,7 +1424,7 @@ impl EffectsCore {
                         boundary_retry: abandoned.retry,
                     });
                 }
-                return output_result;
+                return output_result.map(SelectedCall::Reproduced);
             }
             EffectHistorySelection::InDoubt(attempts) => {
                 if !is_affine(safety) {
@@ -1496,10 +1562,13 @@ impl EffectsCore {
 
         let prepared = PreparedLiveEffect {
             identity: EffectIdentity {
+                additional: None,
                 effect_type: E::EFFECT_TYPE,
                 safety,
-                cursor: cursor.clone(),
-                idempotency_key: effect.idempotency_key(),
+                first: CallIdentity {
+                    cursor: cursor.clone(),
+                    idempotency_key: effect.idempotency_key(),
+                },
             },
             cursor,
             descriptor_hash,
@@ -1507,10 +1576,42 @@ impl EffectsCore {
             binding_context,
             committed_waits,
         };
-        if let Some(key) = &prepared.identity.idempotency_key {
+        if let Some(key) = &prepared.identity.first.idempotency_key {
             self.call_keys.insert(prepared.cursor.clone(), key.clone());
         }
 
+        Ok(SelectedCall::Live(Box::new(LiveCall {
+            effect: prepared,
+            prior_attempts,
+            guard: cursor_guard,
+        })))
+    }
+
+    async fn perform_authorised<E: Effect>(
+        &mut self,
+        effect: E,
+        declaration: EffectDeclaration,
+    ) -> Result<E::Outcome, EffectError> {
+        match self.select_call(&effect, declaration).await? {
+            SelectedCall::Reproduced(outcome) => Ok(outcome),
+            SelectedCall::Live(live) => {
+                let LiveCall {
+                    effect: prepared,
+                    prior_attempts,
+                    guard: _guard,
+                } = *live;
+                self.execute_live(effect, prepared, prior_attempts).await
+            }
+        }
+    }
+
+    async fn execute_live<E: Effect>(
+        &mut self,
+        effect: E,
+        prepared: PreparedLiveEffect,
+        prior_attempts: Vec<EffectAttemptStarted>,
+    ) -> Result<E::Outcome, EffectError> {
+        let safety = prepared.identity.safety;
         if is_affine(safety) {
             // Keep the generated affine state machine off the caller's async
             // frame. `perform` is monomorphised for every effect safety class;
@@ -1758,6 +1859,7 @@ impl EffectsCore {
     where
         E: Effect,
     {
+        let start = Arc::new(AffineStart::new(self, &prepared, &prior_attempts));
         let PreparedLiveEffect {
             identity,
             cursor,
@@ -1774,8 +1876,7 @@ impl EffectsCore {
         let recovery_causal_input_id = prior_attempts
             .first()
             .map(|started| started.causal_input_id);
-        let causal_input_id =
-            recovery_causal_input_id.unwrap_or(self.ctx.parent.envelope.provenance.event.id);
+        let causal_input_id = start.causal_input_id;
         let outcome_slot: ExecutedOutcomeSlot<E::Outcome> = Arc::new(Mutex::new(None));
         let failure_slot = Arc::new(Mutex::new(None::<(EffectError, EffectObservation)>));
         let committed_start = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -1784,21 +1885,6 @@ impl EffectsCore {
             let slot = outcome_slot.clone();
             let failure = failure_slot.clone();
             let committed_start = committed_start.clone();
-            let start = Arc::new(AffineStart {
-                cursor: cursor.clone(),
-                descriptor_hash: descriptor_hash.clone(),
-                descriptor: descriptor.clone(),
-                causal_input_id,
-                writer_id: self.ctx.stage.writer_id,
-                lineage: self.ctx.stage.lineage,
-                data_journal: self.ctx.stage.data_journal.clone(),
-                flow_context: self.ctx.stage.flow_context.clone(),
-                instrumentation: self.ctx.stage.instrumentation.clone(),
-                heartbeat_state: self.ctx.stage.heartbeat_state.clone(),
-                backpressure_writer: self.ctx.backpressure_writer.clone(),
-                parent: self.ctx.parent.clone(),
-                causal: self.causal.clone(),
-            });
             let writer_id = self.ctx.stage.writer_id;
             let parent_event = Arc::clone(self.ctx.parent.view());
             let lineage = self.ctx.stage.lineage;
@@ -3066,6 +3152,17 @@ impl EffectsCore {
         )?;
         self.stamp_idempotency_key(&mut event);
         self.mark_lineage(&mut event, lineage);
+        if let Some(buffer) = &self.sink_outcomes {
+            buffer
+                .lock()
+                .expect("sink outcome buffer")
+                .push(AtomicCommitEntry {
+                    event,
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::NonDataStageFact,
+                });
+            return Ok(());
+        }
         crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
             append_effect_record(
@@ -3299,6 +3396,10 @@ impl EffectsCore {
         entries.extend(outcome_entries);
         for entry in &mut entries {
             self.mark_lineage(&mut entry.event, lineage);
+        }
+        if let Some(buffer) = &self.sink_outcomes {
+            buffer.lock().expect("sink outcome buffer").extend(entries);
+            return Ok(());
         }
         let group_id = effect_outcome_group_id(cursor);
         let committer = OutputCommitter {

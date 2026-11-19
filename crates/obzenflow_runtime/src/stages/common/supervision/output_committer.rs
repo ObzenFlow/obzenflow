@@ -247,6 +247,40 @@ pub(crate) enum StageAppendIntent {
     FrameworkObservability,
 }
 
+enum GroupParents<'a> {
+    Shared(Option<&'a DeliveredRecord<ChainPayload>>),
+    Members(&'a [DeliveredRecord<ChainPayload>]),
+}
+
+impl GroupParents<'_> {
+    fn member(&self, index: usize) -> Option<&DeliveredRecord<ChainPayload>> {
+        match self {
+            Self::Shared(parent) => *parent,
+            Self::Members(parents) => Some(&parents[index]),
+        }
+    }
+
+    fn append_options(&self) -> Result<AppendOptions<ChainEvent>, CommitError> {
+        match self {
+            Self::Shared(parent) => Ok(AppendOptions::from_record(
+                parent.map(DeliveredRecord::record),
+            )?),
+            Self::Members(parents) => {
+                let frontiers = parents
+                    .iter()
+                    .map(|parent| {
+                        obzenflow_core::event::CausalFrontier::from_record(parent.record())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(AppendOptions {
+                    frontier: obzenflow_core::journal::AppendFrontiers::Members(frontiers),
+                    capture: Default::default(),
+                })
+            }
+        }
+    }
+}
+
 /// One member of a policy-neutral atomic journal group.
 pub(crate) struct AtomicCommitEntry {
     pub event: ChainEvent,
@@ -600,7 +634,27 @@ impl OutputCommitter<'_> {
         crate::supervised_base::publication::commit(async move {
             owned
                 .borrowed()
-                .commit_atomic_group_inline(&group_id, entries, parent.as_ref())
+                .commit_atomic_group_inline(
+                    &group_id,
+                    entries,
+                    GroupParents::Shared(parent.as_ref()),
+                )
+                .await
+        })
+        .await
+    }
+
+    pub(crate) async fn commit_group_with_parents(
+        &self,
+        group_id: String,
+        members: Vec<(AtomicCommitEntry, DeliveredRecord<ChainPayload>)>,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
+        let owned = self.owned();
+        let (entries, parents): (Vec<_>, Vec<_>) = members.into_iter().unzip();
+        crate::supervised_base::publication::commit(async move {
+            owned
+                .borrowed()
+                .commit_atomic_group_inline(&group_id, entries, GroupParents::Members(&parents))
                 .await
         })
         .await
@@ -610,7 +664,7 @@ impl OutputCommitter<'_> {
         &self,
         group_id: &str,
         entries: Vec<AtomicCommitEntry>,
-        parent: Option<&DeliveredRecord<ChainPayload>>,
+        parents: GroupParents<'_>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
         if entries.is_empty() {
             return Ok(Vec::new());
@@ -623,9 +677,14 @@ impl OutputCommitter<'_> {
         let mut snapshot = self
             .instrumentation
             .map(|instrumentation| instrumentation.capture_accounting());
-        for entry in entries {
+        for (index, entry) in entries.into_iter().enumerate() {
             let mut event = self
-                .prepare_prebuilt_with_intent(entry.event, parent, entry.options, entry.intent)
+                .prepare_prebuilt_with_intent(
+                    entry.event,
+                    parents.member(index),
+                    entry.options,
+                    entry.intent,
+                )
                 .await?;
             if let Some(snapshot) = &mut snapshot {
                 self.project_committed_output(snapshot, &event, entry.options);
@@ -656,7 +715,8 @@ impl OutputCommitter<'_> {
             self.data_journal,
             group_id,
             prepared,
-            AppendOptions::from_record(parent.map(DeliveredRecord::record))?
+            parents
+                .append_options()?
                 .with_capture(self.observation_capture(projections)),
         )
         .await

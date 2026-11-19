@@ -1450,8 +1450,6 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         other => panic!("expected physical cursor completion, got {other:?}"),
     }
 
-    // Physical completion is not logical delivery: no position, ordinal or
-    // contract read moves for the filtered row.
     assert_eq!(reader_progress[0].reader_seq, SeqNo(0));
     assert!(reader_progress[0].last_event_id.is_none());
     assert_eq!(subscription.delivered_counts()[0], DeliveredCount(0));

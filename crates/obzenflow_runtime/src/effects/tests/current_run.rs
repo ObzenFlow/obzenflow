@@ -146,8 +146,8 @@ impl Window {
                 effect_ports: self.ports.clone(),
                 effect_declarations: vec![
                     EffectDeclaration::named(&fixtures().counting),
-                    EffectDeclaration::named_at_least_once(&fixtures().affine_counting),
-                    EffectDeclaration::named_at_least_once(&fixtures().invariant_affine),
+                    EffectDeclaration::named(&fixtures().affine_counting),
+                    EffectDeclaration::named(&fixtures().invariant_affine),
                     self.transactional.clone(),
                 ],
                 output_contract: OutcomeContract::empty(),

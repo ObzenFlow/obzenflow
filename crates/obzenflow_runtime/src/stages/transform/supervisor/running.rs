@@ -145,6 +145,14 @@ async fn dispatch_running_inner<
         "transform: about to call subscription.poll_next()"
     );
 
+    if ctx
+        .sink_batch
+        .as_ref()
+        .is_some_and(super::sink_batch::SinkBatch::expired)
+    {
+        super::sink_batch::flush(ctx, flow_context).await?;
+    }
+
     let poll_result = {
         let subscription = sup
             .subscription
@@ -206,6 +214,10 @@ async fn dispatch_running_inner<
                         .state
                         .record_data_read(upstream, envelope.envelope.provenance.event.id);
                 }
+            }
+
+            if !envelope.consumes_data_credit() || envelope.is_control() {
+                super::sink_batch::flush(ctx, flow_context).await?;
             }
 
             let suppress_event = sup
@@ -418,6 +430,20 @@ async fn dispatch_running_inner<
                             EventLoopDirective::Continue
                         }
                     }
+                }
+                payload if payload.consumes_data_credit() && ctx.sink_batch.is_some() => {
+                    let position =
+                        stage_input_position.ok_or("sink input lacks a stage input position")?;
+                    super::sink_batch::enqueue(
+                        ctx,
+                        flow_context,
+                        envelope,
+                        position,
+                        upstream_stage,
+                        delivered_generation,
+                    )
+                    .await?;
+                    EventLoopDirective::Continue
                 }
                 payload if payload.consumes_data_credit() => {
                     let observer_input_position = stage_input_position
@@ -740,6 +766,13 @@ async fn dispatch_running_inner<
             Ok(EventLoopDirective::Continue)
         }
         PollResult::NoEvents => {
+            let wait = ctx
+                .sink_batch
+                .as_ref()
+                .map_or(Duration::ZERO, super::sink_batch::SinkBatch::idle_wait);
+            if wait.is_zero() {
+                super::sink_batch::flush(ctx, flow_context).await?;
+            }
             // FLOWIP-095d: a canonical merge that delivered nothing because an
             // input is quiet is idle-by-rule; name the awaited input.
             crate::stages::common::heartbeat::note_merge_wait(
@@ -779,7 +812,8 @@ async fn dispatch_running_inner<
             }
 
             tracing::trace!(stage_name = %ctx.stage_name, "No events available, sleeping");
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let idle = Duration::from_millis(10);
+            tokio::time::sleep(if wait.is_zero() { idle } else { idle.min(wait) }).await;
             Ok(EventLoopDirective::Continue)
         }
         PollResult::Error(e) => {

@@ -165,7 +165,6 @@ impl CandidateSet {
             });
         }
 
-        // §2 first-pass lock: scoped entries ride file and DSL only.
         if matches!(source, ConfigSource::Cli | ConfigSource::Env)
             && address != ConfigAddress::unqualified(ConfigScope::Global)
         {

@@ -530,7 +530,7 @@ async fn stale_reservation_after_wait_refused() {
         .expect("waiting aggregate with a limiter");
     let (attachment, control, stage_id) = materialized_resilience(factory);
     let target = identity_at(2);
-    let gate = FinalAdmissionTestGate::new(target.cursor.clone(), 0);
+    let gate = FinalAdmissionTestGate::new(target.first.cursor.clone(), 0);
     attachment
         .effect_resilience_policy()
         .expect("one recovery owner")

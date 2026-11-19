@@ -46,6 +46,48 @@ use report::{delta_side, CountsByType, DivergenceReport, RunSummary, StageReport
 use source::SourceOpenError;
 use walker::{tally_journal, walk_journal, StageWalkOptions};
 
+fn sink_calls<'a>(
+    mut rows: Box<dyn Iterator<Item = Result<obzenflow_core::ChainEvent, VerifyError>> + 'a>,
+) -> Box<dyn Iterator<Item = Result<obzenflow_core::ChainEvent, VerifyError>> + 'a> {
+    use obzenflow_core::event::payloads::effect_payload::{
+        EffectCursor, EFFECT_ATTEMPT_STARTED_EVENT_TYPE,
+    };
+    use std::collections::{HashMap, VecDeque};
+    let mut starts = HashMap::<EffectCursor, Vec<(u64, obzenflow_core::ChainEvent)>>::new();
+    let mut ready = VecDeque::new();
+    let mut position = 0;
+    Box::new(std::iter::from_fn(move || loop {
+        if let Some(row) = ready.pop_front() {
+            return Some(Ok(row));
+        }
+        let event = match rows.next() {
+            Some(Ok(event)) => event,
+            Some(Err(error)) => return Some(Err(error)),
+            None if starts.is_empty() => return None,
+            None => {
+                let mut remaining: Vec<_> = starts.drain().flat_map(|(_, rows)| rows).collect();
+                remaining.sort_by_key(|(index, _)| *index);
+                ready.extend(remaining.into_iter().map(|(_, event)| event));
+                continue;
+            }
+        };
+        position += 1;
+        if let Some(provenance) = &event.effect_provenance {
+            if event.event_type() == EFFECT_ATTEMPT_STARTED_EVENT_TYPE {
+                starts
+                    .entry(provenance.cursor.clone())
+                    .or_default()
+                    .push((position, event));
+                continue;
+            }
+            if let Some(attempts) = starts.remove(&provenance.cursor) {
+                ready.extend(attempts.into_iter().map(|(_, start)| start));
+            }
+        }
+        ready.push_back(event);
+    }))
+}
+
 #[derive(Debug, Clone)]
 pub struct VerifyOptions {
     /// Cap on recorded divergences per journal; counting continues past it.
@@ -124,11 +166,19 @@ pub fn verify_sources(
                         journal_label,
                         classification,
                     };
-                    walk_journal(
-                        baseline.stage_rows(b_file)?,
-                        candidate.stage_rows(c_file)?,
-                        &opts,
-                    )
+                    let baseline_rows = baseline.stage_rows(b_file)?;
+                    let candidate_rows = candidate.stage_rows(c_file)?;
+                    if journal_label == "data"
+                        && b_stage.stage_type == obzenflow_core::event::context::StageType::Sink
+                        && c_stage.stage_type == obzenflow_core::event::context::StageType::Sink
+                    {
+                        return walk_journal(
+                            sink_calls(baseline_rows),
+                            sink_calls(candidate_rows),
+                            &opts,
+                        );
+                    }
+                    walk_journal(baseline_rows, candidate_rows, &opts)
                 };
 
                 let data = walk(

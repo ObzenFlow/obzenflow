@@ -166,8 +166,7 @@ pub struct IngressUnitId {
     pub target: HostedIngressTargetKey,
 }
 
-/// The call-site shape a middleware attaches to. Broad and non-exhaustive so
-/// later slices consume the same foundation.
+/// The call-site shape a middleware attaches to.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MiddlewareSurface {
@@ -1160,12 +1159,6 @@ pub struct SourcePollAttachment {
     pub completion_gate: Option<Arc<dyn CompletionGate>>,
 }
 
-/// The single typed attachment a factory materializes for one surface.
-///
-/// Adapter-owned: the DSL binder collects the per-surface policies, composes
-/// them into the neutral runtime/core boundary, and passes only that neutral
-/// seam to runtime/infra. `Ingress`'s neutral port is the core-owned
-/// `IngressBoundaryMiddleware` that infra calls.
 pub(crate) enum MiddlewareSurfaceAttachmentKind {
     SourcePoll(SourcePollAttachment),
     Effect(EffectPolicyAttachment),

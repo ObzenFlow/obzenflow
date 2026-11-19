@@ -17,22 +17,22 @@
 //! transform!(In -> Out => handler)
 //! effectful_transform!(In -> Out with policy => handler)
 //! stateful!(In -> Out => handler)
-//! effectful_stateful!(In -> Out => handler.at_least_once::<ChargeCard>())
+//! effectful_stateful!(In -> Out => handler)
 //! sink!(In => command)
 //! join!(catalog CatalogStage: Catalog, Stream -> Out => handler)
 //! ```
 //!
 //! Ordinary handler and role slots accept only a local name, unit value path,
-//! or qualified value path made from identifier segments, followed by its
-//! decorations. Calls, builder chains, closures, and struct literals are
-//! rejected with a diagnostic that teaches the binding idiom. Builder-owned
+//! or qualified value path made from identifier segments. Calls, builder chains,
+//! closures, and struct literals are rejected with a diagnostic that teaches
+//! the binding idiom. Builder-owned
 //! values are constructed as ordinary Rust inside
 //! [`FlowDefinition::materialize`](crate::FlowDefinition::materialize),
 //! immediately above the inner `flow!`, and only their names appear here.
 //! `placeholder!()` and `placeholder!("reason")` remain the sketching forms.
 //!
 //! The decoration matrix covers binding-derived and explicit names plus each
-//! family's applicable contract, the `with` clause, handler decorations and
+//! family's applicable contract, the `with` clause and
 //! catalog clauses. Async-source poll timeout is configured on the handler and
 //! exposed through its `poll_timeout()` method; it is not a stage-macro clause
 //! or positional tuple.
@@ -1581,7 +1581,7 @@ macro_rules! __obzenflow_effectful_row {
     (@output $family:ident, name = $name:literal, in = [$($in:tt)+], out = [$($out:tt)*]) => {
         compile_error!("expected `Input -> Output with middleware => handler`")
     };
-    (@handler $family:ident, name = $name:literal, in = [$($in:tt)+], out = [{ $first:ty $(, $member:ty)* $(,)? }], $handler_head:ident $(:: $handler_tail:ident)* @attachments [$($mw:expr),* $(,)?] @acks [$($acks:tt)*]) => {
+    (@handler $family:ident, name = $name:literal, in = [$($in:tt)+], out = [{ $first:ty $(, $member:ty)* $(,)? }], $handler_head:ident $(:: $handler_tail:ident)* @attachments [$($mw:expr),* $(,)?]) => {
         $crate::__obzenflow_effectful_lower!(
             $family,
             input = exact($($in)+),
@@ -1590,11 +1590,10 @@ macro_rules! __obzenflow_effectful_row {
             contract = [$first $(, $member)*],
             name = $name,
             handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*],
-            acks = [$($acks)*]
+            middleware = [$($mw),*]
         )
     };
-    (@handler $family:ident, name = $name:literal, in = [$($in:tt)+], out = [$out:ty], $handler_head:ident $(:: $handler_tail:ident)* @attachments [$($mw:expr),* $(,)?] @acks [$($acks:tt)*]) => {
+    (@handler $family:ident, name = $name:literal, in = [$($in:tt)+], out = [$out:ty], $handler_head:ident $(:: $handler_tail:ident)* @attachments [$($mw:expr),* $(,)?]) => {
         $crate::__obzenflow_effectful_lower!(
             $family,
             input = exact($($in)+),
@@ -1603,8 +1602,7 @@ macro_rules! __obzenflow_effectful_row {
             contract = single,
             name = $name,
             handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*],
-            acks = [$($acks)*]
+            middleware = [$($mw),*]
         )
     };
     (@handler $family:ident, name = $name:literal, in = [$($in:tt)+], out = [$($out:tt)+], placeholder!($($message:tt)*) $($rest:tt)*) => {
@@ -1647,13 +1645,13 @@ macro_rules! __obzenflow_effectful_metadata {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_lower {
-    (transform, input = exact($in:ty), output = $out:ty, members = [$($member:ty),+], contract = $contract:tt, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*], acks = [$($acks:tt)*]) => {{
+    (transform, input = exact($in:ty), output = $out:ty, members = [$($member:ty),+], contract = $contract:tt, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
         $crate::__private::assert_command(&__handler);
         $crate::__private::assert_handler_performs_no_ai_effect(&__handler);
         $crate::__obzenflow_assert_effectful_transform_contract!(__handler, $in, [$($member),+]);
         let __effects =
-            $crate::__private::effectful_transform_effects(&__handler, &[$($acks)*]);
+            $crate::__private::effectful_transform_effects(&__handler);
         let __descriptor: Box<dyn $crate::dsl::stage_descriptor::StageDescriptor> = Box::new(
             $crate::dsl::stage_descriptor::EffectfulTransformDescriptor::new(
                 $name,
@@ -1667,13 +1665,13 @@ macro_rules! __obzenflow_effectful_lower {
             $crate::__obzenflow_effectful_metadata!(transform, $in, $out, $contract),
         )
     }};
-    (stateful, input = exact($in:ty), output = $out:ty, members = [$($member:ty),+], contract = $contract:tt, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*], acks = [$($acks:tt)*]) => {{
+    (stateful, input = exact($in:ty), output = $out:ty, members = [$($member:ty),+], contract = $contract:tt, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
         $crate::__private::assert_command(&__handler);
         $crate::__private::assert_stateful_handler_performs_no_ai_effect(&__handler);
         $crate::__obzenflow_assert_effectful_stateful_contract!(__handler, $in, [$($member),+]);
         let __effects =
-            $crate::__private::effectful_stateful_effects(&__handler, &[$($acks)*]);
+            $crate::__private::effectful_stateful_effects(&__handler);
         let __descriptor: Box<dyn $crate::dsl::stage_descriptor::StageDescriptor> = Box::new(
             $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor::new(
                 $name,
@@ -2689,10 +2687,10 @@ macro_rules! __obzenflow_stage_row {
     };
 
     (@handler $kind:ident $target:ident $sig:tt $mw:tt placeholder!() $($rest:tt)*) => {
-        $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw [placeholder!()] [] [] $($rest)*)
+        $crate::__obzenflow_stage_row!(@tail $target $sig $mw [placeholder!()] $($rest)*)
     };
     (@handler $kind:ident $target:ident $sig:tt $mw:tt placeholder!($message:expr) $($rest:tt)*) => {
-        $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw [placeholder!($message)] [] [] $($rest)*)
+        $crate::__obzenflow_stage_row!(@tail $target $sig $mw [placeholder!($message)] $($rest)*)
     };
     (@handler $kind:ident $target:ident $sig:tt $mw:tt handler_set!($($set:tt)*) $($rest:tt)*) => {
         compile_error!("`handler_set!` was removed; build each system's port with `Port::to` or `Port::deferred` and choose between them in code")
@@ -2701,75 +2699,59 @@ macro_rules! __obzenflow_stage_row {
         $crate::__obzenflow_stage_row!(@path $kind $target $sig $mw [$head] $($rest)*)
     };
     (@handler $kind:ident $target:ident $sig:tt $mw:tt $($rest:tt)*) => {
-        compile_error!("a stage handler is a name, optionally followed by its decorations; build values with `let` above `flow!`")
+        compile_error!("a stage handler is a name; build values with `let` above `flow!`")
     };
     (@path $kind:ident $target:ident $sig:tt $mw:tt [$($path:tt)*] :: $next:ident $($rest:tt)*) => {
         $crate::__obzenflow_stage_row!(@path $kind $target $sig $mw [$($path)* :: $next] $($rest)*)
     };
     (@path $kind:ident $target:ident $sig:tt $mw:tt [$($path:tt)*] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw [$($path)*] [] [] $($rest)*)
+        $crate::__obzenflow_stage_row!(@tail $target $sig $mw [$($path)*] $($rest)*)
     };
 
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . system $($rest:tt)*) => {
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt . system $($rest:tt)*) => {
         compile_error!("`.system(…)` was removed; the command holds the port it works through in a `#[port]` field, and `fx.call(request)` performs the request through it")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt [$($acks:tt)*] $delivery:tt . at_least_once :: < $effect:ty > () $($rest:tt)*) => {
-        $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw $handler [$($acks)* $crate::__private::EffectAcknowledgement::at_least_once::<$effect>(stringify!($effect)),] $delivery $($rest)*)
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt . exactly_once $($rest:tt)*) => {
+        $crate::__obzenflow_stage_row!(@guarantee $target)
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . transactional :: < $effect:ty > () $($rest:tt)*) => {
-        compile_error!(concat!("`.transactional::<", stringify!($effect), ">()` was removed: a method that takes an `EffectCommitHandle` is exactly once, so its stage acknowledges nothing"))
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt . at_least_once $($rest:tt)*) => {
+        $crate::__obzenflow_stage_row!(@guarantee $target)
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . at_least_once $($rest:tt)*) => {
-        compile_error!("an acknowledgement names its effect, as in `.at_least_once::<ChargeCard>()`")
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt . at_most_once $($rest:tt)*) => {
+        $crate::__obzenflow_stage_row!(@guarantee $target)
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . transactional $($rest:tt)*) => {
-        compile_error!("`.transactional` was removed: a method that takes an `EffectCommitHandle` is exactly once, so its stage acknowledges nothing")
+    (@guarantee __obzenflow_ai_attachment_contract) => {
+        compile_error!("the AI role selects an effect with a built-in guarantee; remove the stage suffix")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . idempotent () $($rest:tt)*) => {
+    (@guarantee $target:ident) => {
+        compile_error!("delivery guarantees belong on the port method in `#[effect(...)]`; remove the stage suffix")
+    };
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt . transactional $($rest:tt)*) => {
+        compile_error!("`.transactional` was removed; a method taking an `EffectCommitHandle` declares `exactly_once`")
+    };
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt . idempotent () $($rest:tt)*) => {
         compile_error!("`.idempotent()` was removed; a sink's port method states its guarantee in `#[effect]`, and a sink row takes no decoration")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . non_idempotent () $($rest:tt)*) => {
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt . non_idempotent () $($rest:tt)*) => {
         compile_error!("`.non_idempotent()` was removed; a sink's port method states its guarantee in `#[effect]`, and a sink row takes no decoration")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt with $($rest:tt)*) => {
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt with $($rest:tt)*) => {
         compile_error!("`with` comes before `=>`; write `with …` after the stage's types")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt , delivery : $($rest:tt)*) => {
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt , delivery : $($rest:tt)*) => {
         compile_error!("`delivery:` was removed; a sink's port method states its guarantee in `#[effect]`")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt , backpressure : $($rest:tt)*) => {
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt , backpressure : $($rest:tt)*) => {
         compile_error!("`backpressure:` was removed; set backpressure in configuration, under `[runtime.backpressure.flow]` or `[runtime.backpressure.stages.<stage>]`")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt , emit_interval $($rest:tt)*) => {
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt , emit_interval $($rest:tt)*) => {
         compile_error!("`emit_interval` was removed from stage rows; a stateful handler declares its interval with `emit_interval_hint()`")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt $(,)?) => {
-        $crate::__obzenflow_stage_row!(@emit $kind $target $sig $mw $handler $acks $delivery)
-    };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt $($rest:tt)+) => {
-        compile_error!("a stage handler is a name, optionally followed by its decorations; build values with `let` above `flow!`")
-    };
-
-    (@emit plain $target:ident [$($sig:tt)*] [$($mw:tt)*] [$($handler:tt)*] [] []) => {
+    (@tail $target:ident [$($sig:tt)*] [$($mw:tt)*] [$($handler:tt)*] $(,)?) => {
         $crate::$target!($($sig)* => $($handler)* @attachments [$($mw)*])
     };
-    (@emit ai $target:ident [$($sig:tt)*] [$($mw:tt)*] [$($handler:tt)*] [] []) => {
-        $crate::$target!($($sig)* => $($handler)* @attachments [$($mw)*])
-    };
-    (@emit ai $target:ident $sig:tt $mw:tt $handler:tt [$($acks:tt)+] $delivery:tt) => {
-        compile_error!("an `ai!` row is itself the acknowledgement for its AI effect; remove `.at_least_once::<E>()`")
-    };
-    (@emit sink $target:ident [$($sig:tt)*] [$($mw:tt)*] [$($handler:tt)*] [] []) => {
-        $crate::$target!($($sig)* => $($handler)* @attachments [$($mw)*])
-    };
-    (@emit sink $target:ident $sig:tt $mw:tt $handler:tt [$($acks:tt)+] $delivery:tt) => {
-        compile_error!("a sink row states no guarantee; its port method's `#[effect]` states it, so remove `.at_least_once::<E>()`")
-    };
-    (@emit effectful $target:ident [$($sig:tt)*] [$($mw:tt)*] [$($handler:tt)*] [$($acks:tt)*] []) => {
-        $crate::$target!($($sig)* => $($handler)* @attachments [$($mw)*] @acks [$($acks)*])
-    };
-    (@emit $kind:ident $target:ident $sig:tt $mw:tt $handler:tt [$($acks:tt)+] $delivery:tt) => {
-        compile_error!("`.at_least_once::<E>()` acknowledges an effect an effectful handler performs; only `effectful_transform!` and `effectful_stateful!` rows acknowledge effects")
+    (@tail $target:ident $sig:tt $mw:tt $handler:tt $($rest:tt)+) => {
+        compile_error!("a stage handler is a name; build values with `let` above `flow!`")
     };
 }
 
@@ -2829,6 +2811,26 @@ macro_rules! effectful_stateful {
 /// let stage = obzenflow_dsl::effectful_transform!(
 ///     Fact -> Fact with first_limit => handler
 /// );
+/// # }
+/// ```
+///
+/// The port method supplies the guarantee. A delivery suffix is a compile error.
+///
+/// ```compile_fail
+/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "row.fact"; }
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct Notice;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait NoticePort {
+/// #     #[effect(type = "row.notice", at_most_once)]
+/// #     fn notify(&self, _: &Notice) -> Result<Fact, EffectError>;
+/// # }
+/// # fn stage(port: Port<dyn NoticePort>) {
+/// let notify = perform(|_: &Fact| Notice).through(port);
+/// let stage = obzenflow_dsl::effectful_transform!(Fact -> Fact => notify.at_most_once::<Notice>());
 /// # }
 /// ```
 ///
@@ -3232,8 +3234,7 @@ macro_rules! effectful_stateful {
 /// # }
 /// ```
 ///
-/// An effect method that takes a commit handle is exactly once, so its row
-/// acknowledges nothing:
+/// An effect method taking a commit handle declares `exactly_once` on the port:
 ///
 /// ```compile_fail
 /// # use async_trait::async_trait;
@@ -3782,7 +3783,7 @@ macro_rules! effectful_transform {
 /// let brief_stage = obzenflow_dsl::ai!(Story -> Summary via chat => brief);
 /// ```
 ///
-/// The row acknowledges its AI effect.
+/// The role's effect declares the guarantee.
 ///
 /// ```compile_fail
 /// # use obzenflow_adapters::ai::{self, ChatCompletion};
@@ -4081,6 +4082,17 @@ macro_rules! join {
 ///
 /// let ledger = perform(|_: &Fact| Entry).through(Port::to(Ledger));
 /// let sink = obzenflow_dsl::sink!(Fact => ledger);
+/// ```
+///
+/// The console port declares `at_least_once`. Repeating it on the sink row fails to compile.
+///
+/// ```compile_fail
+/// # use obzenflow_adapters::sinks::{ConsoleOutput, ConsoleSink, DebugFormatter};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
+/// let log = ConsoleSink::new(DebugFormatter);
+/// let sink = obzenflow_dsl::sink!(Fact => log.at_least_once::<ConsoleOutput>());
 /// ```
 ///
 /// `.idempotent()` and `.non_idempotent()` were removed:

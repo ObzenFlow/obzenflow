@@ -46,8 +46,8 @@
 //! A command's ports allow the effects its stage performs. A port allows every
 //! effect it declares, or only the requests a `#[port(...)]` field lists, and
 //! the row never restates them. A command with no port performs no effects and
-//! is written `In -> Out => handler`. Effectful transform and stateful rows
-//! acknowledge an `at_least_once` effect with `.at_least_once::<R>()`.
+//! is written `In -> Out => handler`. Each port method's `#[effect]` attribute
+//! declares its guarantee.
 //!
 //! ```
 //! use async_trait::async_trait;

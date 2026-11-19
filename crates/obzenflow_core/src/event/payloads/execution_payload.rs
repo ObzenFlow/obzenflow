@@ -260,6 +260,8 @@ pub enum CircuitBreakerFact {
         test_request_count: u32,
     },
     AttemptSettled {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        member_cursors: Vec<EffectCursor>,
         unit: StageKey,
         cursor: EffectCursor,
         attempt: u32,

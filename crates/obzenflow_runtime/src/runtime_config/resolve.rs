@@ -170,6 +170,7 @@ pub fn resolve_at(
     point: &ResolutionPoint,
     set: &CandidateSet,
 ) -> Result<Option<Resolved<ConfigValue>>, ConfigResolveError> {
+    let mut helper_default = None;
     for scope in ladder(spec, point) {
         let broadcast = ConfigAddress::unqualified(scope.clone());
         let exact = match (point, &scope) {
@@ -197,7 +198,7 @@ pub fn resolve_at(
                     .get_at(spec.key_path, address)
                     .and_then(|slots| value_for_source(slots, &source))
                 {
-                    return Ok(Some(Resolved {
+                    let resolved = Resolved {
                         value: value.clone(),
                         meta: ConfigValueMeta {
                             source: source.clone(),
@@ -205,10 +206,23 @@ pub fn resolve_at(
                             subject: address.subject.clone(),
                             key_path: spec.key_path.to_string(),
                         },
-                    }));
+                    };
+                    if source == ConfigSource::Dsl
+                        && matches!(
+                            spec.key_path,
+                            super::SINK_BATCH_SIZE | super::SINK_BATCH_MAX_WAIT_MS
+                        )
+                    {
+                        helper_default.get_or_insert(resolved);
+                    } else {
+                        return Ok(Some(resolved));
+                    }
                 }
             }
         }
+    }
+    if helper_default.is_some() {
+        return Ok(helper_default);
     }
     match &spec.default {
         KnobDefault::Value(value) => Ok(Some(Resolved {
@@ -974,6 +988,35 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn sink_file_overrides_helper_default() {
+        let key = super::super::SINK_BATCH_SIZE;
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            key,
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::U64(64),
+        );
+        let scope = ConfigScope::stage("printer");
+        let mut dsl = DslCandidates::default();
+        dsl.declare_stage_consumption(key, "printer");
+        dsl.declare(key, scope.clone(), ConfigValue::U64(256));
+        let ctx = FlowResolutionContext {
+            flow_name: "f".into(),
+            stages: BTreeSet::from([StageKey::from("printer")]),
+            edges: Default::default(),
+            declared_effects: Default::default(),
+            dsl,
+        };
+        let effective = materialize_flow_config(&ResolvedRuntimeConfig::new(set), ctx).unwrap();
+        let value = effective.get(key, &scope).unwrap();
+        assert_eq!(value.value, ConfigValue::U64(64));
+        assert_eq!(value.meta.source, ConfigSource::File);
+        assert_eq!(value.meta.scope, ConfigScope::Flow);
     }
 
     fn one_edge_ctx() -> FlowResolutionContext {

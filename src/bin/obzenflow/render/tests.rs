@@ -2087,8 +2087,6 @@ fn rejected_row(event: u64, index: u64) -> RunRecord {
     )
 }
 
-/// One call of the `written` sink, settled as `succeeded` says, for the input
-/// numbered `parent`.
 fn sink_call(event: u64, parent: u64, succeeded: bool) -> RunRecord {
     use obzenflow_core::event::payloads::effect_payload::EffectRecord;
     let (observation, outcome) = if succeeded {

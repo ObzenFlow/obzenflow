@@ -11,6 +11,70 @@ use obzenflow_core::{EventDescriptor, StageKey};
 use std::collections::{BTreeMap, HashSet};
 
 type GroupedJournalEvents = HashMap<String, Vec<(usize, Option<JournalGroupMember>, ChainEvent)>>;
+pub(super) const SINK_OUTCOME_PREFIX: &str = "sink-outcomes:v1:";
+
+type GroupMemberEvent = (usize, Option<JournalGroupMember>, ChainEvent);
+
+pub(super) fn sink_outcome_groups(
+    id: &str,
+    members: Vec<GroupMemberEvent>,
+) -> Result<Vec<(EffectCursor, Vec<GroupMemberEvent>)>, EffectError> {
+    validate_atomic_group_members(id, &members)?;
+    let mut groups = Vec::new();
+    let mut pending = Vec::new();
+    let mut cursors = std::collections::HashSet::new();
+    let mut members = members.into_iter().peekable();
+    while let Some(member) = members.next() {
+        let record = effect_record_from_event(&member.2)?;
+        pending.push(member);
+        if let Some(record) = record {
+            if !cursors.insert(record.cursor.clone()) {
+                return Err(EffectError::EffectProvenanceMismatch(format!(
+                    "sink group '{id}' repeats an outcome"
+                )));
+            }
+            if members.peek().is_some_and(|(_, _, event)| {
+                EffectRecoveryAbandoned::matches_event_type(&event.event_type())
+            }) {
+                pending.push(members.next().expect("pending abandonment"));
+            }
+            let size = pending.len() as u32;
+            for (index, (_, logical, _)) in pending.iter_mut().enumerate() {
+                *logical = Some(JournalGroupMember {
+                    index: index as u32,
+                    size,
+                });
+            }
+            groups.push((record.cursor, std::mem::take(&mut pending)));
+        }
+    }
+    if groups.is_empty() || !pending.is_empty() {
+        return Err(EffectError::EffectProvenanceMismatch(format!(
+            "sink group '{id}' lacks a terminal outcome"
+        )));
+    }
+    Ok(groups)
+}
+
+fn index_sink_outcomes(groups: &mut GroupedJournalEvents) -> Result<(), EffectError> {
+    let batches: Vec<_> = groups
+        .keys()
+        .filter(|id| id.starts_with(SINK_OUTCOME_PREFIX))
+        .cloned()
+        .collect();
+    for id in batches {
+        let members = groups.remove(&id).expect("selected batch exists");
+        for (cursor, members) in sink_outcome_groups(&id, members)? {
+            let logical = effect_outcome_group_id(&cursor).to_string();
+            if groups.insert(logical, members).is_some() {
+                return Err(EffectError::EffectProvenanceMismatch(format!(
+                    "sink cursor {cursor:?} has two terminal groups"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// What a stage reads from its archived journal before it starts.
 #[derive(Debug)]
@@ -510,6 +574,7 @@ impl EffectHistory {
             }
         }
 
+        index_sink_outcomes(&mut grouped_events)?;
         if let Some(namespace) = archive.recorded_flow_id() {
             if let Some(record) = records
                 .iter()
@@ -999,6 +1064,7 @@ pub(crate) async fn current_cursor_history(
         }
     }
 
+    index_sink_outcomes(&mut groups)?;
     validate_group_grammar_parts(&all_attempt_positions, &groups)?;
     let terminal_group_id = effect_outcome_group_id(cursor);
     history.terminal_group_events = groups

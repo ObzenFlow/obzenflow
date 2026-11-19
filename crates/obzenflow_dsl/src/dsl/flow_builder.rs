@@ -559,6 +559,29 @@ where
                         );
                     }
                 }
+                if let Some(batch) = descriptor.sink_batch_defaults() {
+                    use obzenflow_runtime::runtime_config::{
+                        ConfigValue, SINK_BATCH_MAX_WAIT_MS, SINK_BATCH_SIZE,
+                    };
+                    let wait_ms = batch.max_wait
+                        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+                    for (key, value) in [
+                        (SINK_BATCH_SIZE, batch.size.map(|size| size.get() as u64)),
+                        (SINK_BATCH_MAX_WAIT_MS, wait_ms),
+                    ] {
+                        __dsl_candidates.declare_stage_consumption(
+                            key,
+                            obzenflow_core::StageKey::from(descriptor.name()),
+                        );
+                        if let Some(value) = value {
+                            __dsl_candidates.declare(
+                                key,
+                                ConfigScope::stage(config_stage),
+                                ConfigValue::U64(value),
+                            );
+                        }
+                    }
+                }
                 if descriptor.max_open_keys().is_some() {
                     __dsl_candidates.declare_stage_consumption(
                         obzenflow_runtime::runtime_config::MAX_OPEN_KEYS_KEY,

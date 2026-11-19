@@ -39,6 +39,10 @@ struct TestAllowAllEffectBoundary;
 
 #[async_trait]
 impl EffectBoundary for TestAllowAllEffectBoundary {
+    fn supports_sink_groups(&self) -> bool {
+        true
+    }
+
     async fn around_repeatable_effect(
         &self,
         _identity: &EffectIdentity,
@@ -325,8 +329,12 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for M
         let mut prepared = records.clone();
         let mut envelopes = Vec::new();
         for (index, event) in events.into_iter().enumerate() {
-            let mut envelope =
-                crate::testing::causal_fixture::commit(self.id, event, &options, &prepared)?;
+            let mut envelope = crate::testing::causal_fixture::commit_member(
+                self.id,
+                event,
+                options.frontier.member(index)?,
+                &prepared,
+            )?;
             envelope.envelope.provenance.journal.journal_group_id = Some(group_id.to_string());
             envelope.envelope.provenance.journal.journal_group_member = Some(JournalGroupMember {
                 index: index as u32,
@@ -657,9 +665,9 @@ fn fixture_declarations() -> Vec<EffectDeclaration> {
     vec![
         EffectDeclaration::named(&fixtures.counting),
         EffectDeclaration::named(&fixtures.recorded_reply),
-        EffectDeclaration::named_at_least_once(&fixtures.affine_counting),
+        EffectDeclaration::named(&fixtures.affine_counting),
         EffectDeclaration::named(&fixtures.at_most_once_counting),
-        EffectDeclaration::named_at_least_once(&fixtures.invariant_affine),
+        EffectDeclaration::named(&fixtures.invariant_affine),
         EffectDeclaration::named(&fixtures.failing),
         EffectDeclaration::named(&fixtures.multi_fact),
         EffectDeclaration::named(&fixtures.keyless),
@@ -1947,7 +1955,7 @@ fn transactional_invocation_context_with_mode(
 
 fn transactional_declaration(ledger: &Port<dyn TransactionalLedger>) -> EffectDeclaration {
     <Port<dyn TransactionalLedger> as AnswersEffect<TransactionalCountingEffect>>::declaration(
-        ledger, None,
+        ledger,
     )
     .unwrap()
 }
@@ -1990,7 +1998,7 @@ fn named_affine_invocation_context_with_mode(
     );
     stage_mut(&mut context)
         .effect_declarations
-        .push(EffectDeclaration::named_at_least_once(binding));
+        .push(EffectDeclaration::named(binding));
     context
 }
 
@@ -5762,8 +5770,8 @@ async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
     );
 
     assert_eq!(
-        EffectDeclaration::named_at_least_once(&declared).binding_identity(),
-        EffectDeclaration::named_at_least_once(&invocation).binding_identity(),
+        EffectDeclaration::named(&declared).binding_identity(),
+        EffectDeclaration::named(&invocation).binding_identity(),
         "durable descriptor identity is evidence-based, not process-family-based"
     );
 
@@ -7182,7 +7190,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
         if self.include_preterminal {
             controls.push(ChainEventFactory::retry_scheduled(
                 evidence_writer,
-                identity.cursor.clone(),
+                identity.first.cursor.clone(),
                 attempt.saturating_add(1),
                 0,
                 CausalInput::of(event),
@@ -7191,7 +7199,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
         controls.push(if self.breaker_free {
             ChainEventFactory::recovery_attempt_completed(
                 evidence_writer,
-                identity.cursor.clone(),
+                identity.first.cursor.clone(),
                 attempt,
                 0,
                 0,
@@ -7201,8 +7209,9 @@ impl EffectBoundary for InvariantEvidenceBoundary {
             ChainEventFactory::circuit_breaker_attempt_settled(
                 evidence_writer,
                 CircuitBreakerAttemptSettledEventParams {
+                    member_cursors: Vec::new(),
                     unit: "effectful".into(),
-                    cursor: identity.cursor.clone(),
+                    cursor: identity.first.cursor.clone(),
                     attempt,
                     health_classification: CircuitBreakerHealthClassification::Ignored,
                     slow: false,
@@ -7215,7 +7224,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
         controls.push(ChainEventFactory::recovery_completed(
             evidence_writer,
             RecoveryCompletedEventParams {
-                cursor: identity.cursor.clone(),
+                cursor: identity.first.cursor.clone(),
                 total_attempts: attempt,
                 backoff_elapsed_ms: 0,
                 recovery_elapsed_ms: 0,
@@ -8371,7 +8380,10 @@ impl EffectBoundary for KeyCheckingThreeCallBoundary {
         _event: &ChainEvent,
         mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
-        assert_eq!(identity.idempotency_key.as_ref(), Some(&self.expected_key));
+        assert_eq!(
+            identity.first.idempotency_key.as_ref(),
+            Some(&self.expected_key)
+        );
         operation.execute().await.expect("first physical call");
         operation.execute().await.expect("second physical call");
         EffectBoundaryReport {
@@ -8386,7 +8398,10 @@ impl EffectBoundary for KeyCheckingThreeCallBoundary {
         _event: &ChainEvent,
         operation: SingleUseEffectOperation,
     ) -> SingleUseEffectBoundaryReport {
-        assert_eq!(identity.idempotency_key.as_ref(), Some(&self.expected_key));
+        assert_eq!(
+            identity.first.idempotency_key.as_ref(),
+            Some(&self.expected_key)
+        );
         operation.execute().await.into_report(Vec::new())
     }
 }

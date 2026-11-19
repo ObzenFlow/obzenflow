@@ -14,8 +14,9 @@ pub mod recording;
 pub mod tracing;
 
 pub use console::{
-    ConsoleFormatError, ConsoleOutput, ConsolePort, ConsoleSink, DebugFormatter, Formatter,
-    JsonFormatter, JsonPrettyFormatter, OutputDestination, SnapshotTableFormatter, TableFormatter,
+    ConsoleFormatError, ConsoleOutput, ConsolePort, ConsoleSink, ConsoleTablePort, DebugFormatter,
+    Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination, SnapshotTableFormatter,
+    TableConsoleSink, TableFormatter, TableRow,
 };
 
 pub use csv::{Appended, CsvProjection, CsvRegisterPort, CsvRow, CsvSink, CsvSinkBuilder};

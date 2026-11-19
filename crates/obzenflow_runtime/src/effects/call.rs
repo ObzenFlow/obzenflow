@@ -390,8 +390,7 @@ pub struct Idempotent;
 #[doc(hidden)]
 pub struct RequiresKey;
 
-/// An `at_least_once` request, which an effectful row acknowledges with
-/// `.at_least_once::<R>()` and a sink row does not.
+/// An `at_least_once` request whose destination may act again on resume.
 #[doc(hidden)]
 pub struct AtLeastOnce;
 
@@ -467,7 +466,7 @@ impl<R> KeyRule<R> for Transactional {
 /// holds for the request's port.
 #[doc(hidden)]
 pub struct Call<R: CallRequest> {
-    request: R,
+    pub(super) request: R,
     projection: EffectBindingUse<Call<R>>,
 }
 

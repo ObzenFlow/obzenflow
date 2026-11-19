@@ -39,8 +39,8 @@ pub struct DeliveredOrderRow {
     pub parent_event_id: EventId,
 }
 
-/// The delivered-order projection of a fan-in stage: its data outputs, or a
-/// sink's effect records, in journal append order, attributed to consumed inputs.
+/// The delivered-order projection of a fan-in stage, its data outputs or a
+/// sink's effect records in journal append order, attributed to consumed inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveredOrderProjection {
     pub rows: Vec<DeliveredOrderRow>,

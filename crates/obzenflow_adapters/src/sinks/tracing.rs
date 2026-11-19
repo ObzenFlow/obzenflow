@@ -8,9 +8,7 @@
 use async_trait::async_trait;
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{
-    Command, DeclaredEffectSet, EffectError, Port, PortField, SinkRole,
-};
+use obzenflow_runtime::effects::{Command, DeclaredEffectSet, EffectError, Port, SinkRole};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -163,8 +161,6 @@ impl<T, F> std::fmt::Debug for TracingSink<T, F> {
 impl<T, F> Command for TracingSink<T, F> {
     type Ports = (Port<dyn TracingPort>, ());
     type AllowedEffects = DeclaredEffectSet<WithMember<TracingOutput, EmptySet>>;
-
-    const PORT_FIELDS: &'static [PortField] = &[PortField::Performed];
 
     fn ports(&self) -> Self::Ports {
         (self.port.clone(), ())

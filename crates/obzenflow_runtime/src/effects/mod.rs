@@ -84,11 +84,12 @@ pub use binding::{
 };
 pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
-    AffineEffectBoundaryReport, AffineEffectExecution, AffineEffectOperation, EffectAbortReason,
-    EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
+    AffineEffectBoundaryReport, AffineEffectExecution, AffineEffectOperation, CallIdentity,
+    EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
     PhysicalCallObservation, PhysicalCallOutcome, PhysicalCallReceipt, PreparedAffineEffectCall,
     PreparedRepeatableEffectCall, PreparedSingleUseEffectCall, RepeatableEffectOperation,
     SingleUseEffectBoundaryReport, SingleUseEffectExecution, SingleUseEffectOperation,
+    SinkAdmission, SinkFinalizer, SinkPermit,
 };
 #[doc(hidden)]
 pub use call::KeyRule;
@@ -100,12 +101,11 @@ pub use call::{
 pub use command::{
     assert_command, assert_handler_performs_no_ai_effect, assert_port_answer,
     assert_stateful_handler_performs_no_ai_effect, effectful_stateful_effects,
-    effectful_transform_effects, AcknowledgedSafety, AnswersEffect, BuiltSystem, DeclareEffects,
-    EffectAcknowledgement, EveryPortAnswers, FieldEffects, FieldsEffects, FindPort,
-    HandlerPerformableEffects, JoinMembers, MarkPortUsed, NarrowedPort, PortAfter, PortAnswer,
-    PortAnswersAnEffect, PortEffects, PortField, PortFound, PortImpl, PortList, PortMark,
-    PortReply, PortServesRequest, RowAcknowledgedEffect, ServesPort, StageEffectsError, Unused,
-    Used, WholePort,
+    effectful_transform_effects, AnswersEffect, BuiltSystem, DeclareEffects, EveryPortAnswers,
+    FieldEffects, FieldsEffects, FindPort, HandlerPerformableEffects, JoinMembers, MarkPortUsed,
+    NarrowedPort, PortAfter, PortAnswer, PortAnswersAnEffect, PortEffects, PortFound, PortImpl,
+    PortList, PortMark, PortReply, PortServesRequest, ServesPort, StageEffectsError, Unused, Used,
+    WholePort,
 };
 pub use command::{Command, Port, StagePort, SystemName};
 pub use commit::EffectCommitHandle;
@@ -121,8 +121,8 @@ pub use obzenflow_core_derive::{command, port, system};
 pub use perform::PerformedRequest;
 pub use perform::{perform, Perform, PerformRequest};
 #[doc(hidden)]
-pub use sink::SinkHandler;
-pub use sink::{SinkRequest, SinkRole};
+pub use sink::{OpenSinkBatch, SinkHandler};
+pub use sink::{SinkBatchDefaults, SinkGroupSystem, SinkRequest, SinkRole};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[doc(hidden)]
 pub use async_trait::async_trait as __async_trait;

@@ -9,7 +9,6 @@ const AI_STAGE: &str = include_str!("../../../crates/obzenflow_dsl/src/dsl/ai_st
 fn ai_stages_declare_their_effect_only_through_the_configured_binding() {
     assert!(AI_STAGE.contains("EffectDeclaration::configured_with_recorded("));
     assert!(!AI_STAGE.contains("EffectPolicyAttachment {"));
-    assert!(!AI_STAGE.contains("EffectDeclaration::named_at_least_once"));
     assert!(!STAGE_MACROS.contains("macro_rules! __obzenflow_effect_entries"));
     assert!(!STAGE_MACROS.contains("@generated_chat surface"));
 }

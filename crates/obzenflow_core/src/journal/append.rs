@@ -41,17 +41,58 @@ impl<T: JournalEvent> Default for JournalCapture<T> {
     }
 }
 
+/// Causal evidence shared by a frame or supplied separately for each member.
+pub enum AppendFrontiers {
+    Shared(CausalFrontier),
+    Members(Vec<CausalFrontier>),
+}
+
+impl AppendFrontiers {
+    pub fn member(&self, index: usize) -> Result<&CausalFrontier, super::JournalError> {
+        match self {
+            Self::Shared(frontier) => Ok(frontier),
+            Self::Members(members) => members.get(index).ok_or_else(Self::count_error),
+        }
+    }
+
+    pub fn merge(&mut self, observed: &CausalFrontier) -> Result<(), super::JournalError> {
+        match self {
+            Self::Shared(frontier) => frontier.merge(observed)?,
+            Self::Members(members) => {
+                for frontier in members {
+                    frontier.merge(observed)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate(&self, count: usize) -> Result<(), super::JournalError> {
+        if matches!(self, Self::Members(members) if members.len() != count) {
+            return Err(Self::count_error());
+        }
+        Ok(())
+    }
+
+    fn count_error() -> super::JournalError {
+        super::JournalError::Implementation {
+            message: "atomic member count differs from causal frontier count".into(),
+            source: "invalid member frontiers".into(),
+        }
+    }
+}
+
 /// Owned, payload-independent causal evidence and preparation for an append. The journal applies its policy
 /// to the complete attachment, including any inherited observations.
 pub struct AppendOptions<T: JournalEvent> {
-    pub frontier: CausalFrontier,
+    pub frontier: AppendFrontiers,
     pub capture: JournalCapture<T>,
 }
 
 impl<T: JournalEvent> AppendOptions<T> {
     pub fn new(frontier: CausalFrontier) -> Self {
         Self {
-            frontier,
+            frontier: AppendFrontiers::Shared(frontier),
             capture: JournalCapture::default(),
         }
     }

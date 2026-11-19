@@ -298,9 +298,6 @@ fn representative_records_preserve_all_fields_and_attribute_complete_origin_cost
         family.1 += sizes.provenance as f64 + sizes.shared as f64 / 2.0;
         family.2 += sizes.inline_definition_counts[2];
     }
-    // The first input has no successful transform or enrichment; the downstream
-    // samples extend one input beyond the source sample. All shared origins
-    // must be references after their first committed definition.
     assert_eq!(origin_count, test_data::RECORDS_PER_STAGE + 1);
     assert!(references > 0);
     println!("Representative stream: {} records, {frame_bytes} frame bytes, {provenance} provenance, {inline_origins} complete inline origins, {references} definition references", records.len());

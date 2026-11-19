@@ -26,7 +26,6 @@ pub enum EffectSafety {
 pub enum IdempotencyKeyPolicy {
     NotRequired,
     Required,
-    AtLeastOnceAcknowledged,
 }
 
 /// Event-sourcing meaning of a successful effect outcome (FLOWIP-120j).
@@ -148,11 +147,7 @@ where
 #[derive(Debug, Clone)]
 pub struct EffectDeclaration {
     effect_type: &'static str,
-    rust_type: &'static str,
     safety: EffectSafety,
-    idempotency_key_policy: IdempotencyKeyPolicy,
-    syntax: EffectDeclarationSyntax,
-    allowance: EffectAllowance,
     pub(crate) binding: EffectDeclarationBinding,
     recorded: Vec<EffectDeclarationBinding>,
     /// Event-sourcing meaning selected by the effect type.
@@ -160,22 +155,6 @@ pub struct EffectDeclaration {
     /// Public facts this effect may author. Recorded replies project an empty
     /// set and therefore never enter an outcome contract.
     public_outcome_fact_types: Vec<TypedFactType>,
-}
-
-/// Lexical safety form selected by the stage declaration. This records an
-/// acknowledgement, not a second safety classification: [`Effect::SAFETY`]
-/// remains authoritative.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EffectDeclarationSyntax {
-    Bare,
-    AtLeastOnce,
-    SinkRow,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EffectAllowance {
-    Binding,
-    Port(Option<PortField>),
 }
 
 impl EffectDeclaration {
@@ -197,13 +176,10 @@ impl EffectDeclaration {
     where
         E: NamedEffect,
     {
-        Self::for_binding::<E>(binding.declaration_binding(), EffectDeclarationSyntax::Bare)
+        Self::for_binding::<E>(binding.declaration_binding())
     }
 
-    pub(super) fn for_binding<E>(
-        binding: EffectDeclarationBinding,
-        syntax: EffectDeclarationSyntax,
-    ) -> Self
+    pub(super) fn for_binding<E>(binding: EffectDeclarationBinding) -> Self
     where
         E: Effect,
     {
@@ -211,15 +187,10 @@ impl EffectDeclaration {
             super::binding::validate_effect_type(E::EFFECT_TYPE).is_ok(),
             "effect identifiers must contain dot-separated public identifier segments and be at most 255 ASCII bytes"
         );
-        let idempotency_key_policy = key_policy(E::SAFETY, syntax);
 
         Self {
             effect_type: E::EFFECT_TYPE,
-            rust_type: std::any::type_name::<E>(),
             safety: E::SAFETY,
-            idempotency_key_policy,
-            syntax,
-            allowance: EffectAllowance::Binding,
             binding,
             recorded: Vec::new(),
             outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
@@ -238,7 +209,10 @@ impl EffectDeclaration {
     }
 
     pub fn idempotency_key_policy(&self) -> IdempotencyKeyPolicy {
-        self.idempotency_key_policy
+        match self.safety {
+            EffectSafety::NonIdempotentRequiresKey => IdempotencyKeyPolicy::Required,
+            _ => IdempotencyKeyPolicy::NotRequired,
+        }
     }
 
     pub fn outcome_kind(&self) -> EffectOutcomeKind {
@@ -254,99 +228,12 @@ impl EffectDeclaration {
         super::binding::validate_effect_type(self.effect_type)
     }
 
-    /// Check that the lexical wrapper agrees with the effect contract's one
-    /// authoritative safety classification.
-    #[doc(hidden)]
-    pub fn validate_safety_syntax(&self) -> Result<(), String> {
-        match (self.syntax, self.safety) {
-            (EffectDeclarationSyntax::Bare, EffectSafety::NonIdempotentAtLeastOnce) => {
-                let effect = self.effect_type;
-                let request = self.short_rust_type();
-                Err(match self.allowance {
-                    EffectAllowance::Binding | EffectAllowance::Port(Some(PortField::Performed)) => format!(
-                        "performs at-least-once effect '{effect}' without acknowledging it; add `.at_least_once::<{request}>()` after the handler"
-                    ),
-                    EffectAllowance::Port(Some(PortField::Through(port))) => format!(
-                        "performs at-least-once effect '{effect}', which its port `{port}` allows; acknowledge it with `.at_least_once::<{request}>()` after the handler, or write the port as a `#[port({request})]` field"
-                    ),
-                    EffectAllowance::Port(Some(PortField::Named(field))) => format!(
-                        "performs at-least-once effect '{effect}', which its `#[port]` field `{field}` allows; acknowledge it with `.at_least_once::<{request}>()` after the handler, or narrow the field with `#[port(...)]`"
-                    ),
-                    EffectAllowance::Port(None) => format!(
-                        "performs at-least-once effect '{effect}', which a `#[port]` field allows; acknowledge it with `.at_least_once::<{request}>()` after the handler, or narrow the field with `#[port(...)]`"
-                    ),
-                })
-            }
-            (
-                EffectDeclarationSyntax::AtLeastOnce,
-                EffectSafety::Idempotent
-                | EffectSafety::NonIdempotentRequiresKey
-                | EffectSafety::Transactional,
-            ) => Err(format!(
-                "acknowledges `{}` as at-least-once, but its effect method is `exactly_once`",
-                self.effect_type
-            )),
-            (EffectDeclarationSyntax::AtLeastOnce, EffectSafety::NonIdempotentAtMostOnce) => {
-                Err(format!(
-                    "acknowledges `{}` as at-least-once, but its effect method is `at_most_once`",
-                    self.effect_type
-                ))
-            }
-            _ => Ok(()),
-        }
-    }
-
-    /// The declaration a sink row makes for the one request it sends. A sink
-    /// row states no guarantee, so its port method's guarantee stands.
-    #[doc(hidden)]
-    pub fn sent_by_sink_row(mut self) -> Self {
-        self.syntax = EffectDeclarationSyntax::SinkRow;
-        self.idempotency_key_policy = key_policy(self.safety, self.syntax);
-        self
-    }
-
-    fn short_rust_type(&self) -> String {
-        short_type_name(self.rust_type)
-    }
-
-    /// Name the effect in diagnostics as the stage's handler wrote it.
-    pub(super) fn written_as<N: ?Sized + 'static>(mut self) -> Self {
-        self.rust_type = std::any::type_name::<N>();
-        self
-    }
-
-    pub(super) fn allowed_by_port_field(mut self) -> Self {
-        self.allowance = EffectAllowance::Port(None);
-        self
-    }
-
-    pub(super) fn held_in_field(mut self, field: Option<PortField>) -> Self {
-        if let EffectAllowance::Port(held) = &mut self.allowance {
-            *held = field;
-        }
-        self
-    }
-
-    /// Explicit at-least-once acknowledgement for a named effect.
-    pub fn named_at_least_once<E>(binding: &EffectBinding<E>) -> Self
-    where
-        E: NamedEffect,
-    {
-        Self::for_binding::<E>(
-            binding.declaration_binding(),
-            EffectDeclarationSyntax::AtLeastOnce,
-        )
-    }
-
     #[doc(hidden)]
     pub fn configured<E>(binding: &EffectBinding<E>) -> Self
     where
         E: ConfiguredEffect,
     {
-        Self::for_binding::<E>(
-            binding.declaration_binding(),
-            EffectDeclarationSyntax::AtLeastOnce,
-        )
+        Self::for_binding::<E>(binding.declaration_binding())
     }
 
     #[doc(hidden)]
@@ -418,55 +305,5 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
         None
-    }
-}
-
-fn key_policy(safety: EffectSafety, syntax: EffectDeclarationSyntax) -> IdempotencyKeyPolicy {
-    match (safety, syntax) {
-        (
-            EffectSafety::NonIdempotentAtLeastOnce,
-            EffectDeclarationSyntax::AtLeastOnce | EffectDeclarationSyntax::SinkRow,
-        ) => IdempotencyKeyPolicy::AtLeastOnceAcknowledged,
-        (EffectSafety::Idempotent | EffectSafety::Transactional, _) => {
-            IdempotencyKeyPolicy::NotRequired
-        }
-        (EffectSafety::NonIdempotentRequiresKey, _) => IdempotencyKeyPolicy::Required,
-        (EffectSafety::NonIdempotentAtLeastOnce | EffectSafety::NonIdempotentAtMostOnce, _) => {
-            IdempotencyKeyPolicy::NotRequired
-        }
-    }
-}
-
-fn short_type_name(full: &str) -> String {
-    let mut short = String::with_capacity(full.len());
-    let mut segment = String::new();
-    for character in full.chars() {
-        if character.is_alphanumeric() || character == '_' || character == ':' {
-            segment.push(character);
-        } else {
-            short.push_str(segment.rsplit("::").next().unwrap_or_default());
-            segment.clear();
-            short.push(character);
-        }
-    }
-    short.push_str(segment.rsplit("::").next().unwrap_or_default());
-    short
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn diagnostics_name_effect_types_without_module_paths() {
-        assert_eq!(
-            short_type_name("aml::risk_engine::ScoreRequest"),
-            "ScoreRequest"
-        );
-        assert_eq!(short_type_name("billing::ChargeCard"), "ChargeCard");
-        assert_eq!(
-            short_type_name("fixtures::Pair<a::Left, b::Right>"),
-            "Pair<Left, Right>"
-        );
     }
 }

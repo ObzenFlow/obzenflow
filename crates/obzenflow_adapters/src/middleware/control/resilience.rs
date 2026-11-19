@@ -763,7 +763,7 @@ struct EffectRecoveryController {
     initial_breaker_epoch: Option<EffectAdmissionEpoch>,
     reservation_epoch: Option<EffectAdmissionEpoch>,
     cumulative_backoff: Duration,
-    current_reservation: Option<RateLimitReservation>,
+    current_reservation: Vec<RateLimitReservation>,
     cancellation_state: RecoveryCancellationState,
     physical_calls: u32,
     calls_since_wait: u32,
@@ -781,7 +781,7 @@ impl EffectRecoveryController {
             initial_breaker_epoch: None,
             reservation_epoch: None,
             cumulative_backoff: Duration::ZERO,
-            current_reservation: None,
+            current_reservation: Vec::new(),
             cancellation_state: RecoveryCancellationState::Idle,
             physical_calls: 0,
             calls_since_wait: 0,
@@ -830,13 +830,13 @@ impl EffectRecoveryController {
     }
 
     fn begin_limiter_wait(&mut self) {
-        debug_assert!(self.current_reservation.is_none());
+        debug_assert!(self.current_reservation.is_empty());
         debug_assert_eq!(self.cancellation_state, RecoveryCancellationState::Idle);
         self.cancellation_state = RecoveryCancellationState::WaitingForLimiter;
     }
 
-    fn install_reservation(&mut self, reservation: Option<RateLimitReservation>) {
-        debug_assert!(self.current_reservation.is_none());
+    fn install_reservation(&mut self, reservation: Vec<RateLimitReservation>) {
+        debug_assert!(self.current_reservation.is_empty());
         debug_assert_eq!(
             self.cancellation_state,
             RecoveryCancellationState::WaitingForLimiter
@@ -846,7 +846,7 @@ impl EffectRecoveryController {
     }
 
     fn cancel_reservation(&mut self) {
-        drop(self.current_reservation.take());
+        self.current_reservation.clear();
         self.cancellation_state = RecoveryCancellationState::Idle;
     }
 
@@ -868,7 +868,7 @@ impl EffectRecoveryController {
 
     fn begin_physical_attempt(&mut self, attempt_start_window: Option<Duration>) -> u32 {
         let attempt = self.begin_physical_attempt_state(attempt_start_window);
-        if let Some(reservation) = self.current_reservation.take() {
+        for reservation in self.current_reservation.drain(..) {
             reservation.commit();
         }
         attempt
@@ -877,9 +877,9 @@ impl EffectRecoveryController {
     fn begin_affine_attempt(
         &mut self,
         attempt_start_window: Option<Duration>,
-    ) -> (u32, Option<RateLimitReservation>) {
+    ) -> (u32, Vec<RateLimitReservation>) {
         let attempt = self.begin_physical_attempt_state(attempt_start_window);
-        (attempt, self.current_reservation.take())
+        (attempt, std::mem::take(&mut self.current_reservation))
     }
 
     fn begin_physical_attempt_state(&mut self, attempt_start_window: Option<Duration>) -> u32 {
@@ -1060,11 +1060,11 @@ impl Drop for AttemptSettlementGuard {
 /// began. Drop performs the same decision for cancellation.
 struct AffineLimiterSettlementGuard {
     receipt: PhysicalCallReceipt,
-    reservation: Option<RateLimitReservation>,
+    reservation: Vec<RateLimitReservation>,
 }
 
 impl AffineLimiterSettlementGuard {
-    fn new(receipt: PhysicalCallReceipt, reservation: Option<RateLimitReservation>) -> Self {
+    fn new(receipt: PhysicalCallReceipt, reservation: Vec<RateLimitReservation>) -> Self {
         Self {
             receipt,
             reservation,
@@ -1072,14 +1072,14 @@ impl AffineLimiterSettlementGuard {
     }
 
     fn settle(&mut self) {
-        let Some(reservation) = self.reservation.take() else {
-            return;
-        };
+        let reservations = std::mem::take(&mut self.reservation);
         match self.receipt.observation() {
             PhysicalCallObservation::Started { .. } | PhysicalCallObservation::Completed { .. } => {
-                reservation.commit()
+                for reservation in reservations {
+                    reservation.commit();
+                }
             }
-            PhysicalCallObservation::Prepared => drop(reservation),
+            PhysicalCallObservation::Prepared => drop(reservations),
         }
     }
 }
@@ -1091,6 +1091,49 @@ impl Drop for AffineLimiterSettlementGuard {
 }
 
 impl EffectResilienceMiddleware {
+    pub(in crate::middleware::control) fn needs_probe(&self) -> bool {
+        self.breaker
+            .as_ref()
+            .is_some_and(|breaker| breaker.needs_probe())
+    }
+
+    async fn reserve_attempt(
+        &self,
+        identity: &EffectIdentity,
+        previous: u32,
+        ctx: &mut crate::middleware::MiddlewareContext,
+    ) -> Vec<RateLimitReservation> {
+        let mut permits = Vec::new();
+        if previous == 0 && identity.additional.is_some() {
+            return permits;
+        }
+        if let Some(limiter) = &self.limiter {
+            for _ in identity.calls() {
+                permits.push(limiter.reserve_permit_async(ctx).await);
+            }
+        }
+        permits
+    }
+
+    pub(in crate::middleware::control) async fn reserve_sink(
+        &self,
+        ctx: &mut crate::middleware::MiddlewareContext,
+    ) -> Result<Option<RateLimitReservation>, Box<crate::middleware::MiddlewareAbortCause>> {
+        let epoch = self
+            .breaker
+            .as_ref()
+            .map(|b| b.effect_precheck(ctx, None))
+            .transpose()?;
+        let permit = match &self.limiter {
+            Some(limiter) => Some(limiter.reserve_permit_async(ctx).await),
+            None => None,
+        };
+        if let Some(breaker) = &self.breaker {
+            breaker.effect_precheck(ctx, epoch)?;
+        }
+        Ok(permit)
+    }
+
     #[cfg(test)]
     pub(in crate::middleware::control) fn set_final_admission_test_gate(
         &self,
@@ -1191,14 +1234,13 @@ impl EffectResilienceMiddleware {
 
             let admission_started = Instant::now();
             recovery.begin_limiter_wait();
-            let reservation = match &self.limiter {
-                Some(limiter) => Some(limiter.reserve_permit_async(ctx).await),
-                None => None,
-            };
+            let reservation = self
+                .reserve_attempt(identity, recovery.physical_calls(), ctx)
+                .await;
             recovery.install_reservation(reservation);
 
             #[cfg(test)]
-            self.pause_before_final_admission(&identity.cursor, recovery.physical_calls())
+            self.pause_before_final_admission(&identity.first.cursor, recovery.physical_calls())
                 .await;
 
             if !recovery.later_attempt_may_start() {
@@ -1446,8 +1488,9 @@ impl EffectResilienceMiddleware {
             ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
                 self.writer_id,
                 CircuitBreakerAttemptSettledEventParams {
+                    member_cursors: identity.member_cursors(),
                     unit: breaker.unit().clone(),
-                    cursor: identity.cursor.clone(),
+                    cursor: identity.first.cursor.clone(),
                     attempt: call.attempt,
                     health_classification: evidence_classification(classification.as_ref()),
                     slow: breaker.is_slow_dependency_call(call.dependency_elapsed),
@@ -1459,7 +1502,7 @@ impl EffectResilienceMiddleware {
         } else {
             ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
                 self.writer_id,
-                identity.cursor.clone(),
+                identity.first.cursor.clone(),
                 call.attempt,
                 duration_ms(call.dependency_elapsed),
                 duration_ms(call.admission_wait),
@@ -1478,7 +1521,7 @@ impl EffectResilienceMiddleware {
             if recovery.retried_or_waited() {
                 ctx.write_control_event(ChainEventFactory::retry_succeeded(
                     self.writer_id,
-                    identity.cursor.clone(),
+                    identity.first.cursor.clone(),
                     recovery.physical_calls(),
                     CausalInput::of(event),
                 ));
@@ -1489,7 +1532,7 @@ impl EffectResilienceMiddleware {
             if recovery.retried_or_waited() {
                 ctx.write_control_event(ChainEventFactory::retry_stopped_non_retryable(
                     self.writer_id,
-                    identity.cursor.clone(),
+                    identity.first.cursor.clone(),
                     recovery.physical_calls(),
                     CausalInput::of(event),
                 ));
@@ -1552,7 +1595,7 @@ impl EffectResilienceMiddleware {
         let next_attempt = recovery.schedule_retry();
         ctx.write_control_event(ChainEventFactory::retry_scheduled(
             self.writer_id,
-            identity.cursor.clone(),
+            identity.first.cursor.clone(),
             next_attempt,
             duration_ms(delay),
             CausalInput::of(event),
@@ -1643,14 +1686,13 @@ impl EffectResilienceMiddleware {
 
         let admission_started = Instant::now();
         recovery.begin_limiter_wait();
-        let reservation = match &self.limiter {
-            Some(limiter) => Some(limiter.reserve_permit_async(ctx).await),
-            None => None,
-        };
+        let reservation = self
+            .reserve_attempt(identity, recovery.physical_calls(), ctx)
+            .await;
         recovery.install_reservation(reservation);
 
         #[cfg(test)]
-        self.pause_before_final_admission(&identity.cursor, recovery.physical_calls())
+        self.pause_before_final_admission(&identity.first.cursor, recovery.physical_calls())
             .await;
 
         if let Some(PolicyAdmission::Reject(cause)) = self
@@ -1711,8 +1753,9 @@ impl EffectResilienceMiddleware {
             ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
                 self.writer_id,
                 CircuitBreakerAttemptSettledEventParams {
+                    member_cursors: identity.member_cursors(),
                     unit: breaker.unit().clone(),
-                    cursor: identity.cursor.clone(),
+                    cursor: identity.first.cursor.clone(),
                     attempt,
                     health_classification: evidence_classification(classification.as_ref()),
                     slow: breaker.is_slow_dependency_call(dependency_elapsed),
@@ -1724,7 +1767,7 @@ impl EffectResilienceMiddleware {
         } else {
             ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
                 self.writer_id,
-                identity.cursor.clone(),
+                identity.first.cursor.clone(),
                 attempt,
                 duration_ms(dependency_elapsed),
                 duration_ms(admission_wait),
@@ -1834,7 +1877,7 @@ fn write_recovery_completed(
     ctx.write_control_event(ChainEventFactory::recovery_completed(
         writer_id,
         RecoveryCompletedEventParams {
-            cursor: identity.cursor.clone(),
+            cursor: identity.first.cursor.clone(),
             total_attempts: completion.total_attempts,
             backoff_elapsed_ms: duration_ms(completion.backoff_elapsed),
             recovery_elapsed_ms: duration_ms(completion.recovery_elapsed),
@@ -2193,7 +2236,7 @@ fn write_exhausted(
 ) {
     ctx.write_control_event(ChainEventFactory::retry_exhausted(
         writer_id,
-        identity.cursor.clone(),
+        identity.first.cursor.clone(),
         attempts,
         reason,
         CausalInput::of(event),

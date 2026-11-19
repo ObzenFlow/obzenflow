@@ -8,18 +8,54 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
 
-/// Identity of the effect a boundary policy guards (FLOWIP-120c gap G3).
-///
-/// Carries the effect cursor, the framework's deterministic identity
-/// coordinate for one effect invocation, plus the declaration-level facts a
-/// policy keys on. One policy instance guards one protected dependency, so
-/// `effect_type` is the routing key for per-effect policy chains.
+/// The declaration and ordered calls carried by one physical dependency operation.
 #[derive(Debug, Clone)]
 pub struct EffectIdentity {
     pub effect_type: &'static str,
     pub safety: EffectSafety,
+    pub first: CallIdentity,
+    /// Additional calls in a pre-admitted sink operation. A singleton sink group has an empty list.
+    pub additional: Option<Vec<CallIdentity>>,
+}
+
+impl EffectIdentity {
+    pub fn calls(&self) -> impl Iterator<Item = &CallIdentity> {
+        std::iter::once(&self.first).chain(self.additional.iter().flatten())
+    }
+
+    pub fn member_cursors(&self) -> Vec<EffectCursor> {
+        if self.additional.is_some() {
+            self.calls().map(|call| call.cursor.clone()).collect()
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// The durable identity of one invocation at a boundary.
+#[derive(Debug, Clone)]
+pub struct CallIdentity {
     pub cursor: EffectCursor,
     pub idempotency_key: Option<IdempotencyKey>,
+}
+
+#[doc(hidden)]
+pub type SinkFinalizer = Box<dyn FnOnce(&EffectBoundaryOutcome) -> Vec<ChainEvent> + Send + Sync>;
+
+#[doc(hidden)]
+pub struct SinkPermit {
+    /// Dispatch this group immediately when a half-open breaker admits a probe.
+    pub closes_group: bool,
+    /// Consume the admission reservation when the write starts.
+    pub started: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Finalize per-request observations with the physical call's outcome.
+    pub finished: Option<SinkFinalizer>,
+}
+
+#[doc(hidden)]
+pub enum SinkAdmission {
+    Admitted(SinkPermit),
+    Refused(EffectAbortReason, Vec<ChainEvent>),
 }
 
 type EffectCall = std::pin::Pin<
@@ -764,6 +800,24 @@ impl AffineEffectBoundaryReport {
 /// whichever arm ended it.
 #[async_trait]
 pub trait EffectBoundary: Send + Sync {
+    #[doc(hidden)]
+    fn supports_sink_groups(&self) -> bool {
+        false
+    }
+
+    #[doc(hidden)]
+    async fn admit_sink_request(
+        &self,
+        _identity: &EffectIdentity,
+        _parent: &ChainEvent,
+    ) -> SinkAdmission {
+        SinkAdmission::Admitted(SinkPermit {
+            closes_group: false,
+            started: None,
+            finished: None,
+        })
+    }
+
     fn install_observation_recorder(&self, _recorder: Arc<dyn ObservationRecorder>) {}
     async fn around_repeatable_effect(
         &self,

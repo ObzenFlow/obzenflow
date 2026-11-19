@@ -6,9 +6,7 @@
 
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{
-    Command, DeclaredEffectSet, EffectError, Port, PortField, SinkRole,
-};
+use obzenflow_runtime::effects::{Command, DeclaredEffectSet, EffectError, Port, SinkRole};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
 use std::marker::PhantomData;
@@ -82,8 +80,6 @@ impl<T> std::fmt::Debug for DiscardSink<T> {
 impl<T> Command for DiscardSink<T> {
     type Ports = (Port<dyn DiscardPort>, ());
     type AllowedEffects = DeclaredEffectSet<WithMember<Discarded, EmptySet>>;
-
-    const PORT_FIELDS: &'static [PortField] = &[PortField::Performed];
 
     fn ports(&self) -> Self::Ports {
         (self.port.clone(), ())

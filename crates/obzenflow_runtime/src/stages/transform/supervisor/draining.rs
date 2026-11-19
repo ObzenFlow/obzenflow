@@ -111,6 +111,14 @@ async fn dispatch_draining_inner<
         ));
     };
 
+    if ctx
+        .sink_batch
+        .as_ref()
+        .is_some_and(super::sink_batch::SinkBatch::expired)
+    {
+        super::sink_batch::flush(ctx, flow_context).await?;
+    }
+
     let poll_result = {
         let subscription = sup
             .subscription
@@ -152,6 +160,10 @@ async fn dispatch_draining_inner<
                 }
             }
 
+            if !envelope.consumes_data_credit() || envelope.is_control() {
+                super::sink_batch::flush(ctx, flow_context).await?;
+            }
+
             let suppress_event = sup
                 .check_cycle_guard_data_event(
                     ctx,
@@ -188,6 +200,18 @@ async fn dispatch_draining_inner<
             let scope =
                 ctx.runtime_execution
                     .dispatch_scope(ctx.stage_id, stage_input_position, None);
+            if ctx.sink_batch.is_some() {
+                super::sink_batch::enqueue(
+                    ctx,
+                    flow_context,
+                    envelope,
+                    observer_input_position,
+                    upstream_stage,
+                    None,
+                )
+                .await?;
+                return Ok(EventLoopDirective::Continue);
+            }
             if super::direct_fact_continuation::start_if_eligible(
                 ctx,
                 &envelope,
@@ -432,6 +456,7 @@ async fn dispatch_draining_inner<
             Ok(EventLoopDirective::Continue)
         }
         PollResult::NoEvents => {
+            super::sink_batch::flush(ctx, flow_context).await?;
             if let Some(subscription) = sup.subscription.as_mut() {
                 subscription
                     .check_contracts(&mut ctx.contract_state[..])

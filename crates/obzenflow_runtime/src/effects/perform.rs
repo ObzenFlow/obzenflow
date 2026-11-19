@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::command::{Command, Port, PortField};
+use super::command::{Command, Port};
 use super::{CallRequest, DeclaredEffectSet, Effects, StageCompletion};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
@@ -130,8 +130,6 @@ impl<F, In, R: CallRequest> Command for Perform<F, In, R> {
     type Ports = (Port<R::Port>, ());
     type AllowedEffects = DeclaredEffectSet<WithMember<R, EmptySet>>;
 
-    const PORT_FIELDS: &'static [PortField] = &[PortField::Performed];
-
     fn ports(&self) -> Self::Ports {
         (self.port.clone(), ())
     }
@@ -173,9 +171,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        effectful_transform_effects, EffectAcknowledgement, EffectError, EffectSafety, EffectSet,
-    };
+    use super::super::{effectful_transform_effects, EffectError, EffectSafety, EffectSet};
     use super::*;
     use obzenflow_core::Outcome;
     use serde::{Deserialize, Serialize};
@@ -277,7 +273,7 @@ mod tests {
     #[test]
     fn allowed_effects_limited_to_request() {
         let charge = perform(ChargeRequest::for_invoice).through(Port::to(Scripted));
-        let declarations = effectful_transform_effects(&charge, &[]).expect("one declaration");
+        let declarations = effectful_transform_effects(&charge).expect("one declaration");
         let effects: Vec<_> = declarations
             .iter()
             .map(|declaration| declaration.effect_type())
@@ -291,25 +287,13 @@ mod tests {
     }
 
     #[test]
-    fn at_least_once_requires_acknowledgement() {
+    fn perform_at_least_once_preserves_safety() {
         let resend = perform(|_: &Invoice| ResendRequest).through(Port::to(Scripted));
-        let declarations = effectful_transform_effects(&resend, &[]).expect("one declaration");
-        let refusal = declarations[0]
-            .validate_safety_syntax()
-            .expect_err("an at-least-once request needs its acknowledgement");
+        let declarations = effectful_transform_effects(&resend).expect("one declaration");
         assert_eq!(
-            refusal,
-            "performs at-least-once effect 'perform_test.resend' without acknowledging it; add `.at_least_once::<ResendRequest>()` after the handler"
+            declarations[0].safety(),
+            EffectSafety::NonIdempotentAtLeastOnce
         );
-
-        let acknowledged = effectful_transform_effects(
-            &resend,
-            &[EffectAcknowledgement::at_least_once::<ResendRequest>(
-                "ResendRequest",
-            )],
-        )
-        .expect("one declaration");
-        assert_eq!(acknowledged[0].validate_safety_syntax(), Ok(()));
     }
 
     #[test]

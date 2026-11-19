@@ -214,9 +214,6 @@ struct ObservationArchive {
     observed: [JournalCommitRef; 3],
 }
 
-// The two grouped source placements and their forwarded placement share one
-// event id. Physical filename order deliberately differs from public export
-// order.
 async fn observation_archive() -> ObservationArchive {
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::ChainEventFactory;

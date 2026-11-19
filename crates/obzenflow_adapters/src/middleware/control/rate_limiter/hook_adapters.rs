@@ -4,13 +4,6 @@
 
 //! FLOWIP-115d: carrier-bound surface adapters for the token-bucket rate
 //! limiter.
-//!
-//! Each adapter is a thin shim that turns a live-I/O boundary attempt into an
-//! admission charge against the shared [`super::RateLimiterMiddleware`] (and its
-//! [`super::admission_core::RateLimiterCore`]). The source and effect adapters
-//! await their permit through the shared cancellable acquisition helper; the
-//! ingress adapter is fail-fast at the hosted listener edge. Production
-//! placement goes through [`super::factory`].
 
 use super::RateLimiterMiddleware;
 use crate::middleware::{

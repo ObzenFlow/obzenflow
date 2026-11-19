@@ -197,8 +197,6 @@ pub trait MiddlewareFactory: Send + Sync {
         Ok(())
     }
 
-    /// Input witness retained by typed observer factories through erasure.
-    /// The stage descriptor checks it against the stage's input at build.
     #[doc(hidden)]
     fn observer_input_type(&self) -> Option<(TypeId, &'static str)> {
         None

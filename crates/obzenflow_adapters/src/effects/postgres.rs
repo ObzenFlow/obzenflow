@@ -9,8 +9,8 @@ use obzenflow_runtime::effects::{EffectError, SystemName};
 
 use super::http::CONNECT_FAILED;
 
-/// The effect error for a statement that failed. A refused connection names
-/// the system, since the statement certainly never reached the server.
+/// The effect error for a statement that failed. A connection that never
+/// opened is the system's retryable refusal, a definite no.
 pub fn unsent<S: SystemName>(error: PostgresClientError) -> EffectError {
     match error {
         PostgresClientError::Connection(message) => {

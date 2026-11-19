@@ -2452,7 +2452,6 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
-        // A fan-in with no order observer below it: never marked.
         descriptors.insert(
             "plain_merge".to_string(),
             crate::transform!(name: "plain_merge", InputEvent -> OutputEvent => ExactTransform),
@@ -2503,7 +2502,6 @@ mod tests {
             effectful_id.to_topology_id(),
         );
         topology.add_edge(source_c_id.to_topology_id(), effectful_id.to_topology_id());
-        // plain_merge: fan-in of a+b with nothing downstream.
         topology.add_edge(
             source_a_id.to_topology_id(),
             plain_merge_id.to_topology_id(),

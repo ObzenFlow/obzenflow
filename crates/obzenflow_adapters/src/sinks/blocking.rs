@@ -2,8 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Blocking destination I/O for a sink's system.
-
 use obzenflow_runtime::effects::EffectError;
 
 pub(crate) async fn blocking_io<T: Send + 'static>(

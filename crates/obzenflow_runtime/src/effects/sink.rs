@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::command::{Command, PortField};
+use super::command::Command;
 use super::{CallRequest, DeclaredEffectSet, Effects, RecordedReply, StageCompletion};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
@@ -21,6 +21,24 @@ pub trait SinkRequest: CallRequest<Records = RecordedReply> {}
 
 impl<R: CallRequest<Records = RecordedReply>> SinkRequest for R {}
 
+/// A destination that commits an ordered group in one physical call.
+/// A successful call returns one reply for each request in input order.
+#[doc(hidden)]
+#[async_trait]
+pub trait SinkGroupSystem<R: SinkRequest>: Send + Sync + 'static {
+    async fn write_group(
+        &self,
+        requests: &[R],
+        context: &super::EffectContext,
+    ) -> Result<Vec<R::Outcome>, super::EffectError>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SinkBatchDefaults {
+    pub size: Option<std::num::NonZeroUsize>,
+    pub max_wait: Option<std::time::Duration>,
+}
+
 /// The command a sink row takes. `prepare` builds the one request the sink
 /// sends for each input, from the input and the command's own fields, with no
 /// I/O. The runtime sends it through the command's port, records the call and
@@ -37,6 +55,11 @@ pub trait SinkRole<In>: Command + Send + Sync + 'static {
 
     fn prepare(&self, input: &In) -> Result<Self::Request, HandlerError>;
 
+    #[doc(hidden)]
+    fn batch_defaults(&self) -> SinkBatchDefaults {
+        SinkBatchDefaults::default()
+    }
+
     /// The role's logic version, which changes only when its logic changes.
     fn stage_logic_version(&self) -> &str {
         "1"
@@ -46,14 +69,14 @@ pub trait SinkRole<In>: Command + Send + Sync + 'static {
 /// The handler a sink stage runs for its command.
 #[doc(hidden)]
 pub struct SinkHandler<C, In> {
-    role: C,
+    role: std::sync::Arc<C>,
     input: PhantomData<fn(In)>,
 }
 
 impl<C, In> SinkHandler<C, In> {
     pub fn new(role: C) -> Self {
         Self {
-            role,
+            role: std::sync::Arc::new(role),
             input: PhantomData,
         }
     }
@@ -61,7 +84,10 @@ impl<C, In> SinkHandler<C, In> {
 
 impl<C: Clone, In> Clone for SinkHandler<C, In> {
     fn clone(&self) -> Self {
-        Self::new(self.role.clone())
+        Self {
+            role: self.role.clone(),
+            input: PhantomData,
+        }
     }
 }
 
@@ -78,11 +104,20 @@ impl<C: SinkRole<In>, In> Command for SinkHandler<C, In> {
     type Ports = C::Ports;
     type AllowedEffects = DeclaredEffectSet<WithMember<C::Request, EmptySet>>;
 
-    const PORT_FIELDS: &'static [PortField] = C::PORT_FIELDS;
-
     fn ports(&self) -> Self::Ports {
         self.role.ports()
     }
+}
+
+pub(super) mod private {
+    pub trait Sealed {}
+}
+
+#[doc(hidden)]
+#[async_trait]
+pub trait OpenSinkBatch: private::Sealed + Send + Sync {
+    async fn admit(&mut self, input: super::EffectInvocationContext) -> Result<bool, HandlerError>;
+    async fn finish(self: Box<Self>) -> Result<Vec<Result<(), HandlerError>>, HandlerError>;
 }
 
 #[async_trait]
@@ -93,6 +128,16 @@ where
 {
     type Input = In;
     type Output = FactsOf<EmptySet>;
+
+    fn open_sink_batch(
+        &self,
+        boundary: std::sync::Arc<dyn super::EffectBoundary>,
+    ) -> Option<Box<dyn OpenSinkBatch>> {
+        Some(Box::new(super::runtime::SinkGroup::new(
+            self.role.clone(),
+            boundary,
+        )))
+    }
 
     async fn process(
         &self,

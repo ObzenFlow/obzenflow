@@ -1197,8 +1197,6 @@ where
     wrap_typed_descriptor(descriptor, metadata)
 }
 
-/// A sink stage: the row's command builds one request per input, which the
-/// stage sends through the command's port as an effect call.
 #[doc(hidden)]
 pub fn typed_sink_descriptor<C, ArrowInput, Index>(
     name: impl Into<String>,
@@ -1217,11 +1215,13 @@ where
     >>::Marked: EveryPortAnswers,
 {
     let metadata = StageTypingMetadata::sink(TypeHint::exact_payload::<ArrowInput>(), false, None);
+    let defaults = command.batch_defaults();
     let handler = SinkHandler::<C, ArrowInput>::new(command);
-    let effects = effectful_transform_effects(&handler, &[]);
-    let descriptor: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::sink(
-        name, handler, effects, middleware,
-    ));
+    let effects = effectful_transform_effects(&handler);
+    let descriptor: Box<dyn StageDescriptor> = Box::new(
+        EffectfulTransformDescriptor::sink(name, handler, effects, middleware)
+            .with_batch_defaults(defaults),
+    );
     wrap_typed_descriptor(descriptor, metadata)
 }
 
@@ -1821,6 +1821,10 @@ impl StageDescriptor for TypedStageDescriptor {
 
     fn ai_config_sections(&self) -> Vec<(&'static str, &'static str)> {
         self.inner.ai_config_sections()
+    }
+
+    fn sink_batch_defaults(&self) -> Option<obzenflow_runtime::effects::SinkBatchDefaults> {
+        self.inner.sink_batch_defaults()
     }
 
     fn max_open_keys(&self) -> Option<u64> {
@@ -2596,12 +2600,6 @@ pub fn validate_order_observer_deterministic_input_order(
             continue;
         }
 
-        // Cycle members are governed by the runtime's bounded cycle protocol,
-        // so retain their established forward-edge validation. An observer
-        // outside the cycle must additionally see `<|` feedback edges in its
-        // upstream induction, so a cycle-fed effect can't look linear. A
-        // sink's outcome feeds nothing and a flow with a cycle never replays,
-        // so a cycle above a sink settles its walk.
         let inbound = if topology.is_in_cycle(stage_id.to_topology_id()) {
             &forward_inbound
         } else {
@@ -2642,14 +2640,6 @@ pub fn validate_order_observer_deterministic_input_order(
     Ok(())
 }
 
-/// FLOWIP-095m: does this stage's reconstruction read fan-in delivery order?
-/// Effects (095d), sinks, which are effects, stateful folds, and live/symmetric
-/// joins do; a hydrating join is a structural orderer; sources and transforms
-/// are carriers.
-///
-/// Must be evaluated on the UNWRAPPED descriptor: the join arm reads
-/// `is_deterministic_input_orderer()`, which `wrap_deterministic_orderers` forces
-/// to true on any marked stage, making a marked live join look hydrating.
 fn is_order_observer(descriptor: &dyn StageDescriptor) -> bool {
     if descriptor.is_effectful() {
         return true;
@@ -3039,6 +3029,10 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn ai_config_sections(&self) -> Vec<(&'static str, &'static str)> {
         self.inner.ai_config_sections()
+    }
+
+    fn sink_batch_defaults(&self) -> Option<obzenflow_runtime::effects::SinkBatchDefaults> {
+        self.inner.sink_batch_defaults()
     }
 
     fn max_open_keys(&self) -> Option<u64> {

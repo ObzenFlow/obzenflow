@@ -232,7 +232,7 @@ mod tests {
 
     #[obzenflow_runtime::effects::port(system = "policy", effects = obzenflow_runtime::effects)]
     impl PolicyPort {
-        #[effect(type = "test.stateful_policy_effect", exactly_once)]
+        #[effect(type = "test.stateful_policy_effect", at_most_once)]
         fn apply(&self, _: &PolicyRequest) -> Result<Out, EffectError> {
             Ok(Out)
         }
@@ -508,7 +508,7 @@ mod tests {
         crate::effectful_transform!(name: "t", In -> Out => FxTr);
     }
     #[test]
-    fn effectful_transform_transactional_effect_needs_no_acknowledgement() {
+    fn transform_bare_preserves_transactional_safety() {
         let tx = tx_system();
         assert_eq!(tx.system_name(), "tx");
         let handler = TxFxTr { tx };
@@ -518,7 +518,6 @@ mod tests {
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].effect_type(), "test.tx_effect");
         assert_eq!(declarations[0].safety(), EffectSafety::Transactional);
-        assert!(declarations[0].validate_safety_syntax().is_ok());
     }
 
     // ── stateful! ───────────────────────────────────────────────────────────
@@ -568,6 +567,10 @@ mod tests {
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].effect_type(), "test.stateful_policy_effect");
+        assert_eq!(
+            declarations[0].safety(),
+            EffectSafety::NonIdempotentAtMostOnce
+        );
         descriptor
             .prepare_middleware()
             .expect("the policy guards the stage's one effect");

@@ -22,7 +22,7 @@ pub mod read;
 pub mod reader;
 mod storage;
 
-pub use append::{AppendOptions, JournalCapture, ObservationCapture};
+pub use append::{AppendFrontiers, AppendOptions, JournalCapture, ObservationCapture};
 pub use archive::{
     ArchiveStatus, RunManifest, RunManifestInterruptedAppend, RunManifestReplayConfig,
     RunManifestStage, StatusDerivation, TailKind, JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,

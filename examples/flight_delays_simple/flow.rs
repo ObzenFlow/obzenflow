@@ -39,7 +39,8 @@ pub fn run_example() -> Result<()> {
                     stats.flight_count.to_string(),
                 ]
             },
-        ));
+        ))
+        .batch_size(256)?;
 
     FlowApplication::builder().run_blocking(FlowDefinition::materialize(
         move |_runtime_config| {

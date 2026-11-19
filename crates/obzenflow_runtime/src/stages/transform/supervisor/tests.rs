@@ -147,6 +147,7 @@ async fn build_cycle_entry_harness<
         StageType::Transform,
     ));
     let resources = TransformResources {
+        sink_batch: None,
         handler: Some(handler),
         stage_id: t,
         stage_name: "t".to_string(),
@@ -536,6 +537,7 @@ async fn build_transform_harness<
         StageType::Transform,
     ));
     let resources = TransformResources {
+        sink_batch: None,
         handler: Some(handler),
         stage_id: t,
         stage_name: "t".to_string(),

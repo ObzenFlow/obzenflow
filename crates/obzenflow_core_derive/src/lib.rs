@@ -80,6 +80,7 @@ pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// versions the request's shape, and `records = reply` makes the method's
 /// answer a reply the runtime records and returns, which writes no fact.
 ///
+/// Every sink or effectful row using the method inherits its guarantee.
 /// The guarantee describes the call at the other end:
 ///
 /// - `exactly_once`: the call takes effect once even if it runs again. Either
@@ -89,8 +90,6 @@ pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   it. A keyed request implements `Keyed`, and its key is journalled with the
 ///   call.
 /// - `at_least_once`: the call may take effect more than once after a crash.
-///   An effectful transform or stateful row acknowledges this with
-///   `.at_least_once::<Request>()`. A sink takes the guarantee from its port.
 ///   Retry middleware may repeat a call after a definite refusal.
 /// - `at_most_once`: the call takes effect at most once. The runtime records
 ///   each attempt's start before making it, and records an attempt a crash

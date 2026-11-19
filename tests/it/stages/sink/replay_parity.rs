@@ -2,9 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! A sink is an effect call per input: live makes each call once, and replay
-//! reproduces every recorded call without making one.
-
 use crate::replay_testkit;
 
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
@@ -174,7 +171,6 @@ fn build_parity_flow(
     })
 }
 
-/// A sink stage's settled calls, without the cursor that places them in a run.
 async fn settled_calls(run_dir: &Path, stage_key: &str) -> Vec<Value> {
     let manifest = replay_testkit::archive_manifest(run_dir);
     let journal = manifest["stages"][stage_key]["data_journal_file"]

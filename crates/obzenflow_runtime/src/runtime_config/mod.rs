@@ -53,3 +53,6 @@ pub use schema::{
     RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY, RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
     RETRY_MAX_OUTAGE_WAIT_MS_KEY, RETRY_ON_REFUSAL_KEY,
 };
+
+pub const SINK_BATCH_SIZE: &str = "runtime.sink_batches.size";
+pub const SINK_BATCH_MAX_WAIT_MS: &str = "runtime.sink_batches.max_wait_ms";

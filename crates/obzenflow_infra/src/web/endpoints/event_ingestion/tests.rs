@@ -850,9 +850,6 @@ async fn a_valid_webhook_signature_passes_authentication() {
 #[derive(Debug, Clone)]
 struct DiscardSink;
 
-/// Signals each row whose sink request is built, then waits for the release.
-/// Replay builds every request and calls no system, so a held request keeps
-/// a replay from completing until released.
 #[derive(Debug, Clone, Default)]
 struct Hold {
     arrived: Arc<tokio::sync::Notify>,
@@ -1286,8 +1283,6 @@ async fn a_strict_replay_refuses_ingress_throughout() {
         }
     };
 
-    // The replay starts itself and holds its sink's request for the replayed
-    // row, so the request lands mid-replay.
     tokio::time::timeout(Duration::from_secs(5), hold.arrived.notified())
         .await
         .expect("the replay builds its row's request");

@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Each stage's records, counted once: data a stage recorded or a sink
-//! delivered, and errors by kind. Runtime entries, and effect entries other
-//! than a sink's successful calls, are not records.
-
 use obzenflow::journal::read::{ChainPayload, ExecutionPayload, StageType};
 use obzenflow::journal::read::{RunJournalKind, RunRecord, RunRecordData};
 use obzenflow::journal::ProcessingStatus;

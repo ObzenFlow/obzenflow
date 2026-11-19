@@ -16,7 +16,6 @@ pub use obzenflow_runtime::effects::assert_handler_performs_no_ai_effect;
 pub use obzenflow_runtime::effects::assert_stateful_handler_performs_no_ai_effect;
 pub use obzenflow_runtime::effects::effectful_stateful_effects;
 pub use obzenflow_runtime::effects::effectful_transform_effects;
-pub use obzenflow_runtime::effects::EffectAcknowledgement;
 pub use obzenflow_runtime::run_context::FlowBuildContext;
 pub use obzenflow_runtime::stages::EffectfulStatefulHandler;
 pub use obzenflow_runtime::stages::EffectfulTransformHandler;

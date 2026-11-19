@@ -76,6 +76,7 @@ impl ChainEventFactory {
         cause: CausalInput,
     ) -> ChainEvent {
         let CircuitBreakerAttemptSettledEventParams {
+            member_cursors,
             unit,
             cursor,
             attempt,
@@ -87,6 +88,7 @@ impl ChainEventFactory {
         Self::circuit_breaker_retry_event(
             writer_id,
             CircuitBreakerFact::AttemptSettled {
+                member_cursors,
                 unit,
                 cursor,
                 attempt,

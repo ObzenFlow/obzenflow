@@ -118,6 +118,11 @@ pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send
         scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
 
+    #[doc(hidden)]
+    fn open_sink_batch(&self) -> Option<Box<dyn crate::effects::OpenSinkBatch>> {
+        None
+    }
+
     async fn drain(&mut self) -> std::result::Result<(), HandlerError>;
 
     fn stage_logic_version(&self) -> &str {
@@ -232,6 +237,14 @@ pub trait EffectfulTransformHandler: crate::effects::Command + Send + Sync {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> std::result::Result<crate::effects::StageCompletion<Self::Output>, HandlerError>;
 
+    #[doc(hidden)]
+    fn open_sink_batch(
+        &self,
+        _boundary: Arc<dyn EffectBoundary>,
+    ) -> Option<Box<dyn crate::effects::OpenSinkBatch>> {
+        None
+    }
+
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
         Ok(())
     }
@@ -325,6 +338,10 @@ where
 
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
         self.effect_boundary.install_observation_recorder(recorder);
+    }
+
+    fn open_sink_batch(&self) -> Option<Box<dyn crate::effects::OpenSinkBatch>> {
+        self.handler.open_sink_batch(self.effect_boundary.clone())
     }
 
     async fn process(
