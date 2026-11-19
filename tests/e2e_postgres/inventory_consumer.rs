@@ -9,14 +9,18 @@
 
 use crate::postgres_support;
 
-use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};
+use async_trait::async_trait;
+use obzenflow::effects::postgres::{
+    self, default_postgres_client, PostgresClient, PostgresStatement,
+};
+use obzenflow::effects::{perform, EffectError, Port};
 use obzenflow::stages::sources;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
 use postgres_support::{connection, pool, required_env};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct InventoryLevelChanged {
@@ -30,44 +34,59 @@ impl TypedPayload for InventoryLevelChanged {
     const EVENT_TYPE: &'static str = "inventory.level_changed";
 }
 
-#[derive(Clone, Debug)]
-struct InventoryBinder;
+#[obzenflow::port]
+#[async_trait]
+trait InventoryStorePort {
+    /// The conflict target makes a repeated call converge on the same row.
+    #[effect(type = "inventory.store", at_least_once, records = reply)]
+    async fn store(&self, level: &InventoryLevelChanged) -> Result<(), EffectError>;
+}
 
-impl PostgresBind for InventoryBinder {
-    type Input = InventoryLevelChanged;
+struct PostgresInventory {
+    postgres: Arc<dyn PostgresClient>,
+    insert: PostgresStatement,
+}
 
-    fn bind(&self, bindings: &mut PostgresBindings, level: &Self::Input) {
-        bindings
-            .bind(&level.warehouse)
-            .bind(&level.sku)
-            .bind(level.available_units)
-            .bind(level.replenishment_due);
+#[obzenflow::system("inventory-postgres")]
+#[async_trait]
+impl InventoryStorePort for PostgresInventory {
+    async fn store(&self, level: &InventoryLevelChanged) -> Result<(), EffectError> {
+        self.postgres
+            .execute(&self.insert, |bindings| {
+                bindings
+                    .bind(&level.warehouse)
+                    .bind(&level.sku)
+                    .bind(level.available_units)
+                    .bind(level.replenishment_due);
+            })
+            .await
+            .map_err(postgres::unsent::<Self>)?;
+        Ok(())
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn independent_inventory_consumer_delivers_through_the_public_connector() {
+async fn independent_consumer_upserts_inventory_rows() {
     let pool = pool().await;
     let schema = required_env("OBZENFLOW_POSTGRES_INVENTORY_SCHEMA");
     let temp = tempfile::tempdir().expect("create inventory consumer journal directory");
     let journal_root = temp.path().join("journals");
 
-    let postgres = PostgresSink::builder(InventoryBinder)
-        .connection(connection())
-        .insert_into(
-            &schema,
-            "inventory_levels",
-            "(warehouse, sku, available_units, replenishment_due) VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (warehouse, sku) DO UPDATE SET \
-             available_units = EXCLUDED.available_units, \
-             replenishment_due = EXCLUDED.replenishment_due",
-        )
-        .expect("configure inventory destination")
-        .batch_size(1)
-        .expect("configure inventory batching")
-        .redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-        .build()
-        .expect("build the inventory connector without opening PostgreSQL");
+    let insert = PostgresStatement::insert_into(
+        &schema,
+        "inventory_levels",
+        "(warehouse, sku, available_units, replenishment_due) VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (warehouse, sku) DO UPDATE SET \
+         available_units = EXCLUDED.available_units, \
+         replenishment_due = EXCLUDED.replenishment_due",
+    )
+    .expect("configure inventory destination");
+    let system = PostgresInventory {
+        postgres: default_postgres_client(connection())
+            .expect("build the inventory client without opening PostgreSQL"),
+        insert,
+    };
+    let postgres = perform(|level: &InventoryLevelChanged| level.clone()).through(Port::to(system));
 
     let flow = FlowDefinition::materialize(move |_runtime_config| {
         let levels = sources::ValuesSource::new([

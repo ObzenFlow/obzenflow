@@ -216,7 +216,6 @@ pub enum FlowControlPayload {
     ConsumptionProgress {
         scope: crate::contracts::SubscriptionScope,
         consumed_count: Count,
-        receipts: Option<crate::contracts::SubscriptionReceipts>,
         reader_seq: SeqNo,
         #[serde(skip_serializing_if = "Option::is_none")]
         last_event_id: Option<crate::event::types::EventId>,
@@ -243,7 +242,6 @@ pub enum FlowControlPayload {
     #[serde(rename = "consumption_final")]
     ConsumptionFinal {
         scope: crate::contracts::SubscriptionScope,
-        receipts: Option<crate::contracts::SubscriptionReceipts>,
         pass: bool,
         consumed_count: Count,
         #[serde(skip_serializing_if = "Option::is_none")]

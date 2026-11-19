@@ -465,6 +465,7 @@ impl EffectPlanFactory {
                 obzenflow_runtime::effects::EffectSafety::Idempotent
                     | obzenflow_runtime::effects::EffectSafety::NonIdempotentRequiresKey
                     | obzenflow_runtime::effects::EffectSafety::NonIdempotentAtLeastOnce
+                    | obzenflow_runtime::effects::EffectSafety::NonIdempotentAtMostOnce
             )
         {
             return Err(MiddlewareFactoryError::invalid_configuration(
@@ -1751,10 +1752,11 @@ impl EffectResilienceMiddleware {
         ctx: &mut crate::middleware::MiddlewareContext,
         operation: AffineEffectOperation,
     ) -> AffineEffectBoundaryReport {
-        debug_assert_eq!(
+        debug_assert!(matches!(
             identity.safety,
             obzenflow_runtime::effects::EffectSafety::NonIdempotentAtLeastOnce
-        );
+                | obzenflow_runtime::effects::EffectSafety::NonIdempotentAtMostOnce
+        ));
         let mut recovery = EffectRecoveryController::new();
 
         #[cfg(feature = "test-support")]

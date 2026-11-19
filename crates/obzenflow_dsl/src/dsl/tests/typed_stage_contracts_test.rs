@@ -7,7 +7,7 @@
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+    use obzenflow_adapters::sinks::DiscardSink;
     use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
     use obzenflow_core::journal::archive::DeliveryOrder;
     use obzenflow_core::{outcome, ChainEvent, StageId, TypedPayload};
@@ -21,11 +21,10 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulTransformHandler, HostedIngressSource, IngressDecoder, InlineSink,
-        JoinReferenceView, SinkDescription, SinkInputOrder, SinkWriteFailure, StatefulEmission,
-        TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
-        TypedStatefulHandler, TypedTransformHandler,
+        EffectfulTransformHandler, HostedIngressSource, IngressDecoder, JoinReferenceView,
+        StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::stages::source::{
         AsyncFiniteContinuation, AsyncFiniteSourceConnector, AsyncInfiniteContinuation,
@@ -471,38 +470,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct ExactSink;
-
-    #[async_trait]
-    impl InlineSink for ExactSink {
-        type Input = OutputEvent;
-        fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-            obzenflow_runtime::stages::sink::SinkDescription::method(
-                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-            )
-        }
-
-        async fn write(&mut self, _input: OutputEvent) -> Result<(), SinkWriteFailure> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct OrderSensitiveSink;
-
-    #[async_trait]
-    impl InlineSink for OrderSensitiveSink {
-        type Input = OutputEvent;
-
-        fn describe(&self) -> SinkDescription {
-            SinkDescription::method(DeliveryMethod::Noop)
-                .with_input_order(SinkInputOrder::OrderSensitive)
-        }
-
-        async fn write(&mut self, _input: OutputEvent) -> Result<(), SinkWriteFailure> {
-            Ok(())
-        }
+    fn exact_sink() -> DiscardSink<OutputEvent> {
+        DiscardSink::new()
     }
 
     #[derive(Clone, Debug)]
@@ -714,7 +683,8 @@ mod tests {
         assert_eq!(stateful_meta.input_type, exact::<InputEvent>());
         assert_eq!(stateful_meta.output_type, exact::<OutputEvent>());
 
-        let sink = crate::sink!(name: "sink", OutputEvent => ExactSink);
+        let output = exact_sink();
+        let sink = crate::sink!(name: "sink", OutputEvent => output);
         let sink_meta = sink.typing_metadata().unwrap();
         assert_eq!(sink_meta.input_type, exact::<OutputEvent>());
         assert!(sink_meta.output_contract.is_empty());
@@ -1109,7 +1079,8 @@ mod tests {
             crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL
         );
 
-        let sink = crate::sink!(OutputEvent => ExactSink);
+        let output = exact_sink();
+        let sink = crate::sink!(OutputEvent => output);
         assert_eq!(
             sink.name(),
             crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL
@@ -2452,7 +2423,6 @@ mod tests {
         let lower_merge_id = StageId::new();
         let effectful_id = StageId::new();
         let plain_merge_id = StageId::new();
-        let plain_sink_id = StageId::new();
 
         let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
         descriptors.insert(
@@ -2482,14 +2452,10 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
-        // A fan-in with only a sink below it: never marked.
+        // A fan-in with no order observer below it: never marked.
         descriptors.insert(
             "plain_merge".to_string(),
             crate::transform!(name: "plain_merge", InputEvent -> OutputEvent => ExactTransform),
-        );
-        descriptors.insert(
-            "plain_sink".to_string(),
-            crate::sink!(name: "plain_sink", OutputEvent => ExactSink),
         );
 
         let mut name_to_id = HashMap::new();
@@ -2500,7 +2466,6 @@ mod tests {
         name_to_id.insert("lower_merge".to_string(), lower_merge_id);
         name_to_id.insert("effectful".to_string(), effectful_id);
         name_to_id.insert("plain_merge".to_string(), plain_merge_id);
-        name_to_id.insert("plain_sink".to_string(), plain_sink_id);
 
         let mut topology = TopologyBuilder::new();
         for (id, name, stage_type) in [
@@ -2511,7 +2476,6 @@ mod tests {
             (lower_merge_id, "lower_merge", TopologyStageType::Transform),
             (effectful_id, "effectful", TopologyStageType::Transform),
             (plain_merge_id, "plain_merge", TopologyStageType::Transform),
-            (plain_sink_id, "plain_sink", TopologyStageType::Sink),
         ] {
             topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), stage_type);
             topology.reset_current();
@@ -2539,7 +2503,7 @@ mod tests {
             effectful_id.to_topology_id(),
         );
         topology.add_edge(source_c_id.to_topology_id(), effectful_id.to_topology_id());
-        // plain_merge: fan-in of a+b with only a sink downstream.
+        // plain_merge: fan-in of a+b with nothing downstream.
         topology.add_edge(
             source_a_id.to_topology_id(),
             plain_merge_id.to_topology_id(),
@@ -2547,10 +2511,6 @@ mod tests {
         topology.add_edge(
             source_b_id.to_topology_id(),
             plain_merge_id.to_topology_id(),
-        );
-        topology.add_edge(
-            plain_merge_id.to_topology_id(),
-            plain_sink_id.to_topology_id(),
         );
         let topology = topology.build_unchecked().unwrap();
 
@@ -2568,7 +2528,7 @@ mod tests {
         );
         assert!(
             !marked.contains(&plain_merge_id),
-            "fan-in with no effectful descendant stays unordered"
+            "fan-in with no order-observing descendant stays unordered"
         );
         assert!(!marked.contains(&source_a_id));
 
@@ -2743,20 +2703,7 @@ mod tests {
     }
 
     #[test]
-    fn order_sensitive_sinks_mark_source_and_derived_fan_in_with_the_right_merge_mode() {
-        let unspecified_sink_id = StageId::new();
-        let unspecified_descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::from([(
-            "unspecified_sink".to_string(),
-            crate::sink!(name: "unspecified_sink", OutputEvent => ExactSink),
-        )]);
-        let unspecified_names =
-            HashMap::from([("unspecified_sink".to_string(), unspecified_sink_id)]);
-        assert!(crate::dsl::typing::order_observer_stage_ids(
-            &unspecified_descriptors,
-            &unspecified_names,
-        )
-        .is_empty());
-
+    fn sink_fan_ins_marked_canonical() {
         let source_a_id = StageId::new();
         let source_b_id = StageId::new();
         let branch_a_id = StageId::new();
@@ -2781,13 +2728,15 @@ mod tests {
             "branch_b".to_string(),
             crate::transform!(name: "branch_b", OutputEvent -> OutputEvent => placeholder!()),
         );
+        let direct_output = exact_sink();
         descriptors.insert(
             "direct_sink".to_string(),
-            crate::sink!(name: "direct_sink", OutputEvent => OrderSensitiveSink),
+            crate::sink!(name: "direct_sink", OutputEvent => direct_output),
         );
+        let derived_output = exact_sink();
         descriptors.insert(
             "derived_sink".to_string(),
-            crate::sink!(name: "derived_sink", OutputEvent => OrderSensitiveSink),
+            crate::sink!(name: "derived_sink", OutputEvent => derived_output),
         );
 
         let name_to_id = HashMap::from([
@@ -2888,9 +2837,10 @@ mod tests {
             "fold".to_string(),
             crate::transform!(name: "fold", OutputEvent -> OutputEvent => placeholder!()),
         );
+        let output = exact_sink();
         descriptors.insert(
             "sink".to_string(),
-            crate::sink!(name: "sink", OutputEvent => OrderSensitiveSink),
+            crate::sink!(name: "sink", OutputEvent => output),
         );
         let name_to_id = HashMap::from([
             ("batch".to_string(), batch_id),
@@ -3044,7 +2994,7 @@ mod tests {
     }
 
     #[test]
-    fn order_sensitive_sink_rejects_a_cycle_fed_input() {
+    fn cycle_fed_sink_passes_order_guard() {
         let source_id = StageId::new();
         let cycle_a_id = StageId::new();
         let cycle_b_id = StageId::new();
@@ -3063,9 +3013,10 @@ mod tests {
             "cycle_b".to_string(),
             crate::transform!(name: "cycle_b", OutputEvent -> OutputEvent => placeholder!()),
         );
+        let output = exact_sink();
         descriptors.insert(
             "sink".to_string(),
-            crate::sink!(name: "sink", OutputEvent => OrderSensitiveSink),
+            crate::sink!(name: "sink", OutputEvent => output),
         );
         let name_to_id = HashMap::from([
             ("source".to_string(), source_id),
@@ -3097,13 +3048,14 @@ mod tests {
         );
         crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
         let observers = crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id);
+        assert!(observers.contains(&sink_id));
         assert!(validate_order_observer_deterministic_input_order(
             &topology,
             &descriptors,
             &name_to_id,
             &observers,
         )
-        .is_err());
+        .is_ok());
     }
 
     // ─── FLOWIP-114c PR D closing-pass regression tests ────────────────────

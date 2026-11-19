@@ -61,6 +61,7 @@ impl CallRequest for LedgerWrite {
     type Safety = RequiresKey;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
+    type Records = DomainFacts;
 
     async fn call(
         &self,
@@ -94,6 +95,7 @@ impl CallRequest for LedgerCheck {
     type Safety = Idempotent;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
+    type Records = DomainFacts;
 
     async fn call(
         &self,
@@ -115,6 +117,7 @@ impl CallRequest for LedgerCharge {
     type Safety = AtLeastOnce;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
+    type Records = DomainFacts;
 
     async fn call(
         &self,
@@ -599,6 +602,7 @@ impl CallRequest for ScoreLike {
     type Safety = RequiresKey;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
+    type Records = DomainFacts;
 
     async fn call(
         &self,

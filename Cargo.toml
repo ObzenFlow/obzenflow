@@ -222,7 +222,7 @@ studio = ["prometheus", "web-host", "obzenflow_infra/studio-registration"]
 tokio-console = ["obzenflow_infra/tokio-console"]
 http = ["obzenflow_infra/reqwest-client"]
 ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
-postgres = ["obzenflow_adapters/postgres"]
+postgres = ["obzenflow_infra/postgres"]
 # Selection gate for tests that require repository-managed external services.
 # It carries no product code and is enabled only by the matching conformance job.
 e2e = []
@@ -381,11 +381,6 @@ required-features = ["test-support"]
 name = "e2e_postgres"
 path = "tests/e2e_postgres/main.rs"
 required-features = ["e2e", "postgres"]
-
-[[test]]
-name = "postgres_sink_application_conformance"
-path = "tests/postgres_sink_application_conformance.rs"
-required-features = ["postgres", "test-support"]
 
 [[test]]
 name = "postgres_public_consumer"

@@ -3,11 +3,10 @@
 // https://obzenflow.dev
 
 use super::{
-    BoundEffect, DomainFacts, Effect, EffectBindingUse, EffectContext, EffectError, EffectPortSlot,
-    EffectPortSlotSet, EffectSafety, IdempotencyKey, Named,
+    BoundEffect, Effect, EffectBindingUse, EffectContext, EffectError, EffectOutcomeSemantics,
+    EffectPortSlot, EffectPortSlotSet, EffectSafety, IdempotencyKey, Named,
 };
 use async_trait::async_trait;
-use obzenflow_core::event::schema::EffectOutcome;
 use obzenflow_core::SystemBindingEvidence;
 use serde::Serialize;
 
@@ -264,21 +263,25 @@ use serde::Serialize;
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a declared request",
     label = "no `#[effect]` port method takes `{Self}`",
-    note = "declare it with `#[effect(type = \"...\", exactly_once)]` or `at_least_once` on the port method that takes it"
+    note = "declare it with `#[effect(type = \"...\", exactly_once)]`, `at_least_once` or `at_most_once` on the port method that takes it"
 )]
 pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'static {
     const EFFECT_TYPE: &'static str;
     const SCHEMA_VERSION: u32 = 1;
 
-    /// How a repeated call behaves: `Idempotent`, `RequiresKey`, `AtLeastOnce` or
-    /// `Transactional`.
+    /// How a repeated call behaves: `Idempotent`, `RequiresKey`, `AtLeastOnce`,
+    /// `AtMostOnce` or `Transactional`.
     type Safety: CallSafety + KeyRule<Self>;
 
     /// The port a system implements to answer this request.
     type Port: ?Sized + Send + Sync + 'static;
 
-    /// The facts a successful call records.
-    type Outcome: EffectOutcome + Clone + Send + Sync + 'static;
+    /// What a successful call answers: facts, or a reply under `records = reply`.
+    type Outcome: Clone + Send + Sync + 'static;
+
+    /// `DomainFacts` when the answer is facts the stage writes, `RecordedReply`
+    /// when it is a reply the runtime records and returns.
+    type Records: EffectOutcomeSemantics<Self::Outcome>;
 
     async fn call(
         &self,
@@ -352,7 +355,7 @@ pub trait Keyed {
 mod sealed {
     #[diagnostic::on_unimplemented(
         message = "`{Self}` is not a request safety class",
-        note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce` or `Transactional`"
+        note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce`, `AtMostOnce` or `Transactional`"
     )]
     pub trait CallSafety {}
 }
@@ -371,7 +374,7 @@ mod sealed {
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a request safety class",
-    note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce` or `Transactional`"
+    note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce`, `AtMostOnce` or `Transactional`"
 )]
 pub trait CallSafety: sealed::CallSafety {
     #[doc(hidden)]
@@ -387,10 +390,15 @@ pub struct Idempotent;
 #[doc(hidden)]
 pub struct RequiresKey;
 
-/// An `at_least_once` request, acknowledged after its stage's handler with
-/// `.at_least_once::<R>()`.
+/// An `at_least_once` request, which an effectful row acknowledges with
+/// `.at_least_once::<R>()` and a sink row does not.
 #[doc(hidden)]
 pub struct AtLeastOnce;
+
+/// An `at_most_once` request, whose call a crash left in doubt is recorded
+/// abandoned and never made again.
+#[doc(hidden)]
+pub struct AtMostOnce;
 
 /// An `exactly_once` request whose port commits its outcome through its
 /// `EffectCommitHandle`. The committed record is the outcome.
@@ -400,6 +408,7 @@ pub struct Transactional;
 impl sealed::CallSafety for Idempotent {}
 impl sealed::CallSafety for RequiresKey {}
 impl sealed::CallSafety for AtLeastOnce {}
+impl sealed::CallSafety for AtMostOnce {}
 impl sealed::CallSafety for Transactional {}
 
 impl CallSafety for Idempotent {
@@ -412,6 +421,10 @@ impl CallSafety for RequiresKey {
 
 impl CallSafety for AtLeastOnce {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+}
+
+impl CallSafety for AtMostOnce {
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtMostOnce;
 }
 
 impl CallSafety for Transactional {
@@ -433,6 +446,12 @@ impl<R> KeyRule<R> for Idempotent {
 }
 
 impl<R> KeyRule<R> for AtLeastOnce {
+    fn key(_: &R) -> Option<IdempotencyKey> {
+        None
+    }
+}
+
+impl<R> KeyRule<R> for AtMostOnce {
     fn key(_: &R) -> Option<IdempotencyKey> {
         None
     }
@@ -491,7 +510,7 @@ impl<R: CallRequest> Effect for Call<R> {
     const SAFETY: EffectSafety = <R::Safety as CallSafety>::SAFETY;
     type BindingMode = Named<SystemBindingEvidence>;
     type Outcome = R::Outcome;
-    type OutcomeSemantics = DomainFacts;
+    type OutcomeSemantics = R::Records;
 
     fn label(&self) -> &str {
         R::EFFECT_TYPE

@@ -29,7 +29,7 @@ pub(super) fn effect_record_from_event(
                 ));
             }
             validate_effect_record_provenance(&event.event_type(), record, provenance)?;
-            Ok(Some(record.clone()))
+            Ok(Some(record.as_ref().clone()))
         }
         ChainPayload::Fact(_) | ChainPayload::CompositeData(_) => {
             let Some(provenance) = event.effect_provenance.as_ref() else {
@@ -68,9 +68,7 @@ pub(super) fn effect_record_from_event(
             validate_domain_effect_record_provenance(&record, provenance)?;
             Ok(Some(record))
         }
-        ChainPayload::Execution(_) | ChainPayload::Delivery(_) | ChainPayload::FlowControl(_) => {
-            Ok(None)
-        }
+        ChainPayload::Execution(_) | ChainPayload::FlowControl(_) => Ok(None),
     }
 }
 

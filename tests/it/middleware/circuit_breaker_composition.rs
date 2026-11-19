@@ -6,8 +6,8 @@
 //! breaker across all three live-I/O surfaces, with effect-bound recovery.
 //!
 //! A single flow places the built-in breaker on a source poll, on a declared
-//! effect, and on a sink delivery, with a fan-out transform in between so one
-//! source input fans out to several effect attempts and several sink deliveries
+//! effect, and on a sink's calls, with a fan-out transform in between so one
+//! source input fans out to several effect attempts and several sink calls
 //! (fan-out) that converge on one sink stage (fan-in). Every derived effect
 //! cursor fails once with a typed timeout, then succeeds on its retry.
 //!
@@ -27,7 +27,6 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{circuit_breaker, retry, MiddlewareFactory};
 use obzenflow_core::{
     event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::DeliveryMethod,
     event::payloads::execution_payload::{
         CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload, RecoveryFact,
     },
@@ -36,12 +35,11 @@ use obzenflow_core::{
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectCursor, EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::effects::{perform, EffectCursor, EffectError, Effects, Port};
 use obzenflow_runtime::runtime_config::RETRY_MAX_ATTEMPTS_KEY;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -217,25 +215,24 @@ impl EffectfulTransformHandler for RetryTransform {
     }
 }
 
-#[derive(Clone, Debug)]
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+trait CollectOutputPort: Send + Sync {
+    #[effect(type = "cb_composition.collect", at_least_once, records = reply)]
+    fn collect(&self, output: &CompOutput) -> Result<(), EffectError>;
+}
+
+/// Keeps every output its sink is called with. Replay makes no call.
 struct CollectSink {
     outputs: Arc<Mutex<Vec<CompOutput>>>,
 }
 
-#[async_trait]
-impl InlineSink for CollectSink {
-    type Input = CompOutput;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Memory".to_string()))
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, output: CompOutput) -> Result<(), SinkWriteFailure> {
+#[obzenflow_runtime::effects::system("composition-collector", effects = obzenflow_runtime::effects)]
+impl CollectOutputPort for CollectSink {
+    fn collect(&self, output: &CompOutput) -> Result<(), EffectError> {
         self.outputs
             .lock()
             .expect("outputs lock poisoned")
-            .push(output);
+            .push(output.clone());
         Ok(())
     }
 }
@@ -258,7 +255,8 @@ fn build_retry_flow(
         let source_handler = CompSource::new(source_calls);
         let fan_out_handler = FanOutTransform::new();
         let effectful_handler = RetryTransform::new(calls);
-        let collector_handler = CollectSink { outputs };
+        let collector_handler = perform(|output: &CompOutput| output.clone())
+            .through(Port::to(CollectSink { outputs }));
 
         Ok(flow! {
             name: "circuit_breaker_composition",
@@ -537,9 +535,8 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
         .await
         .expect("live composition flow should complete");
 
-    let live_domain_outputs = live_outputs.lock().expect("outputs lock poisoned").clone();
     assert_eq!(
-        live_domain_outputs,
+        *live_outputs.lock().expect("outputs lock poisoned"),
         expected_outputs(),
         "fan-in should deliver all six recovered outputs in deterministic order"
     );
@@ -574,6 +571,12 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     let live_effect_events = read_stage_events(&live_run, "effectful").await;
     assert_retry_evidence_per_cursor(&live_effect_events);
     let live_effect_breaker_ids = circuit_breaker_event_ids(&live_effect_events);
+    let live_sink_breaker_ids =
+        circuit_breaker_event_ids(&read_stage_events(&live_run, "collector").await);
+    assert!(
+        !live_sink_breaker_ids.is_empty(),
+        "the sink's breaker records evidence for its live calls"
+    );
 
     // --- Strict replay of the same archive --------------------------------
     let replay_source_calls = Arc::new(AtomicUsize::new(0));
@@ -605,30 +608,39 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
         0,
         "strict replay must not perform a live source poll, timeout, policy pass, or idle backoff"
     );
-    assert_eq!(
+    assert!(
         replay_outputs
             .lock()
             .expect("outputs lock poisoned")
-            .clone(),
-        live_domain_outputs,
+            .is_empty(),
+        "replay calls no sink system"
+    );
+    let replay_run = latest_run_dir(&journal_base);
+    let effect_outputs = |events: &[ChainEvent]| {
+        events
+            .iter()
+            .filter_map(CompOutput::from_event)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        effect_outputs(&read_stage_events(&replay_run, "effectful").await),
+        expected_outputs(),
         "strict replay must reproduce the identical output order through the composed breakers"
     );
 
-    // Source and sink policy still remain suppressed during strict replay.
-    // Effect-history hits rematerialise their archived terminal evidence under
-    // FLOWIP-128g, but do not execute policy or author new identities.
-    let replay_run = latest_run_dir(&journal_base);
-    for stage in ["inputs", "collector"] {
-        let replay_breaker_events = circuit_breaker_events_in_stage(&replay_run, stage).await;
+    assert_eq!(
+        circuit_breaker_events_in_stage(&replay_run, "inputs").await,
+        0,
+        "strict replay must not emit fresh circuit-breaker rows on the source"
+    );
+    for (stage, live_ids) in [
+        ("effectful", live_effect_breaker_ids),
+        ("collector", live_sink_breaker_ids),
+    ] {
         assert_eq!(
-            replay_breaker_events, 0,
-            "strict replay must not emit fresh circuit-breaker rows on the '{stage}' stage"
+            circuit_breaker_event_ids(&read_stage_events(&replay_run, stage).await),
+            live_ids,
+            "strict replay must rematerialize the '{stage}' stage's settlement evidence byte-for-byte without fresh policy work"
         );
     }
-    let replay_effect_events = read_stage_events(&replay_run, "effectful").await;
-    assert_eq!(
-        circuit_breaker_event_ids(&replay_effect_events),
-        live_effect_breaker_ids,
-        "strict replay must rematerialise effect settlement evidence byte-for-byte without fresh policy work"
-    );
 }

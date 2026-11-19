@@ -10,7 +10,6 @@ pub mod merge;
 pub mod merges;
 pub mod observer;
 pub mod resources_builder;
-pub mod sink;
 pub mod source;
 pub mod stateful;
 pub mod transform;
@@ -21,11 +20,10 @@ pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
     prove_journal_form, EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig,
     HostedIngressSource, HostedSubmission, IngressDecodeError, IngressDecoder,
-    IngressReceiptSender, IngressRecord, InlineSink, ObserverHandler, ProcessingContext,
-    ResourceManaged, SignalDecision, SignalGate, SinkConnector, SinkDescription, SinkWriter,
-    SinkWriterInitContext, SourceObservationSink, StatefulEmission, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-    TypedStatefulHandler,
+    IngressReceiptSender, IngressRecord, ObserverHandler, ProcessingContext, ResourceManaged,
+    SignalDecision, SignalGate, SourceObservationSink, StatefulEmission,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler, TypedStatefulHandler,
 };
 
 pub use common::{CreditWaker, WakeOn};
@@ -38,6 +36,4 @@ pub use common::handlers::{
 
 // Re-export resources builder
 pub use crate::typing::{SourceTyping, TransformTyping};
-pub use resources_builder::{
-    SinkResumeEdges, StageResources, StageResourcesBuilder, StageResourcesSet,
-};
+pub use resources_builder::{StageResources, StageResourcesBuilder, StageResourcesSet};

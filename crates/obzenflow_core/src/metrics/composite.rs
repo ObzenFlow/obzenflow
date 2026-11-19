@@ -1056,14 +1056,9 @@ mod tests {
     fn duration_excludes_signals_unmatched_data_and_internal_member_output() {
         let (boundary, input, success, _, _, _) = boundary();
         let mut unmatched = exit_event(&boundary, success, "internal.fact", 10, 20);
-        unmatched.payload =
-            ChainPayload::Delivery(crate::event::payloads::delivery_payload::test_receipt(
-                unmatched.id,
-                crate::event::payloads::delivery_payload::DeliveryOutcome::success(
-                    crate::event::payloads::delivery_payload::DeliveryMethod::Noop,
-                    None,
-                ),
-            ));
+        unmatched.payload = ChainPayload::FlowControl(
+            crate::event::payloads::flow_control_payload::FlowControlPayload::Drain,
+        );
         let internal = exit_event(&boundary, input, "checkout.command", 10, 20);
         let mut accumulator = CompositeDurationAccumulator::default();
         accumulator.observe_event(std::slice::from_ref(&boundary), success, &unmatched);

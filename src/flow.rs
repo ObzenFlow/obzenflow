@@ -5,8 +5,7 @@
 //! Flow definitions and stage macros.
 //!
 //! Construct handlers inside a deferred [`FlowDefinition`] materialiser, then
-//! pass those bindings to the stage macros. `handler_set!` is syntax consumed
-//! by `sink!`, not a standalone handler value.
+//! pass those bindings to the stage macros.
 //!
 //! ## Combining different input types
 //!
@@ -68,7 +67,7 @@
 
 pub use obzenflow_dsl::{
     ai, ai_map_reduce, async_infinite_source, async_source, effectful_stateful,
-    effectful_transform, flow, handler_set, inference, infinite_source, join, merge, placeholder,
-    sink, source, stateful, transform, FlowBuildError, FlowBuildFailure, FlowDefinition,
-    StageCreationError, StageCreationResult,
+    effectful_transform, flow, inference, infinite_source, join, merge, placeholder, sink, source,
+    stateful, transform, FlowBuildError, FlowBuildFailure, FlowDefinition, StageCreationError,
+    StageCreationResult,
 };

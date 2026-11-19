@@ -22,13 +22,14 @@
 //!   `last_event_id`, `timestamp` are excluded), compared as an
 //!   order-insensitive multiset per journal.
 //!
-//! Rows excluded: `Delivery` receipts, `Observability`/lifecycle rows, and
-//! all other flow control (reader telemetry is wall-clock-gated by design;
+//! Rows excluded: `Observability`/lifecycle rows, and all other flow control
+//! (reader telemetry is wall-clock-gated by design;
 //! checkpoint, drain and abort describe how a run executed rather than what
 //! it concluded).
 //!
 //! Fields excluded everywhere: envelope wall-clock metadata, `processing_time`,
-//! writer ids, the comparing runs' own flow ids, vector clocks,
+//! writer ids, the comparing runs' own flow ids (including the one an effect
+//! attempt's outcome group id carries), an attempt's causal input id, vector clocks,
 //! `replay_context` (present on every `Data` row of a replay run by design),
 //! `runtime_context`, `observability`, `ingress_context`, and cycle metadata.
 //! Payloads are compared as parsed values, never bytes. All protocol and
@@ -40,6 +41,10 @@
 //! compared only within a replay lineage; see `lineage`.
 
 use obzenflow_core::event::payloads::chain_payload::EventKind;
+use obzenflow_core::event::payloads::effect_payload::{
+    EffectOutcomePayload, EFFECT_ATTEMPT_STARTED_EVENT_TYPE, EFFECT_RECOVERY_ABANDONED_EVENT_TYPE,
+};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload};
@@ -67,6 +72,11 @@ pub struct PositionalRow {
     /// Present when the row carries `effect_provenance`. Compared only under
     /// `IdentityMode::Lineage`.
     pub identity: Option<EffectIdentity>,
+    /// A sink's call that replay refused, because this build's request
+    /// differs from the recorded call or the recording holds no call there.
+    /// Every one is a divergence, wherever it appears.
+    #[serde(skip)]
+    pub replay_rejection: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -117,12 +127,10 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
                     event_type: event.event_type().to_owned(),
                     payload_schema_version: event.payload_schema_version,
                 },
-                payload: comparable_data_payload(
-                    event.effect_provenance.is_some(),
-                    &payload.contract_body().ok()?,
-                ),
+                payload: comparable_data_payload(event, &payload.contract_body().ok()?),
                 status: Some(semantic_status(event)),
                 identity: effect_identity(event),
+                replay_rejection: is_replay_rejection(payload),
             }))
         }
         ChainPayload::FlowControl(FlowControlPayload::Watermark { timestamp, .. }) => {
@@ -131,6 +139,7 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
                 payload: json!({ "timestamp": timestamp }),
                 status: None,
                 identity: None,
+                replay_rejection: false,
             }))
         }
         ChainPayload::FlowControl(FlowControlPayload::Eof {
@@ -146,25 +155,49 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
             Some(ProjectedRow::EofEvidence(evidence))
         }
         ChainPayload::FlowControl(_)
-        | ChainPayload::Delivery(_)
         | ChainPayload::Execution(_)
         | ChainPayload::Fact(_)
         | ChainPayload::CompositeData(_) => None,
     }
 }
 
-fn comparable_data_payload(effect_lane: bool, payload: &Value) -> Value {
+fn is_replay_rejection(payload: &ChainPayload) -> bool {
+    matches!(
+        payload,
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+            if matches!(
+                &record.outcome,
+                EffectOutcomePayload::Failed { cause: Some(cause), .. }
+                    if cause.source.as_str() == "replay"
+            )
+    )
+}
+
+const RECORDED_FLOW_NAMESPACE: &str = "<recorded-flow-namespace>";
+
+fn comparable_data_payload(event: &ChainEvent, payload: &Value) -> Value {
     let mut payload = payload.clone();
-    if effect_lane {
-        if let Some(cursor) = payload
-            .get_mut("cursor")
-            .and_then(Value::as_object_mut)
-            .filter(|cursor| cursor.contains_key("recorded_flow_id"))
+    if event.effect_provenance.is_none() {
+        return payload;
+    }
+    let recorded_flow_id = payload
+        .get_mut("cursor")
+        .and_then(Value::as_object_mut)
+        .and_then(|cursor| cursor.get_mut("recorded_flow_id"))
+        .map(|flow_id| {
+            std::mem::replace(flow_id, Value::String(RECORDED_FLOW_NAMESPACE.to_string()))
+        });
+    let event_type = event.event_type();
+    if event_type == EFFECT_ATTEMPT_STARTED_EVENT_TYPE
+        || event_type == EFFECT_RECOVERY_ABANDONED_EVENT_TYPE
+    {
+        if let (Some(Value::String(recorded_flow_id)), Some(Value::String(group_id))) =
+            (recorded_flow_id, payload.get_mut("outcome_group_id"))
         {
-            cursor.insert(
-                "recorded_flow_id".to_string(),
-                Value::String("<recorded-flow-namespace>".to_string()),
-            );
+            *group_id = group_id.replace(&recorded_flow_id, RECORDED_FLOW_NAMESPACE);
+        }
+        if let Some(causal_input_id) = payload.get_mut("causal_input_id") {
+            *causal_input_id = Value::String("<causal-input>".to_string());
         }
     }
     payload

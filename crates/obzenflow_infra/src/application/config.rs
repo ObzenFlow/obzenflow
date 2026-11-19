@@ -176,14 +176,6 @@ pub struct FlowConfig {
     #[arg(long, action = ArgAction::SetTrue)]
     pub allow_incomplete_archive: bool,
 
-    /// Allow `--replay-from` or `--resume-from` to proceed past sinks whose
-    /// delivery path is non-idempotent or undeclared.
-    ///
-    /// Both archive verbs re-execute recorded work at sinks, so those sinks
-    /// may duplicate their external writes. Requires an archive verb.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub allow_duplicate_sink_delivery: bool,
-
     /// Verify the replay output against the source archive after completion.
     /// Requires `--replay-from`. The source archive must remain
     /// present through completion; on a fully certified match the run prints
@@ -293,9 +285,6 @@ pub(crate) struct ResolvedMetricsConfig {
 pub(crate) struct ResolvedReplayConfig {
     pub from: PathBuf,
     pub allow_incomplete_archive: bool,
-    /// FLOWIP-120n F16: resume past non-idempotent/undeclared sinks,
-    /// accepting duplicated delivery during catch-up.
-    pub allow_duplicate_sink_delivery: bool,
     /// FLOWIP-095j: verify the replay output against `from` after completion.
     pub verify: bool,
     /// FLOWIP-120n: which verb selected the archive (replay drains, resume
@@ -316,7 +305,6 @@ impl ResolvedStartupConfig {
                 obzenflow_runtime::bootstrap::ReplayBootstrap {
                     archive_path: replay.from.clone(),
                     allow_incomplete_archive: replay.allow_incomplete_archive,
-                    allow_duplicate_sink_delivery: replay.allow_duplicate_sink_delivery,
                     verb: replay.verb,
                 }
             }),
@@ -385,7 +373,6 @@ pub(crate) struct RawFileStartupConfig {
     pub(crate) journal: RawFileJournalConfig,
     pub(crate) middleware: RawFileMiddlewareConfig,
     pub(crate) ai: RawFileAiConfig,
-    pub(crate) sinks: RawFileSinksConfig,
     /// FLOWIP-114d: Studio phonebook registration (010h startup layer).
     studio: RawFileStudioConfig,
     app: Option<RawAppTable>,
@@ -686,22 +673,6 @@ pub(crate) struct RawRuntimeStageScope {
     pub(crate) heartbeat_interval: Option<i64>,
 }
 
-/// `[sinks]`, `[sinks.flow]`, and `[sinks.stages.<key>]` select one member
-/// from an authored `handler_set!`. Handler membership remains Rust-owned.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct RawFileSinksConfig {
-    pub(crate) handler: Option<String>,
-    pub(crate) flow: RawSinkHandlerFields,
-    pub(crate) stages: BTreeMap<String, RawSinkHandlerFields>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct RawSinkHandlerFields {
-    pub(crate) handler: Option<String>,
-}
-
 /// `[runtime.backpressure]` with the §4c nested edge layout.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -875,7 +846,6 @@ pub(crate) struct RawFileReplayConfig {
     pub(crate) from: Option<PathBuf>,
     pub(crate) resume_from: Option<PathBuf>,
     pub(crate) allow_incomplete_archive: Option<bool>,
-    pub(crate) allow_duplicate_sink_delivery: Option<bool>,
     pub(crate) verify: Option<bool>,
 }
 
@@ -1138,15 +1108,6 @@ impl FlowConfig {
             file.replay.resume_from,
             parse_env_path("OBZENFLOW_RESUME_FROM", "replay.resume_from")?,
         );
-        let allow_duplicate_sink_delivery = resolve_positive_flag(
-            self.allow_duplicate_sink_delivery,
-            file.replay.allow_duplicate_sink_delivery,
-            parse_env_bool(
-                "OBZENFLOW_ALLOW_DUPLICATE_SINK_DELIVERY",
-                "replay.allow_duplicate_sink_delivery",
-            )?,
-            false,
-        );
         if replay_from.is_some() && resume_from.is_some() {
             return Err(ConfigError::at(
                 "replay.resume_from",
@@ -1159,25 +1120,17 @@ impl FlowConfig {
                 "requires replay.from; a resume continues live and cannot be verified as a bounded replay",
             ));
         }
-        if allow_duplicate_sink_delivery && replay_from.is_none() && resume_from.is_none() {
-            return Err(ConfigError::at(
-                "replay.allow_duplicate_sink_delivery",
-                "requires replay.from or replay.resume_from; both archive verbs re-deliver recorded work to sinks",
-            ));
-        }
 
         let replay = match (replay_from, resume_from) {
             (Some(from), None) => Some(ResolvedReplayConfig {
                 from,
                 allow_incomplete_archive,
-                allow_duplicate_sink_delivery,
                 verify,
                 verb: ReplayVerb::Replay,
             }),
             (None, Some(from)) => Some(ResolvedReplayConfig {
                 from,
                 allow_incomplete_archive,
-                allow_duplicate_sink_delivery,
                 verify: false,
                 verb: ReplayVerb::Resume,
             }),
@@ -2560,88 +2513,6 @@ resume_from = "/tmp/recorded"
     }
 
     #[test]
-    fn allow_duplicate_sink_delivery_resolves_with_resume_from() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let archive = fake_archive_dir(&tempdir, "archive");
-
-        let cli = FlowConfig::try_parse_from([
-            "obzenflow",
-            "--resume-from",
-            archive.to_str().unwrap(),
-            "--allow-duplicate-sink-delivery",
-        ])
-        .unwrap();
-        let resolved = cli.resolve(None, false).unwrap();
-        let replay = resolved
-            .replay
-            .as_ref()
-            .expect("resume resolves a replay config");
-        assert!(replay.allow_duplicate_sink_delivery);
-
-        let bootstrap = resolved.bootstrap_config();
-        assert!(
-            bootstrap
-                .replay
-                .expect("bootstrap carries the replay config")
-                .allow_duplicate_sink_delivery,
-            "the opt-in must ride ReplayBootstrap to the resume sink gate"
-        );
-    }
-
-    #[test]
-    fn allow_duplicate_sink_delivery_defaults_to_false() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let archive = fake_archive_dir(&tempdir, "archive");
-
-        let cli =
-            FlowConfig::try_parse_from(["obzenflow", "--resume-from", archive.to_str().unwrap()])
-                .unwrap();
-        let resolved = cli.resolve(None, false).unwrap();
-        let replay = resolved.replay.expect("resume resolves a replay config");
-        assert!(!replay.allow_duplicate_sink_delivery);
-    }
-
-    #[test]
-    fn allow_duplicate_sink_delivery_resolves_with_replay_from() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let archive = fake_archive_dir(&tempdir, "archive");
-
-        let cli = FlowConfig::try_parse_from([
-            "obzenflow",
-            "--replay-from",
-            archive.to_str().unwrap(),
-            "--allow-duplicate-sink-delivery",
-        ])
-        .unwrap();
-        let resolved = cli.resolve(None, false).unwrap();
-        let replay = resolved
-            .replay
-            .as_ref()
-            .expect("replay resolves a replay config");
-        assert!(replay.allow_duplicate_sink_delivery);
-
-        let bootstrap = resolved.bootstrap_config();
-        assert!(
-            bootstrap
-                .replay
-                .expect("bootstrap carries the replay config")
-                .allow_duplicate_sink_delivery,
-            "the opt-in must ride ReplayBootstrap to the replay sink gate"
-        );
-    }
-
-    #[test]
-    fn allow_duplicate_sink_delivery_without_archive_verb_errors_at_resolve() {
-        let cli =
-            FlowConfig::try_parse_from(["obzenflow", "--allow-duplicate-sink-delivery"]).unwrap();
-        let err = cli.resolve(None, false).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "config error at replay.allow_duplicate_sink_delivery: requires replay.from or replay.resume_from; both archive verbs re-deliver recorded work to sinks"
-        );
-    }
-
-    #[test]
     fn builder_config_file_is_used_when_cli_has_no_config() {
         let tempdir = tempfile::tempdir().unwrap();
         let config_path = tempdir.path().join("obzenflow.toml");
@@ -2707,6 +2578,28 @@ port = 2222
         let cli = FlowConfig::try_parse_from(["obzenflow"]).unwrap();
         let resolved = cli.resolve(None, false).unwrap();
         assert!(!resolved.metrics.enabled);
+    }
+
+    #[test]
+    fn duplicate_delivery_flag_fails_parse() {
+        assert!(
+            FlowConfig::try_parse_from(["obzenflow", "--allow-duplicate-sink-delivery"]).is_err()
+        );
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(
+            &config_path,
+            "[replay]\nallow_duplicate_sink_delivery = true\n",
+        )
+        .unwrap();
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        let rendered = cli.resolve(None, false).unwrap_err().to_string();
+        assert!(
+            rendered.contains("unknown field `allow_duplicate_sink_delivery`"),
+            "{rendered}"
+        );
     }
 
     #[test]

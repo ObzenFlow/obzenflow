@@ -19,26 +19,26 @@ use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_adapters::sinks::CountingSink;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedInfiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedInfiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -194,26 +194,6 @@ impl EffectfulTransformHandler for EffectfulTail {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingSink {
-    delivered: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = AbortOutput;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _input: AbortOutput) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 struct SourceRanges {
     a_first: u64,
     a_count: u64,
@@ -238,7 +218,7 @@ fn build_flow(
         let effectful_tail = EffectfulTail {
             counter: Port::to(CallCounter { calls }),
         };
-        let counting_sink = CountingSink { delivered };
+        let counting_sink = CountingSink::<AbortOutput>::new(delivered);
 
         Ok(flow! {
             name: "resume_abort",
@@ -315,6 +295,30 @@ async fn wait_for_failed(handle: &FlowHandle) -> Result<String> {
 enum ResumeRow {
     Data(serde_json::Value),
     CatchUp { stage_key: String, generation: u64 },
+}
+
+/// The sink calls a run started and never settled.
+async fn unsettled_sink_calls(run: &Path) -> u64 {
+    let rows = replay_testkit::read_stage_envelopes_appended(run, "collect").await;
+    let started = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.payload,
+                ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(_))
+            )
+        })
+        .count();
+    let settled = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.payload,
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+            )
+        })
+        .count();
+    started.saturating_sub(settled) as u64
 }
 
 fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
@@ -409,7 +413,6 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
@@ -507,13 +510,13 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
         0,
         "no effect executed during the failed catch-up"
     );
-    // The sink re-consumes the recorded prefix during catch-up (F14), so rows
-    // whose admission seq precedes the corrupt frame may reach it before
-    // teardown lands; how many is scheduling-dependent. The merge-row
-    // assertions above prove nothing outside the recorded prefix moved.
+    // A resume makes no sink call the recording settled. Only a call the
+    // recording started and never settled may run again before teardown.
+    let unsettled = unsettled_sink_calls(&recorded_run).await;
     assert!(
-        delivered.load(Ordering::SeqCst) <= RECORDED_DELIVERED,
-        "only recorded-prefix re-consumption may reach the sink during a failed catch-up (saw {})",
+        delivered.load(Ordering::SeqCst) <= unsettled,
+        "only a call the recording left unsettled may reach the sink during a failed catch-up \
+         (saw {}, unsettled {unsettled})",
         delivered.load(Ordering::SeqCst)
     );
 

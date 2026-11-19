@@ -7,16 +7,15 @@
 //!
 //! Each adapter is a thin shim that turns a live-I/O boundary attempt into an
 //! admission charge against the shared [`super::RateLimiterMiddleware`] (and its
-//! [`super::admission_core::RateLimiterCore`]). The source, effect, and
-//! sink-delivery adapters await their permit through the shared cancellable
-//! acquisition helper; the ingress adapter is fail-fast at the hosted listener
-//! edge. Production placement goes through [`super::factory`].
+//! [`super::admission_core::RateLimiterCore`]). The source and effect adapters
+//! await their permit through the shared cancellable acquisition helper; the
+//! ingress adapter is fail-fast at the hosted listener edge. Production
+//! placement goes through [`super::factory`].
 
 use super::RateLimiterMiddleware;
 use crate::middleware::{
-    MiddlewareContext, SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx,
-    SourceAdmission, SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx,
-    SourcePollOutcome,
+    MiddlewareContext, SourceAdmission, SourceAfterPoll, SourceBatchFacts, SourcePolicy,
+    SourcePolicyCtx, SourcePollOutcome,
 };
 use obzenflow_core::ingress::{
     IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
@@ -112,43 +111,6 @@ impl SourcePolicy for RateLimiterSourcePolicy {
     }
 
     fn observe(&self, _outcome: &SourcePollOutcome<'_>, ctx: &mut SourcePolicyCtx) {
-        let middleware_ctx = ctx.middleware_context_mut();
-        self.inner.maybe_emit_activity_pulse(middleware_ctx);
-        self.inner.maybe_emit_summary(middleware_ctx);
-    }
-}
-
-/// Sink-delivery boundary policy for the token-bucket rate limiter (FLOWIP-115d).
-///
-/// It awaits a permit before the sink consume operation through the shared
-/// cancellable acquisition helper, protecting the delivery unit rather than the
-/// event's prior transformation. The typed delivery identity and attempt
-/// context are available for proof rows; the v1 limiter charges one token per
-/// delivery attempt regardless of payload.
-pub(super) struct RateLimiterSinkPolicy {
-    inner: Arc<RateLimiterMiddleware>,
-}
-
-impl RateLimiterSinkPolicy {
-    pub(super) fn new(inner: Arc<RateLimiterMiddleware>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl SinkPolicy for RateLimiterSinkPolicy {
-    fn label(&self) -> &'static str {
-        self.inner.label()
-    }
-
-    async fn admit(&self, ctx: &mut SinkPolicyCtx) -> SinkAdmission {
-        self.inner
-            .acquire_permit_async(ctx.middleware_context_mut())
-            .await;
-        SinkAdmission::Admit(None)
-    }
-
-    fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, ctx: &mut SinkPolicyCtx) {
         let middleware_ctx = ctx.middleware_context_mut();
         self.inner.maybe_emit_activity_pulse(middleware_ctx);
         self.inner.maybe_emit_summary(middleware_ctx);

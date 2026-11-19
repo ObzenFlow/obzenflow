@@ -8,17 +8,16 @@
 //! down a flow that delivers every input exactly once. This is different from
 //! per-event latency as it measures overall batch processing.
 
-use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::{perform, EffectError, Perform, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -94,36 +93,39 @@ impl TypedTransformHandler for PassthroughStage {
     }
 }
 
-/// Sink that records delivered input IDs for the exactly-once check
-#[derive(Clone, Debug)]
-struct DeliverySink {
+#[derive(Clone, Debug, Serialize)]
+struct Delivered {
+    event_id: u64,
+}
+
+/// Records each delivered input ID for the exactly-once check.
+struct DeliveryLog {
     delivered: Arc<Mutex<Vec<u64>>>,
 }
 
-impl DeliverySink {
-    fn new(expected_count: u64) -> (Self, Arc<Mutex<Vec<u64>>>) {
-        let delivered = Arc::new(Mutex::new(Vec::with_capacity(expected_count as usize)));
-        (
-            Self {
-                delivered: delivered.clone(),
-            },
-            delivered,
-        )
+#[obzenflow_runtime::effects::port(system = "delivery-log", effects = obzenflow_runtime::effects)]
+impl DeliveryLog {
+    #[effect(type = "bench.pipeline.deliver", at_least_once, records = reply)]
+    fn deliver(&self, delivered: &Delivered) -> Result<(), EffectError> {
+        self.delivered.lock().unwrap().push(delivered.event_id);
+        Ok(())
     }
 }
 
-#[async_trait]
-impl InlineSink for DeliverySink {
-    type Input = BenchEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
+fn delivered(event: &BenchEvent) -> Delivered {
+    Delivered {
+        event_id: event.event_id,
     }
+}
 
-    async fn write(&mut self, event: BenchEvent) -> Result<(), SinkWriteFailure> {
-        self.delivered.lock().unwrap().push(event.event_id);
-        Ok(())
-    }
+type DeliverySink = Perform<fn(&BenchEvent) -> Delivered, BenchEvent, Delivered>;
+
+fn delivery_sink(expected_count: u64) -> (DeliverySink, Arc<Mutex<Vec<u64>>>) {
+    let log = Arc::new(Mutex::new(Vec::with_capacity(expected_count as usize)));
+    let sink = perform(delivered as fn(&BenchEvent) -> Delivered).through(Port::to(DeliveryLog {
+        delivered: log.clone(),
+    }));
+    (sink, log)
 }
 
 /// Create a temporary journal for benchmarking
@@ -252,7 +254,7 @@ async fn run_execution_test(stage_count: usize) -> anyhow::Result<Vec<u64>> {
     let (journals_base_path, _temp_dir) = create_temp_journals_base(&test_name)?;
 
     let source = TimestampedSource::new(INPUTS);
-    let (sink, delivered) = DeliverySink::new(INPUTS);
+    let (sink, delivered) = delivery_sink(INPUTS);
 
     let handle = build_pipeline(stage_count, source, sink, journals_base_path).await?;
     handle

@@ -16,7 +16,9 @@ use super::validation;
 use obzenflow::effects::Port;
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::{circuit_breaker, rate_limit, retry, sink_delivery_observer};
+use obzenflow::middleware::{
+    circuit_breaker, effect_observer, rate_limit, retry, typed_effect_observer,
+};
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
 use serde::{Deserialize, Serialize};
@@ -142,19 +144,19 @@ pub fn assemble_flow(
                 );
 
                 paid_orders = sink!(
-                    PaymentAuthorized with { sink_delivery_observer(
+                    PaymentAuthorized with { effect_observer(
                         "shipping-delivery-log",
                         ShippingDeliveryLog
-                    ) } => shipping_handoff.idempotent()
+                    ) } => shipping_handoff
                 );
-                declined_orders = sink!(PaymentDeclined => record_declined.idempotent());
-                invalid_orders = sink!(InvalidOrder => record_invalid.idempotent());
-                cancelled_orders = sink!(CancelledOrder => record_cancelled.idempotent());
+                declined_orders = sink!(PaymentDeclined => record_declined);
+                invalid_orders = sink!(InvalidOrder => record_invalid);
+                cancelled_orders = sink!(CancelledOrder => record_cancelled);
                 manual_review = sink!(
-                    PaymentAuthorizationUnavailable with { sink_delivery_observer(
+                    PaymentAuthorizationUnavailable with { typed_effect_observer(
                         "manual-review-delivery-log",
                         ManualReviewDeliveryLog
-                    ) } => record_unavailable.idempotent()
+                    ) } => record_unavailable
                 );
             },
 

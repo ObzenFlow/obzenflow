@@ -14,19 +14,28 @@ use syn::{
     Type, TypeParamBound, TypePath,
 };
 
-const MISSING_GUARANTEE: &str = "`#[effect]` needs its guarantee: `exactly_once` or `at_least_once`
+const MISSING_GUARANTEE: &str =
+    "`#[effect]` needs its guarantee: `exactly_once`, `at_least_once` or `at_most_once`
   exactly_once    the call takes effect once even if it runs again: the operation is
                   idempotent, or the method takes `key: &IdempotencyKey` and the other
                   end deduplicates by it, or it takes `tx: EffectCommitHandle<Outcome>`
                   and commits its outcome
   at_least_once   the call may take effect more than once after a crash; the stage row
-                  accepts that with `.at_least_once::<Request>()`";
+                  accepts that with `.at_least_once::<Request>()`
+  at_most_once    the call takes effect at most once; a call a crash left in doubt is
+                  recorded abandoned and never made again";
 
 const MISSING_TYPE: &str =
     "`#[effect]` needs `type = \"...\"`, the effect type the journal records this call under";
 
-const ARGUMENTS: &str = "`#[effect]` takes `type = \"...\"`, `exactly_once` or `at_least_once`, \
-                         and optionally `schema_version = N`";
+const ARGUMENTS: &str = "`#[effect]` takes `type = \"...\"`, `exactly_once`, `at_least_once` or \
+                         `at_most_once`, and optionally `schema_version = N` and \
+                         `records = reply`";
+
+const RECORDS: &str = "`records` is `facts`, the default, or `reply`";
+
+const ONE_GUARANTEE: &str =
+    "an effect method states one guarantee: `exactly_once`, `at_least_once` or `at_most_once`";
 
 const REQUEST_SHAPE: &str =
     "an effect method takes its request by reference after `&self`, as `request: &MyRequest`";
@@ -382,8 +391,25 @@ fn names_outside_the_port(tokens: TokenStream, generics: &Generics) -> bool {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Guarantee {
-    ExactlyOnce,
-    AtLeastOnce,
+    Exactly,
+    AtLeast,
+    AtMost,
+}
+
+impl Guarantee {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Exactly => "exactly_once",
+            Self::AtLeast => "at_least_once",
+            Self::AtMost => "at_most_once",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Records {
+    Facts,
+    Reply,
 }
 
 enum Takes {
@@ -399,6 +425,7 @@ struct EffectMethod<'a> {
     effect_type: LitStr,
     schema_version: Option<LitInt>,
     guarantee: Guarantee,
+    records: Records,
     request: &'a TypePath,
     takes: Takes,
     answer: TokenStream,
@@ -421,27 +448,38 @@ fn read_effect<'a>(
     let arguments = effect_arguments(attribute)?;
     let request = request_type(signature)?;
     let takes = remaining_parameters(signature)?;
+    let repeated = arguments.guarantee.word();
     match (arguments.guarantee, &takes) {
-        (Guarantee::AtLeastOnce, Takes::Key { .. }) => {
+        (Guarantee::AtLeast | Guarantee::AtMost, Takes::Key { .. }) => {
             return Err(syn::Error::new(
                 arguments.written.span(),
                 format!(
-                    "`{}` takes an idempotency key, so it is `exactly_once`, not `at_least_once`",
+                    "`{}` takes an idempotency key, so it is `exactly_once`, not `{repeated}`",
                     signature.ident
                 ),
             ));
         }
-        (Guarantee::AtLeastOnce, Takes::Handle) => {
+        (Guarantee::AtLeast | Guarantee::AtMost, Takes::Handle) => {
             return Err(syn::Error::new(
                 arguments.written.span(),
                 format!(
                     "`{}` commits through an `EffectCommitHandle`, so it is `exactly_once`, not \
-                     `at_least_once`",
+                     `{repeated}`",
                     signature.ident
                 ),
             ));
         }
         _ => {}
+    }
+    if arguments.records == Records::Reply && matches!(takes, Takes::Handle) {
+        return Err(syn::Error::new(
+            arguments.written.span(),
+            format!(
+                "`{}` commits its outcome through an `EffectCommitHandle`, so it records facts, \
+                 not a reply",
+                signature.ident
+            ),
+        ));
     }
     Ok(Some(EffectMethod {
         signature,
@@ -449,6 +487,7 @@ fn read_effect<'a>(
         effect_type: arguments.effect_type,
         schema_version: arguments.schema_version,
         guarantee: arguments.guarantee,
+        records: arguments.records,
         request,
         takes,
         answer: answer_type(signature)?,
@@ -459,12 +498,14 @@ struct EffectArguments {
     effect_type: LitStr,
     schema_version: Option<LitInt>,
     guarantee: Guarantee,
+    records: Records,
     written: Ident,
 }
 
 fn effect_arguments(attribute: &Attribute) -> Result<EffectArguments, syn::Error> {
     let mut effect_type: Option<LitStr> = None;
     let mut schema_version: Option<LitInt> = None;
+    let mut records = Records::Facts;
     let mut guarantee: Option<(Guarantee, Ident)> = None;
     if !matches!(attribute.meta, Meta::Path(_)) {
         attribute.parse_nested_meta(|meta| {
@@ -476,15 +517,23 @@ fn effect_arguments(attribute: &Attribute) -> Result<EffectArguments, syn::Error
                 schema_version = Some(meta.value()?.parse()?);
                 return Ok(());
             }
+            if meta.path.is_ident("records") {
+                let value: Ident = meta.value()?.parse()?;
+                records = match value.to_string().as_str() {
+                    "facts" => Records::Facts,
+                    "reply" => Records::Reply,
+                    _ => return Err(syn::Error::new(value.span(), RECORDS)),
+                };
+                return Ok(());
+            }
             let word = match meta.path.get_ident() {
-                Some(word) if word == "exactly_once" => (Guarantee::ExactlyOnce, word.clone()),
-                Some(word) if word == "at_least_once" => (Guarantee::AtLeastOnce, word.clone()),
+                Some(word) if word == "exactly_once" => (Guarantee::Exactly, word.clone()),
+                Some(word) if word == "at_least_once" => (Guarantee::AtLeast, word.clone()),
+                Some(word) if word == "at_most_once" => (Guarantee::AtMost, word.clone()),
                 _ => return Err(meta.error(ARGUMENTS)),
             };
             if guarantee.is_some() {
-                return Err(
-                    meta.error("an effect method is `exactly_once` or `at_least_once`, not both")
-                );
+                return Err(meta.error(ONE_GUARANTEE));
             }
             guarantee = Some(word);
             Ok(())
@@ -498,6 +547,7 @@ fn effect_arguments(attribute: &Attribute) -> Result<EffectArguments, syn::Error
             effect_type,
             schema_version,
             guarantee,
+            records,
             written,
         }),
         (effect_type, guarantee) => {
@@ -717,10 +767,21 @@ fn generated_request(
     let awaited = method.signature.asyncness.map(|_| quote!(.await));
     let cfgs = &method.cfgs;
     let safety = match (method.guarantee, &method.takes) {
-        (Guarantee::AtLeastOnce, _) => quote!(AtLeastOnce),
-        (Guarantee::ExactlyOnce, Takes::Key { .. }) => quote!(RequiresKey),
-        (Guarantee::ExactlyOnce, Takes::Handle) => quote!(Transactional),
-        (Guarantee::ExactlyOnce, Takes::Nothing | Takes::Context) => quote!(Idempotent),
+        (Guarantee::AtLeast, _) => quote!(AtLeastOnce),
+        (Guarantee::AtMost, _) => quote!(AtMostOnce),
+        (Guarantee::Exactly, Takes::Key { .. }) => quote!(RequiresKey),
+        (Guarantee::Exactly, Takes::Handle) => quote!(Transactional),
+        (Guarantee::Exactly, Takes::Nothing | Takes::Context) => quote!(Idempotent),
+    };
+    let (records, outcome) = match method.records {
+        Records::Facts => (
+            quote!(#effects::DomainFacts),
+            quote!(<#answer as #effects::PortAnswer>::Outcome),
+        ),
+        Records::Reply => (
+            quote!(#effects::RecordedReply),
+            quote!(<#answer as #effects::PortReply>::Reply),
+        ),
     };
     let (context, body) = match &method.takes {
         Takes::Nothing => (quote!(_), quote!(#owner::#name(port, self)#awaited)),
@@ -762,7 +823,8 @@ fn generated_request(
                 #schema_version
                 type Safety = #effects::#safety;
                 type Port = #port;
-                type Outcome = <#answer as #effects::PortAnswer>::Outcome;
+                type Outcome = #outcome;
+                type Records = #records;
 
                 async fn call(
                     &self,
@@ -1044,7 +1106,9 @@ mod tests {
         });
 
         assert!(
-            expanded.contains("`#[effect]` needs its guarantee: `exactly_once` or `at_least_once`"),
+            expanded.contains(
+                "`#[effect]` needs its guarantee: `exactly_once`, `at_least_once` or `at_most_once`"
+            ),
             "{expanded}"
         );
         assert!(
@@ -1088,6 +1152,23 @@ mod tests {
             "{expanded}"
         );
         assert!(expanded.contains(KEY_AND_HANDLE), "{expanded}");
+    }
+
+    #[test]
+    fn keyed_method_at_most_once_fails_compile() {
+        let expanded = expanded(syn::parse_quote! {
+            trait NoticePort: Send + Sync {
+                #[effect(type = "partner.notice", at_most_once)]
+                fn notify(&self, request: &Notice, key: &IdempotencyKey) -> Result<(), EffectError>;
+            }
+        });
+
+        assert!(
+            expanded.contains(
+                "`notify` takes an idempotency key, so it is `exactly_once`, not `at_most_once`"
+            ),
+            "{expanded}"
+        );
     }
 
     #[test]

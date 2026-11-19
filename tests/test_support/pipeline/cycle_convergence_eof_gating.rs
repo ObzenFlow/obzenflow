@@ -7,7 +7,6 @@ use crate::replay_testkit;
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::contracts::ContractPhase;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
@@ -15,15 +14,16 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{CycleDepth, DeliveryContract, Outcomes, TransportContract};
+use obzenflow_core::{CycleDepth, Outcomes, TransportContract};
 use obzenflow_dsl::{
     async_infinite_source, async_source, flow, sink, source, test_flow, transform, FlowDefinition,
 };
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::{BackpressureAckGate, JournalProbe};
@@ -373,36 +373,35 @@ impl TypedTransformHandler for IterationTransform {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DoneCounterSink {
+#[derive(Clone, Debug, Serialize)]
+struct SeedKind {
+    kind: String,
+}
+
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+trait DoneCounterPort: Send + Sync {
+    #[effect(type = "cycle_convergence_eof_gating.count_done", at_least_once, records = reply)]
+    fn count(&self, seed: &SeedKind) -> Result<(), EffectError>;
+}
+
+/// Counts the sink's calls for `done` events.
+struct DoneCounter {
     done_events: Arc<AtomicU64>,
 }
 
-impl DoneCounterSink {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let done_events = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                done_events: done_events.clone(),
-            },
-            done_events,
-        )
-    }
-}
-
-#[async_trait]
-impl InlineSink for DoneCounterSink {
-    type Input = SeedEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
-    }
-
-    async fn write(&mut self, event: SeedEvent) -> Result<(), SinkWriteFailure> {
-        if event.kind == KIND_DONE {
+#[obzenflow_runtime::effects::system("done-counter", effects = obzenflow_runtime::effects)]
+impl DoneCounterPort for DoneCounter {
+    fn count(&self, seed: &SeedKind) -> Result<(), EffectError> {
+        if seed.kind == KIND_DONE {
             self.done_events.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+}
+
+fn seed_kind(event: &SeedEvent) -> SeedKind {
+    SeedKind {
+        kind: event.kind.clone(),
     }
 }
 
@@ -418,7 +417,10 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let iter_processed = Arc::new(AtomicU64::new(0));
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
-    let (sink, done_count) = DoneCounterSink::new();
+    let done_count = Arc::new(AtomicU64::new(0));
+    let sink = perform(seed_kind).through(Port::to(DoneCounter {
+        done_events: done_count.clone(),
+    }));
     let iteration_started = Arc::new(Notify::new());
     let source = SeedThenEofSource::new(target_iterations, iteration_started.clone());
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
@@ -528,10 +530,7 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
             ),
             (
                 "eof_entry -> snk".to_string(),
-                vec![
-                    TransportContract::NAME.to_string(),
-                    DeliveryContract::NAME.to_string()
-                ]
+                vec![TransportContract::NAME.to_string()]
             ),
             (
                 "eof_iter -> eof_entry".to_string(),
@@ -630,7 +629,10 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let iter_processed = Arc::new(AtomicU64::new(0));
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
-    let (sink, done_count) = DoneCounterSink::new();
+    let done_count = Arc::new(AtomicU64::new(0));
+    let sink = perform(seed_kind).through(Port::to(DoneCounter {
+        done_events: done_count.clone(),
+    }));
     let source = SeedThenDrainSource::new(target_iterations);
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
     let iter = IterationTransform::new(iter_processed_for_flow, None);
@@ -768,7 +770,10 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
     let iter_processed = Arc::new(AtomicU64::new(0));
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
-    let (sink, done_count) = DoneCounterSink::new();
+    let done_count = Arc::new(AtomicU64::new(0));
+    let sink = perform(seed_kind).through(Port::to(DoneCounter {
+        done_events: done_count.clone(),
+    }));
 
     // One correlation converges quickly; one correlation never converges and must be aborted
     // by CycleGuard max_iterations. Default max_iterations=30, so pick a target > 30.
@@ -841,7 +846,9 @@ async fn cycle_rejects_sccs_with_multiple_entry_points() {
         let source_b = SingleSeedSource::new(1);
         let transform_a = EntryConvergeTransform::new(Arc::new(AtomicU64::new(0)));
         let transform_b = EntryConvergeTransform::new(Arc::new(AtomicU64::new(0)));
-        let (sink, _done_count) = DoneCounterSink::new();
+        let sink = perform(seed_kind).through(Port::to(DoneCounter {
+            done_events: Arc::default(),
+        }));
 
         Ok(flow! {
             name: "cycle_reject_multi_entry_scc",

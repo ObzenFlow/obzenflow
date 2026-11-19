@@ -7,7 +7,7 @@ use super::{CallRequest, DeclaredEffectSet, Effects, StageCompletion};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
 use async_trait::async_trait;
-use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
+use obzenflow_core::event::schema::{EffectOutcome, EmptySet, FactsOf, WithMember};
 use obzenflow_core::TypedPayload;
 use std::marker::PhantomData;
 
@@ -143,6 +143,7 @@ where
     F: for<'input> Fn(&'input In) -> R + Send + Sync,
     In: TypedPayload + Send + Sync + 'static,
     R: CallRequest,
+    R::Outcome: EffectOutcome,
 {
     type Input = In;
     type Output = FactsOf<R::Outcome>;
@@ -154,6 +155,19 @@ where
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.call_as_output((self.request)(&input)).await?;
         Ok(fx.complete()?)
+    }
+}
+
+impl<F, In, R> super::sink::SinkRole<In> for Perform<F, In, R>
+where
+    F: for<'input> Fn(&'input In) -> R + Send + Sync + 'static,
+    In: 'static,
+    R: super::sink::SinkRequest,
+{
+    type Request = R;
+
+    fn prepare(&self, input: &In) -> Result<R, HandlerError> {
+        Ok((self.request)(input))
     }
 }
 

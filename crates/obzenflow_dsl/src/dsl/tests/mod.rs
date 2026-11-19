@@ -4,7 +4,6 @@
 
 //! Tests for the DSL
 
-pub mod archive_sink_gate_test;
 pub mod as_of_join_contract_test;
 pub mod composite_source_guards_test;
 pub mod composite_substrate_test;

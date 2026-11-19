@@ -5,12 +5,11 @@
 //! FLOWIP-133c composed proofs for strict replay and resume-to-live HTTP sources.
 
 use super::*;
-use async_trait::async_trait;
+use obzenflow_adapters::sinks::CountingSink;
 use obzenflow_adapters::sources::http_pull::HttpRetryConfig;
 use obzenflow_adapters::sources::{
     simple_poll, HttpPollConfig, HttpPollSource, HttpPullConfig, HttpPullSource,
 };
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, ReattachGuarantee, SourcePollErrorKind, SourceReattachedFact,
 };
@@ -25,12 +24,9 @@ use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinit
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
-use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
 use obzenflow_runtime::stages::source::{AsyncFiniteSourceConnector, SourceReaderInitContext};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -70,26 +66,6 @@ fn enter_isolated_test(test_name: &str) -> bool {
         .expect("start isolated replay test process");
     assert!(status.success(), "isolated replay test failed: {test_name}");
     false
-}
-
-#[derive(Clone, Debug)]
-struct CountingSink {
-    delivered: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = HttpFixtureEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _input: HttpFixtureEvent) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
 }
 
 async fn spawn_http_fixture(
@@ -289,7 +265,7 @@ fn pull_flow(
                 obzenflow_dsl::dsl::FlowBuildError::StageResourcesFailed(error.to_string())
             })?;
         let source = HttpPullSource::new(decoder(url), config);
-        let collected = CountingSink { delivered };
+        let collected = CountingSink::<HttpFixtureEvent>::new(delivered);
 
         Ok(flow! {
             name: "flowip_133c_http_pull",
@@ -327,7 +303,7 @@ fn poll_flow(
                 obzenflow_dsl::dsl::FlowBuildError::StageResourcesFailed(error.to_string())
             })?;
         let source = HttpPollSource::new(decoder(url), config);
-        let collected = CountingSink { delivered };
+        let collected = CountingSink::<HttpFixtureEvent>::new(delivered);
 
         Ok(flow! {
             name: "flowip_133c_http_poll",
@@ -370,7 +346,6 @@ async fn bootstrap_from(
         replay: Some(ReplayBootstrap {
             archive_path,
             allow_incomplete_archive,
-            allow_duplicate_sink_delivery: false,
             verb,
         }),
         archive_evidence: Some(archive.evidence()),
@@ -678,7 +653,7 @@ async fn strict_replay_keeps_the_default_source_client_cold() {
 
     assert_eq!(replay_initializations.load(Ordering::SeqCst), 0);
     assert_eq!(replay_requests.load(Ordering::SeqCst), 0);
-    assert_eq!(replay_delivered.load(Ordering::SeqCst), 1);
+    assert_eq!(replay_delivered.load(Ordering::SeqCst), 0);
     let replay_archive = latest_run_dir(&journal_base);
     assert_ne!(live_archive, replay_archive);
 
@@ -757,12 +732,7 @@ async fn resume_initializes_only_after_the_recorded_prefix_crosses_continue_live
         )
         .await;
         wait_for_running(&resumed).await;
-        wait_for_count(
-            resume_delivered.as_ref(),
-            RECORDED + 1,
-            "resume prefix plus live delivery",
-        )
-        .await;
+        wait_for_count(resume_delivered.as_ref(), 1, "resume live delivery").await;
         wait_for_count(
             resume_initializations.as_ref(),
             1,
@@ -776,6 +746,7 @@ async fn resume_initializes_only_after_the_recorded_prefix_crosses_continue_live
 
     assert_eq!(resume_initializations.load(Ordering::SeqCst), 1);
     assert_eq!(resume_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(resume_delivered.load(Ordering::SeqCst), 1);
     let resumed_archive = latest_run_dir(&journal_base);
     let events = source_events(&resumed_archive).await;
     assert_eq!(

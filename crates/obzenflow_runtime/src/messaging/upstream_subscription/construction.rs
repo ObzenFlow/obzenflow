@@ -20,7 +20,7 @@ use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{DeliveryContract, JournalRecord, Result, StageId, TransportContract};
+use obzenflow_core::{JournalRecord, Result, StageId, TransportContract};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -426,7 +426,6 @@ where
             config,
             reader_stage,
             control_plane,
-            include_delivery_contract,
             cycle_guard_config,
         } = wiring;
 
@@ -437,7 +436,6 @@ where
             writer_id,
             journal: contract_journal,
             reader_stage,
-            receipt_aware_progress: include_delivery_contract,
             flow_context: None,
             output_events_written: SeqNo(0),
         });
@@ -450,9 +448,6 @@ where
                 .iter()
                 .map(|slot| {
                     let mut chain = ContractChain::new().with_contract(TransportContract::new());
-                    if include_delivery_contract {
-                        chain = chain.with_contract(DeliveryContract::default());
-                    }
 
                     // Divergence detection is attached only for SCC-internal upstreams
                     // when cycle metadata is available (FLOWIP-080r).
@@ -475,9 +470,8 @@ where
                 .collect();
 
             // Selected-feed chains intentionally start with the transport
-            // contract only. Delivery receipts and divergence predicates still
-            // use the physical edge chain until those contracts gain explicit
-            // selected-feed semantics.
+            // contract only. Divergence predicates still use the physical edge
+            // chain until that contract gains explicit selected-feed semantics.
             self.contract_feed_chains = self
                 .readers
                 .iter()

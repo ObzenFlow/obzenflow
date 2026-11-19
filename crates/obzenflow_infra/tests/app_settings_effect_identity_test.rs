@@ -7,10 +7,10 @@ use crate::replay_testkit;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_adapters::sinks::CountingSink;
 use obzenflow_adapters::sources::{
     YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
 };
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::effect_payload::{
     EffectInputPosition, EffectOrdinal, EffectType, SETTLEMENT_EFFECT_TYPE,
 };
@@ -32,14 +32,13 @@ use obzenflow_infra::journal::read::{
     open_disk_run, read_config_changes, read_configuration_refusals, ConfigChanges,
 };
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{Command, EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::effects::{Command, EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{AppTable, CandidateSet, ResolvedRuntimeConfig};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedInfiniteSourceHandler,
+    EffectfulTransformHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use replay_testkit::ReattachingSource;
@@ -264,26 +263,6 @@ impl EffectfulTransformHandler for ScoreTransform {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingSink {
-    delivered: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = Scored;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _input: Scored) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 #[derive(Default)]
 struct Run {
     executed: Executed,
@@ -335,7 +314,7 @@ async fn build(
             },
             scorer: Port::to(Scorer { executed }),
         };
-        let counting_sink = CountingSink { delivered };
+        let counting_sink = CountingSink::<Scored>::new(delivered);
         Ok(flow! {
             name: "app_identity",
             journals: disk_journals(base),
@@ -428,7 +407,6 @@ fn archive(path: PathBuf, verb: ReplayVerb) -> ReplayBootstrap {
     ReplayBootstrap {
         archive_path: path,
         allow_incomplete_archive: false,
-        allow_duplicate_sink_delivery: false,
         verb,
     }
 }

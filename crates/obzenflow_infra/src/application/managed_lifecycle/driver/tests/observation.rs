@@ -11,9 +11,9 @@ use obzenflow_core::event::{
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinition};
+use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -73,23 +73,27 @@ impl TypedAsyncInfiniteSourceHandler for PendingSource {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+struct Hold;
+
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[async_trait::async_trait]
+trait HoldPort {
+    #[effect(type = "test.observation_hold", at_least_once, records = reply)]
+    async fn hold(&self, request: &Hold) -> Result<(), EffectError>;
+}
+
 #[derive(Clone, Debug)]
 struct CountingSink {
     writes: Arc<AtomicUsize>,
     entered: Arc<Notify>,
     released: Arc<Notify>,
 }
+
+#[obzenflow_runtime::effects::system("holding", effects = obzenflow_runtime::effects)]
 #[async_trait::async_trait]
-impl InlineSink for CountingSink {
-    type Input = Payload;
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                "test".to_string(),
-            ),
-        )
-    }
-    async fn write(&mut self, _: Payload) -> Result<(), SinkWriteFailure> {
+impl HoldPort for CountingSink {
+    async fn hold(&self, _: &Hold) -> Result<(), EffectError> {
         self.entered.notify_one();
         self.released.notified().await;
         self.writes.fetch_add(1, Ordering::SeqCst);
@@ -110,7 +114,7 @@ async fn pending_flow(infinite: bool) -> (Arc<FlowHandle>, PendingSource, Counti
         entered: Arc::new(Notify::new()),
         released: Arc::new(Notify::new()),
     };
-    let sink_handler = sink.clone();
+    let sink_handler = perform(|_: &Payload| Hold).through(Port::to(sink.clone()));
     let flow = FlowDefinition::materialize(move |_| {
         Ok(if infinite {
             flow! {

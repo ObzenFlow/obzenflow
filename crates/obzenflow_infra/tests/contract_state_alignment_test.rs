@@ -91,7 +91,6 @@ async fn build_subscription_with_contracts(
         config,
         reader_stage: Some(stage_id),
         control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
         cycle_guard_config: None,
     });
 

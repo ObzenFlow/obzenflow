@@ -52,9 +52,6 @@ pub struct ReplayBootstrap {
     pub archive_path: PathBuf,
     /// When true, allow replay from an incomplete archive.
     pub allow_incomplete_archive: bool,
-    /// When true, resume proceeds past non-idempotent or undeclared sinks
-    /// instead of refusing (FLOWIP-120n F16).
-    pub allow_duplicate_sink_delivery: bool,
     /// Which verb selected the archive.
     pub verb: ReplayVerb,
 }
@@ -330,7 +327,6 @@ mod tests {
                 replay: Some(ReplayBootstrap {
                     archive_path: PathBuf::from("/tmp/archive"),
                     allow_incomplete_archive: true,
-                    allow_duplicate_sink_delivery: false,
                     verb: ReplayVerb::Replay,
                 }),
                 replay_archive: None,

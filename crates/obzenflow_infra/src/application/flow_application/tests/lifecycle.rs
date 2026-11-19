@@ -135,7 +135,7 @@ async fn application_drop(hosted: bool) {
     let flow_tx = Mutex::new(Some(flow_tx));
     let application = tokio::spawn(FlowApplication::launch(
         FlowDefinition::materialize(move |_| {
-            let sink = NoopSink;
+            let sink = noop_sink();
             Ok(flow! {
                 name: "application_drop", journals: crate::journal::memory_journals(),
                 stages: {
@@ -258,7 +258,7 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
     let application = tokio::spawn(FlowApplication::launch(
         FlowDefinition::materialize(move |_| {
             let source = IdleInfiniteSource;
-            let sink = NoopSink;
+            let sink = noop_sink();
             Ok(flow! {
                 name: "application_drop_preparation", journals: crate::journal::memory_journals(),
                 stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
@@ -367,7 +367,7 @@ async fn hosted_start_observes_runtime_exit_before_readiness() {
         let result = tokio::time::timeout(Duration::from_secs(2), FlowApplication::launch(
             FlowDefinition::new(move |context| async move {
                 let source = IdleInfiniteSource;
-                let sink = NoopSink;
+                let sink = noop_sink();
                 let flow = flow! {
                     name: "startup_runtime_exit", journals: crate::journal::memory_journals(),
                     stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
@@ -432,7 +432,7 @@ enabled = false
         let hook_observed = observed.clone();
         let definition = FlowDefinition::materialize(move |_| {
             let source = CountingSource(source_calls);
-            let sink = NoopSink;
+            let sink = noop_sink();
             Ok(flow! {
                 name: "startup_signal", journals: crate::journal::memory_journals(),
                 stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
@@ -526,7 +526,7 @@ enabled = false
     let flow_tx = Mutex::new(Some(flow_tx));
     let definition = FlowDefinition::materialize(move |_| {
         let source = IdleInfiniteSource;
-        let sink = NoopSink;
+        let sink = noop_sink();
         Ok(flow! {
             name: "startup_cleanup_join", journals: crate::journal::memory_journals(),
             stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
@@ -740,7 +740,7 @@ enabled = false
                     terminal: matches!(phase, FaultPhase::Terminal),
                     calls: source_calls,
                 };
-                let sink = NoopSink;
+                let sink = noop_sink();
                 Ok(flow! {
                     name: "managed_host_fault",
                     journals: crate::journal::memory_journals(),
@@ -953,7 +953,7 @@ enabled = false
             });
         let definition = FlowDefinition::materialize(move |_| {
             let source = IdleInfiniteSource;
-            let sink = NoopSink;
+            let sink = noop_sink();
             Ok(flow! {
                 name: "embedded_host_scope", journals: crate::journal::memory_journals(),
                 stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
@@ -1061,7 +1061,7 @@ enabled = false
                 let application = FlowApplication::launch(
                     FlowDefinition::materialize(move |_| {
                         let source = IdleInfiniteSource;
-                        let sink = NoopSink;
+                        let sink = noop_sink();
                         Ok(flow! {
                             name: "failed_exit_signal", journals: crate::journal::memory_journals(),
                             stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
@@ -1179,7 +1179,7 @@ async fn graceful_finite_completion_and_infinite_cancellation_match_application_
             let definition = if finite {
                 FlowDefinition::materialize(move |_| {
                     let source = WaitingFiniteSource;
-                    let sink = NoopSink;
+                    let sink = noop_sink();
                     Ok(flow! {
                         name: "finite_stop_outcome", journals: crate::journal::memory_journals(),
                         stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
@@ -1189,7 +1189,7 @@ async fn graceful_finite_completion_and_infinite_cancellation_match_application_
             } else {
                 FlowDefinition::materialize(move |_| {
                     let source = IdleInfiniteSource;
-                    let sink = NoopSink;
+                    let sink = noop_sink();
                     Ok(flow! {
                         name: "infinite_stop_outcome", journals: crate::journal::memory_journals(),
                         stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },

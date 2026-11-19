@@ -11,10 +11,8 @@ use super::{
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use crate::testing::causal_fixture::fact_descriptor;
 use async_trait::async_trait;
-use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryOutcome};
 use obzenflow_core::event::payloads::effect_payload::{EffectFactOwner, EffectProvenance};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -30,10 +28,7 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{
-    ContractResult, DeliveryContract, EventId, EventType, ReaderGeneration, StageId,
-    TransportContract, WriterId,
-};
+use obzenflow_core::{EventId, EventType, ReaderGeneration, StageId, TransportContract, WriterId};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,15 +36,6 @@ use std::sync::{Arc, Mutex};
 
 #[path = "pending_read_tests.rs"]
 mod pending_read;
-
-fn committed_input(event: ChainEvent, vector_clock: VectorClock) -> JournalRecord<ChainPayload> {
-    let mut record = JournalRecord::new(JournalWriterId::new(), event);
-    obzenflow_core::event::vector_clock::CausalOrderingService::update_with_parent(
-        &mut record.envelope.provenance.journal.vector_clock,
-        &vector_clock,
-    );
-    record
-}
 
 fn contract_flow_context(stage_id: StageId) -> obzenflow_core::event::provenance::FlowContext {
     crate::stages::common::supervision::flow_context_factory::make_flow_context(
@@ -105,7 +91,6 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
             config: ContractConfig::default(),
             reader_stage: Some(owner.stage_id),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .with_contract_flow_context(owner.clone());
@@ -506,7 +491,6 @@ async fn progress_append_failure_does_not_advance_progress_state() {
         config: ContractConfig::default(),
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
         cycle_guard_config: None,
     });
 
@@ -549,7 +533,6 @@ async fn final_append_failure_keeps_final_emitted_false() {
         config: ContractConfig::default(),
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
         cycle_guard_config: None,
     });
 
@@ -595,7 +578,6 @@ async fn an_ended_reader_gets_its_final_verdict_on_the_next_check() {
             config: ContractConfig::default(),
             reader_stage: None,
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         });
 
@@ -617,55 +599,6 @@ async fn an_ended_reader_gets_its_final_verdict_on_the_next_check() {
             ))
             .count(),
         1
-    );
-}
-
-#[tokio::test]
-async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
-    let upstream_stage = StageId::new();
-    let upstream_owner = JournalOwner::stage(upstream_stage);
-    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
-    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
-
-    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
-        .await
-        .unwrap();
-
-    let contract_stage = StageId::new();
-    let contract_owner = JournalOwner::stage(contract_stage);
-    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
-
-    subscription = subscription.with_contracts(ContractsWiring {
-        writer_id: WriterId::from(contract_stage),
-        contract_journal: contract_journal.clone(),
-        config: ContractConfig::default(),
-        reader_stage: None,
-        control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: true,
-        cycle_guard_config: None,
-    });
-
-    subscription.state.mark_reader_eof(0);
-
-    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].reader_seq = SeqNo(1);
-    reader_progress[0].receipted_seq = SeqNo(1);
-
-    let status = subscription
-        .check_contracts_diagnostics_only(&mut reader_progress)
-        .await;
-    assert!(matches!(status, ContractStatus::Healthy), "{status:?}");
-
-    assert!(!reader_progress[0].final_emitted);
-    assert!(!reader_progress[0].contract_violated);
-
-    assert!(
-        contract_journal
-            .read_causally_ordered()
-            .await
-            .unwrap()
-            .is_empty(),
-        "diagnostics-only checks leave an ended reader's records to the authoritative check"
     );
 }
 
@@ -700,7 +633,6 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
         config: ContractConfig::default(),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
         cycle_guard_config: None,
     });
 
@@ -808,7 +740,6 @@ async fn every_required_finalization_append_must_commit_before_one_final_report(
             config: ContractConfig::default(),
             reader_stage: Some(reader),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .with_contract_flow_context(contract_flow_context(reader))
@@ -898,7 +829,6 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
         config: ContractConfig::default(),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
         cycle_guard_config: None,
     });
 
@@ -945,311 +875,6 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
 }
 
 #[tokio::test]
-async fn progress_reports_consumption_separately_from_receipt_watermark() {
-    let upstream_stage = StageId::new();
-    let upstream_owner = JournalOwner::stage(upstream_stage);
-    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
-    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
-
-    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
-        .await
-        .unwrap();
-
-    let contract_stage = StageId::new();
-    let contract_owner = JournalOwner::stage(contract_stage);
-    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
-
-    subscription = subscription.with_contracts(ContractsWiring {
-        writer_id: WriterId::from(contract_stage),
-        contract_journal: contract_journal.clone(),
-        config: ContractConfig::default(),
-        reader_stage: None,
-        control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: true,
-        cycle_guard_config: None,
-    });
-
-    let read_event_id = EventId::new();
-    let receipted_event_id = EventId::new();
-    let mut read_clock = VectorClock::new();
-    read_clock
-        .clocks
-        .insert(crate::testing::causal_fixture::coordinate("upstream"), 3);
-    let mut receipted_clock = VectorClock::new();
-    receipted_clock
-        .clocks
-        .insert(crate::testing::causal_fixture::coordinate("upstream"), 1);
-
-    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].reader_seq = SeqNo(3);
-    reader_progress[0].receipted_seq = SeqNo(1);
-    reader_progress[0].last_event_id = Some(read_event_id);
-    reader_progress[0].last_vector_clock = Some(read_clock.clone());
-    reader_progress[0].last_receipted_event_id = Some(receipted_event_id);
-    reader_progress[0].last_receipted_vector_clock = Some(receipted_clock.clone());
-
-    let status = subscription.check_contracts(&mut reader_progress).await;
-    assert!(matches!(status, ContractStatus::ProgressEmitted));
-    assert_eq!(reader_progress[0].last_progress_seq, SeqNo(1));
-
-    let events = contract_journal.read_causally_ordered().await.unwrap();
-    let progress = events
-        .iter()
-        .find_map(|env| match &env.payload {
-            ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
-                reader_seq,
-                last_event_id,
-                vector_clock,
-                consumed_count,
-                receipts,
-                ..
-            }) => Some((
-                *reader_seq,
-                *last_event_id,
-                vector_clock.clone(),
-                *consumed_count,
-                receipts.clone(),
-            )),
-            _ => None,
-        })
-        .expect("expected ConsumptionProgress event");
-
-    assert_eq!(progress.0, SeqNo(3));
-    assert_eq!(progress.1, Some(read_event_id));
-    assert_eq!(progress.2, Some(read_clock));
-    assert_eq!(progress.3, Count(3));
-    let receipts = progress.4.expect("receipt tracking is available");
-    assert_eq!(receipts.terminal_frontier, SeqNo(1));
-    assert_eq!(receipts.last_event_id, Some(receipted_event_id));
-}
-
-#[tokio::test]
-async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous() {
-    let upstream_stage = StageId::new();
-    let upstream_owner = JournalOwner::stage(upstream_stage);
-    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
-    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
-
-    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
-        .await
-        .unwrap();
-
-    let contract_stage = StageId::new();
-    let contract_owner = JournalOwner::stage(contract_stage);
-    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
-
-    subscription = subscription.with_contracts(ContractsWiring {
-        writer_id: WriterId::from(contract_stage),
-        contract_journal,
-        config: ContractConfig::default(),
-        reader_stage: None,
-        control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: true,
-        cycle_guard_config: None,
-    });
-
-    let writer_id = WriterId::from(upstream_stage);
-    let first = ChainEventFactory::data_event(
-        writer_id,
-        "test.event",
-        std::num::NonZeroU32::MIN,
-        json!({"seq": 1}),
-    );
-    let second = ChainEventFactory::data_event(
-        writer_id,
-        "test.event",
-        std::num::NonZeroU32::MIN,
-        json!({"seq": 2}),
-    );
-
-    let mut clock_1 = VectorClock::new();
-    clock_1
-        .clocks
-        .insert(crate::testing::causal_fixture::coordinate("upstream"), 1);
-    let mut clock_2 = VectorClock::new();
-    clock_2
-        .clocks
-        .insert(crate::testing::causal_fixture::coordinate("upstream"), 2);
-
-    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    let first_record = committed_input(first.clone(), clock_1.clone());
-    let second_record = committed_input(second.clone(), clock_2.clone());
-    reader_progress[0].reader_seq = SeqNo(1);
-    reader_progress[0].track_pending_delivery_input(first_record.clone().into());
-    reader_progress[0].track_pending_receipt(first_record.commitment(), clock_1);
-    reader_progress[0].reader_seq = SeqNo(2);
-    reader_progress[0].track_pending_delivery_input(second_record.clone().into());
-    reader_progress[0].track_pending_receipt(second_record.commitment(), clock_2.clone());
-
-    let second_receipt = ChainEventFactory::delivery_event(
-        WriterId::from(contract_stage),
-        obzenflow_core::event::payloads::delivery_payload::DeliveryPayload {
-            subject:
-                obzenflow_core::event::payloads::delivery_payload::DeliverySubject::from_record(
-                    &second_record,
-                ),
-            outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
-        },
-    );
-
-    assert!(subscription
-        .record_delivery_receipt(&second_receipt, &mut reader_progress)
-        .is_none());
-    assert_eq!(reader_progress[0].receipted_seq, SeqNo(0));
-
-    let first_receipt = ChainEventFactory::delivery_event(
-        WriterId::from(contract_stage),
-        obzenflow_core::event::payloads::delivery_payload::DeliveryPayload {
-            subject:
-                obzenflow_core::event::payloads::delivery_payload::DeliverySubject::from_record(
-                    &first_record,
-                ),
-            outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
-        },
-    );
-
-    let watermark = subscription
-        .record_delivery_receipt(&first_receipt, &mut reader_progress)
-        .expect("expected contiguous receipts to advance watermark");
-
-    assert_eq!(watermark.0, SeqNo(2));
-    assert_eq!(watermark.1, second.id);
-    assert_eq!(watermark.2, clock_2);
-    assert_eq!(reader_progress[0].receipted_seq, SeqNo(2));
-    assert!(reader_progress[0].pending_delivery_inputs.is_empty());
-    assert!(reader_progress[0].pending_receipts.is_empty());
-    assert!(reader_progress[0].committed_out_of_order.is_empty());
-}
-
-#[test]
-fn reconverging_forwarded_identity_requires_the_exact_receipt_subject() {
-    use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliverySubject};
-    let event = ChainEventFactory::data_event(
-        StageId::new().into(),
-        "forwarded",
-        std::num::NonZeroU32::new(2).unwrap(),
-        json!({}),
-    );
-    let records = [
-        JournalRecord::new(JournalWriterId::new(), event.clone()),
-        JournalRecord::new(JournalWriterId::new(), event),
-    ];
-    let upstreams = [StageId::new(), StageId::new()];
-    let mut progress = upstreams.map(ReaderProgress::new);
-    for (progress, record) in progress.iter_mut().zip(&records) {
-        progress.reader_seq = SeqNo(1);
-        progress.track_pending_delivery_input(record.clone().into());
-        progress.track_pending_receipt(
-            record.commitment(),
-            record.envelope.provenance.journal.vector_clock.clone(),
-        );
-    }
-    let mut receipt = ChainEventFactory::delivery_event(
-        StageId::new().into(),
-        DeliveryPayload {
-            subject: DeliverySubject::from_record(&records[1]),
-            outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
-        },
-    );
-    let mut chains = [None, None];
-    assert!(super::record_receipt(
-        &receipt,
-        "test",
-        true,
-        None,
-        &upstreams,
-        &mut chains,
-        &mut progress
-    )
-    .is_some());
-    assert_eq!(progress[0].receipted_seq, SeqNo(0));
-    assert_eq!(progress[0].pending_delivery_inputs.len(), 1);
-    assert_eq!(progress[1].receipted_seq, SeqNo(1));
-    let ChainPayload::Delivery(payload) = &mut receipt.payload else {
-        unreachable!()
-    };
-    payload.subject = DeliverySubject::from_record(&records[0]);
-    payload.subject.payload_schema_version = std::num::NonZeroU32::MIN;
-    assert!(super::record_receipt(
-        &receipt,
-        "test",
-        true,
-        None,
-        &upstreams,
-        &mut chains,
-        &mut progress
-    )
-    .is_none());
-    assert_eq!(progress[0].pending_delivery_inputs.len(), 1);
-}
-
-#[tokio::test]
-async fn forwarded_sink_input_settles_without_entering_authored_delivery_contract() {
-    let upstream_stage = StageId::new();
-    let upstream_owner = JournalOwner::stage(upstream_stage);
-    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
-    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
-
-    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
-        .await
-        .unwrap();
-
-    let sink_stage = StageId::new();
-    let contract_owner = JournalOwner::stage(sink_stage);
-    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
-    subscription = subscription.with_contracts(ContractsWiring {
-        writer_id: WriterId::from(sink_stage),
-        contract_journal,
-        config: ContractConfig::default(),
-        reader_stage: Some(sink_stage),
-        control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: true,
-        cycle_guard_config: None,
-    });
-
-    let source_stage = StageId::new();
-    let forwarded = ChainEventFactory::data_event(
-        WriterId::from(source_stage),
-        "forwarded.event",
-        std::num::NonZeroU32::MIN,
-        json!({"value": 1}),
-    );
-    let mut clock = VectorClock::new();
-    clock
-        .clocks
-        .insert(crate::testing::causal_fixture::coordinate("source"), 1);
-    let forwarded_record = committed_input(forwarded.clone(), clock);
-    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].track_pending_delivery_input(forwarded_record.clone().into());
-
-    let receipt = ChainEventFactory::delivery_event(
-        WriterId::from(sink_stage),
-        obzenflow_core::event::payloads::delivery_payload::DeliveryPayload {
-            subject:
-                obzenflow_core::event::payloads::delivery_payload::DeliverySubject::from_record(
-                    &forwarded_record,
-                ),
-            outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
-        },
-    );
-
-    assert!(subscription
-        .record_delivery_receipt(&receipt, &mut reader_progress)
-        .is_none());
-    assert!(reader_progress[0].pending_delivery_inputs.is_empty());
-    assert_eq!(reader_progress[0].receipted_seq, SeqNo(0));
-
-    let delivery_result = subscription.contract_chains[0]
-        .as_ref()
-        .expect("delivery contract chain")
-        .verify_all(upstream_stage, sink_stage)
-        .into_iter()
-        .find_map(|(name, result)| (name.as_str() == DeliveryContract::NAME).then_some(result))
-        .expect("delivery contract result");
-    assert!(matches!(delivery_result, ContractResult::Passed(_)));
-}
-
-#[tokio::test]
 async fn reader_idle_appends_nothing() {
     tokio::time::pause();
 
@@ -1272,13 +897,11 @@ async fn reader_idle_appends_nothing() {
         config: ContractConfig::default(),
         reader_stage: Some(contract_stage),
         control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
         cycle_guard_config: None,
     });
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].reader_seq = SeqNo(1);
-    reader_progress[0].receipted_seq = SeqNo(1);
 
     let status = subscription.check_contracts(&mut reader_progress).await;
     assert!(
@@ -1348,7 +971,6 @@ async fn multi_reader_progress_isolated_under_partial_append_failure() {
         config: ContractConfig::default(),
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
         cycle_guard_config: None,
     });
 
@@ -1430,7 +1052,6 @@ async fn build_upstream_with_seq_divergence(
         config: contract_config,
         reader_stage: Some(reader_stage),
         control_plane,
-        include_delivery_contract: false,
         cycle_guard_config: None,
     });
 
@@ -1809,7 +1430,6 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             config: ContractConfig::default(),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .transport_only();
@@ -1830,10 +1450,9 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         other => panic!("expected physical cursor completion, got {other:?}"),
     }
 
-    // Physical completion is not logical delivery: no position, ordinal,
-    // contract read, or receipt state moves for the filtered row.
+    // Physical completion is not logical delivery: no position, ordinal or
+    // contract read moves for the filtered row.
     assert_eq!(reader_progress[0].reader_seq, SeqNo(0));
-    assert_eq!(reader_progress[0].receipted_seq, SeqNo(0));
     assert!(reader_progress[0].last_event_id.is_none());
     assert_eq!(subscription.delivered_counts()[0], DeliveredCount(0));
     assert_eq!(subscription.last_delivered_stage_input_position(), None);
@@ -1982,7 +1601,6 @@ async fn transport_progress_unique_feed_matches_final() {
             config: ContractConfig::default(),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .transport_only();
@@ -2138,7 +1756,6 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
             config: ContractConfig::default(),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .transport_only();
@@ -2277,7 +1894,6 @@ async fn a_merged_lineage_aliases_the_upstream_in_every_member() {
                 config: ContractConfig::default(),
                 reader_stage: Some(reader_stage),
                 control_plane: Arc::new(NoControlPlane),
-                include_delivery_contract: false,
                 cycle_guard_config: None,
             })
             .transport_only();
@@ -2482,7 +2098,6 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
             config: ContractConfig::default(),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .transport_only();
@@ -2628,7 +2243,6 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
             config: ContractConfig::default(),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .transport_only();
@@ -2820,7 +2434,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
                     std::num::NonZeroU32::MIN,
                     json!({}),
                 ),
-                ExecutionPayload::EffectRecord(effect_record.clone()),
+                ExecutionPayload::EffectRecord(Box::new(effect_record.clone())),
                 obzenflow_core::config::LineagePolicy::default(),
             )
             .with_effect_provenance(EffectProvenance::from_record(
@@ -3171,7 +2785,6 @@ fn merge_consumption_progress(writer: StageId, seq: u64) -> ChainEvent {
                 selection: obzenflow_core::contracts::SubscriptionSelection::All,
             },
             consumed_count: obzenflow_core::event::types::Count(seq),
-            receipts: None,
             reader_seq: SeqNo(seq),
             last_event_id: None,
             vector_clock: None,
@@ -3619,7 +3232,6 @@ async fn canonical_merge_contract_read_accounting_fires_at_delivery_not_at_hold(
         config: ContractConfig::default(),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
-        include_delivery_contract: false,
         cycle_guard_config: None,
     });
 
@@ -4379,7 +3991,6 @@ async fn recorded_pair_with(
             config: ContractConfig::default(),
             reader_stage: Some(reader),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .with_contract_flow_context(contract_flow_context(reader))
@@ -4818,7 +4429,6 @@ async fn source_warning_cannot_mask_another_inputs_contract_failure() {
                     config: ContractConfig::default(),
                     reader_stage: Some(reader),
                     control_plane: Arc::new(NoControlPlane),
-                    include_delivery_contract: false,
                     cycle_guard_config: None,
                 })
                 .with_contract_flow_context(contract_flow_context(reader))
@@ -4917,7 +4527,6 @@ async fn recorded_inputs(
             config: ContractConfig::default(),
             reader_stage: Some(reader),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .with_contract_flow_context(contract_flow_context(reader))
@@ -5034,7 +4643,6 @@ async fn a_decision_row_that_fails_to_append_delivers_nothing() {
             config: ContractConfig::default(),
             reader_stage: Some(reader),
             control_plane: Arc::new(NoControlPlane),
-            include_delivery_contract: false,
             cycle_guard_config: None,
         })
         .with_contract_flow_context(contract_flow_context(reader))

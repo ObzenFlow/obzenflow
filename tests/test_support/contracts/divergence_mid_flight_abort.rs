@@ -21,7 +21,6 @@ use obzenflow_adapters::middleware::{
     SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
 use obzenflow_core::event::system_event::SystemEvent;
@@ -45,8 +44,7 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -415,21 +413,7 @@ impl FlowJournalFactory for CycleDepthFaultFactory {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingSink;
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = SeedEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
-    }
-
-    async fn write(&mut self, _event: SeedEvent) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type CountingSink = obzenflow::stages::sinks::DiscardSink<SeedEvent>;
 
 async fn committed_facts(
     journals: &[(obzenflow_core::StageId, Arc<dyn Journal<ChainEvent>>)],
@@ -455,7 +439,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let armed = delay.armed.clone();
     let entry = CycleEntryTransform;
     let iter = LoopBackTransform;
-    let sink = CountingSink;
+    let sink = CountingSink::new();
 
     let harness = test_flow! {
         name: "divergence_mid_flight_abort",
@@ -540,7 +524,7 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
     let source = SeedSource::new(50);
     let delay = DelayedSeedTransform::new(Duration::from_millis(1));
     let armed = delay.armed.clone();
-    let sink = CountingSink;
+    let sink = CountingSink::new();
 
     let harness = test_flow! {
         name: "divergence_mid_flight_contract_health",
@@ -607,7 +591,7 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     let branch_a = PassThroughTransform;
     let branch_b = PassThroughTransform;
     let merge = LoopBackTransform;
-    let sink = CountingSink;
+    let sink = CountingSink::new();
 
     let harness = test_flow! {
         name: "divergence_fan_in_inside_cycle",
@@ -693,7 +677,7 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     let armed = delay.armed.clone();
     let entry = PassThroughTransform;
     let iter = PassThroughTransform;
-    let sink = CountingSink;
+    let sink = CountingSink::new();
     let journals =
         |flow_id, _: Option<&std::path::Path>, _| Ok(CycleDepthFaultFactory::new(flow_id));
 

@@ -855,9 +855,6 @@ impl FlowApplication {
             };
 
             print_banner(&resumed_replayed_run);
-            for notice in flow_handle.resume_notices() {
-                println!("{notice}");
-            }
             application.protect_flow(&flow_handle);
 
             for line in super::config_report::settings_lines(

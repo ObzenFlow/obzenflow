@@ -11,8 +11,7 @@ mod lifecycle;
 mod middleware;
 
 use super::{ChainEvent, ChainPayload};
-use crate::event::payloads::delivery_payload::DeliveryPayload;
-use crate::event::provenance::causality_context::{CausalInput, CausalityContext};
+use crate::event::provenance::causality_context::CausalityContext;
 use crate::event::provenance::FlowContext;
 use crate::event::types::{EventId, WriterId};
 use std::num::NonZeroU32;
@@ -70,16 +69,6 @@ impl ChainEventFactory {
         payload: crate::event::payloads::flow_control_payload::FlowControlPayload,
     ) -> ChainEvent {
         Self::framework_event(writer_id, ChainPayload::FlowControl(payload))
-    }
-
-    /// Create a delivery event
-    pub fn delivery_event(writer_id: WriterId, payload: DeliveryPayload) -> ChainEvent {
-        let input = CausalInput {
-            id: payload.subject.input.event_id,
-            event_type: payload.subject.event_type.clone(),
-        };
-        Self::framework_event(writer_id, ChainPayload::Delivery(payload))
-            .with_causality(CausalityContext::with_input(input))
     }
 
     pub(crate) fn framework_event(writer_id: WriterId, content: ChainPayload) -> ChainEvent {

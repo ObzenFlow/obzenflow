@@ -10,13 +10,13 @@
 //! One test per binary: the bootstrap install is process-global, so a sibling
 //! test building concurrently would see this test's verb.
 
+use obzenflow_adapters::sinks::DiscardSink;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
-use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,34 +32,18 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
         replay: Some(ReplayBootstrap {
             archive_path: std::path::PathBuf::from("/nonexistent/archive"),
             allow_incomplete_archive: true,
-            allow_duplicate_sink_delivery: false,
             verb: ReplayVerb::Resume,
         }),
         replay_archive: None,
         ..Default::default()
     });
 
-    // Disk journals pass the F13 ephemeral-resume refusal and the declared
-    // sink passes the 120n F16 gate, so the build reaches the
-    // strategy-selection point this guard sits at.
+    // Disk journals pass the F13 ephemeral-resume refusal, so the build
+    // reaches the strategy-selection point this guard sits at.
     let base = tempfile::tempdir().expect("tempdir");
     let journals = disk_journals(base.path().to_path_buf());
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        #[derive(Clone, Debug)]
-        struct DiscardGuardSink {}
-        #[async_trait::async_trait]
-        impl InlineSink for DiscardGuardSink {
-            type Input = GuardEvent;
-            fn describe(&self) -> SinkDescription {
-                SinkDescription::method(
-                    obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-                )
-            }
-            async fn write(&mut self, _input: GuardEvent) -> Result<(), SinkWriteFailure> {
-                Ok(())
-            }
-        }
-        let guard_sink = DiscardGuardSink {};
+        let guard_sink = DiscardSink::<GuardEvent>::new();
 
         Ok(flow! {
             name: "verb_without_archive",
@@ -67,7 +51,7 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
 
             stages: {
                 src = source!(GuardEvent => placeholder!());
-                snk = sink!(GuardEvent => guard_sink.idempotent());
+                snk = sink!(GuardEvent => guard_sink);
             },
 
             topology: {

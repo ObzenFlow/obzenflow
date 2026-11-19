@@ -118,12 +118,6 @@ mod tests {
             obzenflow_core::event::context::StageType::Transform
         }
 
-        fn sink_description(
-            &self,
-        ) -> Option<&obzenflow_runtime::stages::common::handlers::SinkDescription> {
-            None
-        }
-
         fn source_continuation(
             &self,
         ) -> Option<obzenflow_runtime::stages::source::SourceContinuation> {

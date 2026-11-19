@@ -580,6 +580,7 @@ struct FixtureBindings {
     counting: EffectBinding<CountingEffect>,
     recorded_reply: EffectBinding<RecordedReplyEffect>,
     affine_counting: EffectBinding<AffineCountingEffect>,
+    at_most_once_counting: EffectBinding<AtMostOnceCountingEffect>,
     invariant_affine: EffectBinding<InvariantAffineEffect>,
     failing: EffectBinding<FailingEffect>,
     multi_fact: EffectBinding<MultiFactEffect>,
@@ -608,6 +609,7 @@ fn fixtures() -> &'static FixtureBindings {
         let counting = fixture_binding("counting");
         let recorded_reply = fixture_binding("recorded_reply");
         let affine_counting = fixture_binding("affine_counting");
+        let at_most_once_counting = fixture_binding("at_most_once_counting");
         let invariant_affine = fixture_binding("invariant_affine");
         let failing = fixture_binding("failing");
         let multi_fact = fixture_binding("multi_fact");
@@ -619,6 +621,7 @@ fn fixtures() -> &'static FixtureBindings {
             EffectDeclaration::named(&counting),
             EffectDeclaration::named(&recorded_reply),
             EffectDeclaration::named(&affine_counting),
+            EffectDeclaration::named(&at_most_once_counting),
             EffectDeclaration::named(&invariant_affine),
             EffectDeclaration::named(&failing),
             EffectDeclaration::named(&multi_fact),
@@ -632,6 +635,7 @@ fn fixtures() -> &'static FixtureBindings {
             counting,
             recorded_reply,
             affine_counting,
+            at_most_once_counting,
             invariant_affine,
             failing,
             multi_fact,
@@ -654,6 +658,7 @@ fn fixture_declarations() -> Vec<EffectDeclaration> {
         EffectDeclaration::named(&fixtures.counting),
         EffectDeclaration::named(&fixtures.recorded_reply),
         EffectDeclaration::named_at_least_once(&fixtures.affine_counting),
+        EffectDeclaration::named(&fixtures.at_most_once_counting),
         EffectDeclaration::named_at_least_once(&fixtures.invariant_affine),
         EffectDeclaration::named(&fixtures.failing),
         EffectDeclaration::named(&fixtures.multi_fact),
@@ -673,6 +678,7 @@ struct CountingEffect {
 fixture_effect!(CountingEffect, counting);
 fixture_effect!(RecordedReplyEffect, recorded_reply);
 fixture_effect!(AffineCountingEffect, affine_counting);
+fixture_effect!(AtMostOnceCountingEffect, at_most_once_counting);
 fixture_effect!(InvariantAffineEffect, invariant_affine);
 fixture_effect!(FailingEffect, failing);
 fixture_effect!(MultiFactEffect, multi_fact);
@@ -977,6 +983,36 @@ impl Effect for AffineCountingEffect {
 }
 
 #[derive(Clone, Debug)]
+struct AtMostOnceCountingEffect {
+    calls: Arc<AtomicUsize>,
+    binding: EffectBindingUse<Self>,
+}
+
+#[async_trait]
+impl Effect for AtMostOnceCountingEffect {
+    const EFFECT_TYPE: &'static str = "test.at_most_once_counting";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtMostOnce;
+    type BindingMode = Named<FixtureEvidence>;
+
+    type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
+
+    fn label(&self) -> &str {
+        "at-most-once-counting"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "kind": "at-most-once-counting" })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CountingOutput { value: 1 })
+    }
+}
+
+#[derive(Clone, Debug)]
 struct RepeatableBoundaryStateful {
     calls: Arc<AtomicUsize>,
 }
@@ -1146,6 +1182,7 @@ impl CallRequest for TransactionalCounting {
     type Safety = Transactional;
     type Port = dyn TransactionalLedger;
     type Outcome = CountingOutput;
+    type Records = DomainFacts;
 
     async fn call(
         &self,
@@ -2825,6 +2862,100 @@ async fn affine_start_append_failure_authors_no_terminal_and_never_executes() {
         .await
         .expect("failed journal remains readable")
         .is_empty());
+}
+
+#[tokio::test]
+async fn failed_start_commit_skips_call() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(FailingStartJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut effects = EffectsCore::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+
+    let error = effects
+        .perform(AtMostOnceCountingEffect {
+            binding: bound(),
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("a failed start commit escapes before the call");
+
+    assert!(matches!(error, EffectError::Journal(_)), "{error:?}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        journal.attempted_event_types(),
+        vec![EffectAttemptStarted::event_type_name()]
+    );
+}
+
+#[tokio::test]
+async fn at_most_once_in_doubt_attempt_records_abandonment() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let crashed_journal = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-outcome:v1:",
+    ));
+    let mut crashed = EffectsCore::new(invocation_context(
+        crashed_journal.clone(),
+        parent.clone(),
+        None,
+    ));
+    assert!(matches!(
+        crashed
+            .perform(AtMostOnceCountingEffect {
+                binding: bound(),
+                calls: calls.clone(),
+            })
+            .await,
+        Err(EffectError::Journal(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let cursor = cursor_started_in(&crashed_journal);
+    let in_doubt = archive_current_cursor(&crashed_journal, &cursor).await;
+
+    let resumed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut resumed = EffectsCore::new(invocation_context_with_mode(
+        resumed_journal.clone(),
+        parent,
+        Some(in_doubt),
+        EffectRuntimeMode::Resume,
+        EffectPortRegistry::new(),
+    ));
+    let error = resumed
+        .perform(AtMostOnceCountingEffect {
+            binding: bound(),
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("an in-doubt at-most-once call settles abandoned");
+
+    assert!(
+        matches!(
+            &error,
+            EffectError::RecoveryAbandoned { failure_source, code, .. }
+                if failure_source.as_str() == "recovery"
+                    && code.as_str() == "at_most_once_in_doubt"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "resume makes no second call"
+    );
+    assert_eq!(
+        resumed_journal
+            .events()
+            .iter()
+            .filter(|envelope| EffectRecoveryAbandoned::matches_event_type(&envelope.event_type()))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -6201,6 +6332,77 @@ async fn replay_fails_on_descriptor_hash_mismatch() {
 }
 
 #[tokio::test]
+async fn changed_sink_request_replay_continues() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut live = EffectsCore::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+    live.perform(CountingEffect {
+        binding: bound(),
+        value: 1,
+        label: "original",
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("live effect should succeed");
+    let records = effect_records(&journal);
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("history should index"),
+    );
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut ctx = invocation_context(
+        replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+    );
+    let stage = stage_mut(&mut ctx);
+    stage.flow_context = Some(
+        crate::stages::common::supervision::flow_context_factory::make_flow_context(
+            "effect_flow",
+            "effect_flow_id",
+            "effect_stage",
+            stage.stage_id,
+            StageType::Sink,
+        ),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut replay = EffectsCore::new(ctx);
+
+    let error = replay
+        .perform(CountingEffect {
+            binding: bound(),
+            value: 1,
+            label: "changed",
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("a changed sink request settles as a replay rejection");
+
+    assert!(
+        matches!(
+            &error,
+            EffectError::BoundaryRejected { rejected_by, code, .. }
+                if rejected_by.as_str() == "replay" && code.as_str() == "request_differs"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(replay.authoring_halt_fatal().is_none());
+    assert!(replay.ensure_authoring_open().is_ok());
+    let rejections = effect_records(&replay_journal);
+    assert_eq!(rejections.len(), 1);
+    assert!(matches!(
+        &rejections[0].outcome,
+        EffectOutcomePayload::Failed { cause: Some(cause), .. }
+            if cause.source.as_str() == "replay" && cause.code.as_str() == "request_differs"
+    ));
+}
+
+#[tokio::test]
 async fn conflicting_archived_and_current_terminals_refuse_whatever_the_handler_does() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
@@ -6549,7 +6751,7 @@ fn effect_record_decode_rejects_reserved_event_without_provenance() {
         .is_none());
     let event = ChainEventFactory::execution_event(
         WriterId::from(stage_id),
-        ExecutionPayload::EffectRecord(record),
+        ExecutionPayload::EffectRecord(Box::new(record)),
     );
 
     let err = effect_record_from_event(&event)

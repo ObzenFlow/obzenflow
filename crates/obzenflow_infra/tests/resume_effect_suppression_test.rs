@@ -15,8 +15,9 @@ use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use obzenflow_adapters::sinks::CountingSink;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::journal::archive::certification::StageOrders;
@@ -32,12 +33,11 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
-use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedInfiniteSourceHandler,
+    EffectfulTransformHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use replay_testkit::ReattachingSource;
@@ -164,26 +164,6 @@ impl EffectfulTransformHandler for EnrichTransform {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingSink {
-    delivered: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = Enriched;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _input: Enriched) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 fn build_flow(
     journal_base: PathBuf,
     first_value: u64,
@@ -196,7 +176,7 @@ fn build_flow(
         let enrich_transform = EnrichTransform {
             counter: Port::to(CallCounter { calls }),
         };
-        let counting_sink = CountingSink { delivered };
+        let counting_sink = CountingSink::<Enriched>::new(delivered);
 
         Ok(flow! {
             name: "resume_effects",
@@ -233,29 +213,47 @@ async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
     .map_err(|_| anyhow!("timeout waiting for pipeline to reach Running"))?
 }
 
-async fn wait_for_count(counter: &Arc<AtomicU64>, target: u64) -> Result<()> {
+fn settled_sink_calls(envelopes: &[JournalRecord<ChainPayload>]) -> u64 {
+    envelopes
+        .iter()
+        .filter(|envelope| {
+            matches!(
+                envelope.payload,
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+            )
+        })
+        .count() as u64
+}
+
+async fn wait_for_settled_sink_calls(run_dir: &Path, target: u64) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(20), async {
-        while counter.load(Ordering::SeqCst) < target {
+        loop {
+            let envelopes = replay_testkit::read_stage_envelopes_appended(run_dir, "snk").await;
+            if settled_sink_calls(&envelopes) >= target {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .map_err(|_| {
-        anyhow!(
-            "timeout waiting for the sink to consume {target} events (saw {})",
-            counter.load(Ordering::SeqCst)
-        )
-    })
+    .map_err(|_| anyhow!("timeout waiting for the sink's journal to settle {target} calls"))
 }
 
-/// Run one flow instance until the sink consumed `expected` outputs, then
-/// stop. Returns the effect executions this run's handlers performed.
+/// The calls one run made.
+struct RunCalls {
+    effects: usize,
+    sink: u64,
+}
+
+/// Run one flow instance until the sink's journal settles `expected` calls,
+/// then stop. A resumed run re-commits the calls its recording settled
+/// without making them, so `expected` counts that prefix too.
 async fn run_until_delivered(
     journal_base: &Path,
     first_value: u64,
     count: u64,
     expected: u64,
-) -> Result<usize> {
+) -> Result<RunCalls> {
     let calls = Arc::new(AtomicUsize::new(0));
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_flow(
@@ -269,12 +267,15 @@ async fn run_until_delivered(
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
-    wait_for_count(&delivered, expected).await?;
+    wait_for_settled_sink_calls(&replay_testkit::latest_run_dir(journal_base), expected).await?;
     handle.stop().await?;
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
-    Ok(calls.load(Ordering::SeqCst))
+    Ok(RunCalls {
+        effects: calls.load(Ordering::SeqCst),
+        sink: delivered.load(Ordering::SeqCst),
+    })
 }
 
 /// The user-owned effect outcome facts of a stage journal, in physical append
@@ -335,8 +336,8 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
     let journal_base = temp.path().join("journals");
 
     // Record: every effect executes live, once per input.
-    let recorded_calls = run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
-    assert_eq!(recorded_calls, RECORDED as usize);
+    let recorded = run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
+    assert_eq!(recorded.effects, RECORDED as usize);
     let recorded_run = replay_testkit::latest_run_dir(&journal_base);
 
     // The recording's root flow id anchors every effect cursor.
@@ -359,25 +360,26 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
         "the recording anchors outcome facts at input_seq 1..=K under its own flow id"
     );
 
-    // Resume with two live inputs. The counter is fresh, so any catch-up
-    // re-execution would be visible in the final count.
-    let resumed_calls = {
+    // Resume with two live inputs. The counters are fresh, so any catch-up
+    // re-execution would be visible in the final counts.
+    let resumed = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
         );
-        // Wait for prefix re-deliveries + live (the sink re-consumes the
-        // recorded prefix during catch-up, F14).
         run_until_delivered(&journal_base, RECORDED + 1, LIVE, RECORDED + LIVE).await?
     };
     assert_eq!(
-        resumed_calls, LIVE as usize,
+        resumed.effects, LIVE as usize,
         "catch-up re-executes ZERO effects; only the live inputs execute"
+    );
+    assert_eq!(
+        resumed.sink, LIVE,
+        "catch-up makes no sink call; only the live inputs reach the sink"
     );
     let resumed_run = replay_testkit::latest_run_dir(&journal_base);
     assert_ne!(recorded_run, resumed_run);
@@ -430,8 +432,8 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
 }
 
 /// Tear R1 as a kill during the effectful stage's catch-up would: the stage
-/// keeps its first `kept` re-committed outcomes, the sink no receipt, and the
-/// system log nothing from any reconstruction completion on.
+/// keeps its first `kept` re-committed outcomes, the sink no effect row, and
+/// the system log nothing from any reconstruction completion on.
 fn tear_effect_catch_up(r1: &Path, kept: usize) -> Result<()> {
     let manifest = replay_testkit::archive_manifest(r1);
     let journal = |key: &str| {
@@ -451,7 +453,7 @@ fn tear_effect_catch_up(r1: &Path, kept: usize) -> Result<()> {
             .map(str::to_owned)
     };
     let outcomes = std::cell::Cell::new(0usize);
-    let receipt_seen = std::cell::Cell::new(false);
+    let effect_seen = std::cell::Cell::new(false);
     let completion_seen = std::cell::Cell::new(false);
     obzenflow_infra::testing::journal::retain_archive_frames(r1, |path, records| {
         if path == enrich {
@@ -462,14 +464,14 @@ fn tear_effect_catch_up(r1: &Path, kept: usize) -> Result<()> {
             outcomes.set(outcomes.get() + committed);
             outcomes.get() <= kept
         } else if path == snk {
-            receipt_seen.set(
-                receipt_seen.get()
+            effect_seen.set(
+                effect_seen.get()
                     || records.iter().any(|record| {
                         record.pointer("/envelope/provenance/event/event_kind")
-                            == Some(&json!("delivery"))
+                            == Some(&json!("execution"))
                     }),
             );
-            !receipt_seen.get()
+            !effect_seen.get()
         } else if path == system {
             completion_seen.set(
                 completion_seen.get()
@@ -498,21 +500,22 @@ async fn a_torn_resume_reuses_effects_only_its_ancestor_still_holds() -> Result<
 
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
-    let recorded_calls = run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
-    assert_eq!(recorded_calls, RECORDED as usize);
+    let recorded = run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
+    assert_eq!(recorded.effects, RECORDED as usize);
     let r0 = replay_testkit::latest_run_dir(&journal_base);
 
     let resume_of = |archive: PathBuf| ReplayBootstrap {
         archive_path: archive,
         allow_incomplete_archive: true,
-        allow_duplicate_sink_delivery: false,
         verb: ReplayVerb::Resume,
     };
     let r1_calls = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(resume_of(r0.clone())).await,
         );
-        run_until_delivered(&journal_base, RECORDED + 1, 0, RECORDED).await?
+        run_until_delivered(&journal_base, RECORDED + 1, 0, RECORDED)
+            .await?
+            .effects
     };
     assert_eq!(r1_calls, 0, "R1 reuses every recorded outcome");
     let r1 = replay_testkit::latest_run_dir(&journal_base);
@@ -532,7 +535,7 @@ async fn a_torn_resume_reuses_effects_only_its_ancestor_still_holds() -> Result<
         run_until_delivered(&journal_base, RECORDED + 1, LIVE, RECORDED + LIVE).await?
     };
     assert_eq!(
-        r2_calls, LIVE as usize,
+        r2_calls.effects, LIVE as usize,
         "outcomes committed only in R0 are reused; only the live inputs execute"
     );
     let r2 = replay_testkit::latest_run_dir(&journal_base);
@@ -603,7 +606,6 @@ async fn resuming_through_a_replay_of_a_torn_resume_reuses_ancestor_effects() ->
     let archive_of = |archive: PathBuf, verb| ReplayBootstrap {
         archive_path: archive,
         allow_incomplete_archive: true,
-        allow_duplicate_sink_delivery: false,
         verb,
     };
     {
@@ -634,7 +636,7 @@ async fn resuming_through_a_replay_of_a_torn_resume_reuses_ancestor_effects() ->
         run_until_delivered(&journal_base, RECORDED + 1, LIVE, RECORDED + LIVE).await?
     };
     assert_eq!(
-        r2_calls, LIVE as usize,
+        r2_calls.effects, LIVE as usize,
         "outcomes committed only in R0 are reused; only the live inputs execute"
     );
     let resume = replay_testkit::archive_manifest(&replay_testkit::latest_run_dir(&journal_base))
@@ -765,7 +767,6 @@ async fn a_replay_reads_only_the_journals_of_stages_with_an_effect_runtime() -> 
         replay: Some(ReplayBootstrap {
             archive_path: recorded,
             allow_incomplete_archive: true,
-            allow_duplicate_sink_delivery: false,
             verb: ReplayVerb::Replay,
         }),
         archive_evidence: Some(archive.evidence()),
@@ -779,10 +780,12 @@ async fn a_replay_reads_only_the_journals_of_stages_with_an_effect_runtime() -> 
     drop(bootstrap);
 
     assert_eq!(replay_calls, 0, "a replay never executes an effect");
+    let mut opened = opened.lock().expect("history reads lock").clone();
+    opened.sort();
     assert_eq!(
-        *opened.lock().expect("history reads lock"),
-        vec!["enrich".to_string()],
-        "only the effectful transform reads its archived journal; the sink reads none"
+        opened,
+        vec!["enrich".to_string(), "snk".to_string()],
+        "the effectful transform and the sink read their archived journals; the source reads none"
     );
     Ok(())
 }

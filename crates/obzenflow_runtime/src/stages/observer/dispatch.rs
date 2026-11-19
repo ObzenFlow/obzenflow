@@ -9,15 +9,13 @@
 //! port before constructing a context, preserving the empty-bundle fast path.
 
 use obzenflow_core::event::context::MiddlewareExecutionScope;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::{ChainEvent, FlowId, StageId};
+use obzenflow_core::{ChainEvent, FlowId};
 
 use super::{
-    EffectObserverContext, EffectObserverOutcome, HandlerObserverContext, JoinObserverContext,
-    SinkDeliveryObserverContext, SinkDeliveryObserverOutcome, SinkDeliverySuccessContext,
-    SourcePollObserverContext, StageInputPosition, StageLifecycleObserverContext,
-    StageLifecyclePhase, StageObserverBundle, StatefulObserverContext,
+    EffectObserverContext, HandlerObserverContext, JoinObserverContext, SourcePollObserverContext,
+    StageInputPosition, StageLifecycleObserverContext, StageLifecyclePhase, StageObserverBundle,
+    StatefulObserverContext,
 };
 
 fn is_live(scope: MiddlewareExecutionScope) -> bool {
@@ -122,66 +120,16 @@ pub(crate) fn run_source_poll_observers(
     );
 }
 
-pub(crate) fn run_sink_delivery_observers(
-    observers: &StageObserverBundle,
-    flow_id: FlowId,
-    flow_context: &FlowContext,
-    scope: MiddlewareExecutionScope,
-    input: &ChainEvent,
-    stage_input_position: StageInputPosition,
-    outcome: SinkDeliveryObserverOutcome,
-) {
-    let Some(observer) = observers.sink_delivery().filter(|_| is_live(scope)) else {
-        return;
-    };
-    let ctx = SinkDeliveryObserverContext::new(
-        flow_id,
-        flow_context,
-        input,
-        stage_input_position,
-        outcome,
-    );
-    observer.invoke_result(
-        ctx.stage_name(),
-        "sink_delivery",
-        "after_sink_delivery",
-        |port| port.after_sink_delivery_checked(&ctx),
-    );
-}
-
-pub(crate) fn run_sink_delivered_observers(
-    observers: &StageObserverBundle,
-    scope: MiddlewareExecutionScope,
-    ctx: &SinkDeliverySuccessContext<'_>,
-) {
-    let Some(observer) = observers.sink_delivery().filter(|_| is_live(scope)) else {
-        return;
-    };
-    if !matches!(ctx.receipt().result, DeliveryResult::Success { .. })
-        || ctx.receipt().delivery_method == DeliveryMethod::Noop
-    {
-        return;
-    }
-    observer.invoke_result(ctx.stage_name(), "sink_delivery", "on_delivered", |port| {
-        port.on_delivered(ctx)
-    });
-}
-
 pub(crate) fn run_effect_observers(
     observers: &StageObserverBundle,
-    flow_id: FlowId,
-    stage_id: StageId,
-    stage_name: &str,
     scope: MiddlewareExecutionScope,
-    effect_type: &str,
-    outcome: EffectObserverOutcome,
+    ctx: &EffectObserverContext<'_>,
 ) {
     let Some(observer) = observers.effect().filter(|_| is_live(scope)) else {
         return;
     };
-    let ctx = EffectObserverContext::new(flow_id, stage_id, stage_name, effect_type, outcome);
-    observer.invoke(stage_name, "effect", "after_effect", |port| {
-        port.after_effect(&ctx);
+    observer.invoke(ctx.stage_name(), "effect", "after_effect", |port| {
+        port.after_effect(ctx);
     });
 }
 
@@ -241,7 +189,7 @@ mod tests {
     };
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::WriterId;
+    use obzenflow_core::{StageId, WriterId};
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering};

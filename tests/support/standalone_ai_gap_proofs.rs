@@ -98,7 +98,8 @@ fn control_interleaving_flow(
         let chat_breaker = circuit_breaker().consecutive_failures(5);
         let embedding_breaker = circuit_breaker().consecutive_failures(5);
         let input = TwoTicketSource::default();
-        let collected = CollectEmbedded { outputs };
+        let collected =
+            perform(|output: &TicketEmbedded| output.clone()).through(collect_into(outputs));
 
         Ok(flow! {
             name: "standalone_ai_control_interleaving",
@@ -156,7 +157,7 @@ fn failed_effect_record(event: &ChainEvent, effect_type: &str) -> Option<EffectR
     let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &event.payload else {
         return None;
     };
-    let record = record.clone();
+    let record = record.as_ref().clone();
     (record.descriptor.effect_type.as_str() == effect_type
         && matches!(record.outcome, EffectOutcomePayload::Failed { .. }))
     .then_some(record)

@@ -536,7 +536,6 @@ async fn replay(journal_base: &Path, archive: &Path, flow: FlowDefinition) -> Re
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: archive.to_path_buf(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Replay,
             })
             .await,
@@ -555,7 +554,6 @@ fn resume_bootstrap(archive: &Path) -> ReplayBootstrap {
     ReplayBootstrap {
         archive_path: archive.to_path_buf(),
         allow_incomplete_archive: true,
-        allow_duplicate_sink_delivery: false,
         verb: ReplayVerb::Resume,
     }
 }
@@ -1041,7 +1039,8 @@ async fn a_resume_continues_the_recorded_prefix_and_its_archive_replays() -> Res
         ))
         .await?;
         inputs.second.send(tx("acct-1", 3)).await?;
-        wait_for_count(&delivered, 3).await?;
+        // The sink makes no call for the settled prefix, only for the live row.
+        wait_for_count(&delivered, 1).await?;
         stop(handle).await?;
     }
     let resumed = replay_testkit::latest_run_dir(&journal_base);
@@ -1148,7 +1147,8 @@ async fn a_folds_end_of_input_output_lands_where_it_was_recorded() -> Result<()>
         ))
         .await?;
         live.send(live_snapshot(10_000)).await?;
-        wait_for_count(&delivered, 4).await?;
+        // The sink makes no call for the settled prefix, only for the live row.
+        wait_for_count(&delivered, 1).await?;
         stop(handle).await?;
     }
     let resumed = replay_testkit::latest_run_dir(&journal_base);

@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use super::composite_data_payload::CompositeDataPayload;
-use super::delivery_payload::DeliveryPayload;
 use super::execution_payload::ExecutionPayload;
 use super::flow_control_payload::FlowControlPayload;
 use crate::event::chain_event::ReplayDisposition;
@@ -18,7 +17,6 @@ pub enum EventKind {
     Fact,
     CompositeData,
     FlowSignal,
-    Delivery,
     Execution,
     System,
 }
@@ -28,7 +26,6 @@ pub enum ChainPayload {
     Fact(Value),
     CompositeData(CompositeDataPayload),
     FlowControl(FlowControlPayload),
-    Delivery(DeliveryPayload),
     Execution(ExecutionPayload),
 }
 
@@ -38,7 +35,7 @@ impl ChainPayload {
             Self::Fact(_) => None,
             Self::CompositeData(payload) => Some(payload.payload_schema_version()),
             Self::Execution(payload) => Some(payload.payload_schema_version()),
-            Self::FlowControl(_) | Self::Delivery(_) => Some(NonZeroU32::MIN),
+            Self::FlowControl(_) => Some(NonZeroU32::MIN),
         }
     }
 
@@ -47,7 +44,6 @@ impl ChainPayload {
             Self::Fact(_) => EventKind::Fact,
             Self::CompositeData(_) => EventKind::CompositeData,
             Self::FlowControl(_) => EventKind::FlowSignal,
-            Self::Delivery(_) => EventKind::Delivery,
             Self::Execution(_) => EventKind::Execution,
         }
     }
@@ -57,7 +53,6 @@ impl ChainPayload {
             Self::Fact(_) => None,
             Self::CompositeData(payload) => Some(payload.event_type().into()),
             Self::Execution(payload) => Some(payload.event_type(stage_name)),
-            Self::Delivery(payload) => Some(payload.event_type().into()),
             Self::FlowControl(payload) => Some(payload.event_type().into()),
         }
     }
@@ -73,10 +68,7 @@ impl ChainPayload {
                 (EventKind::CompositeData, event_type) => {
                     CompositeDataPayload::schema_version_of(event_type).map_or(1, NonZeroU32::get)
                 }
-                (
-                    EventKind::Execution,
-                    "obzenflow.sink_operation_failed" | "runtime.source.cleanup_failed",
-                ) => 2,
+                (EventKind::Execution, "runtime.source.cleanup_failed") => 2,
                 _ => 1,
             };
             if payload_schema_version.get() != expected {
@@ -91,7 +83,6 @@ impl ChainPayload {
                 Self::CompositeData(CompositeDataPayload::decode(event_type, value)?)
             }
             EventKind::FlowSignal => Self::FlowControl(serde_json::from_value(value)?),
-            EventKind::Delivery => Self::Delivery(serde_json::from_value(value)?),
             EventKind::Execution => Self::Execution(serde_json::from_value(value)?),
             EventKind::System => {
                 return Err(<serde_json::Error as serde::de::Error>::custom(
@@ -136,15 +127,6 @@ impl ChainPayload {
                 ));
             }
         }
-        match self {
-            Self::Delivery(payload) => payload
-                .validate()
-                .map_err(<serde_json::Error as serde::de::Error>::custom)?,
-            Self::Execution(ExecutionPayload::SinkAudit(payload)) => payload
-                .validate()
-                .map_err(<serde_json::Error as serde::de::Error>::custom)?,
-            _ => {}
-        }
         if let Self::Execution(ExecutionPayload::EffectRecord(record)) = self {
             record
                 .validate()
@@ -165,7 +147,7 @@ impl ChainPayload {
         match self {
             Self::Fact(_) | Self::CompositeData(_) => true,
             Self::Execution(payload) => payload.consumes_data_credit(),
-            Self::FlowControl(_) | Self::Delivery(_) => false,
+            Self::FlowControl(_) => false,
         }
     }
 }
@@ -176,7 +158,6 @@ impl Serialize for ChainPayload {
             Self::Fact(payload) => payload.serialize(serializer),
             Self::CompositeData(payload) => payload.serialize(serializer),
             Self::FlowControl(payload) => payload.serialize(serializer),
-            Self::Delivery(payload) => payload.serialize(serializer),
             Self::Execution(payload) => payload.serialize(serializer),
         }
     }
@@ -188,7 +169,6 @@ impl EventKind {
             Self::Fact => "fact",
             Self::CompositeData => "composite_data",
             Self::FlowSignal => "flow_signal",
-            Self::Delivery => "delivery",
             Self::Execution => "execution",
             Self::System => "system",
         }
@@ -202,7 +182,6 @@ impl ChainPayload {
         match self {
             Self::Execution(ExecutionPayload::StageFatalRecorded(p)) => serde_json::to_value(p),
             Self::Execution(ExecutionPayload::StageProcessingFailed(p)) => serde_json::to_value(p),
-            Self::Execution(ExecutionPayload::SinkOperationFailed(p)) => serde_json::to_value(p),
             Self::Execution(ExecutionPayload::EffectRecord(p)) => serde_json::to_value(p),
             Self::Execution(ExecutionPayload::EffectAttemptStarted(p)) => serde_json::to_value(p),
             Self::Execution(ExecutionPayload::EffectRecoveryAbandoned(p)) => {
@@ -222,7 +201,6 @@ impl ChainPayload {
                 // These two previously position-bearing source rows must retain
                 // their disposition; the history loader also inspects them.
                 ExecutionPayload::StageFatalRecorded(_)
-                | ExecutionPayload::SinkOperationFailed(_)
                 | ExecutionPayload::EffectAttemptStarted(_)
                 | ExecutionPayload::EffectRecoveryAbandoned(_) => ReplayDisposition::ReAdmit,
                 ExecutionPayload::SourceInputPinned(_) => ReplayDisposition::Preserve,
@@ -231,7 +209,6 @@ impl ChainPayload {
                 | ExecutionPayload::SourceReattached(_)
                 | ExecutionPayload::SourceContinuationRefused(_)
                 | ExecutionPayload::SourceSeekFailed(_)
-                | ExecutionPayload::SinkAudit(_)
                 | ExecutionPayload::EffectRecord(_)
                 | ExecutionPayload::ReplayLifecycle(_)
                 | ExecutionPayload::SupervisorRegistered { .. }
@@ -273,7 +250,6 @@ impl ChainPayload {
                 | FlowControlPayload::AtLeastOnceViolation { .. }
                 | FlowControlPayload::InputSelection { .. } => ReplayDisposition::ReAuthor,
             },
-            ChainPayload::Delivery(_) => ReplayDisposition::ReAuthor,
         }
     }
 }

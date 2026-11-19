@@ -5,7 +5,7 @@
 //! Evidence owned by the existing contract evaluator, independent of policy.
 
 use crate::event::types::{Count, SeqNo};
-use crate::{EventDescriptor, EventId, SccId, StageId};
+use crate::{EventDescriptor, SccId, StageId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,18 +36,6 @@ pub enum ContractEvidenceDetails {
     Transport {
         advertised_writer_seq: Option<SeqNo>,
         consumed_count: Count,
-    },
-    Delivery {
-        consumed_total: u64,
-        receipted_total: u64,
-        pending_peak: usize,
-        buffered_count: u64,
-        success_count: u64,
-        partial_count: u64,
-        failed_count: u64,
-        missing_count: usize,
-        orphan_count: u64,
-        missing_event_ids: Vec<EventId>,
     },
     Divergence {
         scc_id: SccId,
@@ -96,13 +84,4 @@ pub enum SubscriptionSelection {
 pub struct SubscriptionFeed {
     pub descriptor: EventDescriptor,
     pub role: Option<crate::event::payloads::system_payload::SystemFeedRole>,
-}
-
-/// Contiguous terminal-receipt frontier for the subscription's receipt population.
-/// Absence of this object means receipt tracking is unavailable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubscriptionReceipts {
-    pub terminal_frontier: SeqNo,
-    pub last_event_id: Option<EventId>,
 }

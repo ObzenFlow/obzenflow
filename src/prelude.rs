@@ -10,7 +10,7 @@ pub use crate::application::FlowApplication;
 pub use crate::error::HandlerError;
 pub use crate::flow::{
     ai, ai_map_reduce, async_infinite_source, async_source, effectful_stateful,
-    effectful_transform, flow, handler_set, inference, infinite_source, join, merge, placeholder,
-    sink, source, stateful, transform, FlowDefinition,
+    effectful_transform, flow, inference, infinite_source, join, merge, placeholder, sink, source,
+    stateful, transform, FlowDefinition,
 };
 pub use crate::schema::TypedPayload;

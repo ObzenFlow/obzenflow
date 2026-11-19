@@ -4,7 +4,6 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{handler_observer, stage_lifecycle_observer};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::SystemPayload;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -14,8 +13,7 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use obzenflow_runtime::stages::observer::{
@@ -115,21 +113,7 @@ impl EffectfulTransformHandler for HungTransform {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NoopSink;
-
-#[async_trait]
-impl InlineSink for NoopSink {
-    type Input = ProbeEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
-    }
-
-    async fn write(&mut self, _input: ProbeEvent) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NoopSink = obzenflow_adapters::sinks::DiscardSink<ProbeEvent>;
 
 struct CountsHungHandlerOccurrences {
     before: Arc<AtomicUsize>,
@@ -192,7 +176,7 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
             handler_dropped_for_flow.clone(),
             handler_drop_observed_for_flow.clone(),
         );
-        let noop_sink = NoopSink;
+        let noop_sink = NoopSink::new();
 
         Ok(flow! {
             name: "liveness_hung_handler_cancel",

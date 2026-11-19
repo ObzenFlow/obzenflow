@@ -16,6 +16,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressKey;
 use obzenflow_runtime::effects::EffectDeclaration;
 use obzenflow_runtime::pipeline::config::StageConfig;
+use std::any::{type_name, TypeId};
 use std::collections::{BTreeMap, HashSet};
 
 type Factories = Vec<Box<dyn MiddlewareFactory>>;
@@ -121,7 +122,6 @@ fn control_surface(
 
 pub(super) fn prepare_io(
     stage: &str,
-    stage_type: StageType,
     hosted: bool,
     controls: &mut Factories,
     ingress: &mut Option<Box<dyn MiddlewareFactory>>,
@@ -132,11 +132,7 @@ pub(super) fn prepare_io(
     all.append(observers);
     freeze(&mut all);
     refuse_effect_scope_without_effects(stage, &all)?;
-    let operation = if stage_type == StageType::Sink {
-        MiddlewareSurfaceKind::SinkDelivery
-    } else {
-        MiddlewareSurfaceKind::SourcePoll
-    };
+    let operation = MiddlewareSurfaceKind::SourcePoll;
     let mut families = HashSet::new();
     let mut custom_controls = 0;
     for factory in all {
@@ -297,6 +293,33 @@ pub(super) fn prepare_effects(
     Ok(())
 }
 
+pub(super) fn refuse_observer_input<In: 'static>(
+    stage: &str,
+    observers: &[Box<dyn MiddlewareFactory>],
+    attachments: &[EffectPolicyAttachment],
+) -> Result<(), MiddlewarePlanError> {
+    let mismatch = observers
+        .iter()
+        .chain(attachments.iter().map(|attachment| &attachment.factory))
+        .find_map(|factory| {
+            factory
+                .observer_input_type()
+                .filter(|(input, _)| *input != TypeId::of::<In>())
+                .map(|(_, expected)| (factory.label(), expected))
+        });
+    if let Some((label, expected)) = mismatch {
+        return Err(MiddlewarePlanError::invalid(
+            stage,
+            None,
+            format!(
+                "stage '{stage}': observer '{label}' expects input '{expected}', but the stage consumes '{}'",
+                type_name::<In>()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_configuration(
     stage_type: StageType,
     stage: &str,
@@ -313,7 +336,6 @@ pub(super) fn validate_configuration(
                 StageType::FiniteSource | StageType::InfiniteSource => {
                     MiddlewareSurfaceKind::SourcePoll
                 }
-                StageType::Sink => MiddlewareSurfaceKind::SinkDelivery,
                 _ => {
                     return Err(MiddlewarePlanError::invalid(
                         stage,
@@ -514,7 +536,6 @@ pub(super) fn topology(
             let operation = match kind {
                 MiddlewareSurfaceKind::SourcePoll => MiddlewareOperation::SourcePoll,
                 MiddlewareSurfaceKind::Ingress => MiddlewareOperation::Ingress,
-                MiddlewareSurfaceKind::SinkDelivery => MiddlewareOperation::SinkDelivery,
                 MiddlewareSurfaceKind::Effect => MiddlewareOperation::Effect {
                     effect_type: effect
                         .expect("effect binding has a subject")
@@ -647,13 +668,12 @@ pub(super) fn topology(
     for factory in descriptor.stage_middleware_factories() {
         let declaration = factory.declaration();
         if declaration.is_control() {
-            let operation = if descriptor.stage_type() == StageType::Sink {
-                MiddlewareSurfaceKind::SinkDelivery
-            } else {
-                MiddlewareSurfaceKind::SourcePoll
-            };
-            let kind = control_surface(factory, operation, ingress.is_some())
-                .map_err(|error| MiddlewarePlanError::invalid(descriptor.name(), None, error))?;
+            let kind = control_surface(
+                factory,
+                MiddlewareSurfaceKind::SourcePoll,
+                ingress.is_some(),
+            )
+            .map_err(|error| MiddlewarePlanError::invalid(descriptor.name(), None, error))?;
             project(
                 factory,
                 kind,

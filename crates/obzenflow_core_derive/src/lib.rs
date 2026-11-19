@@ -71,12 +71,14 @@ pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// outcome is one fact or an `outcome![...]` list. A port trait is `Send` and
 /// `Sync`, which the attribute adds when the trait doesn't write them.
 ///
-/// Each method marked `#[effect(type = "...", exactly_once)]` or
-/// `#[effect(type = "...", at_least_once)]` declares one effect. It takes its
+/// Each method marked `#[effect(type = "...", exactly_once)]`,
+/// `#[effect(type = "...", at_least_once)]` or
+/// `#[effect(type = "...", at_most_once)]` declares one effect. It takes its
 /// request by reference after `&self`, and the request type then names the
 /// effect: a command performs it with `fx.call(request)`. `type` is the effect
-/// type the journal records the call under, and an optional
-/// `schema_version = N` versions the request's shape.
+/// type the journal records the call under, an optional `schema_version = N`
+/// versions the request's shape, and `records = reply` makes the method's
+/// answer a reply the runtime records and returns, which writes no fact.
 ///
 /// The guarantee describes the call at the other end:
 ///
@@ -89,6 +91,9 @@ pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `at_least_once`: the call may take effect more than once after a crash.
 ///   The stage row accepts that with `.at_least_once::<Request>()` after its
 ///   handler, and retry middleware does not repeat it.
+/// - `at_most_once`: the call takes effect at most once. The runtime records
+///   each attempt's start before making it, and records an attempt a crash
+///   left in doubt abandoned instead of making it again.
 ///
 /// After its request, an effect method takes nothing, `&EffectContext`,
 /// `key: &IdempotencyKey` optionally followed by `&EffectContext`, or a

@@ -26,10 +26,10 @@ use crate::replay_testkit;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_adapters::sinks::CountingSink;
 use obzenflow_adapters::sources::{
     ChannelSource, CsvDecodeError, CsvDecoder, CsvRecord, CsvSource,
 };
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, ReattachGuarantee, SourceCleanupPhase, SourceCleanupTrigger,
     SourceContinuationRefusal, SourceOpenIntent, SourceReattachedFact,
@@ -46,12 +46,12 @@ use obzenflow_dsl::{
 };
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::effects::{perform, EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::source::{
     FiniteSourceConnector, PositionedFiniteReader, RefusedBy, ResumeRefusal, Seek, SeekableSource,
@@ -257,26 +257,6 @@ impl EffectfulTransformHandler for EffectfulTail {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingSink {
-    delivered: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = MixedOutput;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _input: MixedOutput) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 /// Ranges for one run: the finite channel f and the infinite channel i.
 struct SourceRanges {
     fin_first: u64,
@@ -303,7 +283,7 @@ fn build_flow(
         let effectful_handler = EffectfulTail {
             counter: Port::to(CallCounter { calls }),
         };
-        let collect_handler = CountingSink { delivered };
+        let collect_handler = CountingSink::<MixedOutput>::new(delivered);
 
         Ok(flow! {
             name: "resume_mixed",
@@ -485,14 +465,13 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
         );
-        // Wait for prefix re-deliveries + live (the sink re-consumes the
-        // recorded prefix during catch-up, F14).
-        run_until_delivered(&journal_base, &live_ranges, RECORDED + LIVE).await?
+        // The sink makes no call for the settled prefix, and its live calls
+        // follow catch-up.
+        run_until_delivered(&journal_base, &live_ranges, LIVE).await?
     };
     assert_eq!(
         resumed_calls, LIVE as usize,
@@ -637,14 +616,13 @@ async fn mixed_sources_resume_flips_when_the_eof_arrives_after_the_watermark() -
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
         );
-        // Wait for prefix re-deliveries + live (the sink re-consumes the
-        // recorded prefix during catch-up, F14).
-        run_until_delivered(&journal_base, &live_ranges, RECORDED_DELIVERED + LIVE).await?
+        // The sink makes no call for the settled prefix, and its live calls
+        // follow catch-up.
+        run_until_delivered(&journal_base, &live_ranges, LIVE).await?
     };
     assert_eq!(
         resumed_calls, LIVE as usize,
@@ -702,39 +680,6 @@ impl TypedFiniteSourceHandler for StallingFiniteSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct MergedSink {
-    delivered: Arc<AtomicU64>,
-    safety: Option<SinkRedeliverySafety>,
-}
-
-impl MergedSink {
-    fn safe_to_repeat(delivered: Arc<AtomicU64>) -> Self {
-        Self {
-            delivered,
-            safety: Some(SinkRedeliverySafety::SafeToRepeat),
-        }
-    }
-}
-
-#[async_trait]
-impl InlineSink for MergedSink {
-    type Input = Merged;
-
-    fn describe(&self) -> SinkDescription {
-        let description = SinkDescription::method(DeliveryMethod::Noop);
-        match self.safety {
-            Some(safety) => description.with_redelivery_safety(safety),
-            None => description,
-        }
-    }
-
-    async fn write(&mut self, _input: Merged) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 fn build_stalling_flow(
     journal_base: PathBuf,
     polls: Arc<AtomicUsize>,
@@ -747,7 +692,7 @@ fn build_stalling_flow(
         };
         let infinite_handler = ReattachingSource(InfiniteChannelSource::new("i", 101, 2));
         let merge_handler = MergeTransform::new();
-        let collect_handler = MergedSink::safe_to_repeat(delivered);
+        let collect_handler = CountingSink::<Merged>::new(delivered);
 
         Ok(flow! {
             name: "resume_mixed_refusal",
@@ -816,7 +761,6 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
@@ -901,7 +845,7 @@ fn build_ticker_flow(
             polls,
         };
         let merge_handler = MergeTransform::new();
-        let collect_handler = MergedSink::safe_to_repeat(delivered);
+        let collect_handler = CountingSink::<Merged>::new(delivered);
 
         Ok(flow! {
             name: "resume_direct_ticker",
@@ -927,7 +871,6 @@ fn build_reattaching_ticker_flow(
     journal_base: PathBuf,
     polls: Arc<AtomicUsize>,
     delivered: Arc<AtomicU64>,
-    sink_safety: Option<SinkRedeliverySafety>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let ticker_handler = ReattachingSource(PolledTicker {
@@ -935,10 +878,7 @@ fn build_reattaching_ticker_flow(
             polls,
         });
         let merge_handler = MergeTransform::new();
-        let collect_handler = MergedSink {
-            delivered,
-            safety: sink_safety,
-        };
+        let collect_handler = CountingSink::<Merged>::new(delivered);
 
         Ok(flow! {
             name: "resume_direct_ticker",
@@ -1034,41 +974,6 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
     assert_eq!(resumed_polls.load(Ordering::SeqCst), 0);
     assert!(!recorded_run.join("run_continuation.json").exists());
 
-    let failure = {
-        let _bootstrap = install_bootstrap_config(
-            replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
-        );
-        build_reattaching_ticker_flow(
-            journal_base.clone(),
-            Arc::new(AtomicUsize::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            None,
-        )
-        .build(replay_testkit::unsynced_context())
-        .await
-        .err()
-        .ok_or_else(|| anyhow!("an undeclared sink must refuse the resume"))?
-    };
-    assert!(
-        matches!(
-            &failure.error,
-            obzenflow_dsl::dsl::FlowBuildError::ArchiveVerbRefused(
-                obzenflow_core::journal::archive_actions::ArchiveRefusal::Sink {
-                    verb: ReplayVerb::Resume,
-                    stage,
-                    undeclared: true,
-                },
-            ) if stage == "collect"
-        ),
-        "{}",
-        failure.error
-    );
-    assert_eq!(
-        std::fs::read_dir(journal_base.join("flows"))?.count(),
-        runs_before,
-        "the sink refusal leaves no run directory"
-    );
-
     let delivered = Arc::new(AtomicU64::new(0));
     {
         let _bootstrap = install_bootstrap_config(
@@ -1078,7 +983,6 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
             journal_base.clone(),
             Arc::new(AtomicUsize::new(0)),
             delivered.clone(),
-            Some(SinkRedeliverySafety::SafeToRepeat),
         )
         .build(replay_testkit::unsynced_context())
         .await
@@ -1094,16 +998,9 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
                 }
             )]
         );
-        assert_eq!(
-            facts.sinks,
-            [(
-                "collect".to_string(),
-                Some(SinkRedeliverySafety::SafeToRepeat)
-            )]
-        );
         wait_for_running(&handle).await?;
-        // The sink re-consumes the recorded prefix during catch-up.
-        wait_for_count(&delivered, 3).await?;
+        // The sink makes no call for the settled prefix, only for tick 3.
+        wait_for_count(&delivered, 1).await?;
         handle.stop_graceful(Duration::from_secs(5)).await?;
         tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
             .await
@@ -1139,7 +1036,7 @@ fn build_channel_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let channel_source = ChannelSource::new(ticks);
         let merge_handler = MergeTransform::new();
-        let collect_handler = MergedSink::safe_to_repeat(delivered);
+        let collect_handler = CountingSink::<Merged>::new(delivered);
 
         Ok(flow! {
             name: "resume_channel_source",
@@ -1204,8 +1101,8 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
             .map_err(|e| anyhow!("resume flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
         sender.send(tick(3)).await?;
-        // The sink re-consumes the recorded prefix during catch-up.
-        wait_for_count(&delivered, 3).await?;
+        // The sink makes no call for the settled prefix, only for tick 3.
+        wait_for_count(&delivered, 1).await?;
         handle.stop_graceful(Duration::from_secs(5)).await?;
         tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
             .await
@@ -1360,7 +1257,6 @@ async fn resume_csv_run(
         replay_testkit::bootstrap_with_archive(ReplayBootstrap {
             archive_path: archive.to_path_buf(),
             allow_incomplete_archive: true,
-            allow_duplicate_sink_delivery: false,
             verb: ReplayVerb::Resume,
         })
         .await,
@@ -1640,7 +1536,6 @@ fn resume_bootstrap(archive: &Path) -> ReplayBootstrap {
     ReplayBootstrap {
         archive_path: archive.to_path_buf(),
         allow_incomplete_archive: true,
-        allow_duplicate_sink_delivery: false,
         verb: ReplayVerb::Resume,
     }
 }
@@ -1661,6 +1556,16 @@ async fn committed_offsets(run: &Path) -> Vec<u64> {
         .collect()
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct CountOrder;
+
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[async_trait]
+trait DelayedCountPort {
+    #[effect(type = "test.resume_mixed.count_order", at_least_once, records = reply)]
+    async fn count(&self, request: &CountOrder) -> Result<(), EffectError>;
+}
+
 /// Counts orders, taking `delay` over each.
 #[derive(Clone, Debug)]
 struct DelayedCount {
@@ -1668,20 +1573,39 @@ struct DelayedCount {
     delay: Duration,
 }
 
+#[obzenflow_runtime::effects::system("delayed-count", effects = obzenflow_runtime::effects)]
 #[async_trait]
-impl InlineSink for DelayedCount {
-    type Input = Order;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _: Order) -> Result<(), SinkWriteFailure> {
+impl DelayedCountPort for DelayedCount {
+    async fn count(&self, _: &CountOrder) -> Result<(), EffectError> {
         tokio::time::sleep(self.delay).await;
         self.delivered.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+/// Wait until the sink's journal in `run` settles `target` calls. A resumed
+/// run re-commits the calls its recording settled, so `target` counts those.
+async fn wait_for_settled_calls(run: &Path, target: usize) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let settled = replay_testkit::read_stage_envelopes_appended(run, "collect")
+                .await
+                .iter()
+                .filter(|envelope| {
+                    matches!(
+                        envelope.payload,
+                        ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+                    )
+                })
+                .count();
+            if settled >= target {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timeout waiting for the sink's journal to settle {target} calls"))
 }
 
 fn enforced_backpressure(window: u64) -> obzenflow_runtime::run_context::FlowBuildContext {
@@ -1723,6 +1647,7 @@ fn lazy_flow(
     collect_handler: DelayedCount,
 ) -> FlowDefinition {
     let journals = journal_base.to_path_buf();
+    let collect_handler = perform(|_: &Order| CountOrder).through(Port::to(collect_handler));
     FlowDefinition::materialize(move |_runtime_config| {
         Ok(flow! {
             name: "resume_lazy",
@@ -1742,8 +1667,9 @@ fn lazy_flow(
     })
 }
 
-/// Read lazy orders, paced like the CSV flow, until the sink has `deliveries`,
-/// then stop. Returns the run and the lowest offset its reader generated.
+/// Read lazy orders, paced like the CSV flow, until the sink has made
+/// `deliveries` calls, then stop. A resume makes no call its recording
+/// settled. Returns the run and the lowest offset its reader generated.
 async fn run_lazy_orders(
     journal_base: &Path,
     resume: Option<&Path>,
@@ -1789,10 +1715,10 @@ async fn run_lazy_orders(
 macro_rules! orders_flow {
     ($journal_base:expr, $orders_source:ident, $delivered:expr) => {{
         let journals = $journal_base.to_path_buf();
-        let collect_handler = DelayedCount {
+        let collect_handler = perform(|_: &Order| CountOrder).through(Port::to(DelayedCount {
             delivered: $delivered,
             delay: Duration::ZERO,
-        };
+        }));
         FlowDefinition::materialize(move |_runtime_config| {
             Ok(flow! {
                 name: "resume_lazy",
@@ -2038,13 +1964,8 @@ async fn a_lazy_billion_record_source_resumes_without_reading_its_prefix() -> Re
     ]);
     assert_eq!(recorded_rows, expected);
 
-    let (resumed, lowest_read) = run_lazy_orders(
-        &journal_base,
-        Some(&recorded),
-        (50.0, 5.0),
-        committed as usize + 5,
-    )
-    .await?;
+    let (resumed, lowest_read) =
+        run_lazy_orders(&journal_base, Some(&recorded), (50.0, 5.0), 5).await?;
     assert_eq!(
         lowest_read, committed,
         "the resumed reader generated nothing before its committed position"
@@ -2130,13 +2051,12 @@ async fn a_source_resumes_after_its_commits_not_its_reads() -> Result<()> {
     );
     let orders_source = duplicates();
     let lowest_read = orders_source.lowest_read.clone();
-    let delivered = Arc::new(AtomicUsize::new(0));
     let handle = lazy_flow(
         &journal_base,
         orders_source,
         (1000.0, 1000.0),
         DelayedCount {
-            delivered: delivered.clone(),
+            delivered: Arc::new(AtomicUsize::new(0)),
             delay: Duration::ZERO,
         },
     )
@@ -2144,7 +2064,13 @@ async fn a_source_resumes_after_its_commits_not_its_reads() -> Result<()> {
     .await
     .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
-    wait_for_deliveries(&delivered, prefix as usize + 100).await?;
+    // The cancel cut the sink short of the committed prefix, so the resume
+    // calls the sink for the unsettled part of it too.
+    wait_for_settled_calls(
+        &replay_testkit::latest_run_dir(&journal_base),
+        prefix as usize + 100,
+    )
+    .await?;
     handle.stop_graceful(Duration::from_secs(20)).await?;
     tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
         .await
@@ -2295,7 +2221,6 @@ async fn a_changed_decoder_output_type_fails_at_re_admission() -> Result<()> {
         replay_testkit::bootstrap_with_archive(ReplayBootstrap {
             archive_path: recorded_run.clone(),
             allow_incomplete_archive: true,
-            allow_duplicate_sink_delivery: false,
             verb: ReplayVerb::Resume,
         })
         .await,

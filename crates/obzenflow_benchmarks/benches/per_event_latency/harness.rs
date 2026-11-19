@@ -5,13 +5,12 @@
 //! Shared latency workload: monotonic process-local stamps, exactly-once
 //! delivery by source-assigned ID and fail-closed completion.
 
-use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::effects::{perform, EffectError, Perform, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -76,21 +75,16 @@ impl TypedTransformHandler for Passthrough {
 
 type Delivered = Arc<Mutex<Vec<(u64, Duration)>>>;
 
-#[derive(Clone, Debug)]
-pub struct Sink {
+/// Records each event's latency when its sink call runs.
+pub struct LatencyRecorder {
     origin: Instant,
     delivered: Delivered,
 }
 
-#[async_trait]
-impl InlineSink for Sink {
-    type Input = Event;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-    }
-
-    async fn write(&mut self, event: Event) -> Result<(), SinkWriteFailure> {
+#[obzenflow_runtime::effects::port(system = "latency-recorder", effects = obzenflow_runtime::effects)]
+impl LatencyRecorder {
+    #[effect(type = "bench.latency.record", at_least_once, records = reply)]
+    fn record(&self, event: &Event) -> Result<(), EffectError> {
         let latency = self
             .origin
             .elapsed()
@@ -100,6 +94,9 @@ impl InlineSink for Sink {
         Ok(())
     }
 }
+
+/// The sink a latency case ends in.
+pub type Sink = Perform<fn(&Event) -> Event, Event, Event>;
 
 /// One flow's source, sink and the deliveries they share.
 pub struct Delivery {
@@ -126,10 +123,10 @@ impl Delivery {
     }
 
     pub fn sink(&self) -> Sink {
-        Sink {
+        perform(Event::clone as fn(&Event) -> Event).through(Port::to(LatencyRecorder {
             origin: self.origin,
             delivered: self.delivered.clone(),
-        }
+        }))
     }
 
     /// Runs the flow to `Drained` and returns the median post-warm-up latency.

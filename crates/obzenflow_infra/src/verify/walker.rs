@@ -149,10 +149,19 @@ pub fn walk_journal(
                         }
                     }
                     WalkMode::BaselinePrefixOfCandidate => {
-                        out.candidate_surplus += 1;
-                        while next_positional(&mut candidate, &mut out.eof_candidate)?.is_some() {
-                            out.positional_candidate += 1;
-                            out.candidate_surplus += 1;
+                        let mut p = position;
+                        let mut row = Some(c_row);
+                        while let Some(surplus) = row {
+                            if surplus.replay_rejection {
+                                record_missing(&mut out, opts, p, Side::BaselineAbsent, &surplus);
+                            } else {
+                                out.candidate_surplus += 1;
+                            }
+                            row = next_positional(&mut candidate, &mut out.eof_candidate)?;
+                            if row.is_some() {
+                                out.positional_candidate += 1;
+                            }
+                            p += 1;
                         }
                     }
                 }
@@ -173,6 +182,8 @@ pub struct TallyOutput {
     pub positional: u64,
     pub counts_by_type: BTreeMap<String, u64>,
     pub eof: Vec<String>,
+    /// Calls replay refused, each a divergence even where order is uncertified.
+    pub replay_rejections: u64,
 }
 
 pub fn tally_journal(
@@ -183,6 +194,9 @@ pub fn tally_journal(
         match project(&event?) {
             Some(ProjectedRow::Positional(row)) => {
                 out.positional += 1;
+                if row.replay_rejection {
+                    out.replay_rejections += 1;
+                }
                 let key = match &row.kind {
                     RowKind::Payload { event_type, .. } => event_type.clone(),
                     RowKind::Watermark => "<watermark>".to_string(),

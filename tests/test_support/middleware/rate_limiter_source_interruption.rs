@@ -17,7 +17,6 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
 use obzenflow_core::event::{ChainPayload, SystemPayload};
 use obzenflow_core::journal::read::{RunJournalKind, RunRecordData};
@@ -25,9 +24,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -80,21 +77,7 @@ impl TypedAsyncFiniteSourceHandler for DripSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NoopSink;
-
-#[async_trait]
-impl InlineSink for NoopSink {
-    type Input = DripEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
-    }
-
-    async fn write(&mut self, _event: DripEvent) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NoopSink = obzenflow::stages::sinks::DiscardSink<DripEvent>;
 
 async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
     let mut rx = handle.state_receiver();
@@ -169,7 +152,7 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
     let journal_base_for_flow = journal_base.clone();
     let definition = FlowDefinition::materialize(move |_runtime_config| {
         let source = DripSource::new();
-        let sink = NoopSink;
+        let sink = NoopSink::new();
 
         Ok(flow! {
             name: "source_rate_limiter_interruption",

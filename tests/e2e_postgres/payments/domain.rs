@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow::effects::postgres::PostgresBindings;
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings};
 use serde::{Deserialize, Serialize};
 
 /// A payment that has been authorised for an order.
@@ -19,19 +19,14 @@ impl TypedPayload for PaymentAuthorized {
     const EVENT_TYPE: &'static str = "payments.payment_authorized";
 }
 
-/// Maps one domain event to the statement parameters configured in `flow.rs`.
-#[derive(Clone, Debug)]
-pub(crate) struct PaymentBinder;
-
-impl PostgresBind for PaymentBinder {
-    type Input = PaymentAuthorized;
-
-    fn bind(&self, bindings: &mut PostgresBindings, payment: &Self::Input) {
+impl PaymentAuthorized {
+    /// Binds the statement parameters configured in `flow.rs`.
+    pub(crate) fn bind(&self, bindings: &mut PostgresBindings) {
         bindings
-            .bind(payment.payment_id)
-            .bind(&payment.order_id)
-            .bind(&payment.customer_id)
-            .bind(payment.amount_cents);
+            .bind(self.payment_id)
+            .bind(&self.order_id)
+            .bind(&self.customer_id)
+            .bind(self.amount_cents);
     }
 }
 

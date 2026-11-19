@@ -20,8 +20,7 @@
 use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_adapters::sinks::CountingSink;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::vocabulary;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
@@ -33,12 +32,10 @@ use obzenflow_infra::journal::read::{
     read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing,
 };
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedInfiniteSourceHandler,
-    TypedTransformHandler,
+    TypedInfiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use replay_testkit::ReattachingSource;
@@ -125,26 +122,6 @@ impl TypedTransformHandler for SlowDouble {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingSink {
-    delivered: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = Doubled;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _event: Doubled) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 fn build_flow(
     journal_base: PathBuf,
     first_n: u64,
@@ -155,7 +132,7 @@ fn build_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let ticker = ReattachingSource(BoundedTicker::new(first_n, count));
         let slow_double = SlowDouble::new(delay_ms);
-        let counting_sink = CountingSink { delivered };
+        let counting_sink = CountingSink::<Doubled>::new(delivered);
 
         Ok(flow! {
             name: "resume_interrupted",
@@ -367,7 +344,6 @@ async fn record_and_interrupt(journal_base: &Path) -> Result<(PathBuf, PathBuf)>
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r0.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
@@ -435,7 +411,6 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
@@ -569,7 +544,6 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
@@ -686,7 +660,6 @@ async fn resuming_a_torn_resume_continues_the_prefix_its_ancestor_committed() ->
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,

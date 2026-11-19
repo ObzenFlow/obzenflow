@@ -13,9 +13,7 @@
 //! qualified value path. They do not take calls, builder chains, closures, or
 //! struct literals. Construct builder-owned handlers as ordinary Rust inside
 //! the flow's deferred materialiser, immediately above the inner `flow!`, then
-//! pass only the binding name. The one exception is a config-selected sink's
-//! syntax-only `handler_set!` operand, documented below; it is consumed by
-//! `sink!` and cannot exist as a handler value on its own.
+//! pass only the binding name.
 //!
 //! ```ignore
 //! FlowDefinition::materialize(move |_runtime_config| {
@@ -105,86 +103,15 @@
 //! `.for_effect::<E>()` guards or watches only `E`, and middleware that names
 //! no effect covers the stage's implementation.
 //!
-//! A sink classifies its redelivery after its handler with `.idempotent()` or
-//! `.non_idempotent()`. Connector descriptions and that classification
-//! compose, but the connector's typed input remains authoritative for the
-//! arrow.
+//! ## Sinks are effects
 //!
-//! A sink may instead consume one compile-time-closed set of heterogeneous,
-//! cold sink bindings. Each binding identifier is also its exact configuration
-//! key. The framework resolves `sinks.handler` for the logical sink stage,
-//! lowers only that binding, and independently checks every branch against the
-//! declared input before descriptor erasure:
-//!
-//! ```ignore
-//! let console_sink = sinks::ConsoleSink::new(render);
-//! let postgres_sink = PostgresSink::builder(binder)
-//!     .connection(connection)
-//!     .insert_into(schema, table, insert_body)?
-//!     .build()?;
-//! flow! {
-//!     stages: {
-//!         output = sink!(
-//!             Out => handler_set!(console_sink, postgres_sink).idempotent()
-//!         )?;
-//!     },
-//!     // topology
-//! }
-//! ```
-//!
-//! For a stage bound as `output`, the file address is
-//! `[sinks.stages.output] handler = "postgres_sink"`; the canonical
-//! Twelve-Factor environment spelling is
-//! `OBZENFLOW_SINKS_STAGES_OUTPUT_HANDLER=postgres_sink`. Selection is consumed
-//! before topology admission and introduces no registry, common handler trait,
-//! stored selector, or lifecycle authority. The ordinary
-//! `sink!(Out => output)` form remains unchanged.
-//!
-//! This is the sink-role instance of a reusable Twelve-Factor law: deployment
-//! configuration names one member of a code-closed typed integration set, and
-//! that choice is consumed before the integration enters its role lifecycle.
-//! Source and effect selection are not provided by this sink surface; later
-//! role-local designs can preserve the law without adding a cross-role registry,
-//! common selection trait, or runtime selector.
-//!
-//! A small named integration can implement `InlineSink` directly. It needs no
-//! separate connector. Its required description declares the delivery method,
-//! and `.idempotent()` or `.non_idempotent()` after the handler classifies
-//! redelivery when archive replay matters.
-//!
-//! ```
-//! use async_trait::async_trait;
-//! use obzenflow_core::event::schema::TypedPayload;
-//! use obzenflow_dsl::sink;
-//! use obzenflow_runtime::stages::common::handlers::{
-//!     InlineSink, SinkDescription, SinkWriteFailure,
-//! };
-//! use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-//! use serde::{Deserialize, Serialize};
-//!
-//! #[derive(Clone, Debug, Serialize, Deserialize)]
-//! struct Out;
-//! impl TypedPayload for Out {
-//!     const EVENT_TYPE: &'static str = "doc.out";
-//! }
-//!
-//! #[derive(Clone, Debug)]
-//! struct Typed;
-//!
-//! #[async_trait]
-//! impl InlineSink for Typed {
-//!     type Input = Out;
-//!     fn describe(&self) -> SinkDescription {
-//!         SinkDescription::method(DeliveryMethod::Noop)
-//!     }
-//!     async fn write(&mut self, _input: Out) -> Result<(), SinkWriteFailure> {
-//!         Ok(())
-//!     }
-//! }
-//!
-//! // The inline sink stays small; the flow row owns this deployment choice.
-//! let _ = sink!(Out => Typed.idempotent());
-//! ```
+//! A sink row takes a command that builds one request per input: `perform(...)`
+//! with its port, a ready-made helper such as `ConsoleSink`, or a struct
+//! implementing `SinkRole`. The stage sends each request through the command's
+//! port as an effect call, and the port method's `#[effect]` states its
+//! guarantee, so the row takes no decoration. A flow chooses a sink's system
+//! as it chooses any effect's, by building its port with `Port::to` or
+//! `Port::deferred`.
 
 pub mod ai_stage;
 mod attachment_plan;
@@ -203,7 +130,6 @@ pub mod error;
 #[doc(hidden)]
 pub mod flow_builder;
 mod flow_definition;
-mod resume_edges;
 pub mod stage_descriptor;
 mod stage_macros;
 mod then_live;

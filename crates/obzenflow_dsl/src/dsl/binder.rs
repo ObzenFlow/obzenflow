@@ -16,8 +16,7 @@ use obzenflow_adapters::middleware::{
     EffectUnitId, HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
     MiddlewareAttachmentRequest, MiddlewareAttachmentSite, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareSurface, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
-    ProtectedUnitOwner, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy,
-    SourcePolicy, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
+    ProtectedUnitOwner, SourcePolicy, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
@@ -86,15 +85,6 @@ fn with_binding_request<T>(
                 stage_id: config.stage_id,
             }),
             ProtectedUnit::SourcePoll(SourcePollUnitId),
-        ),
-        MiddlewareSurfaceKind::SinkDelivery => (
-            MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
-                stage_id: config.stage_id,
-                configured_target: None,
-            }),
-            ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
-                target: SinkDeliveryTarget::Stage,
-            }),
         ),
         MiddlewareSurfaceKind::Effect => {
             let effect = effect.ok_or_else(|| {
@@ -371,12 +361,6 @@ pub(crate) fn materialize_observer(
         MiddlewareSurfaceKind::SourcePoll => MiddlewareSurface::SourcePoll(SourcePollSurface {
             stage_id: config.stage_id,
         }),
-        MiddlewareSurfaceKind::SinkDelivery => {
-            MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
-                stage_id: config.stage_id,
-                configured_target: None,
-            })
-        }
         MiddlewareSurfaceKind::Handler => MiddlewareSurface::Handler {
             stage_id: config.stage_id,
         },
@@ -402,11 +386,6 @@ pub(crate) fn materialize_observer(
         owner: ProtectedUnitOwner::Stage,
         unit: match surface_kind {
             MiddlewareSurfaceKind::SourcePoll => ProtectedUnit::SourcePoll(SourcePollUnitId),
-            MiddlewareSurfaceKind::SinkDelivery => {
-                ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
-                    target: SinkDeliveryTarget::Stage,
-                })
-            }
             MiddlewareSurfaceKind::Handler => ProtectedUnit::Handler,
             MiddlewareSurfaceKind::Stateful => ProtectedUnit::Stateful,
             MiddlewareSurfaceKind::Join => ProtectedUnit::Join,
@@ -422,44 +401,6 @@ pub(crate) fn materialize_observer(
     };
     materialize_factory_checked(factory, request, config, stage_type, control_middleware)
         .map_err(|error| error.to_string())
-}
-
-/// Materialize one hook-bound control middleware onto the sink-delivery surface,
-/// returning the composable sink policy.
-pub(crate) fn materialize_sink_delivery(
-    factory: &dyn MiddlewareFactory,
-    config: &StageConfig,
-    stage_type: StageType,
-    control_middleware: &Arc<ControlMiddlewareAggregator>,
-    authored_site: MiddlewareAttachmentSite,
-) -> Result<Arc<dyn SinkPolicy>, String> {
-    let surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
-        stage_id: config.stage_id,
-        configured_target: None,
-    });
-    let protected_unit = ProtectedUnitId {
-        stage_id: config.stage_id,
-        owner: ProtectedUnitOwner::Stage,
-        unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
-            target: SinkDeliveryTarget::Stage,
-        }),
-    };
-    let request = MiddlewareAttachmentRequest {
-        stage_key: &config.name,
-        surface: &surface,
-        protected_unit: &protected_unit,
-        authored_site,
-    };
-    match materialize_factory_checked(factory, request, config, stage_type, control_middleware)
-        .map_err(|error| error.to_string())?
-        .into_sink_delivery()
-    {
-        Some(policy) => Ok(policy),
-        None => Err(format!(
-            "binder expected a SinkDelivery attachment from middleware '{}'",
-            factory.label()
-        )),
-    }
 }
 
 /// Materialize one hook-bound control middleware onto the source-backed hosted

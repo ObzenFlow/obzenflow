@@ -4,7 +4,6 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload, EdgeLivenessState};
 use obzenflow_core::journal::Journal;
@@ -16,8 +15,7 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -115,21 +113,7 @@ impl EffectfulTransformHandler for SlowAiTransform {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NoopSink;
-
-#[async_trait]
-impl InlineSink for NoopSink {
-    type Input = ProbeOutputEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
-    }
-
-    async fn write(&mut self, _input: ProbeOutputEvent) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NoopSink = obzenflow_adapters::sinks::DiscardSink<ProbeOutputEvent>;
 
 #[tokio::test(flavor = "current_thread")]
 async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
@@ -157,7 +141,7 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let numbers_handler = TwoEventSource::new();
         let slow_ai_handler = SlowAiTransform::new();
-        let sink_handler = NoopSink;
+        let sink_handler = NoopSink::new();
 
         Ok(flow! {
             name: "liveness_slow_but_healthy",

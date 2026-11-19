@@ -12,21 +12,17 @@ mod postgres_transport;
 
 use anyhow::Result;
 use obzenflow::application::FlowApplication;
-use obzenflow::stages::sinks::postgres::PostgresConnection;
 use std::{ffi::OsString, path::PathBuf};
 
 pub fn run(args: Vec<OsString>) -> Result<()> {
-    let connection = PostgresConnection::deferred_from_env(
-        "OBZENFLOW_POSTGRES_URL",
-        postgres_transport::from_environment()?,
-    );
+    let transport = postgres_transport::from_environment()?;
     let schema = std::env::var("OBZENFLOW_POSTGRES_SCHEMA")
         .unwrap_or_else(|_| "obzenflow_example".to_string());
     let journals = std::env::var_os("OBZENFLOW_JOURNAL_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/postgres-sink-payments"));
 
-    let payment_flow = flow::build(journals, connection, schema)?;
+    let payment_flow = flow::build(journals, transport, schema)?;
     FlowApplication::builder()
         .with_cli_args(args)
         .run_blocking(payment_flow)?;

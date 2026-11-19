@@ -24,7 +24,6 @@ pub mod metrics;
 pub mod metrics_barrier;
 pub mod pipeline;
 pub mod probe;
-pub mod sink;
 pub mod stage_journal;
 pub mod test_clock;
 

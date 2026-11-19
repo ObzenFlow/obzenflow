@@ -5,14 +5,11 @@
 use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use obzenflow::flow::{flow, merge, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::merges;
-use obzenflow::stages::sinks::{
-    DeliveryMethod, InlineSink, SinkDescription, SinkRedeliverySafety, SinkWriteFailure,
-};
+use obzenflow::stages::sinks::DiscardSink;
 use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
@@ -21,8 +18,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tokio::sync::Notify;
 
 static CONCAT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -42,31 +37,6 @@ fn notes(prefix: &str, count: usize) -> Vec<Note> {
         .collect()
 }
 
-#[derive(Clone, Debug, Default)]
-struct Collect {
-    notes: Arc<Mutex<Vec<String>>>,
-    arrived: Arc<Notify>,
-}
-
-#[async_trait]
-impl InlineSink for Collect {
-    type Input = Note;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, note: Note) -> Result<(), SinkWriteFailure> {
-        self.notes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(note.note);
-        self.arrived.notify_one();
-        Ok(())
-    }
-}
-
 #[derive(Clone)]
 struct Inputs {
     first: usize,
@@ -75,11 +45,11 @@ struct Inputs {
     enforce: Option<(u64, u64)>,
 }
 
-fn build(journal_base: PathBuf, inputs: Inputs, sink: Collect) -> FlowDefinition {
+fn build(journal_base: PathBuf, inputs: Inputs) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let first_source = ValuesSource::new(notes("first", inputs.first));
         let last_source = ValuesSource::new(notes("last", inputs.last));
-        let collector = sink.clone();
+        let collector = DiscardSink::<Note>::new();
         let rate = inputs.first_rate;
         let journals = journal_base.clone();
 
@@ -117,13 +87,9 @@ async fn run_to_end(journal_base: &Path, inputs: Inputs, args: Vec<OsString>) ->
         )?;
         app = app.with_config_file(config);
     }
-    app.run_async(build(
-        journal_base.to_path_buf(),
-        inputs,
-        Collect::default(),
-    ))
-    .await
-    .map_err(|error| anyhow!("{error:?}"))?;
+    app.run_async(build(journal_base.to_path_buf(), inputs))
+        .await
+        .map_err(|error| anyhow!("{error:?}"))?;
     Ok(replay_testkit::latest_run_dir(journal_base))
 }
 

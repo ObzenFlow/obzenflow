@@ -24,7 +24,7 @@ use std::marker::PhantomData;
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a declared request",
     label = "no `#[effect]` port method takes `{Self}`",
-    note = "declare it with `#[effect(type = \"...\", exactly_once)]` or `at_least_once` on the port method that takes it"
+    note = "declare it with `#[effect(type = \"...\", exactly_once)]`, `at_least_once` or `at_most_once` on the port method that takes it"
 )]
 pub trait EffectName: 'static {
     type Effect: Effect;
@@ -191,6 +191,7 @@ mod tests {
         type Safety = Idempotent;
         type Port = ();
         type Outcome = PingValue;
+        type Records = super::super::DomainFacts;
 
         async fn call(&self, _: &(), _: &mut EffectContext) -> Result<PingValue, EffectError> {
             Ok(PingValue { value: 1 })
@@ -206,6 +207,7 @@ mod tests {
         type Safety = Idempotent;
         type Port = ();
         type Outcome = PingValue;
+        type Records = super::super::DomainFacts;
 
         async fn call(&self, _: &(), _: &mut EffectContext) -> Result<PingValue, EffectError> {
             Ok(PingValue { value: 2 })

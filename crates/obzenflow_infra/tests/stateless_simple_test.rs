@@ -2,14 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -64,22 +60,6 @@ impl TypedFiniteSourceHandler for SimpleSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct Printer;
-
-#[async_trait]
-impl InlineSink for Printer {
-    type Input = DoubledEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Print".to_string()))
-    }
-
-    async fn write(&mut self, _input: DoubledEvent) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn stateless_pipeline_runs_to_completion() {
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
@@ -88,7 +68,7 @@ async fn stateless_pipeline_runs_to_completion() {
             original: event.value,
             doubled: event.value * 2,
         });
-        let printer = Printer;
+        let printer = obzenflow_adapters::sinks::DiscardSink::<DoubledEvent>::new();
 
         Ok(flow! {
             name: "stateless_simple_test",

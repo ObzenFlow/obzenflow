@@ -18,7 +18,7 @@
 //! effectful_transform!(In -> Out with policy => handler)
 //! stateful!(In -> Out => handler)
 //! effectful_stateful!(In -> Out => handler.at_least_once::<ChargeCard>())
-//! sink!(In => handler.idempotent())
+//! sink!(In => command)
 //! join!(catalog CatalogStage: Catalog, Stream -> Out => handler)
 //! ```
 //!
@@ -1712,336 +1712,51 @@ macro_rules! __obzenflow_effectful_transform_attachment_contract {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_sink_typed {
-    // ── exact input, placeholder ──
-    (input = exact($in:ty), name = $name:literal, handler = placeholder!(), sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
+    (input = exact($in:ty), name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         $crate::dsl::typing::placeholder_sink_descriptor::<$in>(
             $name,
             None,
-            vec![$($crate::__private::capture_middleware($policy)),*],
-            vec![$($crate::__private::capture_middleware($observer)),*],
+            vec![$($crate::__private::capture_middleware($mw)),*],
         )
     }};
-    (input = exact($in:ty), name = $name:literal, handler = placeholder!($msg:expr), sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
+    (input = exact($in:ty), name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         $crate::dsl::typing::placeholder_sink_descriptor::<$in>(
             $name,
             Some($msg),
-            vec![$($crate::__private::capture_middleware($policy)),*],
-            vec![$($crate::__private::capture_middleware($observer)),*],
+            vec![$($crate::__private::capture_middleware($mw)),*],
         )
     }};
-
-    // ── exact input, real handler (facade call anchoring) ──
-    //
-    // Like joins, sink facade helpers often need the contract type injected to avoid
-    // turbofish/annotations at the call site (e.g., `sinks::ConsoleSink::new(sinks::JsonFormatter)` and `sinks::ConsoleSink::new(sinks::TableFormatter::new(...)).batch_size(256)?`).
-
-    // ── exact input, real handler ──
-    //
-    (input = exact($in:ty), name = $name:literal, handler = $handler:expr, sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
+    (input = exact($in:ty), name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        $crate::dsl::typing::typed_sink_descriptor::<_, $in>(
+        $crate::dsl::typing::typed_sink_descriptor::<_, $in, _>(
             $name,
             __handler,
-            vec![$($crate::__private::capture_middleware($policy)),*],
-            vec![$($crate::__private::capture_middleware($observer)),*],
+            vec![$($crate::__private::capture_middleware($mw)),*],
         )
     }};
-}
-
-/// Lower a sink's `.idempotent()` or `.non_idempotent()` decoration. Routes
-/// through the sealed `SetSinkRedeliverySafety` trait so the decoration is
-/// accepted only for a `SinkConnector`, including the inline tier, and wraps
-/// its description before the DSL snapshots it.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_sink_delivery {
-    ($handler:expr) => {
-        $handler
-    };
-    ($handler:expr, idempotent) => {
-        $crate::__private::SetSinkRedeliverySafety::safe_to_repeat($handler)
-    };
-    ($handler:expr, non_idempotent) => {
-        $crate::__private::SetSinkRedeliverySafety::duplicate_sensitive($handler)
-    };
-}
-
-/// Render the closed binding-name set used by a config-selected `sink!`
-/// diagnostic.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_sink_selection_expected {
-    ($only:ident) => {
-        concat!("\"", stringify!($only), "\"")
-    };
-    ($first:ident, $second:ident) => {
-        concat!(
-            "\"",
-            stringify!($first),
-            "\" or \"",
-            stringify!($second),
-            "\""
-        )
-    };
-    ($first:ident, $second:ident, $($rest:ident),+) => {
-        concat!(
-            "one of \"",
-            stringify!($first),
-            "\", \"",
-            stringify!($second),
-            "\"",
-            $(", \"", stringify!($rest), "\"")+
-        )
-    };
-}
-
-/// Apply the enclosing sink site's delivery declaration to one selected
-/// handler constructor. The token group is carried intact through the
-/// heterogeneous branch repetition so every arm receives the same site law.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_sink_handler_set_delivery {
-    ($handler:expr, []) => {
-        $handler
-    };
-    ($handler:expr, [idempotent]) => {
-        $crate::__obzenflow_sink_delivery!($handler, idempotent)
-    };
-    ($handler:expr, [non_idempotent]) => {
-        $crate::__obzenflow_sink_delivery!($handler, non_idempotent)
-    };
-}
-
-/// Lower one branch of a selected sink through the ordinary typed sink
-/// boundary. Keeping this helper branch-local is what makes every authored
-/// alternative satisfy the same arrow-input witness before descriptor erasure.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_sink_handler_set_branch {
-    (
-        input = exact($in:ty),
-        name = $name:literal,
-        handler = $handler:expr,
-        delivery = $delivery:tt,
-        sink_policies = [$($policy:expr),*],
-        observers = [$($observer:expr),*]
-    ) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = $name,
-            handler = $crate::__obzenflow_sink_handler_set_delivery!($handler, $delivery),
-            sink_policies = [$($policy),*],
-            observers = [$($observer),*]
-        )
-    };
-}
-
-/// Sink-owned lowering for the syntax-only `handler_set!` operand.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_sink_handler_set {
-    (
-        input = exact($in:ty),
-        name = $name:literal,
-        handlers = [$($handler:ident),+ $(,)?],
-        delivery = $delivery:tt,
-        sink_policies = $sink_policies:tt,
-        observers = $observers:tt
-    ) => {{
-        const _: () = assert!(
-            $crate::dsl::stage_descriptor::configured_sink_handler_keys_are_unique(&[
-                $(stringify!($handler)),+
-            ]),
-            "sink!: handler_set! binding identifiers must be unique"
-        );
-        let __obzenflow_configured_sink: ::std::boxed::Box<
-            dyn $crate::dsl::stage_descriptor::StageDescriptor,
-        > = $crate::dsl::stage_descriptor::configured_sink_descriptor(
-            $name,
-            &[$(stringify!($handler)),+],
-            $crate::__obzenflow_sink_selection_expected!($($handler),+),
-            move |__obzenflow_selected_key: &str| {
-                match __obzenflow_selected_key {
-                    $(
-                        stringify!($handler) => ::core::option::Option::Some(
-                            $crate::__obzenflow_sink_handler_set_branch!(
-                                input = exact($in),
-                                name = $name,
-                                handler = $handler,
-                                delivery = $delivery,
-                                sink_policies = $sink_policies,
-                                observers = $observers
-                            )
-                        ),
-                    )+
-                    _ => ::core::option::Option::None,
-                }
-            },
-        );
-        ::core::result::Result::<
-            ::std::boxed::Box<dyn $crate::dsl::stage_descriptor::StageDescriptor>,
-            $crate::dsl::FlowBuildError,
-        >::Ok(__obzenflow_configured_sink)
-    }};
-}
-
-/// A closed set of cold sink bindings consumed by `sink!`.
-///
-/// This macro is a syntax-only operand. `sink!` must provide the declared input
-/// witness and site clauses before any selected branch can lower to a descriptor.
-/// Each binding identifier is also its exact deployment-configuration key.
-/// A standalone invocation is deliberately rejected:
-///
-/// ```compile_fail
-/// use obzenflow_dsl::handler_set;
-///
-/// let _ = handler_set!(console_sink, postgres_sink);
-/// ```
-#[macro_export]
-macro_rules! handler_set {
-    ($($tokens:tt)*) => {
-        compile_error!(
-            "handler_set! is a sink! operand, not a standalone handler; use \
-             sink!(Input => handler_set!(console_sink, postgres_sink))"
-        )
-    };
 }
 
 /// Create a sink stage descriptor.
 ///
-/// Canonical grammar: `InputType with middleware => handler_path`, where
-/// `with middleware` or `with { a, b }` is optional and holds controls and
-/// passive observers, and the handler may be followed by `.idempotent()` or
-/// `.non_idempotent()`. Configure a built-in or named trait implementation in
-/// ordinary Rust inside the materializer, then pass the resulting binding by
-/// path.
-///
-/// The config-selected form composes the direct surface with a syntax-only
-/// handler set:
-/// `InputType => handler_set!(primary_sink, audit_sink)`. Framework
-/// configuration resolves one binding name for the logical sink stage. Only
-/// that binding lowers to an ordinary descriptor, while every branch is
-/// checked through the same exact input witness before erasure.
-/// An incompatible unselected binding is therefore still a compile error:
-///
-/// ```compile_fail
-/// use obzenflow_core::TypedPayload;
-/// use obzenflow_dsl::sink;
-/// use obzenflow_adapters::sinks::{ConsoleSink, JsonFormatter};
-/// use serde::{Deserialize, Serialize};
-///
-/// #[derive(Clone, Debug, Deserialize, Serialize)]
-/// struct Output;
-/// impl TypedPayload for Output {
-///     const EVENT_TYPE: &'static str = "docs.handler-set.output";
-/// }
-/// #[derive(Clone, Debug, Deserialize, Serialize)]
-/// struct Wrong;
-/// impl TypedPayload for Wrong {
-///     const EVENT_TYPE: &'static str = "docs.handler-set.wrong";
-/// }
-///
-/// let output_sink = ConsoleSink::<Output, _>::new(JsonFormatter);
-/// let wrong_sink = ConsoleSink::<Wrong, _>::new(JsonFormatter);
-/// let _ = sink!(Output => handler_set!(output_sink, wrong_sink));
-/// ```
-/// Duplicate binding names are also a compile error rather than an ambiguous
-/// deployment key:
-///
-/// ```compile_fail
-/// use obzenflow_core::TypedPayload;
-/// use obzenflow_dsl::sink;
-/// use obzenflow_adapters::sinks::{ConsoleSink, JsonFormatter};
-/// use serde::{Deserialize, Serialize};
-///
-/// #[derive(Clone, Debug, Deserialize, Serialize)]
-/// struct Output;
-/// impl TypedPayload for Output {
-///     const EVENT_TYPE: &'static str = "docs.handler-set.duplicate";
-/// }
-///
-/// let output_sink = ConsoleSink::<Output, _>::new(JsonFormatter);
-/// let _ = sink!(Output => handler_set!(output_sink, output_sink));
-/// ```
-/// The earlier uncomposed spelling receives a migration diagnostic:
-///
-/// ```compile_fail
-/// use obzenflow_dsl::sink;
-///
-/// struct Output;
-/// let _ = sink!(
-///     Output => select("console".to_owned()) {
-///         "console" => console_handler,
-///     }
-/// );
-/// ```
+/// Canonical grammar: `InputType with middleware => command`, where
+/// `with middleware` or `with { a, b }` is optional. The command is
+/// `perform(...)` with its port, a ready-made helper such as `ConsoleSink`, or a
+/// struct implementing `SinkRole`, built above `flow!` and passed by path. The
+/// sink sends one request per input through the command's port, and the port
+/// method's `#[effect]` states the guarantee.
 #[macro_export]
 macro_rules! __obzenflow_sink_attachment_contract {
-    // FLOWIP-010o B1/B2: framework configuration selects one binding name
-    // from a compile-time-closed handler set. The enclosing sink owns the
-    // arrow witness and all site metadata; the set disappears before topology.
-    ($in:ty => handler_set!($($handler:ident),+ $(,)?)
-        $(@attachments [$($policy:expr),* $(,)?])?
-        $(@delivery $delivery:ident)?
-    ) => {
-        $crate::__obzenflow_sink_handler_set!(
-            input = exact($in),
-            name = "__obzenflow_binding_derived_name__",
-            handlers = [$($handler),+],
-            delivery = [$($delivery)?],
-            sink_policies = [$($($policy),*)?],
-            observers = []
-        )
-    };
-    (name: $name:literal, $in:ty => handler_set!($($handler:ident),+ $(,)?)
-        $(@attachments [$($policy:expr),* $(,)?])?
-        $(@delivery $delivery:ident)?
-    ) => {
-        $crate::__obzenflow_sink_handler_set!(
-            input = exact($in),
-            name = $name,
-            handlers = [$($handler),+],
-            delivery = [$($delivery)?],
-            sink_policies = [$($($policy),*)?],
-            observers = []
-        )
-    };
-    ($in:ty => handler_set!() $($rest:tt)*) => {
-        compile_error!("sink!: handler_set! requires one or more sink binding identifiers")
-    };
-    (name: $name:literal, $in:ty => handler_set!() $($rest:tt)*) => {
-        compile_error!("sink!: handler_set! requires one or more sink binding identifiers")
-    };
-    ($in:ty => handler_set!($($handler_set:tt)*) $($rest:tt)*) => {
-        compile_error!(
-            "sink!: expected `handler_set!(primary_sink, audit_sink)`; each alternative must be a unique binding identifier, and that identifier is its exact config key"
-        )
-    };
-    (name: $name:literal, $in:ty => handler_set!($($handler_set:tt)*) $($rest:tt)*) => {
-        compile_error!(
-            "sink!: expected `handler_set!(primary_sink, audit_sink)`; each alternative must be a unique binding identifier, and that identifier is its exact config key"
-        )
-    };
     ($in:ty => select($selector:expr) {$($arms:tt)*} $($rest:tt)*) => {
-        compile_error!(
-            "sink!: selected handlers compose through handler_set!; use \
-             sink!(Input => handler_set!(primary_sink, audit_sink))"
-        )
+        compile_error!("choose a sink's system in code, by building its port with `Port::to` or `Port::deferred` in a `match`")
     };
     (name: $name:literal, $in:ty => select($selector:expr) {$($arms:tt)*} $($rest:tt)*) => {
-        compile_error!(
-            "sink!: selected handlers compose through handler_set!; use \
-             sink!(name: \"output\", Input => handler_set!(primary_sink, audit_sink))"
-        )
+        compile_error!("choose a sink's system in code, by building its port with `Port::to` or `Port::deferred` in a `match`")
     };
-
-
-    // ── typed (binding-derived name): exact input ──
-    ($in:ty => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!(), sink_policies = [$($($policy),*)?], observers = [])
+    ($in:ty => placeholder!() $(@attachments [$($mw:expr),* $(,)?])? $(,)?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($($mw),*)?])
     };
-    ($in:ty => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), sink_policies = [$($($policy),*)?], observers = [])
+    ($in:ty => placeholder!($msg:expr) $(@attachments [$($mw:expr),* $(,)?])? $(,)?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($($mw),*)?])
     };
     (|$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
@@ -2074,18 +1789,15 @@ macro_rules! __obzenflow_sink_attachment_contract {
         )
     };
     ($in:ty => $handler_head:ident $(:: $handler_tail:ident)*
-        $(@attachments [$($policy:expr),* $(,)?])?
-        $(@delivery $delivery:ident)?
+        $(@attachments [$($mw:expr),* $(,)?])?
     ) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = $crate::__obzenflow_sink_delivery!($handler_head $(:: $handler_tail)* $(, $delivery)?), sink_policies = [$($($policy),*)?], observers = [])
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, middleware = [$($($mw),*)?])
     };
-
-    // ── typed (explicit name override): exact input ──
-    (name: $name:literal, $in:ty => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!(), sink_policies = [$($($policy),*)?], observers = [])
+    (name: $name:literal, $in:ty => placeholder!() $(@attachments [$($mw:expr),* $(,)?])? $(,)?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!(), middleware = [$($($mw),*)?])
     };
-    (name: $name:literal, $in:ty => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!($msg), sink_policies = [$($($policy),*)?], observers = [])
+    (name: $name:literal, $in:ty => placeholder!($msg:expr) $(@attachments [$($mw:expr),* $(,)?])? $(,)?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!($msg), middleware = [$($($mw),*)?])
     };
     (name: $name:literal, |$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
@@ -2118,16 +1830,9 @@ macro_rules! __obzenflow_sink_attachment_contract {
         )
     };
     (name: $name:literal, $in:ty => $handler_head:ident $(:: $handler_tail:ident)*
-        $(@attachments [$($policy:expr),* $(,)?])?
-        $(@delivery $delivery:ident)?
+        $(@attachments [$($mw:expr),* $(,)?])?
     ) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = $crate::__obzenflow_sink_delivery!($handler_head $(:: $handler_tail)* $(, $delivery)?), sink_policies = [$($($policy),*)?], observers = [])
-    };
-    ($in:ty => placeholder!($($message:tt)*) $(@attachments [$($policy:expr),* $(,)?])? @delivery $delivery:ident) => {
-        compile_error!("a placeholder sink delivers nothing, so it takes no `.idempotent()` or `.non_idempotent()`")
-    };
-    (name: $name:literal, $in:ty => placeholder!($($message:tt)*) $(@attachments [$($policy:expr),* $(,)?])? @delivery $delivery:ident) => {
-        compile_error!("a placeholder sink delivers nothing, so it takes no `.idempotent()` or `.non_idempotent()`")
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = $handler_head $(:: $handler_tail)*, middleware = [$($($mw),*)?])
     };
 }
 
@@ -2990,7 +2695,7 @@ macro_rules! __obzenflow_stage_row {
         $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw [placeholder!($message)] [] [] $($rest)*)
     };
     (@handler $kind:ident $target:ident $sig:tt $mw:tt handler_set!($($set:tt)*) $($rest:tt)*) => {
-        $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw [handler_set!($($set)*)] [] [] $($rest)*)
+        compile_error!("`handler_set!` was removed; build each system's port with `Port::to` or `Port::deferred` and choose between them in code")
     };
     (@handler $kind:ident $target:ident $sig:tt $mw:tt $head:ident $($rest:tt)*) => {
         $crate::__obzenflow_stage_row!(@path $kind $target $sig $mw [$head] $($rest)*)
@@ -3020,23 +2725,17 @@ macro_rules! __obzenflow_stage_row {
     (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . transactional $($rest:tt)*) => {
         compile_error!("`.transactional` was removed: a method that takes an `EffectCommitHandle` is exactly once, so its stage acknowledges nothing")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt [] . idempotent () $($rest:tt)*) => {
-        $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw $handler $acks [idempotent] $($rest)*)
+    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . idempotent () $($rest:tt)*) => {
+        compile_error!("`.idempotent()` was removed; a sink's port method states its guarantee in `#[effect]`, and a sink row takes no decoration")
     };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt [] . non_idempotent () $($rest:tt)*) => {
-        $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw $handler $acks [non_idempotent] $($rest)*)
-    };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt [$delivery:ident] . idempotent () $($rest:tt)*) => {
-        compile_error!("a sink classifies its redelivery once, with `.idempotent()` or `.non_idempotent()`")
-    };
-    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt [$delivery:ident] . non_idempotent () $($rest:tt)*) => {
-        compile_error!("a sink classifies its redelivery once, with `.idempotent()` or `.non_idempotent()`")
+    (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . non_idempotent () $($rest:tt)*) => {
+        compile_error!("`.non_idempotent()` was removed; a sink's port method states its guarantee in `#[effect]`, and a sink row takes no decoration")
     };
     (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt with $($rest:tt)*) => {
         compile_error!("`with` comes before `=>`; write `with …` after the stage's types")
     };
     (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt , delivery : $($rest:tt)*) => {
-        compile_error!("`delivery:` was removed; classify the sink after its handler, as in `=> shipping_handoff.idempotent()`")
+        compile_error!("`delivery:` was removed; a sink's port method states its guarantee in `#[effect]`")
     };
     (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt , backpressure : $($rest:tt)*) => {
         compile_error!("`backpressure:` was removed; set backpressure in configuration, under `[runtime.backpressure.flow]` or `[runtime.backpressure.stages.<stage>]`")
@@ -3060,17 +2759,17 @@ macro_rules! __obzenflow_stage_row {
     (@emit ai $target:ident $sig:tt $mw:tt $handler:tt [$($acks:tt)+] $delivery:tt) => {
         compile_error!("an `ai!` row is itself the acknowledgement for its AI effect; remove `.at_least_once::<E>()`")
     };
-    (@emit sink $target:ident [$($sig:tt)*] [$($mw:tt)*] [$($handler:tt)*] [] [$($delivery:ident)?]) => {
-        $crate::$target!($($sig)* => $($handler)* @attachments [$($mw)*] $(@delivery $delivery)?)
+    (@emit sink $target:ident [$($sig:tt)*] [$($mw:tt)*] [$($handler:tt)*] [] []) => {
+        $crate::$target!($($sig)* => $($handler)* @attachments [$($mw)*])
+    };
+    (@emit sink $target:ident $sig:tt $mw:tt $handler:tt [$($acks:tt)+] $delivery:tt) => {
+        compile_error!("a sink row states no guarantee; its port method's `#[effect]` states it, so remove `.at_least_once::<E>()`")
     };
     (@emit effectful $target:ident [$($sig:tt)*] [$($mw:tt)*] [$($handler:tt)*] [$($acks:tt)*] []) => {
         $crate::$target!($($sig)* => $($handler)* @attachments [$($mw)*] @acks [$($acks)*])
     };
     (@emit $kind:ident $target:ident $sig:tt $mw:tt $handler:tt [$($acks:tt)+] $delivery:tt) => {
         compile_error!("`.at_least_once::<E>()` acknowledges an effect an effectful handler performs; only `effectful_transform!` and `effectful_stateful!` rows acknowledge effects")
-    };
-    (@emit $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt [$delivery:ident]) => {
-        compile_error!("`.idempotent()` and `.non_idempotent()` classify a sink's redelivery; only `sink!` rows take them")
     };
 }
 
@@ -4321,45 +4020,169 @@ macro_rules! join {
     ($($tokens:tt)*) => { $crate::__obzenflow_stage_row!(@sig plain __obzenflow_join_attachment_contract [] $($tokens)*) };
 }
 
-/// Declares a typed sink. `.idempotent()` or `.non_idempotent()` after the
-/// handler classifies its redelivery.
+/// Declares a typed sink. The row's command builds one request per input and
+/// sends it through its port. The port method's `#[effect]` states the
+/// guarantee, so the row takes no decoration.
 ///
 /// ```
-/// # use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-/// # use obzenflow_runtime::stages::common::handlers::{InlineSink, SinkDescription, SinkWriteFailure};
+/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
-/// # #[derive(Clone, Debug)]
-/// # struct Ledger;
-/// # #[async_trait::async_trait]
-/// # impl InlineSink for Ledger {
-/// #     type Input = Fact;
-/// #     fn describe(&self) -> SinkDescription { SinkDescription::method(DeliveryMethod::Noop) }
-/// #     async fn write(&mut self, _: Fact) -> Result<(), SinkWriteFailure> { Ok(()) }
+/// #[derive(Clone, Debug, serde::Serialize)]
+/// struct Entry;
+///
+/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// trait LedgerPort {
+///     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
+///     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
+/// }
+///
+/// struct Ledger;
+///
+/// #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// impl LedgerPort for Ledger {
+///     fn record(&self, _: &Entry) -> Result<(), EffectError> {
+///         Ok(())
+///     }
+/// }
+///
+/// let ledger = perform(|_: &Fact| Entry).through(Port::to(Ledger));
+/// let sink = obzenflow_dsl::sink!(Fact => ledger);
+/// ```
+///
+/// A request whose port method records facts belongs in `effectful_transform!`:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Recorded;
+/// # impl obzenflow_core::TypedPayload for Recorded { const EVENT_TYPE: &'static str = "sink_doc.recorded"; }
+/// #[derive(Clone, Debug, serde::Serialize)]
+/// struct Entry;
+///
+/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// trait LedgerPort {
+///     #[effect(type = "sink_doc.record", exactly_once)]
+///     fn record(&self, entry: &Entry) -> Result<Recorded, EffectError>;
+/// }
+///
+/// struct Ledger;
+///
+/// #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// impl LedgerPort for Ledger {
+///     fn record(&self, _: &Entry) -> Result<Recorded, EffectError> {
+///         Ok(Recorded)
+///     }
+/// }
+///
+/// let ledger = perform(|_: &Fact| Entry).through(Port::to(Ledger));
+/// let sink = obzenflow_dsl::sink!(Fact => ledger);
+/// ```
+///
+/// `.idempotent()` and `.non_idempotent()` were removed:
+///
+/// ```compile_fail
+/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct Entry;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait LedgerPort {
+/// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
+/// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
-/// let ledger = Ledger;
+/// # struct Ledger;
+/// # #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// # impl LedgerPort for Ledger {
+/// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
+/// # }
+/// let ledger = perform(|_: &Fact| Entry).through(Port::to(Ledger));
 /// let sink = obzenflow_dsl::sink!(Fact => ledger.idempotent());
 /// ```
 ///
-/// The `delivery:` clause was removed.
-///
 /// ```compile_fail
-/// # use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-/// # use obzenflow_runtime::stages::common::handlers::{InlineSink, SinkDescription, SinkWriteFailure};
+/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
-/// # #[derive(Clone, Debug)]
-/// # struct Ledger;
-/// # #[async_trait::async_trait]
-/// # impl InlineSink for Ledger {
-/// #     type Input = Fact;
-/// #     fn describe(&self) -> SinkDescription { SinkDescription::method(DeliveryMethod::Noop) }
-/// #     async fn write(&mut self, _: Fact) -> Result<(), SinkWriteFailure> { Ok(()) }
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct Entry;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait LedgerPort {
+/// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
+/// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
-/// let ledger = Ledger;
-/// let sink = obzenflow_dsl::sink!(Fact => ledger, delivery: idempotent);
+/// # struct Ledger;
+/// # #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// # impl LedgerPort for Ledger {
+/// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
+/// # }
+/// let ledger = perform(|_: &Fact| Entry).through(Port::to(Ledger));
+/// let sink = obzenflow_dsl::sink!(Fact => ledger.non_idempotent());
+/// ```
+///
+/// `handler_set!` was removed:
+///
+/// ```compile_fail
+/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct Entry;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait LedgerPort {
+/// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
+/// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
+/// # }
+/// # struct Ledger;
+/// # #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// # impl LedgerPort for Ledger {
+/// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
+/// # }
+/// let ledger = perform(|_: &Fact| Entry).through(Port::to(Ledger));
+/// let sink = obzenflow_dsl::sink!(Fact => handler_set!(ledger));
+/// ```
+///
+/// A command that calls ports itself belongs in `effectful_transform!`:
+///
+/// ```compile_fail,E0277
+/// # use async_trait::async_trait;
+/// # use obzenflow_runtime::effects::{EffectError, Effects, Port, StageCompletion};
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct Entry;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait LedgerPort {
+/// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
+/// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
+/// # }
+/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[derive(Clone, Debug)]
+/// struct RecordEntry {
+///     #[port]
+///     ledger: Port<dyn LedgerPort>,
+/// }
+///
+/// #[async_trait]
+/// impl EffectfulTransformHandler for RecordEntry {
+///     type Input = Fact;
+///     type Output = Fact;
+///     async fn process(&self, _: Fact, _: &mut Effects<Fact, Self::AllowedEffects>) -> Result<StageCompletion<Fact>, HandlerError> { unimplemented!() }
+/// }
+/// # fn build(record_entry: RecordEntry) {
+/// let sink = obzenflow_dsl::sink!(Fact => record_entry);
+/// # }
 /// ```
 #[macro_export]
 macro_rules! sink {

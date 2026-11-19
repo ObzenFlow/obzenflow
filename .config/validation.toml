@@ -30,11 +30,6 @@ test = "payments::payments_application_process"
 owner = "postgres coordinator subprocess fixture"
 
 [[ignored]]
-binary = "obzenflow::test_support"
-test = "stages::sink::csv_termination_contract::crash_fixture_process"
-owner = "crash_before_flush_replays_unreceipted_csv_work_under_truncated_eof subprocess"
-
-[[ignored]]
 binary = "obzenflow::cli"
 test = "hosted::child_application"
 owner = "independent_lifetimes subprocess"

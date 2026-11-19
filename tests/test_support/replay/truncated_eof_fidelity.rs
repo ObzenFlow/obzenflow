@@ -14,14 +14,12 @@
 
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
-use obzenflow_core::{Outcomes, TypedPayload, WriterId};
-use obzenflow_dsl::{flow, infinite_source, sink, source, stateful, transform, FlowDefinition};
+use obzenflow_core::{TypedPayload, WriterId};
+use obzenflow_dsl::{flow, infinite_source, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     StatefulEmission, TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedStatefulHandler,
-    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -36,14 +34,6 @@ use crate::replay_testkit;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Tick {
     n: u64,
-    #[serde(default)]
-    depth: u64,
-    #[serde(default = "seed_kind")]
-    kind: String,
-}
-
-fn seed_kind() -> String {
-    "seed".to_string()
 }
 
 impl TypedPayload for Tick {
@@ -98,11 +88,7 @@ impl TypedFiniteSourceHandler for Ticks {
         }
         let n = self.next;
         self.next += 1;
-        Ok(Some(vec![Tick {
-            n,
-            depth: 0,
-            kind: seed_kind(),
-        }]))
+        Ok(Some(vec![Tick { n }]))
     }
 }
 
@@ -461,7 +447,11 @@ async fn clean_archive_replay_still_finalizes_naturally() {
         1,
         "a clean archive's replay still finalizes"
     );
-    assert_eq!(replay_delivered.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        replay_delivered.load(Ordering::SeqCst),
+        0,
+        "replay calls no sink system"
+    );
     assert_eq!(
         synthesized_kinds(&candidate).await,
         vec![Some(EofKind::Natural)]
@@ -647,11 +637,7 @@ impl TypedInfiniteSourceHandler for Pulse {
         }
         let n = 100 + self.next;
         self.next += 1;
-        Ok(vec![Tick {
-            n,
-            depth: 0,
-            kind: seed_kind(),
-        }])
+        Ok(vec![Tick { n }])
     }
 }
 
@@ -728,151 +714,4 @@ async fn graceful_stop_truncates_finite_and_infinite_inputs_of_a_stateful_fan_in
         "no finalization over partial input"
     );
     assert_eq!(delivered.load(Ordering::SeqCst), 0);
-}
-
-/// Cycle entry transform: converged seeds emit a done row; everything else
-/// re-enters the loop at the same depth.
-#[derive(Debug, Clone)]
-struct CycleEntry;
-
-impl TypedTransformHandler for CycleEntry {
-    type Input = Tick;
-    type Output = Outcomes<Tick>;
-
-    fn process(&self, mut event: Tick) -> Result<Outcomes<Tick>, HandlerError> {
-        if event.kind == "done" {
-            return Ok(Outcomes::none());
-        }
-        event.kind = if event.depth >= 2 { "done" } else { "iter" }.to_string();
-        Ok(Outcomes::one(event))
-    }
-}
-
-/// Cycle iteration transform: bumps depth on loop rows, ignores done rows.
-#[derive(Debug, Clone)]
-struct CycleIter;
-
-impl TypedTransformHandler for CycleIter {
-    type Input = Tick;
-    type Output = Outcomes<Tick>;
-
-    fn process(&self, mut event: Tick) -> Result<Outcomes<Tick>, HandlerError> {
-        if event.kind != "iter" {
-            return Ok(Outcomes::none());
-        }
-        event.depth += 1;
-        Ok(Outcomes::one(event))
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn cycle_flow_truncated_replay_terminates_without_error() {
-    // The SCC entry point buffers the external EOF until the cycle is
-    // quiescent; the pre-resolution fold must still carry the Truncated kind
-    // into the entry's authored EOF (the BufferAtEntryPoint path).
-    let temp = tempfile::tempdir().expect("tempdir");
-    let journal_base = temp.path().join("journals");
-
-    macro_rules! cycle_flow {
-        ($base:expr, $delivered:expr) => {
-            FlowDefinition::materialize(move |_runtime_config| {
-                let seeds = Ticks::stalling(2);
-                let entry = CycleEntry;
-                let iter = CycleIter;
-                let out = replay_testkit::CountDeliveries::<Tick>::new($delivered);
-
-                Ok(flow! {
-                    name: "truncated_fidelity_cycle",
-                    journals: disk_journals($base),
-
-                    stages: {
-                        seeds = source!(Tick => seeds);
-                        entry = transform!(Tick -> Tick => entry);
-                        iter = transform!(Tick -> Tick => iter);
-                        out = sink!(Tick => out);
-                    },
-
-                    topology: {
-                        seeds |> entry;
-                        entry |> iter;
-                        entry <| iter;
-                        entry |> out;
-                    }
-                })
-            })
-        };
-    }
-
-    let delivered = Arc::new(AtomicUsize::new(0));
-    let base = journal_base.clone();
-    let counter = delivered.clone();
-    let handle = cycle_flow!(base, counter)
-        .build(replay_testkit::unsynced_context())
-        .await
-        .expect("cycle flow should build");
-    let baseline = replay_testkit::latest_run_dir(&journal_base);
-
-    // Wait until both seeds converged (two done rows in the entry journal).
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the cycle did not converge in time"
-        );
-        let entry_rows = std::panic::AssertUnwindSafe(
-            replay_testkit::read_stage_envelopes_appended(&baseline, "entry"),
-        );
-        let done = futures::FutureExt::catch_unwind(entry_rows)
-            .await
-            .map(|rows| {
-                rows.iter()
-                    .filter(|envelope| {
-                        envelope.consumes_data_credit()
-                            && envelope.payload()["kind"].as_str() == Some("done")
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-        if done >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    handle.stop().await.expect("stop should be accepted");
-    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
-        .await
-        .expect("cancelled cycle run should terminate")
-        .expect("cancelled cycle run should resolve");
-    drop(handle);
-
-    // Replay the cancelled cycle archive: it must terminate cleanly, with the
-    // Truncated kind carried through the entry point's buffered-EOF path.
-    let replay_delivered = Arc::new(AtomicUsize::new(0));
-    let replay_base = journal_base.clone();
-    let replay_counter = replay_delivered.clone();
-    replay_testkit::unsynced_application()
-        .with_cli_args(vec![
-            OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
-            baseline.as_os_str().to_os_string(),
-        ])
-        .run_async(cycle_flow!(replay_base, replay_counter))
-        .await
-        .expect("replay of the cancelled cycle archive should complete");
-    let candidate = replay_testkit::latest_run_dir(&journal_base);
-    assert_ne!(baseline, candidate);
-
-    assert_eq!(
-        eof_kinds(&candidate, "seeds").await,
-        vec![EofKind::Truncated]
-    );
-    let entry_kinds = eof_kinds(&candidate, "entry").await;
-    assert!(
-        entry_kinds.iter().all(|kind| *kind == EofKind::Truncated),
-        "the cycle entry's journal carries only Truncated EOFs: {entry_kinds:?}"
-    );
-    assert!(
-        !entry_kinds.is_empty(),
-        "the cycle entry authored a terminal EOF"
-    );
 }

@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload, EdgeLivenessState};
 use obzenflow_core::journal::Journal;
@@ -15,8 +14,7 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedAsyncFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedAsyncFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
@@ -151,36 +149,7 @@ impl TypedTransformHandler for FastTransform {
     }
 }
 
-#[derive(Debug)]
-struct NoopSink<T>(std::marker::PhantomData<fn() -> T>);
-
-impl<T> Clone for NoopSink<T> {
-    fn clone(&self) -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-impl<T> NoopSink<T> {
-    fn new() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-#[async_trait]
-impl<T> InlineSink for NoopSink<T>
-where
-    T: TypedPayload + Send + Sync + 'static,
-{
-    type Input = T;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
-    }
-
-    async fn write(&mut self, _input: T) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NoopSink<T> = obzenflow_adapters::sinks::DiscardSink<T>;
 
 fn stage_id_by_name(registry: &LivenessSnapshots, name: &str) -> obzenflow_core::StageId {
     registry.with_read(|guard| {

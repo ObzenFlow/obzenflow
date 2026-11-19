@@ -12,7 +12,6 @@
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -339,6 +338,7 @@ pub struct EffectObserverContext<'a> {
     stage_name: &'a str,
     effect_type: &'a str,
     outcome: EffectObserverOutcome,
+    input: Option<&'a ChainEvent>,
 }
 
 impl<'a> EffectObserverContext<'a> {
@@ -355,7 +355,18 @@ impl<'a> EffectObserverContext<'a> {
             stage_name,
             effect_type,
             outcome,
+            input: None,
         }
+    }
+
+    pub(crate) fn with_input(mut self, input: &'a ChainEvent) -> Self {
+        self.input = Some(input);
+        self
+    }
+
+    /// The input whose invocation made the call.
+    pub fn input(&self) -> Option<&ChainEvent> {
+        self.input
     }
 
     pub fn flow_id(&self) -> FlowId {
@@ -376,149 +387,6 @@ impl<'a> EffectObserverContext<'a> {
 
     pub fn outcome(&self) -> EffectObserverOutcome {
         self.outcome
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SinkDeliveryObserverOutcome {
-    Attempted { result: SinkDeliveryAttemptResult },
-    Rejected { policy: Option<String> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SinkDeliveryAttemptResult {
-    ReportedSuccess,
-    ReportedPartial {
-        successful_count: u64,
-        failed_count: u64,
-    },
-    ReportedBuffered,
-    ReportedFailure,
-    HandlerError {
-        kind: ErrorKind,
-    },
-    HandlerPanicked,
-}
-
-pub struct SinkDeliveryObserverContext<'a> {
-    flow_id: FlowId,
-    flow_context: &'a FlowContext,
-    input: &'a ChainEvent,
-    stage_input_position: StageInputPosition,
-    outcome: SinkDeliveryObserverOutcome,
-}
-
-/// A full-success receipt that has been journalled for this exact input.
-///
-/// The runtime omits `Noop` receipts and reconstruction inputs. Buffered inputs
-/// reach this hook only when a later write, flush, or drain commits their
-/// successful terminal receipt. The callback is best-effort diagnostics, not a
-/// durable handoff: a crash after journal commit may prevent notification.
-pub struct SinkDeliverySuccessContext<'a> {
-    flow_id: FlowId,
-    flow_context: &'a FlowContext,
-    input: &'a ChainEvent,
-    stage_input_position: StageInputPosition,
-    receipt: &'a DeliveryPayload,
-}
-
-impl<'a> SinkDeliverySuccessContext<'a> {
-    pub(crate) fn new(
-        flow_id: FlowId,
-        flow_context: &'a FlowContext,
-        input: &'a ChainEvent,
-        stage_input_position: StageInputPosition,
-        receipt: &'a DeliveryPayload,
-    ) -> Self {
-        Self {
-            flow_id,
-            flow_context,
-            input,
-            stage_input_position,
-            receipt,
-        }
-    }
-
-    pub fn flow_name(&self) -> &str {
-        &self.flow_context.flow_name
-    }
-
-    pub fn flow_id(&self) -> FlowId {
-        self.flow_id
-    }
-
-    pub fn stage_id(&self) -> StageId {
-        self.flow_context.stage_id
-    }
-
-    pub fn stage_name(&self) -> &str {
-        &self.flow_context.stage_name
-    }
-
-    pub fn stage_type(&self) -> StageType {
-        self.flow_context.stage_type
-    }
-
-    pub fn input(&self) -> &ChainEvent {
-        self.input
-    }
-
-    pub fn stage_input_position(&self) -> StageInputPosition {
-        self.stage_input_position
-    }
-
-    pub fn receipt(&self) -> &DeliveryPayload {
-        self.receipt
-    }
-}
-
-impl<'a> SinkDeliveryObserverContext<'a> {
-    pub(crate) fn new(
-        flow_id: FlowId,
-        flow_context: &'a FlowContext,
-        input: &'a ChainEvent,
-        stage_input_position: StageInputPosition,
-        outcome: SinkDeliveryObserverOutcome,
-    ) -> Self {
-        Self {
-            flow_id,
-            flow_context,
-            input,
-            stage_input_position,
-            outcome,
-        }
-    }
-
-    pub fn flow_name(&self) -> &str {
-        &self.flow_context.flow_name
-    }
-
-    pub fn flow_id(&self) -> FlowId {
-        self.flow_id
-    }
-
-    pub fn stage_id(&self) -> StageId {
-        self.flow_context.stage_id
-    }
-
-    pub fn stage_name(&self) -> &str {
-        &self.flow_context.stage_name
-    }
-
-    pub fn stage_type(&self) -> StageType {
-        self.flow_context.stage_type
-    }
-
-    pub fn input(&self) -> &ChainEvent {
-        self.input
-    }
-
-    pub fn stage_input_position(&self) -> StageInputPosition {
-        self.stage_input_position
-    }
-
-    pub fn outcome(&self) -> &SinkDeliveryObserverOutcome {
-        &self.outcome
     }
 }
 
@@ -599,25 +467,6 @@ pub trait SourcePollObserver: Send + Sync {
 
 pub trait EffectObserver: Send + Sync {
     fn after_effect(&self, _ctx: &EffectObserverContext<'_>) {}
-}
-
-pub trait SinkDeliveryObserver: Send + Sync {
-    /// Observe the current input attempt, including buffered and failed attempts.
-    /// This is not a notification for later deferred receipt settlements.
-    fn after_sink_delivery(&self, _ctx: &SinkDeliveryObserverContext<'_>) {}
-
-    /// Health-reporting bridge used by typed authoring adapters. Existing raw
-    /// observers keep their unit-returning attempt hook through this default.
-    fn after_sink_delivery_checked(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
-        self.after_sink_delivery(ctx);
-        Ok(())
-    }
-
-    /// Observe each newly committed full-success, non-Noop receipt, using the
-    /// original input even when a later write or lifecycle operation settled it.
-    fn on_delivered(&self, _ctx: &SinkDeliverySuccessContext<'_>) -> ObserverResult {
-        Ok(())
-    }
 }
 
 pub trait StageLifecycleObserver: Send + Sync {
@@ -705,18 +554,6 @@ mod tests {
             EffectObserverOutcome::Succeeded,
         );
         require_flow_id(effect.flow_id());
-
-        let sink = SinkDeliveryObserverContext::new(
-            flow_id,
-            &flow_context,
-            &event,
-            position,
-            SinkDeliveryObserverOutcome::Attempted {
-                result: SinkDeliveryAttemptResult::ReportedSuccess,
-            },
-        );
-        require_flow_id(sink.flow_id());
-        require_position(sink.stage_input_position());
 
         let lifecycle = StageLifecycleObserverContext::new(
             flow_id,

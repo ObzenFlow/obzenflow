@@ -587,7 +587,7 @@ fn audit_file<T: JournalEvent>(
                 }
             }
             if sizes.records == 1
-                && matches!(event["event_kind"].as_str(), Some("fact" | "delivery"))
+                && event["event_kind"].as_str() == Some("fact")
                 && event["causality"]["parent_ids"]
                     .as_array()
                     .is_some_and(|parents| parents.len() <= 1)

@@ -2,201 +2,78 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Traits for application sinks, with built-in destination adapters.
+//! Ready-made sinks, the stages where a flow's results leave it.
 //!
-//! Sinks are the terminal stages of a pipeline. This module re-exports the
-//! contracts for implementing application sinks and the built-in destinations.
-//!
-//! ## Implement an application sink
-//!
-//! Use [`InlineSink`] when a configured sink completes each input before
-//! returning. Declare its input and destination once; `write` performs the
-//! application operation and returns `Ok(())` or [`SinkWriteFailure`]. The
-//! framework creates the delivery receipt, including one delivered input and
-//! an unknown byte count. It owns input identity, provenance and journalling.
+//! A sink is an effect. Its row takes a command, as an effectful transform's
+//! row does, and the command sends one request per input through a port. The
+//! port method's `#[effect]` states the guarantee, so the row states none, and
+//! the method is marked `records = reply`, because a sink's outcome feeds no
+//! other stage. Replay makes no call to a sink's system, and a resume makes only
+//! the calls the recording didn't settle.
 //!
 //! ```
-//! use obzenflow::stages::sinks::{
-//!     DeliveryMethod, InlineSink, SinkDescription, SinkOperationError,
-//!     SinkWriteFailure, SinkWritePhase,
-//! };
+//! use obzenflow::effects::{perform, EffectError, Port};
 //! # use obzenflow::schema::TypedPayload;
 //! # use serde::{Deserialize, Serialize};
 //! # #[derive(Clone, Debug, Serialize, Deserialize)]
 //! # struct Order { id: String }
 //! # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "orders.order"; }
 //!
-//! #[derive(Clone, Debug)]
-//! struct DispatchOrders {
-//!     sender: tokio::sync::mpsc::Sender<Order>,
+//! #[derive(Clone, Debug, Serialize)]
+//! struct Dispatch {
+//!     order_id: String,
 //! }
 //!
-//! #[async_trait::async_trait]
-//! impl InlineSink for DispatchOrders {
-//!     type Input = Order;
+//! #[obzenflow::port]
+//! trait DispatchPort {
+//!     #[effect(type = "orders.dispatch", at_least_once, records = reply)]
+//!     fn dispatch(&self, request: &Dispatch) -> Result<(), EffectError>;
+//! }
 //!
-//!     fn describe(&self) -> SinkDescription {
-//!         SinkDescription::destination(
-//!             "order_dispatch", DeliveryMethod::Custom("channel".into()),
-//!         )
-//!     }
+//! struct Warehouse;
 //!
-//!     async fn write(&mut self, order: Order) -> Result<(), SinkWriteFailure> {
-//!         self.sender.send(order).await.map_err(|_| {
-//!             SinkWriteFailure::current_only(
-//!                 SinkWritePhase::Execute,
-//!                 SinkOperationError::permanent("order dispatcher closed"),
-//!             )
-//!         })
+//! #[obzenflow::system("warehouse")]
+//! impl DispatchPort for Warehouse {
+//!     fn dispatch(&self, request: &Dispatch) -> Result<(), EffectError> {
+//!         println!("dispatching {}", request.order_id);
+//!         Ok(())
 //!     }
 //! }
-//! # let (sender, _receiver) = tokio::sync::mpsc::channel(16);
-//! # let dispatch_orders = DispatchOrders { sender };
-//! # let _stage = obzenflow::flow::sink!(Order => dispatch_orders);
+//!
+//! let dispatch = perform(|order: &Order| Dispatch { order_id: order.id.clone() })
+//!     .through(Port::to(Warehouse));
+//! let _stage = obzenflow::flow::sink!(Order => dispatch);
 //! ```
 //!
-//! Bind this sink with `sink!(Order => dispatch_orders)`. The operation must be
-//! complete when it returns success. Cloning opens the inline writer, so clones
-//! must isolate transient execution state; a shared destination handle is fine.
+//! ## Ready-made destinations
 //!
-//! Use [`SinkConnector`] and [`SinkWriter`] when opening destination resources,
-//! buffering, inspecting delivery provenance, measuring bytes, or reporting
-//! partial outcomes. Configuration belongs to the connector; `open` creates an
-//! isolated writer. Only that richer writer receives [`SinkWriteContext`] and
-//! authors [`SinkWriteReport`] values. Both tiers use the same runtime protocol.
-//! A [`SinkDescription`] always declares a [`DeliveryMethod`]; redelivery safety
-//! is a separate property that the integration or flow must classify.
-//!
-//! ## Built-in destinations
-//!
-//! These adapters cover common destinations. The traits above are the extension
-//! points for application integrations.
-//!
-//! | Integration | Entry point |
+//! | Destination | Command |
 //! |---|---|
-//! | Console | [`ConsoleSink::new`] with a pure formatter |
-//! | Batched console table | `ConsoleSink::new(TableFormatter::new(columns, extractor)).batch_size(256)?` |
-//! | Structured diagnostics | [`TracingSink::new`] with a synchronous tracing emitter |
+//! | Console | [`ConsoleSink::new`] with a formatter |
+//! | Structured diagnostics | [`TracingSink::new`] with a callback that returns a [`TracingOutput`] |
 //! | Intentional discard | [`DiscardSink::new`] |
-//! | CSV or TSV | [`CsvSink::builder`] |
-//! | PostgreSQL | `postgres::PostgresSink::builder` (`postgres` feature) |
+//! | CSV or TSV register | [`CsvSink::builder`] |
 //!
-//! TSV is a CSV builder setting, `.tab_delimited()`. [`ConsoleSink::batch_size`]
-//! requires a positive row limit and moves the formatter and destination into
-//! isolated table writers. Batches also have a default 64 KiB cap on
-//! prepared UTF-8 cell text, configurable through [`TableConsoleSink::batch_byte_limit`].
-//! This excludes rendered table overhead and allocation overhead; an oversized
-//! row is rejected. Thresholds or runtime flush/drain trigger output, with replay
-//! provenance changes forming another boundary. There is no timed flush guarantee.
+//! Each sends its request through a port and system the framework declares,
+//! and [`ConsoleSink::through`], [`TracingSink::through`] and
+//! [`CsvSinkBuilder::through`] send it through another system instead. TSV is
+//! the CSV builder's `.tab_delimited()`.
 //!
-//! ## Console sinks
+//! The console and tracing writes are `at_least_once`, so a crash between the
+//! write and its record can repeat a line. The CSV register is `exactly_once`:
+//! it checks its file against the recorded length and digest before its first
+//! append, and moves any unrecorded tail aside to `<path>.<length>.damage`.
 //!
-//! [`ConsoleSink`] prints events to stdout using a pluggable [`Formatter`].
-//! Built-in formatters include [`DebugFormatter`], [`JsonFormatter`],
-//! [`JsonPrettyFormatter`], and [`TableFormatter`].
-//! Human-readable [`ConsoleOutput::Text`] is automatically labelled during replay
-//! and resume reconstruction. Formatters receive only application input.
-//! [`JsonFormatter`] and [`JsonPrettyFormatter`] use [`ConsoleOutput::Verbatim`]
-//! to preserve their encoded body without presentation labels. Custom formatters
-//! can use the same representation for output that must retain its exact body.
-//! Both representations retain the console's trailing newline. String-returning
-//! formatter functions produce human-readable text.
-//! The adapter owns stdout/stderr, measures successful bytes, and reports I/O
-//! failures; [`ConsoleOutput::Empty`] is an explicit no-op.
+//! ## PostgreSQL
 //!
-//! ## CSV sinks
-//!
-//! [`CsvSink`] writes typed events to CSV files on disk. A user-owned
-//! [`CsvProjection`] value declares the accepted input and CSV-facing row with
-//! associated types, matching the framework's handler style.
-//!
-//! ## PostgreSQL sinks
-//!
-//! Enable the `postgres` Cargo feature. A binder maps a domain event to SQL
-//! parameters; the sink owns a fixed statement and batching configuration.
-//! This UPSERT makes repeated delivery of a payment update the same row:
-//!
-//! ```no_run
-//! # #[cfg(feature = "postgres")]
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! use obzenflow::stages::sinks::postgres::{
-//!     PostgresBind, PostgresBindings, PostgresConnection, PostgresSink, PostgresTransport,
-//! };
-//! use obzenflow::stages::sinks::SinkRedeliverySafety;
-//! # use obzenflow::schema::TypedPayload;
-//! # use serde::{Deserialize, Serialize};
-//! # #[derive(Clone, Debug, Serialize, Deserialize)]
-//! # struct PaymentAuthorized {
-//! #     payment_id: i64, order_id: String, customer_id: String, amount_cents: i64,
-//! # }
-//! # impl TypedPayload for PaymentAuthorized {
-//! #     const EVENT_TYPE: &'static str = "payments.payment_authorized";
-//! # }
-//!
-//! #[derive(Clone)]
-//! struct PaymentBinder;
-//!
-//! impl PostgresBind for PaymentBinder {
-//!     type Input = PaymentAuthorized;
-//!
-//!     fn bind(&self, bindings: &mut PostgresBindings, payment: &PaymentAuthorized) {
-//!         bindings.bind(payment.payment_id)
-//!             .bind(&payment.order_id)
-//!             .bind(&payment.customer_id)
-//!             .bind(payment.amount_cents);
-//!     }
-//! }
-//!
-//! let payments = PostgresSink::builder(PaymentBinder)
-//!     .connection(PostgresConnection::deferred_from_env(
-//!         "OBZENFLOW_POSTGRES_URL", PostgresTransport::VerifiedTls,
-//!     ))
-//!     .insert_into(
-//!         "obzenflow_example", "payments",
-//!         "(payment_id, order_id, customer_id, amount_cents) VALUES ($1, $2, $3, $4) \
-//!          ON CONFLICT (payment_id) DO UPDATE SET order_id = EXCLUDED.order_id, \
-//!          customer_id = EXCLUDED.customer_id, amount_cents = EXCLUDED.amount_cents",
-//!     )?
-//!     .batch_size(2)?
-//!     .redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-//!     .build()?;
-//! # Ok(())
-//! # }
-//! # #[cfg(not(feature = "postgres"))]
-//! # fn main() {}
-//! ```
-//!
-//! Bind `payments` to `sink!(PaymentAuthorized => payments)`. Provision the
-//! schema and table separately. The connection URL must select
-//! `sslmode=verify-full`; use `sslrootcert` for a private certificate authority.
-//! Construction performs no database I/O; the connection is resolved when a
-//! live writer opens.
+//! PostgreSQL output is an application's port, with a system that writes through
+//! the framework's client in [`crate::effects::postgres`]. An insert with
+//! `ON CONFLICT ... DO NOTHING` is `exactly_once`, and a plain insert is
+//! `at_least_once`.
 
-pub use obzenflow_adapters::sinks::csv::CsvWriter;
-/// Built-in destinations, formatters, and output configuration.
 pub use obzenflow_adapters::sinks::{
-    ConsoleConfigError, ConsoleFormatError, ConsoleOutput, ConsoleSink, ConsoleWriter,
-    CsvProjection, CsvSink, CsvSinkBuilder, DebugFormatter, DiscardSink, Formatter, JsonFormatter,
-    JsonPrettyFormatter, OutputDestination, SnapshotTableFormatter, TableConsoleSink,
-    TableFormatter, TracingSink,
+    Appended, ConsoleFormatError, ConsoleOutput, ConsolePort, ConsoleSink, CsvProjection,
+    CsvRegisterPort, CsvRow, CsvSink, CsvSinkBuilder, DebugFormatter, DiscardPort, DiscardSink,
+    Discarded, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
+    SnapshotTableFormatter, TableFormatter, TracingLevel, TracingOutput, TracingPort, TracingSink,
 };
-
-pub use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
-pub use obzenflow_runtime::effects::SinkRedeliverySafety;
-pub use obzenflow_runtime::stages::common::handlers::WithRedeliverySafety;
-pub use obzenflow_runtime::stages::sink::{
-    DeliveryContext, DeliveryProvenance, InlineSink, PendingSinkInput, SinkAuditOutcome,
-    SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription,
-    SinkDestinationErrorCode, SinkInputOrder, SinkOperationError,
-    SinkOperationErrorConversionError, SinkOperationResult, SinkPrimaryOutcome,
-    SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteFailureDisposition,
-    SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
-    SinkWriterLifecycleReport,
-};
-
-/// Feature-gated PostgreSQL sink and its typed parameter-binding surface.
-///
-/// The connector witnesses its exact input type, so the generic `sink!` arm
-/// proves arrow equality before erasing the writer.
-#[cfg(feature = "postgres")]
-pub use obzenflow_adapters::sinks::postgres;

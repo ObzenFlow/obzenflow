@@ -48,11 +48,6 @@ pub use payloads::effect_payload::{
     EffectRecoveryAbandoned, EffectSchemaVersion, EffectStageKey, EffectType, IdempotencyKey,
     OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion,
 };
-pub use payloads::sink_operation_payload::{
-    SinkDestinationErrorCode, SinkDestinationErrorCodeError, SinkOperationFailed,
-    SinkOperationPhase, SinkWritePhase, MAX_SINK_DESTINATION_ERROR_NAMESPACE_BYTES,
-    MAX_SINK_DESTINATION_ERROR_VALUE_BYTES,
-};
 pub use payloads::source_diagnostic::{
     FieldName, FieldSegment, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode,
     SourceErrorCodeError, SourceLocation, TextPosition, MAX_FIELD_PATH_DEPTH,

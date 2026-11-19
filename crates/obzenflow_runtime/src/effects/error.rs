@@ -304,6 +304,15 @@ impl EffectError {
         }
     }
 
+    /// Whether a replay recorded this call rejected because its request no
+    /// longer matches the recording, without calling any system.
+    pub fn is_replay_rejection(&self) -> bool {
+        matches!(
+            self,
+            EffectError::BoundaryRejected { rejected_by, .. } if rejected_by.as_str() == "replay"
+        )
+    }
+
     /// Whether the failure proves the dependency did not act: a rate limit, or
     /// a dependency failure marked retryable. Repeating a definite no cannot
     /// duplicate work, whatever the effect's safety.

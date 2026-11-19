@@ -19,7 +19,7 @@ use obzenflow_core::event::payloads::execution_payload::{
 };
 use obzenflow_core::event::provenance::{RetryAccounting, RuntimeProvenance};
 use obzenflow_core::event::status::processing_status::ErrorKind;
-use obzenflow_core::event::{CausalCoordinate, SinkOperationPhase, SystemPayload, WriterId};
+use obzenflow_core::event::{CausalCoordinate, SystemPayload, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::metrics::{
     BoundaryMetricsView, ContractMetricEdgeKey, ContractMetricsSnapshot, ControlUnit, Percentile,
@@ -224,9 +224,6 @@ pub struct MetricsStore {
     pub first_event_time: Option<std::time::Instant>,
     pub last_event_time: Option<std::time::Instant>,
     pub total_events_processed: u64,
-
-    /// Projection of durable sink-operation failure facts only.
-    pub sink_operation_failures: HashMap<(StageId, SinkOperationPhase, ErrorKind), u64>,
 
     /// Per-stage vector clock watermark (FLOWIP-059c)
     /// Highest selected own-writer carrier from the data journal. This is a
@@ -793,18 +790,6 @@ impl MetricsAggregatorResources {
         snapshot.stage_metadata = self.stage_metadata.clone();
         snapshot.throughput = store.throughput.latest.clone();
         snapshot.observation_export_interval = Some(self.export_interval);
-        snapshot.sink_operation_failures = store
-            .sink_operation_failures
-            .iter()
-            .map(|((stage_id, phase, error_kind), count)| {
-                obzenflow_core::metrics::SinkOperationFailureMetric {
-                    stage_id: *stage_id,
-                    phase: *phase,
-                    error_kind: error_kind.clone(),
-                    count: *count,
-                }
-            })
-            .collect();
 
         // FLOWIP-059a: Middleware metrics
         snapshot.circuit_breaker_state = store
@@ -1878,10 +1863,8 @@ mod tests {
 
     use async_trait::async_trait;
     use obzenflow_core::event::context::StageType;
-    use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
-    use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryOutcome};
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent};
+    use obzenflow_core::event::JournalEvent;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::reader::JournalReader;
@@ -2125,43 +2108,6 @@ mod tests {
                 .stage_lifecycle_states
                 .get(&(failed, "completed".to_string())),
             None
-        );
-    }
-
-    #[tokio::test]
-    async fn test_delivery_event_preserves_correlation() {
-        // Create a test event with correlation
-        let writer_id = WriterId::from(StageId::new());
-        let correlation_id = CorrelationId::new();
-        let mut event = ChainEventFactory::data_event(
-            writer_id,
-            "test.event",
-            std::num::NonZeroU32::MIN,
-            serde_json::json!({"data": "test"}),
-        );
-        event.set_single_correlation(correlation_id, Some(CorrelationPayload::new(event.id)));
-
-        // Simulate what the sink supervisor does when creating a delivery event
-        let payload = DeliveryOutcome::success(DeliveryMethod::Noop, Some(1));
-        let delivery_event = ChainEventFactory::delivery_event(
-            writer_id,
-            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload {
-                subject: crate::testing::causal_fixture::delivery_subject(event.id),
-                outcome: payload,
-            },
-        )
-        .with_correlation_from(&event)
-        .with_cycle_state_from(&event);
-        let delivery_event = delivery_event
-            .try_with_composite_activations(event.composite_activations().to_vec())
-            .unwrap();
-
-        // Verify correlation is preserved
-        assert_eq!(delivery_event.correlation_id(), Some(correlation_id));
-        assert!(delivery_event.correlation_payload().is_some());
-        assert_eq!(
-            delivery_event.correlation_payload(),
-            event.correlation_payload()
         );
     }
 

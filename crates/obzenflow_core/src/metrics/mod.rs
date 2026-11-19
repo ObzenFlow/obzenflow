@@ -34,6 +34,5 @@ pub use snapshots::{
     AiChunkingMetricsSnapshot, AppMetricsSnapshot, ContractMetricEdgeKey, ContractMetricResultKey,
     ContractMetricViolationKey, ContractMetricsSnapshot, ContractViolationCauseLabel, ControlUnit,
     FlowLifecycleMetricsSnapshot, FlowMetricsSnapshot, HistogramSnapshot, InfraMetricsSnapshot,
-    JournalMetricsSnapshot, SinkOperationFailureMetric, StageInfraMetrics, StageMetadata,
-    StageMetricsSnapshot,
+    JournalMetricsSnapshot, StageInfraMetrics, StageMetadata, StageMetricsSnapshot,
 };

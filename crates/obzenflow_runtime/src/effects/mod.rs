@@ -66,6 +66,7 @@ mod ports;
 mod recovery;
 mod replay;
 mod runtime;
+mod sink;
 mod typed;
 
 #[cfg(test)]
@@ -92,7 +93,8 @@ pub use boundary::{
 #[doc(hidden)]
 pub use call::KeyRule;
 pub use call::{
-    AtLeastOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey, Transactional,
+    AtLeastOnce, AtMostOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey,
+    Transactional,
 };
 #[doc(hidden)]
 pub use command::{
@@ -102,8 +104,8 @@ pub use command::{
     EffectAcknowledgement, EveryPortAnswers, FieldEffects, FieldsEffects, FindPort,
     HandlerPerformableEffects, JoinMembers, MarkPortUsed, NarrowedPort, PortAfter, PortAnswer,
     PortAnswersAnEffect, PortEffects, PortField, PortFound, PortImpl, PortList, PortMark,
-    PortServesRequest, RowAcknowledgedEffect, ServesPort, StageEffectsError, Unused, Used,
-    WholePort,
+    PortReply, PortServesRequest, RowAcknowledgedEffect, ServesPort, StageEffectsError, Unused,
+    Used, WholePort,
 };
 pub use command::{Command, Port, StagePort, SystemName};
 pub use commit::EffectCommitHandle;
@@ -118,6 +120,9 @@ pub use obzenflow_core_derive::{command, port, system};
 #[doc(hidden)]
 pub use perform::PerformedRequest;
 pub use perform::{perform, Perform, PerformRequest};
+#[doc(hidden)]
+pub use sink::SinkHandler;
+pub use sink::{SinkRequest, SinkRole};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[doc(hidden)]
 pub use async_trait::async_trait as __async_trait;
@@ -127,7 +132,7 @@ pub(crate) use context::EffectRuntimeMode;
 pub use declaration::{DomainFacts, Effect, EffectOutcomeSemantics, RecordedReply};
 pub use declaration::{
     EffectDeclaration, EffectOutcomeKind, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
-    PreparedEffectSuccess, SinkRedeliverySafety,
+    PreparedEffectSuccess,
 };
 pub use effect_set::{
     assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectName, EffectSet,

@@ -8,11 +8,29 @@
 //! connector code. Field names are compile-time strings, so input-controlled
 //! keys, rejected values and parser text cannot be authored into one.
 
-use super::sink_operation_payload::{is_error_code_namespace, is_error_code_value};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt;
 use std::num::NonZeroU32;
+
+const MAX_ERROR_CODE_NAMESPACE_BYTES: usize = 48;
+const MAX_ERROR_CODE_VALUE_BYTES: usize = 64;
+
+fn is_error_code_namespace(namespace: &str) -> bool {
+    !namespace.is_empty()
+        && namespace.len() <= MAX_ERROR_CODE_NAMESPACE_BYTES
+        && namespace.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+}
+
+fn is_error_code_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ERROR_CODE_VALUE_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
 
 /// Maximum number of field-path segments retained in one diagnostic.
 pub const MAX_FIELD_PATH_DEPTH: usize = 16;

@@ -10,18 +10,19 @@
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use obzenflow_adapters::sinks::DiscardSink;
     use obzenflow_core::{ChainEvent, TypedPayload};
     use obzenflow_runtime::effects::{
         EffectCommitHandle, EffectError, EffectPortResolutionError, EffectSafety, Effects, Port,
-        SinkRedeliverySafety, StageCompletion,
+        StageCompletion,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulStatefulHandler, EffectfulTransformHandler, InlineSink, JoinReferenceView,
-        SinkWriteFailure, StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
-        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, JoinReferenceView, StatefulEmission,
+        TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
+        TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
     use serde::{Deserialize, Serialize};
@@ -38,12 +39,6 @@ mod tests {
     impl TypedPayload for Out {
         const EVENT_TYPE: &'static str = "test.out";
         const SCHEMA_VERSION: u32 = 1;
-    }
-
-    struct OutObserver;
-
-    impl obzenflow_adapters::middleware::SinkDeliveryObserver for OutObserver {
-        type Input = Out;
     }
 
     #[derive(Clone, Debug)]
@@ -282,20 +277,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct Sn;
-    #[async_trait]
-    impl InlineSink for Sn {
-        type Input = Out;
-        fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-            obzenflow_runtime::stages::sink::SinkDescription::method(
-                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-            )
-        }
-
-        async fn write(&mut self, _input: Out) -> Result<(), SinkWriteFailure> {
-            Ok(())
-        }
+    fn sn() -> DiscardSink<Out> {
+        DiscardSink::new()
     }
 
     #[derive(Clone, Debug)]
@@ -362,7 +345,7 @@ mod tests {
         let stateful = St;
         let effectful_stateful = FxSt;
         let join = Jn;
-        let sink = Sn;
+        let sink = sn();
 
         crate::source!(
             name: "finite",
@@ -402,7 +385,7 @@ mod tests {
             In -> Out with rate_limit(10.0) => join);
         crate::sink!(
             name: "sink",
-            Out with rate_limit(10.0) => sink.idempotent());
+            Out with rate_limit(10.0) => sink);
     }
 
     // ── source! ─────────────────────────────────────────────────────────────
@@ -628,182 +611,49 @@ mod tests {
     #[test]
     fn source_and_sink_groups_mix_observers_with_controls() {
         use obzenflow_adapters::middleware::{
-            circuit_breaker, rate_limit, sink_delivery_observer, source_poll_observer,
+            circuit_breaker, effect_observer, rate_limit, source_poll_observer,
         };
         struct PollAudit;
         impl obzenflow_runtime::stages::observer::SourcePollObserver for PollAudit {}
         let mut source = crate::source!(Out with { circuit_breaker().consecutive_failures(3), source_poll_observer("audit", PollAudit), rate_limit(10.0) } => Src);
         source.prepare_middleware().unwrap();
         assert_eq!(source.stage_middleware_factories().len(), 3);
-        let mut sink = crate::sink!(Out with { sink_delivery_observer("audit", OutObserver), rate_limit(10.0), circuit_breaker().consecutive_failures(3) } => Sn);
+        let output = sn();
+        let mut sink = crate::sink!(Out with { effect_observer("audit", EffectAudit), rate_limit(10.0), circuit_breaker().consecutive_failures(3) } => output);
         sink.prepare_middleware().unwrap();
-        assert_eq!(sink.stage_middleware_factories().len(), 3);
+        assert_eq!(sink.stage_middleware_factories().len(), 1);
+        let controls = sink.effect_policy_attachments();
+        assert_eq!(controls.len(), 1);
+        assert_eq!(
+            controls[0]
+                .factory
+                .builtin_control()
+                .unwrap()
+                .families()
+                .len(),
+            2
+        );
     }
 
     // ── sink! ───────────────────────────────────────────────────────────────
     #[test]
     fn sink_typed_bare() {
-        crate::sink!(Out => Sn);
+        let output = sn();
+        crate::sink!(Out => output);
     }
     #[test]
     fn sink_typed_mw() {
-        crate::sink!(Out => Sn);
+        let output = sn();
+        crate::sink!(Out with obzenflow_adapters::middleware::rate_limit(10.0) => output);
     }
     #[test]
     fn sink_typed_name() {
-        crate::sink!(name: "s", Out => Sn);
+        let output = sn();
+        crate::sink!(name: "s", Out => output);
     }
     #[test]
     fn sink_typed_name_mw() {
-        crate::sink!(name: "s", Out => Sn);
-    }
-    #[test]
-    fn sink_handler_set_lowers_one_heterogeneous_binding_by_its_exact_name() {
-        let inline_sink = Sn;
-        let classified_sink =
-            obzenflow_runtime::stages::common::handlers::WithRedeliverySafety::new(
-                Sn,
-                SinkRedeliverySafety::SafeToRepeat,
-            );
-        let pending = crate::sink!(Out => handler_set!(inline_sink, classified_sink))
-            .expect("the closed handler set is valid");
-
-        assert_eq!(
-            pending.configured_sink_handler_keys(),
-            Some(["inline_sink", "classified_sink"].as_slice())
-        );
-        let selected = pending
-            .select_configured_sink_handler("classified_sink")
-            .expect("the configured binding name is in the closed set");
-        assert_eq!(
-            selected
-                .typing_metadata()
-                .expect("typed sink metadata")
-                .input_type,
-            crate::dsl::typing::TypeHint::exact_payload::<Out>()
-        );
-    }
-
-    #[test]
-    fn sink_handler_set_rejects_unknown_config_before_descriptor_lowering() {
-        let policy_constructions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observer_constructions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let policy_probe = std::sync::Arc::clone(&policy_constructions);
-        let observer_probe = std::sync::Arc::clone(&observer_constructions);
-        let first_sink = Sn;
-        let second_sink = obzenflow_runtime::stages::common::handlers::WithRedeliverySafety::new(
-            Sn,
-            SinkRedeliverySafety::SafeToRepeat,
-        );
-
-        let pending = crate::sink!(
-            Out with { ({
-                policy_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                obzenflow_adapters::middleware::rate_limit(1_000.0)
-            }), ({
-                observer_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                obzenflow_adapters::middleware::sink_delivery_observer("capture-proof", OutObserver)
-            }) } => handler_set!(first_sink, second_sink))
-        .expect("the closed handler set is valid");
-        let result = pending.select_configured_sink_handler("unknown_sink");
-
-        assert_eq!(
-            policy_constructions.load(std::sync::atomic::Ordering::SeqCst),
-            0
-        );
-        assert_eq!(
-            observer_constructions.load(std::sync::atomic::Ordering::SeqCst),
-            0
-        );
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("an unknown sink key must fail materialisation"),
-        };
-        assert_eq!(
-            error.to_string(),
-            "config error at sinks.stages.__obzenflow_binding_derived_name__.handler: expected \"first_sink\" or \"second_sink\"; got \"unknown_sink\""
-        );
-        match error {
-            crate::dsl::FlowBuildError::InvalidSinkSelection {
-                stage_name,
-                selected,
-                expected,
-            } => {
-                assert_eq!(stage_name, "__obzenflow_binding_derived_name__");
-                assert_eq!(selected, "unknown_sink");
-                assert_eq!(expected, "\"first_sink\" or \"second_sink\"");
-            }
-            error => panic!("unexpected sink selection error: {error}"),
-        }
-    }
-    #[test]
-    fn sink_handler_set_form_composes_name_and_site_clauses_once() {
-        let policy_constructions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let observer_constructions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let policy_probe = std::sync::Arc::clone(&policy_constructions);
-        let observer_probe = std::sync::Arc::clone(&observer_constructions);
-        let inline_sink = Sn;
-        let classified_sink =
-            obzenflow_runtime::stages::common::handlers::WithRedeliverySafety::new(
-                Sn,
-                SinkRedeliverySafety::SafeToRepeat,
-            );
-
-        let pending = crate::sink!(
-            name: "selected_output",
-            Out with { ({
-                policy_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                obzenflow_adapters::middleware::rate_limit(1_000.0)
-            }), ({
-                observer_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                obzenflow_adapters::middleware::sink_delivery_observer("capture-proof", OutObserver)
-            }) } => handler_set!(inline_sink, classified_sink).idempotent())
-        .expect("the closed handler set is valid");
-        let selected = pending
-            .select_configured_sink_handler("inline_sink")
-            .expect("the configured binding name is in the closed set");
-
-        assert_eq!(selected.name(), "selected_output");
-        assert_eq!(
-            policy_constructions.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-        assert_eq!(
-            observer_constructions.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-        assert_eq!(selected.stage_middleware_names().len(), 2);
-        assert_eq!(
-            selected
-                .sink_description()
-                .expect("selected sink description")
-                .redelivery_safety(),
-            Some(SinkRedeliverySafety::SafeToRepeat)
-        );
-    }
-    #[test]
-    fn sink_typed_redelivery_decoration() {
-        let idempotent_sink = Sn;
-        crate::sink!(Out => idempotent_sink.idempotent());
-        let non_idempotent_sink = Sn;
-        crate::sink!(Out => non_idempotent_sink.non_idempotent());
-    }
-    #[test]
-    fn sink_exact_contract_inline_sink() {
-        let bare_sink = Sn;
-        crate::sink!(Out => bare_sink);
-        let idempotent_sink = Sn;
-        crate::sink!(Out => idempotent_sink.idempotent());
-        let named_sink = Sn;
-        crate::sink!(name: "s", Out => named_sink);
-    }
-    #[test]
-    fn sink_exact_contract_named_delivery() {
-        let bare_sink = Sn;
-        crate::sink!(Out => bare_sink);
-        let named_sink = Sn;
-        crate::sink!(
-            name: "s",
-            Out => named_sink.idempotent());
+        let output = sn();
+        crate::sink!(name: "s", Out with obzenflow_adapters::middleware::rate_limit(10.0) => output);
     }
 }

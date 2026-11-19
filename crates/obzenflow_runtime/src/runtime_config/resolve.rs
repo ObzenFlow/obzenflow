@@ -935,17 +935,17 @@ mod tests {
         let mut set = CandidateSet::default();
         admit(
             &mut set,
-            super::super::schema::SINK_HANDLER_KEY,
+            super::super::ai::MAX_OPEN_KEYS_KEY,
             ConfigScope::Global,
             ConfigSource::File,
-            ConfigValue::Text("console_sink".to_string()),
+            ConfigValue::U64(7),
         );
         let snapshot = ResolvedRuntimeConfig::new(set);
         let mut dsl = DslCandidates::default();
-        dsl.declare_stage_consumption(super::super::schema::SINK_HANDLER_KEY, "output");
+        dsl.declare_stage_consumption(super::super::ai::MAX_OPEN_KEYS_KEY, "summarize");
         let ctx = FlowResolutionContext {
             flow_name: "f".to_string(),
-            stages: BTreeSet::from([StageKey::from("output"), StageKey::from("ordinary_sink")]),
+            stages: BTreeSet::from([StageKey::from("summarize"), StageKey::from("output")]),
             edges: BTreeSet::new(),
             declared_effects: Default::default(),
             dsl,
@@ -955,54 +955,25 @@ mod tests {
         assert_eq!(
             effective
                 .get(
-                    super::super::schema::SINK_HANDLER_KEY,
-                    &ConfigScope::stage("output")
+                    super::super::ai::MAX_OPEN_KEYS_KEY,
+                    &ConfigScope::stage("summarize")
                 )
                 .unwrap()
-                .value
-                .as_text(),
-            Some("console_sink")
+                .value,
+            ConfigValue::U64(7)
         );
         assert!(effective
             .get(
-                super::super::schema::SINK_HANDLER_KEY,
-                &ConfigScope::stage("ordinary_sink")
+                super::super::ai::MAX_OPEN_KEYS_KEY,
+                &ConfigScope::stage("output")
             )
             .is_none());
         assert_eq!(
             effective
-                .points(super::super::schema::SINK_HANDLER_KEY)
+                .points(super::super::ai::MAX_OPEN_KEYS_KEY)
                 .count(),
             1
         );
-    }
-
-    #[test]
-    fn stage_consumer_knobs_reject_entries_on_non_consuming_stages() {
-        let mut set = CandidateSet::default();
-        admit(
-            &mut set,
-            super::super::schema::SINK_HANDLER_KEY,
-            ConfigScope::stage("ordinary_sink"),
-            ConfigSource::File,
-            ConfigValue::Text("console_sink".to_string()),
-        );
-        let snapshot = ResolvedRuntimeConfig::new(set);
-        let ctx = FlowResolutionContext {
-            flow_name: "f".to_string(),
-            stages: BTreeSet::from([StageKey::from("ordinary_sink")]),
-            edges: BTreeSet::new(),
-            declared_effects: Default::default(),
-            dsl: Default::default(),
-        };
-
-        let error = materialize_flow_config(&snapshot, ctx).unwrap_err();
-        assert!(matches!(
-            error,
-            ConfigResolveError::UnattachedStageConsumer { ref key_path, ref stage }
-                if key_path == super::super::schema::SINK_HANDLER_KEY
-                    && stage == "ordinary_sink"
-        ));
     }
 
     fn one_edge_ctx() -> FlowResolutionContext {

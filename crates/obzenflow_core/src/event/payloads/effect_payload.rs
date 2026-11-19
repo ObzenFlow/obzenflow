@@ -1089,13 +1089,13 @@ mod tests {
         };
         for (payload, event_type) in [
             (
-                ChainPayload::Execution(ExecutionPayload::EffectRecord(effect_record(
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(Box::new(effect_record(
                     cursor.clone(),
-                ))),
+                )))),
                 EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
             ),
             (
-                ChainPayload::Execution(ExecutionPayload::EffectRecord(failed)),
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(Box::new(failed))),
                 "effect.execution_failed",
             ),
             (

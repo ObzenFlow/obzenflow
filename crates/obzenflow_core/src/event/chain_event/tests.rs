@@ -99,8 +99,10 @@ fn framework_effect_data_is_not_source_replayable() {
         outcome: EffectOutcomePayload::Succeeded { output: json!({}) },
         origin: None,
     };
-    let event =
-        ChainEventFactory::execution_event(writer_id, ExecutionPayload::EffectRecord(record));
+    let event = ChainEventFactory::execution_event(
+        writer_id,
+        ExecutionPayload::EffectRecord(Box::new(record)),
+    );
     // Application descriptors cannot impersonate execution records.
     let fact = ChainEventFactory::data_event(
         writer_id,
@@ -236,27 +238,5 @@ fn a_derived_event_names_its_own_input_and_type_but_not_its_ancestors() {
     assert_eq!(
         encoded["inputs"],
         json!([{"id": classified.id, "event_type": "sensor.classified"}])
-    );
-}
-
-#[test]
-fn a_delivery_receipt_names_its_subject_as_its_input() {
-    use crate::event::payloads::delivery_payload::{test_receipt, DeliveryMethod, DeliveryOutcome};
-    use crate::event::provenance::causality_context::CausalInput;
-    use crate::event::types::EventType;
-
-    let input = crate::EventId::new();
-    let receipt = ChainEventFactory::delivery_event(
-        WriterId::from(StageId::new()),
-        test_receipt(input, DeliveryOutcome::success(DeliveryMethod::Noop, None)),
-    );
-
-    assert_eq!(receipt.causality.parent_ids, [input]);
-    assert_eq!(
-        receipt.causality.inputs,
-        [CausalInput {
-            id: input,
-            event_type: EventType("test.event".into()),
-        }]
     );
 }

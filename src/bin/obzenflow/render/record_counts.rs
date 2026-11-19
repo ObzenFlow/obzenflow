@@ -3,12 +3,13 @@
 // https://obzenflow.dev
 
 //! Each stage's records, counted once: data a stage recorded or a sink
-//! delivered, and errors by kind. Runtime and effect entries are not records.
+//! delivered, and errors by kind. Runtime entries, and effect entries other
+//! than a sink's successful calls, are not records.
 
-use obzenflow::journal::read::{ChainPayload, ExecutionPayload};
-use obzenflow::journal::read::{DeliveryResult, RunJournalKind, RunRecord, RunRecordData};
+use obzenflow::journal::read::{ChainPayload, ExecutionPayload, StageType};
+use obzenflow::journal::read::{RunJournalKind, RunRecord, RunRecordData};
 use obzenflow::journal::ProcessingStatus;
-use obzenflow_core::event::SinkOperationPhase;
+use obzenflow_core::event::payloads::effect_payload::EffectOutcomePayload;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -48,8 +49,9 @@ impl RecordCounts {
                     ChainPayload::Fact(_) => {
                         row.envelope.provenance.event.processing.status.is_success()
                     }
-                    ChainPayload::Delivery(delivery) => {
-                        matches!(delivery.result, DeliveryResult::Success { .. })
+                    ChainPayload::Execution(ExecutionPayload::EffectRecord(effect)) => {
+                        stage.stage_type == StageType::Sink
+                            && matches!(effect.outcome, EffectOutcomePayload::Succeeded { .. })
                     }
                     _ => false,
                 };
@@ -63,10 +65,6 @@ impl RecordCounts {
                 else {
                     return;
                 };
-                if matches!(&row.payload, ChainPayload::Execution(ExecutionPayload::SinkOperationFailed(failed)) if matches!(failed.phase, SinkOperationPhase::Write(_)))
-                {
-                    return;
-                }
                 if repeat {
                     self.repeats += 1;
                     return;

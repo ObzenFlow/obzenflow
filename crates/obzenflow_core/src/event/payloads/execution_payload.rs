@@ -101,11 +101,9 @@ pub enum ExecutionPayload {
     },
     /// A join left a state that holds inputs.
     JoinPhase(JoinPhaseFact),
-    SinkAudit(super::delivery_payload::SinkAuditPayload),
     StageFatalRecorded(super::stage_fatal_payload::StageFatalRecorded),
     StageProcessingFailed(super::stage_processing_failed_payload::StageProcessingFailed),
-    SinkOperationFailed(super::sink_operation_payload::SinkOperationFailed),
-    EffectRecord(EffectRecord),
+    EffectRecord(Box<EffectRecord>),
     EffectAttemptStarted(EffectAttemptStarted),
     EffectRecoveryAbandoned(EffectRecoveryAbandoned),
 }
@@ -701,9 +699,7 @@ pub struct AiChunkingPlannedFact {
 impl ExecutionPayload {
     pub const fn payload_schema_version(&self) -> std::num::NonZeroU32 {
         match self {
-            Self::SinkOperationFailed(_) | Self::SourceCleanupFailed(_) => {
-                std::num::NonZeroU32::new(2).unwrap()
-            }
+            Self::SourceCleanupFailed(_) => std::num::NonZeroU32::new(2).unwrap(),
             _ => std::num::NonZeroU32::MIN,
         }
     }
@@ -745,10 +741,8 @@ impl ExecutionPayload {
             Self::AccumulatorProgress { .. } => "stateful.accumulation_progress",
             Self::JoinReferenceProgress { .. } => "join.reference_progress",
             Self::JoinPhase(fact) => fact.event_type(),
-            Self::SinkAudit(audit) => audit.event_type(),
             Self::StageFatalRecorded(_) => "obzenflow.stage_fatal_recorded",
             Self::StageProcessingFailed(_) => vocabulary::stage::PROCESSING_FAILED,
-            Self::SinkOperationFailed(_) => "obzenflow.sink_operation_failed",
             Self::EffectRecord(record) => record.event_type(),
             Self::EffectAttemptStarted(_) => {
                 super::effect_payload::EFFECT_ATTEMPT_STARTED_EVENT_TYPE
@@ -766,12 +760,10 @@ impl ExecutionPayload {
         match self {
             Self::StageFatalRecorded(_)
             | Self::StageProcessingFailed(_)
-            | Self::SinkOperationFailed(_)
             | Self::EffectRecord(_)
             | Self::EffectAttemptStarted(_)
             | Self::EffectRecoveryAbandoned(_) => true,
-            Self::SinkAudit(_)
-            | Self::ReplayLifecycle(_)
+            Self::ReplayLifecycle(_)
             | Self::SupervisorRegistered { .. }
             | Self::SupervisorCommandDiscarded { .. }
             | Self::ContractStatus { .. }

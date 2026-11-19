@@ -88,19 +88,3 @@ pub(crate) fn fact_descriptor(name: &str, version: u32) -> obzenflow_core::Event
             .expect("positive fixture version"),
     }
 }
-
-#[cfg(test)]
-pub(crate) fn delivery_subject(
-    event_id: obzenflow_core::EventId,
-) -> obzenflow_core::event::payloads::delivery_payload::DeliverySubject {
-    let mut event = obzenflow_core::event::ChainEventFactory::data_event(
-        obzenflow_core::StageId::new().into(),
-        "test.event",
-        std::num::NonZeroU32::MIN,
-        serde_json::json!({}),
-    );
-    event.id = event_id;
-    obzenflow_core::event::payloads::delivery_payload::DeliverySubject::from_record(
-        &committed_input(obzenflow_core::JournalWriterId::new(), event),
-    )
-}

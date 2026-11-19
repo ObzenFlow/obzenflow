@@ -142,43 +142,6 @@ pub(crate) fn commit_control_output(
     })
 }
 
-/// Error-journal Data participates in emitted-output accounting without
-/// advancing the authored data-journal transport frontier.
-pub(crate) fn commit_error_output(
-    journal: &Arc<dyn Journal<ChainEvent>>,
-    instrumentation: &Arc<StageInstrumentation>,
-    mut event: ChainEvent,
-    parent: Option<&DeliveredRecord<ChainPayload>>,
-) -> futures::future::BoxFuture<'static, Result<JournalRecord<ChainPayload>, CommitError>> {
-    use futures::FutureExt;
-    let journal = journal.clone();
-    let instrumentation = instrumentation.clone();
-    let parent = parent.cloned();
-    crate::supervised_base::publication::commit(async move {
-        let mut snapshot = instrumentation.capture_accounting();
-        if event.consumes_data_credit() {
-            snapshot.accounting.events_emitted_total =
-                snapshot.accounting.events_emitted_total.saturating_add(1);
-            snapshot.project_emission(&event);
-        }
-        let emitted = u64::from(event.consumes_data_credit());
-        event = snapshot.attach_to(event);
-        let capture = instrumentation.journal_capture(None, vec![(emitted, true)]);
-        let written = crate::supervised_base::publication::append_inline(
-            &journal,
-            event,
-            AppendOptions::from_record(parent.as_ref().map(DeliveredRecord::record))?
-                .with_capture(capture),
-        )
-        .await?;
-        if written.consumes_data_credit() {
-            instrumentation.record_error_journal_output_event(&written);
-        }
-        Ok(written)
-    })
-    .boxed()
-}
-
 enum PhysicalDataReservation {
     Legacy(BackpressureReservation),
     Direct(DirectFactClaim),

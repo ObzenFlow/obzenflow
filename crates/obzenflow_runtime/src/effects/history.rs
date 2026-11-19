@@ -760,6 +760,30 @@ impl EffectHistory {
         })
     }
 
+    pub(crate) fn last_reply_before(
+        &self,
+        effect_type: &str,
+        cursor: &EffectCursor,
+    ) -> Option<&Value> {
+        let before = (cursor.input_seq, cursor.effect_ordinal.get());
+        self.records
+            .iter()
+            .filter(|record| {
+                record.descriptor.effect_type.as_str() == effect_type
+                    && record.cursor.stage_key == cursor.stage_key
+                    && (record.cursor.input_seq, record.cursor.effect_ordinal.get()) < before
+            })
+            .filter_map(|record| match &record.outcome {
+                EffectOutcomePayload::Succeeded { output } => Some((
+                    (record.cursor.input_seq, record.cursor.effect_ordinal.get()),
+                    output,
+                )),
+                _ => None,
+            })
+            .max_by_key(|(position, _)| *position)
+            .map(|(_, output)| output)
+    }
+
     pub(crate) fn attempts(&self, cursor: &EffectCursor) -> &[EffectAttemptStarted] {
         self.attempts
             .get(cursor)

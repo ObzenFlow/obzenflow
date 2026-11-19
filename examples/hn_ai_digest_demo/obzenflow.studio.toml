@@ -19,9 +19,6 @@ endpoint = "ollama"
 model = "llama3.1:8b"
 request_timeout_ms = 150000
 
-[sinks]
-handler = "console_sink"
-
 [server]
 enabled = true
 host = "127.0.0.1"

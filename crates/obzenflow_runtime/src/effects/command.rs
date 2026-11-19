@@ -218,6 +218,28 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     pub fn system_name(&self) -> &str {
         self.name.as_str()
     }
+
+    /// The same port bound under `system.instance`, for a framework system
+    /// whose instances each hold their own destination, such as one file each.
+    /// Characters a binding name can't hold become `_`.
+    #[doc(hidden)]
+    pub fn instance(mut self, instance: &str) -> Self {
+        let qualified: String = format!("{}.{instance}", self.name.as_str())
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .take(64)
+            .collect();
+        if let Ok(name) = LogicalEffectBindingName::new(qualified) {
+            self.name = name;
+        }
+        self
+    }
 }
 
 const fn checked_system_name<T: SystemName>() -> &'static str {
@@ -400,6 +422,24 @@ pub trait PortAnswer {
 
 impl<O: EffectOutcome> PortAnswer for Result<O, EffectError> {
     type Outcome = O;
+}
+
+/// The answer of a port method marked `records = reply`.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "a port method marked `records = reply` answers with a reply and fails with `EffectError`",
+    label = "`{Self}` is not `Result<Reply, EffectError>`",
+    note = "a reply is a plain serializable value the runtime records and returns, such as `()`"
+)]
+pub trait PortReply {
+    type Reply;
+}
+
+impl<O> PortReply for Result<O, EffectError>
+where
+    O: Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
+{
+    type Reply = O;
 }
 
 #[doc(hidden)]

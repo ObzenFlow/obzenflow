@@ -165,15 +165,9 @@ impl CandidateSet {
             });
         }
 
-        // §2 first-pass lock: scoped entries ride file and DSL only. The one
-        // stage-addressed environment exception is the non-secret
-        // Twelve-Factor sink handler choice introduced by FLOWIP-010o.
+        // §2 first-pass lock: scoped entries ride file and DSL only.
         if matches!(source, ConfigSource::Cli | ConfigSource::Env)
             && address != ConfigAddress::unqualified(ConfigScope::Global)
-            && !(source == ConfigSource::Env
-                && key_path == super::schema::SINK_HANDLER_KEY
-                && matches!(address.scope, ConfigScope::Stage { .. })
-                && matches!(address.subject, ConfigSubject::Unqualified))
         {
             return Err(ConfigResolveError::ScopeNotAdmitted {
                 key_path,
@@ -462,27 +456,6 @@ mod tests {
             ConfigValue::U64(5),
         ))
         .unwrap();
-    }
-
-    #[test]
-    fn sink_handler_is_the_only_stage_addressed_environment_candidate() {
-        let mut set = CandidateSet::default();
-        set.admit(candidate(
-            super::super::schema::SINK_HANDLER_KEY,
-            ConfigScope::stage("digest_summary"),
-            ConfigSource::Env,
-            ConfigValue::Text("postgres_sink".to_string()),
-        ))
-        .unwrap();
-
-        assert_eq!(
-            set.get(
-                super::super::schema::SINK_HANDLER_KEY,
-                &ConfigScope::stage("digest_summary")
-            )
-            .and_then(|slots| slots.env.as_ref()),
-            Some(&ConfigValue::Text("postgres_sink".to_string()))
-        );
     }
 
     #[test]

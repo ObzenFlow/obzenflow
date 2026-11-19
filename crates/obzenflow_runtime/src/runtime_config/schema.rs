@@ -13,7 +13,6 @@ use super::candidates::ConfigValue;
 use super::flow_view::BackpressureMode;
 use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSubject};
 
-pub const SINK_HANDLER_KEY: &str = "sinks.handler";
 pub const CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY: &str =
     "middleware.circuit_breaker.consecutive_failures";
 pub const CIRCUIT_BREAKER_COUNT_WINDOW_KEY: &str = "middleware.circuit_breaker.count_window";
@@ -968,17 +967,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             // The runtime.resume.* view over the 010h [replay] parse
             // (absorption without moving the parse; Immutable: run identity).
             KnobSpec {
-                key_path: "runtime.resume.allow_duplicate_sink_delivery",
-                file_path: Some("replay.allow_duplicate_sink_delivery"),
-                value_type: KnobType::Bool,
-                target: KnobTarget::Global,
-                default: KnobDefault::OptionalAbsent,
-                mutability: Mutability::Immutable,
-                role: KnobRole::Invocation,
-                redaction: Redaction::Plain,
-                env: EnvBinding::Named("OBZENFLOW_ALLOW_DUPLICATE_SINK_DELIVERY"),
-            },
-            KnobSpec {
                 key_path: "runtime.resume.allow_incomplete_archive",
                 file_path: Some("replay.allow_incomplete_archive"),
                 value_type: KnobType::Bool,
@@ -1021,18 +1009,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 role: KnobRole::Invocation,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Named("OBZENFLOW_REPLAY_VERIFY"),
-            },
-            KnobSpec {
-                key_path: SINK_HANDLER_KEY,
-                file_path: None,
-                value_type: KnobType::Text,
-                // Only authored handler-set stages consume this key.
-                target: KnobTarget::StageConsumer,
-                default: KnobDefault::OptionalAbsent,
-                mutability: Mutability::Immutable,
-                role: KnobRole::Configuration,
-                redaction: Redaction::Plain,
-                env: EnvBinding::Canonical,
             },
         ]
     })
@@ -1201,7 +1177,6 @@ mod tests {
             invocation,
             [
                 "journal.root",
-                "runtime.resume.allow_duplicate_sink_delivery",
                 "runtime.resume.allow_incomplete_archive",
                 "runtime.resume.replay_from",
                 "runtime.resume.resume_from",

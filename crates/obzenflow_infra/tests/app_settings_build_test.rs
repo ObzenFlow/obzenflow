@@ -215,7 +215,6 @@ async fn a_resume_refused_for_an_unextracted_table_leaves_its_parent_unclaimed()
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r0.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,

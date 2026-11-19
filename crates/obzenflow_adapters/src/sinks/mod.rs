@@ -2,22 +2,27 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Adapter sinks
+//! Ready-made sinks. Each is a command a `sink!` row takes, sending one
+//! request per input through a port the framework declares.
 
 mod blocking;
 pub mod console;
 pub mod csv;
 pub mod discard;
-#[cfg(feature = "postgres")]
-pub mod postgres;
+#[cfg(feature = "test-support")]
+pub mod recording;
 pub mod tracing;
 
 pub use console::{
-    ConsoleConfigError, ConsoleFormatError, ConsoleOutput, ConsoleSink, ConsoleWriter,
-    DebugFormatter, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
-    SnapshotTableFormatter, TableConsoleSink, TableFormatter,
+    ConsoleFormatError, ConsoleOutput, ConsolePort, ConsoleSink, DebugFormatter, Formatter,
+    JsonFormatter, JsonPrettyFormatter, OutputDestination, SnapshotTableFormatter, TableFormatter,
 };
 
-pub use csv::{CsvProjection, CsvSink, CsvSinkBuilder};
-pub use discard::DiscardSink;
-pub use tracing::TracingSink;
+pub use csv::{Appended, CsvProjection, CsvRegisterPort, CsvRow, CsvSink, CsvSinkBuilder};
+pub use discard::{DiscardPort, DiscardSink, Discarded};
+#[cfg(feature = "test-support")]
+pub use recording::{
+    CallCounter, Counted, CountingPort, CountingSink, Recorded, RecordedInput, RecordingPort,
+    RecordingSink,
+};
+pub use tracing::{TracingLevel, TracingOutput, TracingPort, TracingSink};

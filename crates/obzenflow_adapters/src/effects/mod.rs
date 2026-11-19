@@ -5,3 +5,4 @@
 //! Adapter-owned effect integrations.
 
 pub mod http;
+pub mod postgres;

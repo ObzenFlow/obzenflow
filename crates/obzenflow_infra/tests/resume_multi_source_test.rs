@@ -17,19 +17,19 @@ use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_adapters::sinks::CountingSink;
+use obzenflow_core::event::payloads::effect_payload::EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedInfiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedInfiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use replay_testkit::ReattachingSource;
@@ -197,26 +197,6 @@ impl EffectfulTransformHandler for EffectfulTail {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingSink {
-    delivered: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = FanInOutput;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _input: FanInOutput) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 /// Source ranges for one run: channel a produces `a_count` values starting at
 /// `a_first`, channel b likewise, disjoint so effect identities never collide.
 struct SourceRanges {
@@ -243,7 +223,7 @@ fn build_flow(
         let effectful_handler = EffectfulTail {
             counter: Port::to(CallCounter { calls }),
         };
-        let collect_handler = CountingSink { delivered };
+        let collect_handler = CountingSink::<FanInOutput>::new(delivered);
 
         Ok(flow! {
             name: "resume_fan_in",
@@ -418,25 +398,19 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
         resume_rows(&replay_testkit::read_stage_envelopes_appended(&recorded_run, "merge").await);
     assert_eq!(recorded_merge.len() as u64, RECORDED_DELIVERED);
 
-    // Resume with both sources producing live. The sink re-consumes the
-    // recorded prefix during catch-up (F14), so the wait target is
-    // prefix + live; a live-only target races the stop into catch-up.
+    // Resume with both sources producing live. The sink makes no call for
+    // the settled prefix, and its live calls follow catch-up, so the live
+    // count alone can't race the stop into catch-up.
     let resumed_calls = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
         );
-        run_until_delivered(
-            &journal_base,
-            &live_ranges,
-            RECORDED_DELIVERED + LIVE_DELIVERED,
-        )
-        .await?
+        run_until_delivered(&journal_base, &live_ranges, LIVE_DELIVERED).await?
     };
     assert_eq!(
         resumed_calls, LIVE_DELIVERED as usize,
@@ -596,7 +570,7 @@ fn tear_before_src_b_crossed(run: &Path, recorded: usize) -> Result<()> {
                     if path == effectful {
                         event_type(record).as_deref() == Some(outcome_type.as_str())
                     } else if path == collect {
-                        kind(record).as_deref() == Some("delivery")
+                        event_type(record).as_deref() == Some(EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE)
                     } else {
                         kind(record).as_deref() == Some("fact")
                     }
@@ -627,7 +601,6 @@ async fn a_source_torn_before_crossing_crosses_its_skipped_generation_vacuously(
     let resume_of = |archive: PathBuf| ReplayBootstrap {
         archive_path: archive,
         allow_incomplete_archive: true,
-        allow_duplicate_sink_delivery: false,
         verb: ReplayVerb::Resume,
     };
 
@@ -652,7 +625,7 @@ async fn a_source_torn_before_crossing_crosses_its_skipped_generation_vacuously(
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(resume_of(r0.clone())).await,
         );
-        run_until_delivered(&journal_base, &a_live, RECORDED + 2).await?;
+        run_until_delivered(&journal_base, &a_live, 2).await?;
     }
     let r1 = replay_testkit::latest_run_dir(&journal_base);
     tear_before_src_b_crossed(&r1, RECORDED as usize)?;
@@ -668,7 +641,9 @@ async fn a_source_torn_before_crossing_crosses_its_skipped_generation_vacuously(
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(resume_of(r1.clone())).await,
         );
-        run_until_delivered(&journal_base, &quiet, RECORDED + 2).await?
+        // The cut took the sink's calls for a 5..=6 with it, so it makes them
+        // again; the eight recorded inputs reuse theirs.
+        run_until_delivered(&journal_base, &quiet, 2).await?
     };
     let r2 = replay_testkit::latest_run_dir(&journal_base);
     let resume = &replay_testkit::archive_manifest(&r2)["resume"];

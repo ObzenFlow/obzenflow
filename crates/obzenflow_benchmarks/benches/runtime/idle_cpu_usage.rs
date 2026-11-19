@@ -12,17 +12,15 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
 use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_benchmarks::prelude::*;
 use obzenflow_benchmarks::process_cpu_time;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
-use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,41 +66,7 @@ impl TypedFiniteSourceHandler for IdleSource {
     }
 }
 
-/// Sink that records latencies
-#[derive(Clone, Debug)]
-struct TimestampedSink {
-    _received: Arc<AtomicU64>,
-    _latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
-}
-
-impl TimestampedSink {
-    fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
-            expected_count as usize,
-        )));
-        let received = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                _received: received.clone(),
-                _latencies: latencies.clone(),
-            },
-            latencies,
-        )
-    }
-}
-
-#[async_trait]
-impl InlineSink for TimestampedSink {
-    type Input = BenchEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-    }
-
-    async fn write(&mut self, _event: BenchEvent) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type TimestampedSink = obzenflow_adapters::sinks::DiscardSink<BenchEvent>;
 
 /// Passthrough stage that just forwards events
 #[derive(Clone, Debug)]
@@ -329,7 +293,7 @@ const WINDOW: Duration = Duration::from_secs(2);
 async fn idle_window(stage_count: usize) -> anyhow::Result<Duration> {
     let test_name = format!("idle_cpu_{stage_count}_stages");
     let (journals_base_path, _temp_dir) = create_temp_journals_base(&test_name)?;
-    let (sink, _) = TimestampedSink::new(0);
+    let sink = TimestampedSink::new();
     let handle = build_pipeline(stage_count, IdleSource::new(), sink, journals_base_path).await?;
     handle
         .start()

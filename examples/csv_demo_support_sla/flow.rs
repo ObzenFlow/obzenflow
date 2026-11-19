@@ -124,8 +124,8 @@ impl CsvProjection for EnrichedTicketCsv {
     type Input = EnrichedTicket;
     type Row = EnrichedTicket;
 
-    fn project(&self, ticket: Self::Input) -> Result<Self::Row, HandlerError> {
-        Ok(ticket)
+    fn project(&self, ticket: &Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(ticket.clone())
     }
 }
 
@@ -180,7 +180,6 @@ fn build_flow() -> FlowDefinition {
                 "Effective SLA (h)",
                 "Due Bucket",
             ])
-            .auto_flush(true)
             .build()
             .map_err(resources_failed)?;
 

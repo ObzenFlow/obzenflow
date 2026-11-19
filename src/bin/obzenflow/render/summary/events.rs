@@ -397,10 +397,6 @@ impl Renderer {
                     name.to_owned()
                 }
             }
-            EventKind::Delivery => name
-                .strip_prefix(&format!("{}.", kind.as_str()))
-                .unwrap_or(name)
-                .to_owned(),
             _ => name.to_owned(),
         };
         format!(

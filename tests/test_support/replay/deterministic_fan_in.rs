@@ -17,11 +17,11 @@ use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission,
-    TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
+    EffectfulTransformHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -248,39 +248,7 @@ impl EffectfulTransformHandler for EffectfulTail {
     }
 }
 
-#[derive(Debug)]
-struct DropSink<T>(std::marker::PhantomData<fn() -> T>);
-
-impl<T> Clone for DropSink<T> {
-    fn clone(&self) -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-impl<T> DropSink<T> {
-    fn new() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-#[async_trait]
-impl<T> InlineSink for DropSink<T>
-where
-    T: TypedPayload + Send + Sync + 'static,
-{
-    type Input = T;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-        )
-        .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type DropSink<T> = obzenflow::stages::sinks::DiscardSink<T>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderedList {

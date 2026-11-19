@@ -13,8 +13,6 @@
 //! - FSM owns control flow decisions (sleep, retry, transition)
 //! - Contract tracking is separated from subscription mechanics
 
-use super::DeliveredRecord;
-use obzenflow_core::event::ChainPayload;
 mod construction;
 mod contract_checking;
 mod polling;
@@ -38,12 +36,11 @@ pub use types::{
 use crate::contracts::ContractChain;
 use crate::control_plane::ControlPlaneProvider;
 use crate::messaging::upstream_subscription_policy::ContractPolicyStack;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::{ChainEvent, JournalEvent, JournalRecord};
+use obzenflow_core::event::{JournalEvent, JournalRecord};
 use obzenflow_core::journal::reader::JournalReader;
-use obzenflow_core::{EventId, ReaderGeneration, StageId};
+use obzenflow_core::{ReaderGeneration, StageId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -83,122 +80,6 @@ impl ReaderFrontier {
             highest: self.highest.max(other.highest),
         }
     }
-}
-
-/// Ownership transfer for mandatory receipt accounting during publication.
-/// The suspended caller regains these values only after observing settlement.
-pub(crate) struct ReceiptSettlement {
-    owner_label: String,
-    receipt_aware: bool,
-    reader_stage: Option<StageId>,
-    upstreams: Vec<StageId>,
-    chains: Vec<Option<ContractChain>>,
-    progress: Vec<ReaderProgress>,
-}
-
-impl ReceiptSettlement {
-    pub(crate) fn record(
-        &mut self,
-        receipt: &DeliveredRecord<ChainPayload>,
-    ) -> Option<(SeqNo, EventId, VectorClock)> {
-        if !self.receipt_aware {
-            return None;
-        }
-        record_receipt(
-            receipt.view(),
-            &self.owner_label,
-            self.receipt_aware,
-            self.reader_stage,
-            &self.upstreams,
-            &mut self.chains,
-            &mut self.progress,
-        )
-    }
-}
-
-fn record_receipt(
-    receipt: &ChainEvent,
-    owner_label: &str,
-    receipt_aware: bool,
-    reader_stage: Option<StageId>,
-    upstreams: &[StageId],
-    chains: &mut [Option<ContractChain>],
-    reader_progress: &mut [ReaderProgress],
-) -> Option<(SeqNo, EventId, VectorClock)> {
-    if !receipt_aware {
-        return None;
-    }
-
-    let ChainPayload::Delivery(payload) = &receipt.payload else {
-        return None;
-    };
-    let subject = &payload.subject;
-    let parent_id = subject.input.event_id;
-    if !receipt.causality.parent_ids.contains(&parent_id) || payload.validate().is_err() {
-        return None;
-    }
-    let Some(index) = reader_progress.iter().position(|progress| {
-        progress
-            .pending_delivery_inputs
-            .get(&subject.input)
-            .is_some_and(|record| subject.matches_record(record.record()))
-    }) else {
-        tracing::warn!(owner = %owner_label, receipt_id = %receipt.id, "receipt has no exact pending input");
-        return None;
-    };
-    let upstream_stage = reader_progress[index].stage_id;
-
-    let is_accounted_receipt = reader_progress[index]
-        .pending_receipts
-        .contains_key(&subject.input);
-    if is_accounted_receipt {
-        if let Some(reader_stage) = reader_stage {
-            if let Some(slot) = upstreams.iter().position(|id| *id == upstream_stage) {
-                if let Some(Some(chain)) = chains.get_mut(slot) {
-                    chain.on_write(receipt, reader_stage, SeqNo(0));
-                }
-            }
-        }
-    }
-
-    if matches!(&payload.result, DeliveryResult::Buffered { .. }) {
-        return None;
-    }
-
-    reader_progress[index]
-        .pending_delivery_inputs
-        .remove(&subject.input);
-
-    if !is_accounted_receipt {
-        tracing::debug!(
-            owner = %owner_label,
-            ?upstream_stage,
-            ?parent_id,
-            "record_delivery_receipt: terminal forwarded input has no receipt-watermark position"
-        );
-        return None;
-    }
-
-    let previous_seq = reader_progress[index].receipted_seq;
-    if reader_progress[index].mark_receipted(subject.input) {
-        if reader_progress[index].receipted_seq != previous_seq {
-            if let (Some(event_id), Some(vector_clock)) = (
-                reader_progress[index].last_receipted_event_id,
-                reader_progress[index].last_receipted_vector_clock.clone(),
-            ) {
-                return Some((reader_progress[index].receipted_seq, event_id, vector_clock));
-            }
-        }
-    } else {
-        tracing::debug!(
-            owner = %owner_label,
-            ?upstream_stage,
-            ?parent_id,
-            "record_delivery_receipt: parent was not pending when receipt arrived"
-        );
-    }
-
-    None
 }
 
 struct FeedContractChain {
@@ -484,21 +365,6 @@ where
         self.selection_base = base;
     }
 
-    fn uses_receipt_watermark(&self) -> bool {
-        self.contract_tracker
-            .as_ref()
-            .map(|tracker| tracker.receipt_aware_progress)
-            .unwrap_or(false)
-    }
-
-    fn progress_seq(&self, progress: &ReaderProgress) -> SeqNo {
-        if self.uses_receipt_watermark() {
-            progress.receipted_seq
-        } else {
-            progress.reader_seq
-        }
-    }
-
     fn has_selected_event_type_filter(&self, stage_id: StageId) -> bool {
         self.selected_event_types_by_stage
             .get(&stage_id)
@@ -583,113 +449,6 @@ where
         }
 
         (Some(first.descriptor().clone()), first.system_feed_role())
-    }
-
-    /// Bridge a sink delivery receipt write into the edge-scoped `ContractChain`
-    /// for the upstream that delivered the consumed parent event.
-    ///
-    /// This is used by sink supervisors to feed `ChainPayload::Delivery`
-    /// events (written to the sink's own journal) into the same per-edge
-    /// contract chain that observed the consumed input event via `on_read`.
-    pub fn notify_delivery_receipt(&mut self, receipt: &ChainEvent, upstream_stage: StageId) {
-        let Some(reader_stage) = self.contract_tracker.as_ref().and_then(|t| t.reader_stage) else {
-            // Contracts are not configured for this subscription.
-            return;
-        };
-
-        let Some(index) = self
-            .readers
-            .iter()
-            .position(|slot| slot.stage_id == upstream_stage)
-        else {
-            tracing::warn!(
-                owner = %self.owner_label,
-                ?upstream_stage,
-                "notify_delivery_receipt: no reader slot for upstream stage"
-            );
-            return;
-        };
-
-        let Some(chain_slot) = self.contract_chains.get_mut(index) else {
-            return;
-        };
-        let Some(chain) = chain_slot.as_mut() else {
-            return;
-        };
-
-        // The receipt is written by the sink (the reader stage for this subscription).
-        // SeqNo(0) because receipt accounting does not use sequence numbers.
-        chain.on_write(receipt, reader_stage, SeqNo(0));
-    }
-
-    /// Record a just-journalled delivery receipt and advance the receipt watermark if possible.
-    ///
-    /// This is called by sink supervisors after appending a `ChainPayload::Delivery` event.
-    /// It clears exact-parent bookkeeping for every terminal receipt and returns the new receipt
-    /// watermark triple when (and only when) accounted receipts become contiguous. Forwarded data
-    /// is settled without entering the immediate upstream's authored-prefix contract population.
-    ///
-    /// `DeliveryResult::Buffered` receipts are recorded for auditing but do **not** advance the
-    /// receipt watermark or clear pending receipt metadata.
-    pub fn record_delivery_receipt(
-        &mut self,
-        receipt: &ChainEvent,
-        reader_progress: &mut [ReaderProgress],
-    ) -> Option<(SeqNo, EventId, VectorClock)> {
-        record_receipt(
-            receipt,
-            &self.owner_label,
-            self.uses_receipt_watermark(),
-            self.contract_tracker
-                .as_ref()
-                .and_then(|tracker| tracker.reader_stage),
-            &self
-                .readers
-                .iter()
-                .map(|slot| slot.stage_id)
-                .collect::<Vec<_>>(),
-            &mut self.contract_chains,
-            reader_progress,
-        )
-    }
-
-    pub(crate) fn take_receipt_settlement(
-        &mut self,
-        progress: &mut Vec<ReaderProgress>,
-    ) -> ReceiptSettlement {
-        ReceiptSettlement {
-            owner_label: self.owner_label.clone(),
-            receipt_aware: self.uses_receipt_watermark(),
-            reader_stage: self
-                .contract_tracker
-                .as_ref()
-                .and_then(|tracker| tracker.reader_stage),
-            upstreams: self.readers.iter().map(|slot| slot.stage_id).collect(),
-            chains: std::mem::take(&mut self.contract_chains),
-            progress: std::mem::take(progress),
-        }
-    }
-
-    pub(crate) fn restore_receipt_settlement(
-        &mut self,
-        progress: &mut Vec<ReaderProgress>,
-        settlement: ReceiptSettlement,
-    ) {
-        self.contract_chains = settlement.chains;
-        *progress = settlement.progress;
-    }
-
-    pub fn pending_receipt_envelope(
-        &self,
-        input: obzenflow_core::event::JournalCommitRef,
-        reader_progress: &[ReaderProgress],
-    ) -> Option<(StageId, DeliveredRecord<ChainPayload>)> {
-        reader_progress.iter().find_map(|progress| {
-            progress.pending_delivery_inputs.get(&input).map(|pending| {
-                let envelope = pending.clone();
-                (progress.stage_id, envelope)
-            })
-        })
     }
 
     /// Retrieve and clear the most recent EOF accounting outcome, if any.

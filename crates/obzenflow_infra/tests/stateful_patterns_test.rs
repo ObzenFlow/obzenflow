@@ -3,17 +3,16 @@
 // https://obzenflow.dev
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use obzenflow_adapters::middleware::stateful_observer;
+use obzenflow_adapters::sinks::RecordingSink;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission, TypedFiniteSourceHandler,
-    TypedStatefulHandler,
+    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::observer::{StatefulObserver, StatefulObserverContext};
 use obzenflow_runtime::stages::SourceError;
@@ -107,54 +106,6 @@ impl TypedFiniteSourceHandler for EmptySource {
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         Ok(None)
-    }
-}
-
-#[derive(Debug)]
-struct CollectingSink<T> {
-    events: Arc<Mutex<Vec<ChainEvent>>>,
-    _input: std::marker::PhantomData<fn() -> T>,
-}
-
-impl<T> Clone for CollectingSink<T> {
-    fn clone(&self) -> Self {
-        Self {
-            events: Arc::clone(&self.events),
-            _input: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T> CollectingSink<T> {
-    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
-        Self {
-            events,
-            _input: std::marker::PhantomData,
-        }
-    }
-}
-
-#[async_trait]
-impl<T> InlineSink for CollectingSink<T>
-where
-    T: TypedPayload + Send + Sync + 'static,
-{
-    type Input = T;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                "collect".to_string(),
-            ),
-        )
-    }
-
-    async fn write(&mut self, input: T) -> Result<(), SinkWriteFailure> {
-        self.events
-            .lock()
-            .unwrap()
-            .push(input.to_event(WriterId::from(StageId::new())));
-        Ok(())
     }
 }
 
@@ -319,15 +270,13 @@ impl TypedStatefulHandler for ImmediateEmitter {
 
 #[tokio::test]
 async fn counter_emits_single_event_on_drain() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_for_flow = events.clone();
+    let (sink_handler, results) = RecordingSink::<CountResult>::new();
 
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(5);
             let counter_handler = CounterHandler::new();
-            let sink_handler = CollectingSink::<CountResult>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_counter_test",
@@ -347,27 +296,20 @@ async fn counter_emits_single_event_on_drain() {
         }))
     .await
     .expect("flow should complete");
-    let events = events.lock().unwrap();
-    let results: Vec<_> = events
-        .iter()
-        .filter(|e| e.event_type() == CountResult::event_type_name())
-        .collect();
+    let results = results.items();
     assert_eq!(results.len(), 1);
-    let total = results[0].payload()["total_count"].as_u64().unwrap();
-    assert_eq!(total, 5);
+    assert_eq!(results[0].total_count, 5);
 }
 
 #[tokio::test]
 async fn accumulator_emits_one_event_per_input_on_drain() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_for_flow = events.clone();
+    let (sink_handler, results) = RecordingSink::<CollectedValue>::new();
 
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(5);
             let accumulator_handler = AccumulatorHandler::new();
-            let sink_handler = CollectingSink::<CollectedValue>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_accumulator_test",
@@ -387,25 +329,18 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
         }))
     .await
     .expect("flow should complete");
-    let events = events.lock().unwrap();
-    let results: Vec<_> = events
-        .iter()
-        .filter(|e| e.event_type() == CollectedValue::event_type_name())
-        .collect();
     assert_eq!(results.len(), 5);
 }
 
 #[tokio::test]
 async fn sum_handler_emits_aggregated_result_on_drain() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_for_flow = events.clone();
+    let (sink_handler, results) = RecordingSink::<SumResult>::new();
 
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(10);
             let sum_handler = SumHandler::new();
-            let sink_handler = CollectingSink::<SumResult>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_sum_test",
@@ -425,20 +360,14 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
         }))
         .await
         .expect("flow should complete");
-    let events = events.lock().unwrap();
-    let results: Vec<_> = events
-        .iter()
-        .filter(|e| e.event_type() == SumResult::event_type_name())
-        .collect();
+    let results = results.items();
     assert_eq!(results.len(), 1);
-    let total = results[0].payload()["total_sum"].as_u64().unwrap();
-    assert_eq!(total, 55);
+    assert_eq!(results[0].total_sum, 55);
 }
 
 #[tokio::test]
 async fn immediate_emitter_emits_during_accumulating() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_for_flow = events.clone();
+    let (sink_handler, results) = RecordingSink::<ProgressUpdate>::new();
     let observer_calls = Arc::new(AtomicUsize::new(0));
     let observer_calls_for_flow = observer_calls.clone();
 
@@ -447,7 +376,6 @@ async fn immediate_emitter_emits_during_accumulating() {
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(5);
             let emitter_handler = ImmediateEmitter::new();
-            let sink_handler = CollectingSink::<ProgressUpdate>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_immediate_test",
@@ -472,11 +400,6 @@ async fn immediate_emitter_emits_during_accumulating() {
         }))
     .await
     .expect("flow should complete");
-    let events = events.lock().unwrap();
-    let results: Vec<_> = events
-        .iter()
-        .filter(|e| e.event_type() == ProgressUpdate::event_type_name())
-        .collect();
     assert_eq!(results.len(), 5);
     assert_eq!(
         observer_calls.load(Ordering::SeqCst),
@@ -487,15 +410,13 @@ async fn immediate_emitter_emits_during_accumulating() {
 
 #[tokio::test]
 async fn empty_source_still_triggers_drain_for_stateful_handler() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_for_flow = events.clone();
+    let (sink_handler, results) = RecordingSink::<CountResult>::new();
 
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = EmptySource::new();
             let counter_handler = CounterHandler::new();
-            let sink_handler = CollectingSink::<CountResult>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_empty_test",
@@ -515,12 +436,7 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
         }))
     .await
     .expect("flow should complete");
-    let events = events.lock().unwrap();
-    let results: Vec<_> = events
-        .iter()
-        .filter(|e| e.event_type() == CountResult::event_type_name())
-        .collect();
+    let results = results.items();
     assert_eq!(results.len(), 1);
-    let total = results[0].payload()["total_count"].as_u64().unwrap();
-    assert_eq!(total, 0);
+    assert_eq!(results[0].total_count, 0);
 }

@@ -6,13 +6,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::source_poll_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
-};
+use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
 use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -28,8 +26,25 @@ struct AsyncTestEvent {
 impl TypedPayload for AsyncTestEvent {
     const EVENT_TYPE: &'static str = "async_finite_source.event";
 }
+
+#[derive(Clone, Debug, Serialize)]
+struct Received;
+
+/// Counts the sink's calls.
+struct CountReceived {
+    received: Arc<AtomicU64>,
+}
+
+#[obzenflow_runtime::effects::port(system = "async-finite-counter", effects = obzenflow_runtime::effects)]
+impl CountReceived {
+    #[effect(type = "async_finite_source.receive", at_least_once, records = reply)]
+    fn receive(&self, _: &Received) -> Result<(), EffectError> {
+        self.received.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
@@ -79,34 +94,6 @@ impl TypedAsyncFiniteSourceHandler for TestAsyncEventSource {
 }
 
 #[derive(Clone, Debug)]
-struct CollectSink {
-    events: Arc<Mutex<Vec<ChainEvent>>>,
-}
-
-impl CollectSink {
-    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
-        Self { events }
-    }
-}
-
-#[async_trait]
-impl InlineSink for CollectSink {
-    type Input = AsyncTestEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
-    }
-
-    async fn write(&mut self, event: AsyncTestEvent) -> Result<(), SinkWriteFailure> {
-        self.events
-            .lock()
-            .unwrap()
-            .push(event.to_event(WriterId::from(StageId::new())));
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
 struct CountSourcePollObserver {
     calls: Arc<AtomicU64>,
 }
@@ -126,16 +113,17 @@ impl SourcePollObserver for CountSourcePollObserver {
 #[tokio::test]
 async fn async_finite_source_applies_stage_middleware() -> Result<()> {
     let drain_calls = Arc::new(AtomicU64::new(0));
-    let events = Arc::new(Mutex::new(Vec::new()));
+    let events = Arc::new(AtomicU64::new(0));
+    let sink = perform(|_: &AsyncTestEvent| Received).through(Port::to(CountReceived {
+        received: events.clone(),
+    }));
     let observer_calls = Arc::new(AtomicU64::new(0));
     let journal_root = unique_journal_dir("async_finite_source_middleware");
     let drain_calls_for_flow = Arc::clone(&drain_calls);
-    let events_for_flow = Arc::clone(&events);
     let observer_calls_for_flow = Arc::clone(&observer_calls);
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         let source = TestAsyncEventSource::new(drain_calls_for_flow);
-        let sink = CollectSink::new(events_for_flow);
 
         Ok(flow! {
             name: "async_finite_source_middleware_test",
@@ -160,22 +148,11 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
 
     handle.run().await?;
 
-    let data_events: Vec<ChainEvent> = events
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|event| event.consumes_data_credit())
-        .cloned()
-        .collect();
-
-    assert_eq!(
-        data_events.len(),
-        2,
-        "expected two data events to reach the sink"
-    );
+    let received = events.load(Ordering::Relaxed);
+    assert_eq!(received, 2, "expected two data events to reach the sink");
     assert_eq!(
         observer_calls.load(Ordering::Relaxed),
-        data_events.len() as u64,
+        received,
         "the source-poll observer sees every live data event"
     );
 

@@ -64,6 +64,9 @@ pub(crate) struct TransformSupervisor<
     /// Stage ID
     pub(crate) stage_id: StageId,
 
+    /// The stage's role in the topology: a transform, or a sink.
+    pub(crate) stage_type: StageType,
+
     /// Subscription to upstream events (supervisor-owned to avoid borrow conflicts).
     pub(super) subscription: Option<UpstreamSubscription<ChainEvent>>,
 
@@ -295,7 +298,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
                 &context.flow_id.to_string(),
                 &context.stage_name,
                 context.stage_id,
-                StageType::Transform,
+                context.flow_context.stage_type,
             ),
             descriptor,
         )
@@ -379,6 +382,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
             name: self.name.clone(),
             data_journal: self.data_journal.clone(),
             stage_id: self.stage_id,
+            stage_type: self.stage_type,
             subscription: self.subscription.take(),
             cycle_guard: self.cycle_guard.take(),
             _marker: PhantomData,
@@ -636,7 +640,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
             envelope,
             self.stage_id,
             stage_name,
-            StageType::Transform,
+            self.stage_type,
             &self.data_journal,
         )
         .await?;

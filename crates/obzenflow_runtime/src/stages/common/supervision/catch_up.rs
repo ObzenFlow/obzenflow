@@ -64,9 +64,6 @@ pub(crate) enum CatchUpEvent {
         generation: ReaderGeneration,
     },
     RecordedActionsExhausted,
-    UnsettledDelivery {
-        edges_redelivering: usize,
-    },
     RecordedInputEnded {
         recorded: ReaderGeneration,
         generation: ReaderGeneration,
@@ -341,15 +338,6 @@ fn step(
                 _ => to(state.clone()),
             }
         }
-        (
-            CatchUpState::Rebuilding { crossed },
-            CatchUpEvent::UnsettledDelivery {
-                edges_redelivering: 0,
-            },
-        ) => match resume {
-            Some(generation) if generation > *crossed => ctx.going_live(*crossed, generation),
-            _ => to(state.clone()),
-        },
         (CatchUpState::Rebuilding { .. }, CatchUpEvent::InputsEnded) if resume.is_some() => {
             match ctx.unreproduced() {
                 Some(fatal) => to(CatchUpState::Refused { fatal }),
@@ -475,7 +463,6 @@ fn machine(initial: CatchUpState) -> CatchUpMachine {
             on CatchUpEvent::InputsEnded => transition;
             on CatchUpEvent::RecordedCrossingReached => transition;
             on CatchUpEvent::RecordedActionsExhausted => transition;
-            on CatchUpEvent::UnsettledDelivery => transition;
             on CatchUpEvent::RecordedInputEnded => transition;
         }
         state CatchUpState::Announcing {
@@ -485,7 +472,6 @@ fn machine(initial: CatchUpState) -> CatchUpMachine {
             on CatchUpEvent::FrontierReached => transition;
             on CatchUpEvent::InputsEnded => transition;
             on CatchUpEvent::RecordedActionsExhausted => transition;
-            on CatchUpEvent::UnsettledDelivery => transition;
         }
     }
 }
@@ -511,14 +497,6 @@ impl CatchUpHandle {
             instrumentation,
             execution,
         ))
-    }
-
-    pub(crate) fn terminal(
-        stage_id: StageId,
-        stage_key: StageKey,
-        execution: RuntimeExecution,
-    ) -> Self {
-        Self::with_context(CatchUpContext::new(stage_id, stage_key, None, execution))
     }
 
     fn with_context(context: CatchUpContext) -> Self {
@@ -796,10 +774,6 @@ mod tests {
         }
     }
 
-    fn unsettled(edges_redelivering: usize) -> CatchUpEvent {
-        CatchUpEvent::UnsettledDelivery { edges_redelivering }
-    }
-
     #[tokio::test]
     async fn a_frontier_crossing_authors_each_generation_once_and_goes_live() {
         let stage = stage(resumed(3), true);
@@ -917,7 +891,6 @@ mod tests {
         for event in [
             reached(1, caught_up_through(1)),
             CatchUpEvent::RecordedActionsExhausted,
-            unsettled(0),
         ] {
             let stage = stage(resumed(1), true);
             with_actions(&stage, vec![effect(4)]).await;
@@ -980,27 +953,6 @@ mod tests {
             ));
         }
         assert_eq!(stage.journal.markers(), vec![1, 2]);
-    }
-
-    #[tokio::test]
-    async fn a_sink_goes_live_at_an_unsettled_delivery_once_its_edges_redelivered() {
-        let stage = stage(resumed(1), false);
-        assert!(matches!(
-            stage.catch_up.send(unsettled(1)).await,
-            CatchUpDisposition::Consumed
-        ));
-        assert!(!live(&stage));
-        assert!(matches!(
-            stage.catch_up.send(unsettled(0)).await,
-            CatchUpDisposition::Crossed
-        ));
-        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(1)));
-        assert!(live(&stage));
-        assert!(matches!(
-            stage.catch_up.send(unsettled(0)).await,
-            CatchUpDisposition::Consumed
-        ));
-        assert!(stage.journal.markers().is_empty());
     }
 
     #[tokio::test]

@@ -44,7 +44,6 @@ pub mod __private {
     pub use crate::stages::common::handlers::join::{
         ErasedJoinInvocation, JoinBinding, TypedJoinHandlerAdapter, UnifiedJoinHandler,
     };
-    pub use crate::stages::common::handlers::sink::SinkWriterAdapter;
     pub use crate::stages::common::handlers::source::typed::{
         TypedAsyncFiniteSourceHandlerAdapter, TypedAsyncInfiniteSourceHandlerAdapter,
         TypedFiniteSourceHandlerAdapter, TypedInfiniteSourceHandlerAdapter,
@@ -116,11 +115,10 @@ pub mod prelude {
     // Handlers
     pub use crate::stages::{
         EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource,
-        IngressDecodeError, IngressDecoder, IngressRecord, InlineSink, ObserverHandler,
-        ResourceManaged, SinkConnector, SinkDescription, SinkWriter, SourceError,
-        SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
-        TypedStatefulHandler, TypedTransformHandler,
+        IngressDecodeError, IngressDecoder, IngressRecord, ObserverHandler, ResourceManaged,
+        SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     pub use crate::typing::{SourceTyping, TransformTyping};
 
@@ -128,7 +126,7 @@ pub mod prelude {
     pub use crate::effects::{
         Command, EffectCommitHandle, EffectContext, EffectDeclaration, EffectError,
         EffectOutcomeKind, EffectOutcomePayload, EffectSafety, Effects, IdempotencyKey, Keyed,
-        Port, SinkRedeliverySafety,
+        Port,
     };
     pub use crate::messaging::UpstreamSubscription;
 

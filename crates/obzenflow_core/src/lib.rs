@@ -17,6 +17,7 @@ pub mod id;
 pub mod ingress;
 pub mod journal;
 pub mod metrics;
+pub mod postgres_client;
 mod serde_support;
 pub mod source;
 pub mod time;
@@ -59,6 +60,6 @@ pub use chrono;
 // Re-export core contract types (FLOWIP-090c)
 pub use contracts::{
     Contract, ContractContext, ContractEvidence, ContractReadContext, ContractResult,
-    ContractState, ContractViolation, ContractWriteContext, DeliveryContract, DivergenceContract,
+    ContractState, ContractViolation, ContractWriteContext, DivergenceContract,
     DivergenceThresholds, HashMismatch, TransportContract, ViolationCause,
 };

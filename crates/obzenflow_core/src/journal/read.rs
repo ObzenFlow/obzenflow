@@ -61,7 +61,6 @@ pub enum RunRecordKind {
     Fact,
     CompositeData,
     Effect,
-    Delivery,
     Lifecycle,
     FlowSignal,
     Execution,

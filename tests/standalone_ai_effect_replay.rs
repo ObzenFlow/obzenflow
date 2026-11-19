@@ -21,7 +21,6 @@ use obzenflow::ai::{
 use obzenflow::stages::sources;
 use obzenflow_adapters::middleware::{circuit_breaker, MiddlewareFactory};
 use obzenflow_core::ai::AiProviderError;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, EffectAttemptStarted, EffectOutcomePayload, EffectRecord,
@@ -30,11 +29,10 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{SinkRedeliverySafety, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE};
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+use obzenflow_runtime::effects::{
+    perform, EffectError, Port, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
 };
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -204,44 +202,30 @@ impl AiRole<TicketSummarised> for EmbedSummary {
     }
 }
 
-#[derive(Clone, Debug)]
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+trait CollectEmbeddedPort: Send + Sync {
+    #[effect(type = "standalone_ai_fixture.collect", at_least_once, records = reply)]
+    fn collect(&self, output: &TicketEmbedded) -> Result<(), EffectError>;
+}
+
+/// Keeps every embedded ticket its sink is called with. Replay makes no call.
 struct CollectEmbedded {
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
 }
 
-#[async_trait::async_trait]
-impl obzenflow_runtime::stages::sink::SinkConnector for CollectEmbedded {
-    type Input = TicketEmbedded;
-    type Writer = Self;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("CollectEmbedded".to_string()))
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn open(
-        &self,
-        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
-    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
-        Ok(self.clone())
+#[obzenflow_runtime::effects::system("embedded-collector", effects = obzenflow_runtime::effects)]
+impl CollectEmbeddedPort for CollectEmbedded {
+    fn collect(&self, output: &TicketEmbedded) -> Result<(), EffectError> {
+        self.outputs
+            .lock()
+            .expect("output lock")
+            .push(output.clone());
+        Ok(())
     }
 }
 
-#[async_trait::async_trait]
-impl obzenflow_runtime::stages::sink::SinkWriter for CollectEmbedded {
-    type Input = TicketEmbedded;
-
-    async fn write(
-        &mut self,
-        output: TicketEmbedded,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        self.outputs.lock().expect("output lock").push(output);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("CollectEmbedded".to_string()),
-            Some(1),
-        )))
-    }
+fn collect_into(outputs: Arc<Mutex<Vec<TicketEmbedded>>>) -> Port<dyn CollectEmbeddedPort> {
+    Port::to(CollectEmbedded { outputs })
 }
 
 fn summarizing() -> FakeChatModels {
@@ -284,7 +268,8 @@ fn chat_and_embedding_flow(
         let chat_breaker = circuit_breaker().consecutive_failures(5);
         let embedding_breaker = circuit_breaker().consecutive_failures(5);
         let input = sources::ValuesSource::new(tickets);
-        let collected = CollectEmbedded { outputs };
+        let collected =
+            perform(|output: &TicketEmbedded| output.clone()).through(collect_into(outputs));
 
         Ok(flow! {
             name: "standalone_ai_effect_replay",
@@ -351,7 +336,7 @@ fn successful_effect_record(event: &ChainEvent, effect_type: &str) -> Option<Eff
     let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &event.payload else {
         return None;
     };
-    let record = record.clone();
+    let record = record.as_ref().clone();
     (record.descriptor.effect_type.as_str() == effect_type
         && matches!(record.outcome, EffectOutcomePayload::Succeeded { .. }))
     .then_some(record)
@@ -483,9 +468,8 @@ async fn a_stage_whose_roles_perform_two_effects_refuses_an_unscoped_breaker() {
                 .reduce(EmbedSummaries)
                 .on_eof();
             let ai_breaker = circuit_breaker().consecutive_failures(5);
-            let collected = CollectEmbedded {
-                outputs: Arc::new(Mutex::new(Vec::new())),
-            };
+            let collected = perform(|output: &TicketEmbedded| output.clone())
+                .through(collect_into(Arc::new(Mutex::new(Vec::new()))));
 
             Ok(flow! {
                 name: "two_effect_unscoped",
@@ -545,7 +529,8 @@ async fn a_stage_whose_roles_perform_two_effects_builds_one_breaker_per_effect()
                     .consecutive_failures(1)
                     .open_for(std::time::Duration::from_secs(60))
                     .for_effect::<EmbeddingGeneration>();
-                let collected = CollectEmbedded { outputs };
+                let collected = perform(|output: &TicketEmbedded| output.clone())
+                    .through(collect_into(outputs));
 
                 Ok(flow! {
                     name: "two_effect_scoped",
@@ -785,7 +770,10 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
         ))
         .await
         .expect("strict replay succeeds without connecting either family");
-    assert_eq!(*replay_outputs.lock().unwrap(), expected);
+    assert!(
+        replay_outputs.lock().unwrap().is_empty(),
+        "replay calls no sink system"
+    );
     assert_eq!(
         replay_chat.connect_count() + replay_embed.connect_count(),
         0
@@ -809,7 +797,10 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
         ))
         .await
         .expect("committed resume prefix completes without live AI authority");
-    assert_eq!(*resume_outputs.lock().unwrap(), expected);
+    assert!(
+        resume_outputs.lock().unwrap().is_empty(),
+        "the resume makes no sink call its recording settled"
+    );
     assert_eq!(resume_chat.connect_count(), 0);
     assert_eq!(resume_chat.call_count(), 0);
     assert_eq!(resume_embed.connect_count(), 0);
@@ -915,7 +906,10 @@ async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_moves() {
         ))
         .await
         .expect("strict replay binds the recorded endpoint, not the configured one");
-    assert_eq!(outputs.lock().unwrap().len(), 1);
+    assert!(
+        outputs.lock().unwrap().is_empty(),
+        "replay calls no sink system"
+    );
     assert_eq!(chat.connect_count() + embed.connect_count(), 0);
 
     let replay_manifest: serde_json::Value = serde_json::from_str(

@@ -4,21 +4,16 @@
 
 use crate::dsl::typing::{
     PlaceholderAsyncSource, PlaceholderFiniteSource, PlaceholderInfiniteSource, PlaceholderJoin,
-    PlaceholderSink, PlaceholderStateful, PlaceholderTransform,
+    PlaceholderStateful, PlaceholderTransform,
 };
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
-use obzenflow_runtime::__private::{
-    SinkWriterAdapter, TypedJoinHandlerAdapter, UnifiedJoinHandler,
-};
+use obzenflow_runtime::__private::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
 use obzenflow_runtime::stages::common::handlers::source::traits::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
     InfiniteSourceHandler,
 };
-use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TransformHandler, TypedStatefulHandler,
-};
+use obzenflow_runtime::stages::common::handlers::{TransformHandler, TypedStatefulHandler};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -100,32 +95,6 @@ fn placeholder_stateful_emits_nothing_and_drains() {
 
     let drained = TypedStatefulHandler::drain(&handler, &());
     assert!(drained.is_empty());
-}
-
-#[tokio::test]
-async fn placeholder_sink_acks_and_flushes_safely() {
-    let handler = PlaceholderSink::<PlaceholderInput>::new(None);
-    let mut handler = SinkWriterAdapter::new(
-        handler,
-        StageId::new(),
-        obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-    );
-    let event = PlaceholderInput.to_event(WriterId::from(StageId::new()));
-
-    let report = SinkHandler::consume_committed_report(
-        &mut handler,
-        obzenflow_core::JournalRecord::new(obzenflow_core::JournalWriterId::new(), event).into(),
-        Default::default(),
-    )
-    .await
-    .expect("sink consume");
-    let payload = report.primary;
-
-    assert!(matches!(payload.delivery_method, DeliveryMethod::Noop));
-    assert!(matches!(payload.result, DeliveryResult::Success { .. }));
-
-    let flushed = SinkHandler::flush(&mut handler).await.expect("sink flush");
-    assert!(flushed.is_none());
 }
 
 #[tokio::test]

@@ -18,7 +18,6 @@ pub use obzenflow_runtime::effects::effectful_stateful_effects;
 pub use obzenflow_runtime::effects::effectful_transform_effects;
 pub use obzenflow_runtime::effects::EffectAcknowledgement;
 pub use obzenflow_runtime::run_context::FlowBuildContext;
-pub use obzenflow_runtime::stages::sink::SetSinkRedeliverySafety;
 pub use obzenflow_runtime::stages::EffectfulStatefulHandler;
 pub use obzenflow_runtime::stages::EffectfulTransformHandler;
 pub use obzenflow_topology::EdgeKind;

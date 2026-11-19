@@ -4,4 +4,7 @@
 
 //! Public application-level test-kit facade.
 
-pub use obzenflow_infra::testing::sink;
+pub use obzenflow_adapters::sinks::{
+    CallCounter, Counted, CountingPort, CountingSink, Recorded, RecordedInput, RecordingPort,
+    RecordingSink,
+};

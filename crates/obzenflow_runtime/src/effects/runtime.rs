@@ -21,6 +21,13 @@ type ExecutedOutcomeSlot<O> = Arc<Mutex<Option<(O, PreparedEffectSuccess)>>>;
 type TransactionalSettleSlot<O> =
     Arc<Mutex<Option<(Result<(), EffectError>, Option<PreparedEffectOutcome<O>>)>>>;
 
+fn is_affine(safety: EffectSafety) -> bool {
+    matches!(
+        safety,
+        EffectSafety::NonIdempotentAtLeastOnce | EffectSafety::NonIdempotentAtMostOnce
+    )
+}
+
 fn success_observation_events(
     success: &PreparedEffectSuccess,
     writer_id: WriterId,
@@ -435,17 +442,59 @@ impl EffectsCore {
         checked.map_err(|error| self.refuse(ReconstructionRefusal::HistoryShape(error)))
     }
 
+    fn missing_outcome(&self) -> UnrecordedEffect {
+        self.ctx
+            .stage
+            .runtime_execution
+            .missing_outcome(ExecutionPosition {
+                stage_id: self.ctx.stage.stage_id,
+                position: self.ctx.input_seq,
+                generation: None,
+            })
+    }
+
+    fn rejects_in_replay(&self) -> bool {
+        self.ctx
+            .stage
+            .flow_context
+            .as_ref()
+            .is_some_and(|flow| flow.stage_type == obzenflow_core::event::context::StageType::Sink)
+            && self.ctx.stage.runtime_execution.resume_control().is_none()
+            && self.is_replaying()
+    }
+
+    async fn record_replay_rejection<T>(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        code: &'static str,
+    ) -> Result<T, EffectError> {
+        let message = match code {
+            "request_differs" => "this build's request differs from the recorded call",
+            _ => "the recording holds no settled call at this position",
+        };
+        self.record_boundary_abort_with_control_events(
+            cursor,
+            descriptor_hash,
+            descriptor,
+            EffectAbortReason {
+                cause: EffectFailureCause {
+                    source: EffectFailureSource::new("replay"),
+                    code: EffectFailureCode::new(code),
+                },
+                message: message.to_string(),
+                retry: RetryDisposition::NotRetryable,
+            },
+            Vec::new(),
+        )
+        .await
+    }
+
     /// The refusal for a cursor without any recorded attempt, or `None` when
     /// this position performs it live (FLOWIP-134i B13).
     fn unrecorded_effect_error(&mut self, cursor: EffectCursor) -> Option<EffectError> {
-        let at = ExecutionPosition {
-            stage_id: self.ctx.stage.stage_id,
-            position: self.ctx.input_seq,
-            // The effect context carries no generation; the effect-miss
-            // decision is positional (FLOWIP-120n F7).
-            generation: None,
-        };
-        match self.ctx.stage.runtime_execution.missing_outcome(at) {
+        match self.missing_outcome() {
             UnrecordedEffect::Execute => None,
             UnrecordedEffect::Corrupt => {
                 Some(self.refuse(ReconstructionRefusal::Unrecorded { cursor }))
@@ -851,14 +900,18 @@ impl EffectsCore {
         if observers.effect().is_none() {
             return;
         }
-        crate::stages::observer::dispatch::run_effect_observers(
-            observers,
+        let ctx = crate::stages::observer::EffectObserverContext::new(
             self.ctx.stage.flow_id,
             self.ctx.stage.stage_id,
             &self.ctx.stage.stage_key,
-            MiddlewareExecutionScope::LiveEffectBoundary,
             effect_type,
             outcome,
+        )
+        .with_input(self.ctx.parent.view());
+        crate::stages::observer::dispatch::run_effect_observers(
+            observers,
+            MiddlewareExecutionScope::LiveEffectBoundary,
+            &ctx,
         );
     }
 
@@ -1195,7 +1248,7 @@ impl EffectsCore {
         let selected = self.history_shape(merge_cursor_histories(&cursor, archived, current))?;
         let incorporated = self.incorporate_history(&selected.causal);
         self.history_shape(incorporated)?;
-        if matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
+        if is_affine(safety) {
             self.history_shape(validate_affine_terminal_group(&cursor, &selected))?;
         }
 
@@ -1205,6 +1258,24 @@ impl EffectsCore {
         }
         match selection {
             EffectHistorySelection::Hit(records) => {
+                let differs = selected.attempts.iter().any(|started| {
+                    started.descriptor_hash != descriptor_hash
+                        || started.effect_type.as_str() != E::EFFECT_TYPE
+                }) || records
+                    .iter()
+                    .any(|record| record.descriptor_hash != descriptor_hash);
+                if differs && self.rejects_in_replay() {
+                    let result = self
+                        .record_replay_rejection(
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            "request_differs",
+                        )
+                        .await;
+                    self.observe_effect_result(E::EFFECT_TYPE, &result);
+                    return result;
+                }
                 let recorded = records.first().map(|record| &record.descriptor);
                 for started in &selected.attempts {
                     if started.descriptor_hash != descriptor_hash
@@ -1279,13 +1350,29 @@ impl EffectsCore {
                 return output_result;
             }
             EffectHistorySelection::InDoubt(attempts) => {
-                if !matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
+                if !is_affine(safety) {
                     return Err(self.refuse(ReconstructionRefusal::HistoryShape(
                         EffectError::EffectProvenanceMismatch(format!(
-                            "effect cursor {cursor:?} has attempt history but effect '{}' is not NonIdempotentAtLeastOnce",
+                            "effect cursor {cursor:?} has attempt history but effect '{}' records no attempt starts",
                             E::EFFECT_TYPE
                         )),
                     )));
+                }
+                if self.rejects_in_replay() {
+                    let differs = attempts.iter().any(|started| {
+                        started.descriptor_hash != descriptor_hash
+                            || started.effect_type.as_str() != E::EFFECT_TYPE
+                    });
+                    let code = if differs {
+                        "request_differs"
+                    } else {
+                        "no_recorded_call"
+                    };
+                    let result = self
+                        .record_replay_rejection(cursor, descriptor_hash, descriptor, code)
+                        .await;
+                    self.observe_effect_result(E::EFFECT_TYPE, &result);
+                    return result;
                 }
                 for started in &attempts {
                     if started.descriptor_hash != descriptor_hash
@@ -1328,11 +1415,52 @@ impl EffectsCore {
                 self.append_replayed_prefix(&cursor, &selected, descriptor.clone())
                     .await?;
                 self.cross_before_live_action().await?;
+                if matches!(safety, EffectSafety::NonIdempotentAtMostOnce) {
+                    let causal_input_id = attempts
+                        .first()
+                        .map(|started| started.causal_input_id)
+                        .unwrap_or(self.ctx.parent.envelope.provenance.event.id);
+                    let result = self
+                        .record_recovery_abandonment(RecoveryAbandonment {
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            highest_started_attempt,
+                            causal_input_id,
+                            reason: EffectAbortReason {
+                                cause: EffectFailureCause {
+                                    source: EffectFailureSource::new("recovery"),
+                                    code: EffectFailureCode::new("at_most_once_in_doubt"),
+                                },
+                                message: format!(
+                                    "at-most-once effect '{}' was in doubt after a crash, so it is not made again",
+                                    E::EFFECT_TYPE
+                                ),
+                                retry: RetryDisposition::NotRetryable,
+                            },
+                            control_events: Vec::new(),
+                        })
+                        .await;
+                    self.observe_effect_result(E::EFFECT_TYPE, &result);
+                    return result;
+                }
                 prior_attempts = attempts;
             }
             EffectHistorySelection::Miss => match plan {
                 ActionPlan::Live => self.cross_before_live_action().await?,
                 ActionPlan::Unchecked | ActionPlan::Reproduce => {
+                    if self.rejects_in_replay() {
+                        let result = self
+                            .record_replay_rejection(
+                                cursor,
+                                descriptor_hash,
+                                descriptor,
+                                "no_recorded_call",
+                            )
+                            .await;
+                        self.observe_effect_result(E::EFFECT_TYPE, &result);
+                        return result;
+                    }
                     if let Some(error) = self.unrecorded_effect_error(cursor.clone()) {
                         return Err(error);
                     }
@@ -1371,7 +1499,7 @@ impl EffectsCore {
             self.call_keys.insert(prepared.cursor.clone(), key.clone());
         }
 
-        if matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
+        if is_affine(safety) {
             // Keep the generated affine state machine off the caller's async
             // frame. `perform` is monomorphised for every effect safety class;
             // storing this large future inline also bloats ordinary
@@ -2867,6 +2995,16 @@ impl EffectsCore {
         let metadata_context = EffectPortMetadataContext {
             metadata: views.metadata,
         };
+        let answers =
+            self.ctx
+                .stage
+                .effect_history
+                .clone()
+                .map(|history| super::context::RecordedAnswers {
+                    history,
+                    effect_type: declaration.effect_type(),
+                    cursor: self.next_cursor(),
+                });
         let binding_context = EffectContext {
             is_replaying: false,
             flow_id: self.ctx.stage.flow_id,
@@ -2874,6 +3012,7 @@ impl EffectsCore {
             input_seq: self.ctx.input_seq,
             ports: views.ports,
             transaction: None,
+            answers,
         };
         Ok((metadata_context, binding_context))
     }

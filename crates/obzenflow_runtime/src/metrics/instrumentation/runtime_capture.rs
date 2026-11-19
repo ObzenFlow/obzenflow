@@ -151,12 +151,10 @@ impl StageInstrumentation {
 
     fn capture_runtime_snapshot(&self, packet: ObservabilityContext) -> Option<RuntimeSnapshot> {
         // Read the diagnostic family together or omit it. These locks are not
-        // needed for terminal accounting or the actual reader/receipt frontier.
+        // needed for terminal accounting or the actual reader frontier.
         let consumed_id = self.last_consumed_event_id.try_read().ok()?;
         let consumed_writer = self.last_consumed_writer.try_read().ok()?;
         let consumed_clock = self.last_consumed_vector_clock.try_read().ok()?;
-        let receipted_id = self.last_receipted_event_id.try_read().ok()?;
-        let receipted_clock = self.last_receipted_vector_clock.try_read().ok()?;
         let emitted_id = self.last_emitted_event_id.try_read().ok()?;
         let emitted_writer = self.last_emitted_writer.try_read().ok()?;
         let state = self.current_state.try_read().ok()?;
@@ -165,13 +163,10 @@ impl StageInstrumentation {
             capture: packet.capture,
             progress: ExecutionProgress {
                 reader_seq: self.reader_seq.load(Ordering::Relaxed),
-                receipted_seq: self.receipted_seq.load(Ordering::Relaxed),
                 writer_seq: self.writer_seq.load(Ordering::Relaxed),
                 last_consumed_event_id: *consumed_id,
                 last_consumed_writer: *consumed_writer,
                 last_consumed_vector_clock: consumed_clock.clone(),
-                last_receipted_event_id: *receipted_id,
-                last_receipted_vector_clock: receipted_clock.clone(),
                 last_emitted_event_id: *emitted_id,
                 last_emitted_writer: *emitted_writer,
             },

@@ -4,18 +4,19 @@
 
 //! Application-owned protection for the one final analytics dashboard.
 //!
-//! The summary fold emits at EOF, so its sink needs at most one live delivery
-//! attempt. A second admission is a wiring or emission error and must not print
-//! another dashboard. This is a per-materialisation attempt budget, not durable
-//! deduplication: admission spends it even if delivery fails or is cancelled.
-//! Strict replay retains the framework's existing console-delivery behaviour.
+//! The summary fold emits at EOF, so its sink needs at most one live call to
+//! the console. A second admission is a wiring or emission error and must not
+//! print another dashboard. This is a per-materialization attempt budget, not
+//! durable deduplication, so admission spends it even if the call fails or is
+//! cancelled. Replay makes no call to the console, so it never spends the budget.
 
 use async_trait::async_trait;
+use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow::middleware::{
-    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-    MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceKind, SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx,
+    validate_attachment_request, EffectAttemptOutcome, EffectPolicy, MiddlewareAbortCause,
+    MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration, MiddlewareFactory,
+    MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -36,8 +37,7 @@ impl MiddlewareFactory for SingleSummaryDelivery {
     }
 
     fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::control(self.label(), vec![MiddlewareSurfaceKind::SinkDelivery])
-            .with_control_intent(MiddlewareSurfaceKind::SinkDelivery)
+        MiddlewareDeclaration::control(self.label(), vec![MiddlewareSurfaceKind::Effect])
     }
 
     fn materialize(
@@ -52,35 +52,45 @@ impl MiddlewareFactory for SingleSummaryDelivery {
                 error,
             )
         })?;
-        Ok(MiddlewareSurfaceAttachment::sink_delivery(Arc::new(
-            SingleSummaryDeliveryPolicy {
-                admitted: AtomicBool::new(false),
-            },
+        Ok(MiddlewareSurfaceAttachment::effect(Arc::new(
+            SingleSummaryDeliveryPolicy::new(),
         )))
     }
 }
 
-struct SingleSummaryDeliveryPolicy {
+/// The budget one materialization of [`SingleSummaryDelivery`] spends.
+pub(crate) struct SingleSummaryDeliveryPolicy {
     admitted: AtomicBool,
 }
 
+impl SingleSummaryDeliveryPolicy {
+    pub(crate) fn new() -> Self {
+        Self {
+            admitted: AtomicBool::new(false),
+        }
+    }
+}
+
 #[async_trait]
-impl SinkPolicy for SingleSummaryDeliveryPolicy {
+impl EffectPolicy for SingleSummaryDeliveryPolicy {
     fn label(&self) -> &'static str {
         "single_summary_delivery"
     }
 
-    async fn admit(&self, _context: &mut SinkPolicyCtx) -> SinkAdmission {
-        // This flag is the entire budget; it does not publish any other state.
+    async fn admit(&self, _context: &mut MiddlewareContext) -> PolicyAdmission {
         if self.admitted.swap(true, Ordering::Relaxed) {
-            SinkAdmission::Reject {
-                reason: "the final analytics summary permits only one live delivery attempt per materialised sink"
+            PolicyAdmission::Reject(Box::new(MiddlewareAbortCause {
+                source: EffectFailureSource::new("single_summary_delivery"),
+                code: EffectFailureCode::new("budget_spent"),
+                message: "the final analytics summary permits only one live delivery attempt per materialized sink"
                     .to_string(),
-            }
+                retry: RetryDisposition::NotRetryable,
+                event: None,
+            }))
         } else {
-            SinkAdmission::Admit(None)
+            PolicyAdmission::Admit
         }
     }
 
-    fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, _context: &mut SinkPolicyCtx) {}
+    fn observe(&self, _attempt: &EffectAttemptOutcome<'_>, _context: &mut MiddlewareContext) {}
 }

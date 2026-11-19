@@ -25,10 +25,10 @@
 //! When using a hosted provider, your prompts and story text will be sent to that provider.
 //!
 //! Digest output configuration:
-//! - `obzenflow.toml` selects `console_sink`.
+//! - `obzenflow.toml` sets `[app] output = "console"`.
 //! - `obzenflow.live.toml` is `obzenflow.toml` reading the live Hacker News API.
 //! - `obzenflow.replay.toml` is `obzenflow.live.toml` without `[ai.models]`, for replay.
-//! - `obzenflow.postgres.toml` selects `postgres_sink`.
+//! - `obzenflow.postgres.toml` sets `[app] output = "postgres"`.
 //! - PostgreSQL output reads `OBZENFLOW_POSTGRES_URL`, optionally
 //!   `OBZENFLOW_POSTGRES_SCHEMA` (default `obzenflow_example`), and optionally
 //!   `OBZENFLOW_POSTGRES_TRANSPORT` (default `verified-tls`).

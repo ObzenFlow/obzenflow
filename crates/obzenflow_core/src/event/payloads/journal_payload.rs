@@ -141,15 +141,6 @@ impl JournalPayload for ChainPayload {
                 .validate(&provenance.writer_id)
                 .map_err(<serde_json::Error as serde::de::Error>::custom)?;
         }
-        if let ChainPayload::Delivery(payload) = self {
-            if !provenance
-                .causality
-                .parent_ids
-                .contains(&payload.subject.input.event_id)
-            {
-                return Err(descriptor_mismatch());
-            }
-        }
         // Only a source fact carries the position after itself (FLOWIP-134i B11).
         if provenance.source_progress.is_some() && !matches!(self, ChainPayload::Fact(_)) {
             return Err(<serde_json::Error as serde::de::Error>::custom(

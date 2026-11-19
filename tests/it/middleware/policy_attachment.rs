@@ -8,14 +8,13 @@
 //! sync stateful, or join) is a flow build error: a handler shell has no typed
 //! live-I/O unit to protect.
 
-use async_trait::async_trait;
 use obzenflow_adapters::middleware::{circuit_breaker, CircuitBreaker};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -62,30 +61,12 @@ impl TypedTransformHandler for SyncPassthrough {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NullSink;
-
-#[async_trait]
-impl InlineSink for NullSink {
-    type Input = GuardEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-        )
-    }
-
-    async fn write(&mut self, _event: GuardEvent) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
     let result = FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = OneShotSource { emitted: false };
         let transform_handler = SyncPassthrough;
-        let sink_handler = NullSink;
+        let sink_handler = obzenflow::stages::sinks::DiscardSink::<GuardEvent>::new();
 
         Ok(flow! {
             name: "policy_guard_pure_sync",

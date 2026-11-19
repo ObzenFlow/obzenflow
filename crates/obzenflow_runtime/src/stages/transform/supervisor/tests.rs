@@ -204,6 +204,7 @@ async fn build_cycle_entry_harness<
         name: "transform_test".to_string(),
         data_journal: data_journal.clone(),
         stage_id: t,
+        stage_type: obzenflow_core::event::context::StageType::Transform,
         subscription: None,
         cycle_guard: Some(CycleGuard::new(
             crate::pipeline::MaxIterations::new(30),
@@ -592,6 +593,7 @@ async fn build_transform_harness<
         name: "transform_test".to_string(),
         data_journal: data_journal.clone(),
         stage_id: t,
+        stage_type: obzenflow_core::event::context::StageType::Transform,
         subscription: None,
         cycle_guard: None,
         _marker: std::marker::PhantomData,

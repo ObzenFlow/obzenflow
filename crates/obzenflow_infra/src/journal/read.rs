@@ -789,7 +789,6 @@ fn classify(journal: &RunJournal, record: &RunRecordData) -> RunRecordKind {
             ChainPayload::Fact(_) => RunRecordKind::Fact,
             ChainPayload::CompositeData(_) => RunRecordKind::CompositeData,
             ChainPayload::FlowControl(_) => RunRecordKind::FlowSignal,
-            ChainPayload::Delivery(_) => RunRecordKind::Delivery,
             ChainPayload::Execution(
                 ExecutionPayload::EffectRecord(_)
                 | ExecutionPayload::EffectAttemptStarted(_)

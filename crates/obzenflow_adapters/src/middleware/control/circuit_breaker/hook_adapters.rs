@@ -14,8 +14,7 @@ use crate::middleware::context_keys::{
 };
 use crate::middleware::MiddlewareContext;
 use crate::middleware::{
-    PolicyAdmission, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy,
-    SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    PolicyAdmission, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::execution_payload::{
@@ -181,56 +180,6 @@ impl CompletionGate for CircuitBreakerCompletionGate {
         } else {
             CompletionDecision::DefaultEof
         }
-    }
-}
-
-/// FLOWIP-115b: sink-delivery boundary policy for the circuit breaker.
-///
-/// Reuses the breaker's admission state machine. Unlike the source policy, which
-/// idles while the breaker is open and shapes completion through the completion
-/// gate, the sink policy fails fast: an open breaker rejects the delivery, which
-/// the supervisor maps to a failed delivery receipt.
-pub(super) struct CircuitBreakerSinkPolicy {
-    pub(super) breaker: Arc<CircuitBreakerMiddleware>,
-}
-
-#[async_trait::async_trait]
-impl SinkPolicy for CircuitBreakerSinkPolicy {
-    fn label(&self) -> &'static str {
-        "circuit_breaker"
-    }
-
-    async fn admit(&self, ctx: &mut SinkPolicyCtx) -> SinkAdmission {
-        match self.breaker.source_admit() {
-            SourceAdmit::Continue { guard, event } => {
-                if let Some(event) = event {
-                    ctx.write_control_event(*event);
-                }
-                SinkAdmission::Admit(
-                    guard.map(|guard| Box::new(guard) as Box<dyn SinkAdmissionGuard>),
-                )
-            }
-            SourceAdmit::Pause(_) => SinkAdmission::Reject {
-                reason: "circuit breaker open".to_string(),
-            },
-        }
-    }
-
-    fn observe(&self, outcome: &SinkDeliveryPolicyOutcome<'_>, ctx: &mut SinkPolicyCtx) {
-        let source_outcome = match outcome {
-            SinkDeliveryPolicyOutcome::Delivered { .. } => SourceOutcome::Success {
-                poll_duration: Duration::ZERO,
-            },
-            SinkDeliveryPolicyOutcome::Failed => SourceOutcome::Failure {
-                poll_duration: Duration::ZERO,
-            },
-            SinkDeliveryPolicyOutcome::RejectedBy { .. } => SourceOutcome::NotExecuted,
-        };
-        if let Some(event) = self.breaker.source_settle(source_outcome) {
-            ctx.write_control_event(event);
-        }
-        self.breaker
-            .maybe_emit_summary(ctx.middleware_context_mut());
     }
 }
 

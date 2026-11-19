@@ -25,13 +25,10 @@ pub struct RuntimeSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct ExecutionProgress {
     pub reader_seq: u64,
-    pub receipted_seq: u64,
     pub writer_seq: u64,
     pub last_consumed_event_id: Option<EventId>,
     pub last_consumed_writer: Option<JournalWriterId>,
     pub last_consumed_vector_clock: Option<VectorClock>,
-    pub last_receipted_event_id: Option<EventId>,
-    pub last_receipted_vector_clock: Option<VectorClock>,
     pub last_emitted_event_id: Option<EventId>,
     pub last_emitted_writer: Option<WriterId>,
 }

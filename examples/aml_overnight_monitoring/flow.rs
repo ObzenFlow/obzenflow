@@ -99,10 +99,10 @@ impl CsvProjection for ClearedRow {
     type Input = TransactionCleared;
     type Row = ClearedRecord;
 
-    fn project(&self, cleared: TransactionCleared) -> Result<ClearedRecord, HandlerError> {
+    fn project(&self, cleared: &TransactionCleared) -> Result<ClearedRecord, HandlerError> {
         Ok(ClearedRecord {
             txn_id: cleared.txn_id.0,
-            rules_version: cleared.rules_version.0,
+            rules_version: cleared.rules_version.0.clone(),
         })
     }
 }
@@ -122,12 +122,12 @@ impl CsvProjection for UnscoredRow {
     type Input = ScoreUnavailable;
     type Row = UnscoredRecord;
 
-    fn project(&self, unscored: ScoreUnavailable) -> Result<UnscoredRecord, HandlerError> {
+    fn project(&self, unscored: &ScoreUnavailable) -> Result<UnscoredRecord, HandlerError> {
         Ok(UnscoredRecord {
             txn_id: unscored.txn_id.0,
-            bank: unscored.account.bank,
-            account: unscored.account.account,
-            reason: unscored.reason,
+            bank: unscored.account.bank.clone(),
+            account: unscored.account.account.clone(),
+            reason: unscored.reason.clone(),
         })
     }
 }
@@ -149,19 +149,19 @@ impl CsvProjection for CaseRow {
     type Input = CaseOpened;
     type Row = CaseRecord;
 
-    fn project(&self, case: CaseOpened) -> Result<CaseRecord, HandlerError> {
+    fn project(&self, case: &CaseOpened) -> Result<CaseRecord, HandlerError> {
         Ok(CaseRecord {
             case_number: case.case_number.0,
-            alert_id: case.alert_id.0,
+            alert_id: case.alert_id.0.clone(),
             reasons: case
                 .reasons
                 .iter()
                 .map(|reason| reason.0.as_str())
                 .collect::<Vec<_>>()
                 .join(";"),
-            bank: case.account.bank,
-            account: case.account.account,
-            rules_version: case.rules_version.0,
+            bank: case.account.bank.clone(),
+            account: case.account.account.clone(),
+            rules_version: case.rules_version.0.clone(),
         })
     }
 }
@@ -181,12 +181,12 @@ impl CsvProjection for UnopenedRow {
     type Input = CaseUnavailable;
     type Row = UnopenedRecord;
 
-    fn project(&self, unopened: CaseUnavailable) -> Result<UnopenedRecord, HandlerError> {
+    fn project(&self, unopened: &CaseUnavailable) -> Result<UnopenedRecord, HandlerError> {
         Ok(UnopenedRecord {
-            alert_id: unopened.alert_id.0,
-            bank: unopened.account.bank,
-            account: unopened.account.account,
-            reason: unopened.reason,
+            alert_id: unopened.alert_id.0.clone(),
+            bank: unopened.account.bank.clone(),
+            account: unopened.account.account.clone(),
+            reason: unopened.reason.clone(),
         })
     }
 }
@@ -305,7 +305,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 );
                 case_register   = sink!(CaseOpened => case_register);
                 unopened_alerts = sink!(CaseUnavailable => unopened_register);
-                totals_report   = sink!(DayTotals => totals_report.idempotent());
+                totals_report   = sink!(DayTotals => totals_report);
             },
 
             topology: {

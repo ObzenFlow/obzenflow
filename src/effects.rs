@@ -7,8 +7,8 @@
 
 pub use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
 pub use obzenflow_runtime::effects::{
-    command, perform, port, system, Command, Keyed, Perform, PerformRequest, Port, StagePort,
-    SystemName,
+    command, perform, port, system, Command, Keyed, Perform, PerformRequest, Port, SinkRequest,
+    SinkRole, StagePort, SystemName,
 };
 pub use obzenflow_runtime::effects::{
     BindingAuthorityFault, BindingMismatchKind, EffectAttemptOrdinal, EffectCursor,
@@ -24,10 +24,10 @@ pub use obzenflow_runtime::effects::{
 
 #[doc(hidden)]
 pub use obzenflow_runtime::effects::{
-    __async_trait, assert_port_answer, AtLeastOnce, Call, CallRequest, CallSafety,
-    DeclaredEffectSet, EffectList, FieldsEffects, Idempotent, KeyRule, NarrowedPort, PortAnswer,
-    PortEffects, PortField, PortImpl, PortServesRequest, RequestList, RequiresKey, ServesPort,
-    Transactional, WholePort,
+    __async_trait, assert_port_answer, AtLeastOnce, AtMostOnce, Call, CallRequest, CallSafety,
+    DeclaredEffectSet, DomainFacts, EffectList, FieldsEffects, Idempotent, KeyRule, NarrowedPort,
+    PortAnswer, PortEffects, PortField, PortImpl, PortReply, PortServesRequest, RecordedReply,
+    RequestList, RequiresKey, ServesPort, Transactional, WholePort,
 };
 
 /// Building blocks for simulated outside systems: a call log that answers a
@@ -49,4 +49,19 @@ pub mod http {
         HttpRequest, HttpResponse, MockHttpClient, Url,
     };
     pub use obzenflow_infra::http_client::{default_http_client, HttpClientFactoryError};
+}
+
+/// The client a system speaks PostgreSQL through, and the framework's one rule
+/// for a statement that failed, [`unsent`](postgres::unsent). It needs the
+/// `postgres` feature.
+#[cfg(feature = "postgres")]
+pub mod postgres {
+    pub use obzenflow_adapters::effects::postgres::unsent;
+    pub use obzenflow_core::postgres_client::{
+        PostgresBindings, PostgresClient, PostgresClientError, PostgresKind, PostgresParameter,
+        PostgresStatement, PostgresStatementError, PostgresValue,
+    };
+    pub use obzenflow_infra::postgres_client::{
+        default_postgres_client, PostgresConfigError, PostgresConnection, PostgresTransport,
+    };
 }

@@ -3,10 +3,10 @@
 // https://obzenflow.dev
 
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
+use obzenflow::stages::sinks::DiscardSink;
 use obzenflow::stages::stateful::{self, emit};
+use obzenflow::testing::RecordingSink;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainPayload};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
@@ -14,12 +14,12 @@ use obzenflow_dsl::{sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
@@ -163,47 +163,9 @@ impl TypedFiniteSourceHandler for GroupedSequenceSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct AggregateSink {
-    seen: Arc<Mutex<Vec<WindowAgg>>>,
-}
+type AggregateSink = RecordingSink<WindowAgg>;
 
-impl AggregateSink {
-    fn new() -> (Self, Arc<Mutex<Vec<WindowAgg>>>) {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        (Self { seen: seen.clone() }, seen)
-    }
-}
-
-#[async_trait]
-impl InlineSink for AggregateSink {
-    type Input = WindowAgg;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
-    }
-
-    async fn write(&mut self, event: WindowAgg) -> Result<(), SinkWriteFailure> {
-        self.seen.lock().unwrap().push(event);
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct AckSink;
-
-#[async_trait]
-impl InlineSink for AckSink {
-    type Input = GroupAggOutput;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Ack".to_string()))
-    }
-
-    async fn write(&mut self, _event: GroupAggOutput) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type AckSink = DiscardSink<GroupAggOutput>;
 
 #[derive(Clone, Debug)]
 struct IdentityTransform;
@@ -332,7 +294,7 @@ async fn emit_per_window_flushes_final_partial_window_before_authored_eof() -> R
         .await
         .map_err(|e| anyhow!("flow run failed: {e}"))?;
 
-    let aggregates = seen.lock().unwrap().clone();
+    let aggregates = seen.items();
     assert_eq!(aggregates.len(), 1, "expected exactly one final aggregate");
     assert_eq!(aggregates[0].event_count, 3);
 
@@ -466,7 +428,7 @@ async fn emit_per_window_final_aggregate_folds_runtime_minted_source_correlation
         .await
         .map_err(|e| anyhow!("flow run failed: {e}"))?;
 
-    let aggregates = seen.lock().unwrap().clone();
+    let aggregates = seen.items();
     assert_eq!(aggregates.len(), 1);
     assert_eq!(aggregates[0].event_count, 2);
 
@@ -541,7 +503,7 @@ async fn emit_per_window_emits_more_than_one_window_aggregate_per_run_and_resets
         .await
         .map_err(|e| anyhow!("flow run failed: {e}"))?;
 
-    let aggregates = seen.lock().unwrap().clone();
+    let aggregates = seen.items();
     assert!(
         aggregates.len() >= 2,
         "expected more than one mid-stream window aggregate per run, got {}",
@@ -662,7 +624,7 @@ async fn group_by_emit_per_window_parents_each_group_to_its_own_inputs() -> Resu
     )
     .emit(emit::per_window(Duration::from_secs(60)))
     .updated_groups();
-    let sink = AckSink;
+    let sink = AckSink::new();
     let harness = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
         name: "emit_per_window_group_by_lineage",

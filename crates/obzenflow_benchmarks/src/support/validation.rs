@@ -62,7 +62,7 @@ impl TypedFiniteSourceHandler for Ticks {
 fn definition(base: PathBuf, count: u64) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
         let input = Ticks { next: 0, count };
-        let output = DiscardTicks;
+        let output = DiscardTicks::new();
         Ok(flow! {
             name: "validation_benchmark",
             journals: disk_journals(base),
@@ -168,12 +168,17 @@ impl Archive {
         }
         assert_eq!(
             read.iter()
-                .filter(|row| row.kind == RunRecordKind::Delivery
-                    && row
-                        .journal
-                        .stage
-                        .as_ref()
-                        .is_some_and(|stage| stage.key == "out"))
+                .filter(|row| matches!(
+                    &row.record,
+                    RunRecordData::Chain(record) if matches!(
+                        record.payload,
+                        ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+                    )
+                ) && row
+                    .journal
+                    .stage
+                    .as_ref()
+                    .is_some_and(|stage| stage.key == "out"))
                 .count(),
             inputs as usize,
             "fixture settles every sink delivery"
@@ -338,7 +343,4 @@ impl ObserverJournals {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DiscardTicks;
-#[path = "validation_sink.rs"]
-mod sink_adapter;
+type DiscardTicks = obzenflow_adapters::sinks::DiscardSink<Tick>;

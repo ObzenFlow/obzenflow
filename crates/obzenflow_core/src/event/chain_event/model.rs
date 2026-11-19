@@ -219,8 +219,13 @@ impl ChainEvent {
     pub fn is_typed_input(&self) -> bool {
         matches!(
             self.payload,
-            ChainPayload::Fact(_) | ChainPayload::CompositeData(_)
-                | ChainPayload::Execution(crate::event::payloads::execution_payload::ExecutionPayload::StageFatalRecorded(_) | crate::event::payloads::execution_payload::ExecutionPayload::SinkOperationFailed(_))
+            ChainPayload::Fact(_)
+                | ChainPayload::CompositeData(_)
+                | ChainPayload::Execution(
+                    crate::event::payloads::execution_payload::ExecutionPayload::StageFatalRecorded(
+                        _
+                    )
+                )
         )
     }
 
@@ -235,17 +240,10 @@ impl ChainEvent {
             ChainPayload::Fact(value) => Some(value.clone()),
             ChainPayload::CompositeData(value) => serde_json::to_value(value).ok(),
             ChainPayload::Execution(
-                crate::event::payloads::execution_payload::ExecutionPayload::StageFatalRecorded(_)
-                | crate::event::payloads::execution_payload::ExecutionPayload::SinkOperationFailed(_),
+                crate::event::payloads::execution_payload::ExecutionPayload::StageFatalRecorded(_),
             ) => self.payload.contract_body().ok(),
-            ChainPayload::Execution(_)
-            | ChainPayload::FlowControl(_)
-            | ChainPayload::Delivery(_) => None,
+            ChainPayload::Execution(_) | ChainPayload::FlowControl(_) => None,
         }
-    }
-
-    pub fn is_delivery(&self) -> bool {
-        matches!(self.payload, ChainPayload::Delivery(_))
     }
 
     pub fn is_lifecycle(&self) -> bool {

@@ -8,7 +8,6 @@
 
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, MiddlewareFactory};
 use obzenflow_core::config::{ConfigAddress, ConfigSource, ConfigSubject, ResolvedForDoc};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_core::journal::factory::RunSubstrateState;
 use obzenflow_core::TypedPayload;
@@ -24,8 +23,7 @@ use obzenflow_runtime::runtime_config::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_topology::{
     MiddlewareAttachmentInfo, MiddlewareAuthoredSite, MiddlewareFamily, MiddlewareInfo,
@@ -71,36 +69,9 @@ impl TypedFiniteSourceHandler for OneShotSource {
     }
 }
 
-#[derive(Debug)]
-struct NullSink<T>(std::marker::PhantomData<fn() -> T>);
+type NullSink<T> = obzenflow::stages::sinks::DiscardSink<T>;
 
-impl<T> Clone for NullSink<T> {
-    fn clone(&self) -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-impl<T> NullSink<T> {
-    fn new() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-#[async_trait]
-impl<T> InlineSink for NullSink<T>
-where
-    T: TypedPayload + Send + Sync + 'static,
-{
-    type Input = T;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Null".to_string()))
-    }
-
-    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+const DISCARD: &str = "obzenflow.discard.record";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PaymentEffectFact {
@@ -593,9 +564,13 @@ async fn manifest_records_a_file_supplied_optional_key_for_a_surviving_factory()
     assert_eq!(burst.scope, "stage:snk");
     assert_eq!(burst.source, "file");
     assert_eq!(burst.value, json!(3.0));
-    assert!(
-        burst.resolved_for.is_none(),
-        "a stage middleware value resolves for the stage itself"
+    assert_eq!(
+        burst.resolved_for,
+        Some(ResolvedForDoc::Effect {
+            stage: "snk".to_string(),
+            effect_type: DISCARD.to_string(),
+        }),
+        "a sink's limiter value resolves for the sink's one effect"
     );
 
     let middleware = round_trip_middleware(&handle, "snk");
@@ -607,20 +582,37 @@ async fn manifest_records_a_file_supplied_optional_key_for_a_surviving_factory()
         attachment.authored_site,
         MiddlewareAuthoredSite::Implementation
     );
-    assert_eq!(attachment.operation, MiddlewareOperation::SinkDelivery);
-    let snk =
-        |value, source: &str| resolved(value, source, "stage:snk", SettingSubject::Unqualified);
+    assert_eq!(
+        attachment.operation,
+        MiddlewareOperation::Effect {
+            effect_type: DISCARD.to_string(),
+        }
+    );
+    let snk = |value, source: &str, subject| resolved(value, source, "stage:snk", subject);
+    let dsl = || SettingSubject::Effect {
+        effect_type: DISCARD.to_string(),
+    };
     assert_eq!(
         row(attachment, "middleware.rate_limiter.events_per_second"),
-        &active(snk(SettingValueInfo::F64(10.0), "dsl"), "10 events/s")
+        &active(
+            snk(SettingValueInfo::F64(10.0), "dsl", dsl()),
+            "10 events/s"
+        )
     );
     assert_eq!(
         row(attachment, "middleware.rate_limiter.cost_per_attempt"),
-        &active(snk(SettingValueInfo::F64(1.0), "dsl"), "1 tokens")
+        &active(snk(SettingValueInfo::F64(1.0), "dsl", dsl()), "1 tokens")
     );
     assert_eq!(
         row(attachment, "middleware.rate_limiter.burst_capacity"),
-        &active(snk(SettingValueInfo::F64(3.0), "file"), "3 tokens")
+        &active(
+            snk(
+                SettingValueInfo::F64(3.0),
+                "file",
+                SettingSubject::Unqualified
+            ),
+            "3 tokens"
+        )
     );
 }
 

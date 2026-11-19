@@ -16,12 +16,10 @@ endpoint = "ollama"
 model = "llama3.1:8b"
 request_timeout_ms = 150000
 
-[sinks]
-handler = "postgres_sink"
-
 # The demo's own settings, as in obzenflow.toml.
 [app]
 source = "mock"
+output = "postgres"
 max_stories = 60
 poll_timeout_secs = 120
 

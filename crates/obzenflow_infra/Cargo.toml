@@ -69,6 +69,9 @@ tonic = { version = "0.14.2", features = ["transport"], optional = true }
 reqwest = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 
+# PostgreSQL client implementation (optional)
+sqlx = { workspace = true, optional = true }
+
 # AI provider substrate (optional)
 rig_rs = { package = "rig-core", version = "0.46", default-features = false, optional = true }
 tiktoken-rs = { version = "0.9", optional = true }
@@ -79,6 +82,7 @@ prometheus = []
 warp-server = ["dep:warp", "dep:headers", "dep:bytes", "dep:tokio-stream", "dep:hyper", "dep:hyper-util", "dep:tower-service"]
 tokio-console = ["dep:console-subscriber", "dep:humantime", "dep:tonic", "dep:tokio-stream", "tokio-stream/net", "obzenflow_runtime/tokio-console"]
 reqwest-client = ["dep:reqwest", "dep:rustls-native-certs"]
+postgres = ["dep:sqlx"]
 # FLOWIP-114d: Studio phonebook registration (heartbeat client + [studio] config).
 studio-registration = ["prometheus", "warp-server", "reqwest-client"]
 ai-rig = ["reqwest-client", "dep:rig_rs"]
@@ -95,6 +99,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # FLOWIP-120n PR-G: the resume integration test reuses the workspace replay
 # testkit, which needs `obzenflow_runtime::testing`.
 obzenflow_runtime = { workspace = true, features = ["test-support"] }
+# Tests read what a sink received through the adapters' recording sink.
+obzenflow_adapters = { workspace = true, features = ["test-support"] }
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }

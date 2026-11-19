@@ -16,10 +16,11 @@ pub enum EffectSafety {
     /// May be repeated only as a new durable attempt after an in-doubt cut.
     /// One runtime-minted affine capability authorises each attempt.
     NonIdempotentAtLeastOnce,
+    /// Never repeated after an in-doubt cut: recovery records the attempt
+    /// abandoned instead of making it again.
+    NonIdempotentAtMostOnce,
     Transactional,
 }
-
-pub use obzenflow_core::journal::archive_actions::SinkRedeliverySafety;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdempotencyKeyPolicy {
@@ -168,6 +169,7 @@ pub struct EffectDeclaration {
 pub(super) enum EffectDeclarationSyntax {
     Bare,
     AtLeastOnce,
+    SinkRow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,16 +211,7 @@ impl EffectDeclaration {
             super::binding::validate_effect_type(E::EFFECT_TYPE).is_ok(),
             "effect identifiers must contain dot-separated public identifier segments and be at most 255 ASCII bytes"
         );
-        let idempotency_key_policy = match (E::SAFETY, syntax) {
-            (EffectSafety::NonIdempotentAtLeastOnce, EffectDeclarationSyntax::AtLeastOnce) => {
-                IdempotencyKeyPolicy::AtLeastOnceAcknowledged
-            }
-            (EffectSafety::Idempotent | EffectSafety::Transactional, _) => {
-                IdempotencyKeyPolicy::NotRequired
-            }
-            (EffectSafety::NonIdempotentRequiresKey, _) => IdempotencyKeyPolicy::Required,
-            (EffectSafety::NonIdempotentAtLeastOnce, _) => IdempotencyKeyPolicy::NotRequired,
-        };
+        let idempotency_key_policy = key_policy(E::SAFETY, syntax);
 
         Self {
             effect_type: E::EFFECT_TYPE,
@@ -293,8 +286,23 @@ impl EffectDeclaration {
                 "acknowledges `{}` as at-least-once, but its effect method is `exactly_once`",
                 self.effect_type
             )),
+            (EffectDeclarationSyntax::AtLeastOnce, EffectSafety::NonIdempotentAtMostOnce) => {
+                Err(format!(
+                    "acknowledges `{}` as at-least-once, but its effect method is `at_most_once`",
+                    self.effect_type
+                ))
+            }
             _ => Ok(()),
         }
+    }
+
+    /// The declaration a sink row makes for the one request it sends. A sink
+    /// row states no guarantee, so its port method's guarantee stands.
+    #[doc(hidden)]
+    pub fn sent_by_sink_row(mut self) -> Self {
+        self.syntax = EffectDeclarationSyntax::SinkRow;
+        self.idempotency_key_policy = key_policy(self.safety, self.syntax);
+        self
     }
 
     fn short_rust_type(&self) -> String {
@@ -410,6 +418,22 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
         None
+    }
+}
+
+fn key_policy(safety: EffectSafety, syntax: EffectDeclarationSyntax) -> IdempotencyKeyPolicy {
+    match (safety, syntax) {
+        (
+            EffectSafety::NonIdempotentAtLeastOnce,
+            EffectDeclarationSyntax::AtLeastOnce | EffectDeclarationSyntax::SinkRow,
+        ) => IdempotencyKeyPolicy::AtLeastOnceAcknowledged,
+        (EffectSafety::Idempotent | EffectSafety::Transactional, _) => {
+            IdempotencyKeyPolicy::NotRequired
+        }
+        (EffectSafety::NonIdempotentRequiresKey, _) => IdempotencyKeyPolicy::Required,
+        (EffectSafety::NonIdempotentAtLeastOnce | EffectSafety::NonIdempotentAtMostOnce, _) => {
+            IdempotencyKeyPolicy::NotRequired
+        }
     }
 }
 

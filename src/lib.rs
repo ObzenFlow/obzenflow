@@ -53,14 +53,12 @@
 //! [`crate::stages::transforms::TypedTransformHandler`], or use helper facades
 //! like [`crate::stages::transforms::map`] for simple one-to-one mappings.
 //!
-//! **Sinks** consume events at the end of a pipeline. Implement
-//! [`crate::stages::sinks::InlineSink`] for immediate delivery: receive the input,
-//! perform the application operation and return `Ok(())` or a typed failure.
-//! Implement [`crate::stages::sinks::SinkConnector`] and
-//! [`crate::stages::sinks::SinkWriter`] for resource lifecycle, buffering,
-//! provenance or measured output. The framework owns delivery journalling.
-//! Built-in destinations expose one constructor or builder. Pass the configured
-//! binding to `sink!`.
+//! **Sinks** are where a flow's results leave it. A sink is an effect: its row
+//! takes a command that sends one request per input through a port, and the
+//! port method's `#[effect]` states the guarantee. Build the command with
+//! [`crate::effects::perform`], or use a ready-made destination from
+//! [`crate::stages::sinks`]. Replay makes no call to a sink's system, and a
+//! resume makes only the calls its recording didn't settle.
 //!
 //! ## 3. The `flow!` block
 //!

@@ -9,7 +9,7 @@ use super::{
     EffectBindingUse, EffectError, EffectInvocationContext, EffectSet, EffectsCore, NamedEffect,
     StageCompletion,
 };
-use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
+use obzenflow_core::event::schema::{EffectOutcome, EmptySet, FactsOf, WithMember};
 use obzenflow_core::{
     assert_distinct_outcome_facts, ChainEvent, Member, Outcome, SubsetOf, TypedPayload,
 };
@@ -137,7 +137,21 @@ pub struct Effects<Output: Outcome, AllowedEffects: EffectSet> {
     _capabilities: PhantomData<fn() -> (Output, AllowedEffects)>,
 }
 
-impl<R: CallRequest> Effects<FactsOf<R::Outcome>, DeclaredEffectSet<WithMember<R, EmptySet>>> {
+impl<R> Effects<FactsOf<EmptySet>, DeclaredEffectSet<WithMember<R, EmptySet>>>
+where
+    R: CallRequest<Records = super::RecordedReply>,
+{
+    pub(super) async fn send(&mut self, request: R) -> Result<R::Outcome, EffectError> {
+        let projection = self.core.project_named_effect::<Call<R>>()?;
+        Box::pin(self.core.perform(Call::new(request, projection))).await
+    }
+}
+
+impl<R> Effects<FactsOf<R::Outcome>, DeclaredEffectSet<WithMember<R, EmptySet>>>
+where
+    R: CallRequest,
+    R::Outcome: EffectOutcome,
+{
     pub(super) async fn call_as_output(&mut self, request: R) -> Result<R::Outcome, EffectError> {
         let projection = self.core.project_named_effect::<Call<R>>()?;
         Box::pin(self.core.perform(Call::new(request, projection))).await

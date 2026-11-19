@@ -15,13 +15,12 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::StageObserverSet;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, MiddlewareAttachmentSite, MiddlewareDeclaration, MiddlewareFactory,
-    MiddlewareSurfaceKind, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
-    PerSourcePolicyBoundary, SinkPolicy, TopologyMiddlewareConfigSlot,
+    MiddlewareSurfaceKind, PerEffectPolicyBoundary, PerSourcePolicyBoundary,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::SinkOperationPhase;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_runtime::__private::{SinkWriterAdapter, UnifiedJoinHandler};
+use obzenflow_runtime::__private::UnifiedJoinHandler;
 use obzenflow_runtime::stages::observer::{
     observer_shell_surfaces_for_stage as runtime_observer_shell_surfaces_for_stage, ObserverSurface,
 };
@@ -40,8 +39,7 @@ use obzenflow_runtime::{
             control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
                 EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
-                EffectfulTransformHandler, EffectfulTransformHandlerAdapter, SinkConnector,
-                SinkDescription, SinkWriterInitContext, TransformHandler,
+                EffectfulTransformHandler, EffectfulTransformHandlerAdapter, TransformHandler,
                 UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
                 UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler, UnifiedStatefulHandler,
             },
@@ -53,11 +51,6 @@ use obzenflow_runtime::{
         },
         merge::{MergeBuilder, MergeConfig, MergeEvent, MergeState},
         merges::MergeStrategyKind,
-        sink::journal_sink::{
-            JournalSinkBuilder, JournalSinkConfig, JournalSinkEvent, JournalSinkState,
-            SinkDeliveryBoundary,
-        },
-        sink::{record_sink_lifecycle_operation_failure, SinkLifecycleFailureCommit},
         source::{
             finite::{
                 AsyncFiniteSourceBuilder, FiniteSourceBuilder, FiniteSourceConfig,
@@ -101,7 +94,6 @@ pub(super) fn middleware_surface_kind(surface: ObserverSurface) -> MiddlewareSur
         ObserverSurface::Join => MiddlewareSurfaceKind::Join,
         ObserverSurface::SourcePoll => MiddlewareSurfaceKind::SourcePoll,
         ObserverSurface::Effect => MiddlewareSurfaceKind::Effect,
-        ObserverSurface::SinkDelivery => MiddlewareSurfaceKind::SinkDelivery,
         ObserverSurface::StageLifecycle => MiddlewareSurfaceKind::StageLifecycle,
     }
 }
@@ -114,7 +106,6 @@ fn observer_surface_name(surface: MiddlewareSurfaceKind) -> &'static str {
     match surface {
         MiddlewareSurfaceKind::SourcePoll => "source_poll",
         MiddlewareSurfaceKind::Effect => "effect",
-        MiddlewareSurfaceKind::SinkDelivery => "sink_delivery",
         MiddlewareSurfaceKind::Ingress => "ingress",
         MiddlewareSurfaceKind::Handler => "handler",
         MiddlewareSurfaceKind::Stateful => "stateful",
@@ -423,8 +414,6 @@ pub enum PolicyGuardSurface {
     Effectful,
     /// Sources are live I/O units; policy middleware attaches legitimately.
     Source,
-    /// Sink delivery placement is deferred until FLOWIP-095g.
-    Sink,
 }
 
 /// A join's mode, its catalog's kind and the built-in variant its handler names.
@@ -448,29 +437,6 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     /// Default: no-op (for descriptors that do not own a mutable name).
     fn set_name(&mut self, _name: String) {
         // Default: no-op
-    }
-
-    /// Build-only marker for a sink whose ordinary descriptor is selected
-    /// from framework configuration before topology admission. Ordinary
-    /// descriptors return `None`; the selected descriptor does too, so this
-    /// authoring carrier cannot survive into runtime lifecycle processing.
-    #[doc(hidden)]
-    fn configured_sink_handler_keys(&self) -> Option<&'static [&'static str]> {
-        None
-    }
-
-    /// Consume a build-only configured-sink carrier and produce the one
-    /// ordinary descriptor admitted to the flow. Called only when
-    /// `configured_sink_handler_keys` returned `Some`.
-    #[doc(hidden)]
-    fn select_configured_sink_handler(
-        self: Box<Self>,
-        _selected: &str,
-    ) -> Result<Box<dyn StageDescriptor>, crate::dsl::FlowBuildError> {
-        Err(crate::dsl::FlowBuildError::StageResourcesFailed(
-            "an ordinary stage descriptor was asked to select a configured sink handler"
-                .to_string(),
-        ))
     }
 
     /// Resolve and freeze all authored middleware before configuration collection.
@@ -608,7 +574,6 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         }
         match self.stage_type() {
             StageType::FiniteSource | StageType::InfiniteSource => PolicyGuardSurface::Source,
-            StageType::Sink => PolicyGuardSurface::Sink,
             _ => PolicyGuardSurface::PureSync,
         }
     }
@@ -639,11 +604,6 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         None
     }
 
-    /// The sink's one pre-erasure connector-description snapshot. Every
-    /// descriptor and wrapper must state whether it carries one so metadata
-    /// cannot silently attenuate while crossing a wrapper (FLOWIP-134h).
-    fn sink_description(&self) -> Option<&SinkDescription>;
-
     /// A source's admitted continuation, `None` for every other stage. Required
     /// for the same reason: resume admission must see every source (FLOWIP-134i B8).
     fn source_continuation(&self) -> Option<SourceContinuation>;
@@ -670,142 +630,6 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     fn direct_fact_plan(
         &self,
     ) -> Option<&obzenflow_runtime::stages::resources_builder::DirectFactPlan> {
-        None
-    }
-}
-
-type ConfiguredSinkMaterializer =
-    Box<dyn FnOnce(&str) -> Option<Box<dyn StageDescriptor>> + Send + Sync + 'static>;
-
-const fn configured_sink_handler_key_eq(left: &str, right: &str) -> bool {
-    let left = left.as_bytes();
-    let right = right.as_bytes();
-    if left.len() != right.len() {
-        return false;
-    }
-
-    let mut index = 0;
-    while index < left.len() {
-        if left[index] != right[index] {
-            return false;
-        }
-        index += 1;
-    }
-    true
-}
-
-/// Compile-time uniqueness check used by the exported handler-set macro.
-/// Public solely for downstream macro expansion.
-#[doc(hidden)]
-pub const fn configured_sink_handler_keys_are_unique(keys: &[&str]) -> bool {
-    let mut left = 0;
-    while left < keys.len() {
-        let mut right = left + 1;
-        while right < keys.len() {
-            if configured_sink_handler_key_eq(keys[left], keys[right]) {
-                return false;
-            }
-            right += 1;
-        }
-        left += 1;
-    }
-    true
-}
-
-/// A cold, build-only carrier emitted by `sink!(... => handler_set!(...))`.
-/// It is replaced by one ordinary typed sink descriptor before topology
-/// admission and therefore owns no runtime execution or lifecycle authority.
-struct ConfiguredSinkDescriptor {
-    name: String,
-    keys: &'static [&'static str],
-    expected: &'static str,
-    materialize: Option<ConfiguredSinkMaterializer>,
-}
-
-/// Construct the build-only carrier used by the exported sink macros.
-/// Public solely for downstream macro expansion.
-#[doc(hidden)]
-pub fn configured_sink_descriptor<F>(
-    name: impl Into<String>,
-    keys: &'static [&'static str],
-    expected: &'static str,
-    materialize: F,
-) -> Box<dyn StageDescriptor>
-where
-    F: FnOnce(&str) -> Option<Box<dyn StageDescriptor>> + Send + Sync + 'static,
-{
-    Box::new(ConfiguredSinkDescriptor {
-        name: name.into(),
-        keys,
-        expected,
-        materialize: Some(Box::new(materialize)),
-    })
-}
-
-#[async_trait]
-impl StageDescriptor for ConfiguredSinkDescriptor {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    fn configured_sink_handler_keys(&self) -> Option<&'static [&'static str]> {
-        Some(self.keys)
-    }
-
-    fn select_configured_sink_handler(
-        mut self: Box<Self>,
-        selected: &str,
-    ) -> Result<Box<dyn StageDescriptor>, crate::dsl::FlowBuildError> {
-        if !self.keys.contains(&selected) {
-            return Err(crate::dsl::FlowBuildError::InvalidSinkSelection {
-                stage_name: self.name.clone(),
-                selected: selected.to_owned(),
-                expected: self.expected.to_string(),
-            });
-        }
-
-        let materialize = self.materialize.take().ok_or_else(|| {
-            crate::dsl::FlowBuildError::StageResourcesFailed(format!(
-                "sink stage '{}' attempted to consume its configured handler set more than once",
-                self.name
-            ))
-        })?;
-        let mut descriptor = materialize(selected).ok_or_else(|| {
-            crate::dsl::FlowBuildError::StageResourcesFailed(format!(
-                "sink stage '{}' accepted configured handler {selected:?} but its closed set did not materialise it",
-                self.name
-            ))
-        })?;
-        descriptor.set_name(self.name);
-        Ok(descriptor)
-    }
-
-    fn stage_type(&self) -> StageType {
-        StageType::Sink
-    }
-
-    async fn create_handle(
-        self: Box<Self>,
-        _config: StageConfig,
-        _resources: StageResources,
-        _control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> StageCreationResult<BoxedStageHandle> {
-        Err(format!(
-            "configured sink stage '{}' reached lifecycle materialisation before handler selection",
-            self.name
-        )
-        .into())
-    }
-
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
-    }
-
-    fn source_continuation(&self) -> Option<SourceContinuation> {
         None
     }
 }
@@ -909,10 +733,6 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         StageType::FiniteSource
     }
 
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
-    }
-
     fn source_continuation(&self) -> Option<SourceContinuation> {
         Some(self.continuation)
     }
@@ -928,7 +748,6 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         let hosted = self.hosted_ingress_key().is_some();
         crate::dsl::attachment_plan::prepare_io(
             &self.name,
-            self.stage_type(),
             hosted,
             &mut self.source_policies,
             &mut self.ingress_policy,
@@ -1062,10 +881,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         StageType::FiniteSource
     }
 
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
-    }
-
     fn source_continuation(&self) -> Option<SourceContinuation> {
         Some(self.continuation)
     }
@@ -1081,7 +896,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         let hosted = self.hosted_ingress_key().is_some();
         crate::dsl::attachment_plan::prepare_io(
             &self.name,
-            self.stage_type(),
             hosted,
             &mut self.source_policies,
             &mut self.ingress_policy,
@@ -1196,10 +1010,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         StageType::InfiniteSource
     }
 
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
-    }
-
     fn source_continuation(&self) -> Option<SourceContinuation> {
         Some(self.continuation)
     }
@@ -1215,7 +1025,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         let hosted = self.hosted_ingress_key().is_some();
         crate::dsl::attachment_plan::prepare_io(
             &self.name,
-            self.stage_type(),
             hosted,
             &mut self.source_policies,
             &mut self.ingress_policy,
@@ -1363,10 +1172,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
         StageType::InfiniteSource
     }
 
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
-    }
-
     fn source_continuation(&self) -> Option<SourceContinuation> {
         Some(self.continuation)
     }
@@ -1382,7 +1187,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
         let hosted = self.hosted_ingress_key().is_some();
         crate::dsl::attachment_plan::prepare_io(
             &self.name,
-            self.stage_type(),
             hosted,
             &mut self.source_policies,
             &mut self.ingress_policy,
@@ -1503,10 +1307,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
     fn stage_type(&self) -> StageType {
         StageType::Transform
-    }
-
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
@@ -1772,9 +1572,33 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     ai_models: Vec<obzenflow_core::ai::AiModelSpec>,
     ai_sections: Vec<(&'static str, &'static str)>,
     policy_owner: obzenflow_adapters::middleware::ProtectedUnitOwner,
+    role: StageType,
 }
 
 impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
+    /// Construct a sink stage: an effectful stage whose outcome no stage
+    /// reads, with the Sink role in the topology.
+    pub fn sink(
+        name: impl Into<String>,
+        handler: H,
+        effects: Result<Vec<EffectDeclaration>, StageEffectsError>,
+        middleware: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Self {
+        let mut descriptor = Self::new(
+            name,
+            handler,
+            effects.map(|effects| {
+                effects
+                    .into_iter()
+                    .map(EffectDeclaration::sent_by_sink_row)
+                    .collect()
+            }),
+            middleware,
+        );
+        descriptor.role = StageType::Sink;
+        descriptor
+    }
+
     /// Construct an ordinary effectful transform from the effects its
     /// handler declares and the middleware its row lists in `with`.
     /// Generated direct-fact admission and raw physical pass-through are
@@ -1823,6 +1647,7 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             ai_models: Vec::new(),
             ai_sections: Vec::new(),
             policy_owner: obzenflow_adapters::middleware::ProtectedUnitOwner::Stage,
+            role: StageType::Transform,
         }
     }
 
@@ -1918,6 +1743,11 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             &self.effects,
             &mut self.observers,
             &mut self.effect_policies,
+        )?;
+        crate::dsl::attachment_plan::refuse_observer_input::<H::Input>(
+            &self.name,
+            &self.observers,
+            &self.effect_policies,
         )
     }
 
@@ -1930,11 +1760,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
     }
 
     fn stage_type(&self) -> StageType {
-        StageType::Transform
-    }
-
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
+        self.role
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
@@ -2133,240 +1959,9 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             handle,
             config.stage_id,
             config.name,
-            StageType::Transform,
+            self.role,
             translate_stage_event_to_transform,
             check_transform_state,
-        );
-
-        Ok(Box::new(adapter) as BoxedStageHandle)
-    }
-}
-
-/// Descriptor for sink stages
-pub(crate) struct SinkDescriptor<C: SinkConnector + 'static> {
-    pub(crate) name: String,
-    pub(crate) connector: C,
-    pub(crate) description: SinkDescription,
-    pub(crate) sink_policies: Vec<Box<dyn MiddlewareFactory>>,
-    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
-}
-
-#[async_trait]
-impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
-    for SinkDescriptor<C>
-{
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    fn stage_type(&self) -> StageType {
-        StageType::Sink
-    }
-
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        Some(&self.description)
-    }
-
-    fn source_continuation(&self) -> Option<SourceContinuation> {
-        None
-    }
-
-    fn stage_middleware_names(&self) -> Vec<String> {
-        self.stage_middleware_factories()
-            .into_iter()
-            .map(|f| f.label().to_string())
-            .collect()
-    }
-
-    fn prepare_middleware(&mut self) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
-        crate::dsl::attachment_plan::prepare_io(
-            &self.name,
-            StageType::Sink,
-            false,
-            &mut self.sink_policies,
-            &mut None,
-            &mut self.observers,
-        )?;
-        for factory in &self.observers {
-            if let Some((input, input_name)) = factory.sink_observer_input_type() {
-                if input != std::any::TypeId::of::<C::Input>() {
-                    return Err(crate::dsl::error::MiddlewarePlanError::invalid(&self.name, None, format!("sink observer '{}' expects input '{input_name}', but the sink consumes '{}'", factory.label(), std::any::type_name::<C::Input>())));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
-        self.sink_policies
-            .iter()
-            .map(Box::as_ref)
-            .chain(self.observers.iter().map(Box::as_ref))
-            .collect()
-    }
-
-    async fn create_handle(
-        self: Box<Self>,
-        config: StageConfig,
-        resources: StageResources,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> StageCreationResult<BoxedStageHandle> {
-        // Validate middleware safety
-        for factory in self.sink_policies.iter().chain(self.observers.iter()) {
-            // Validate safety
-            let validation_result =
-                validate_middleware_safety(factory.as_ref(), StageType::Sink, &self.name);
-
-            if !validation_result.is_ok() {
-                for error in &validation_result.errors {
-                    tracing::error!("{}", error);
-                }
-                // Could choose to panic here for critical errors
-            }
-        }
-
-        let sink_policy_factories = self.sink_policies;
-        let observer_factories = self.observers;
-        for factory in &observer_factories {
-            if let Some((observer_input, observer_input_name)) = factory.sink_observer_input_type()
-            {
-                if observer_input != std::any::TypeId::of::<C::Input>() {
-                    return Err(format!(
-                        "sink observer '{}' expects input '{observer_input_name}', but sink '{}' consumes '{}'",
-                        factory.label(),
-                        config.name,
-                        std::any::type_name::<C::Input>(),
-                    )
-                    .into());
-                }
-            }
-        }
-        let control_strategy = create_default_signal_strategy();
-
-        // Create instrumentation configuration
-        let instrumentation_config = InstrumentationConfig::default();
-        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
-            control_middleware.clone();
-
-        let expects_circuit_breaker = sink_policy_factories
-            .iter()
-            .any(|factory| factory_declares_circuit_breaker(factory.as_ref()));
-        let expects_rate_limiter = sink_policy_factories.iter().any(|factory| {
-            factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
-        });
-
-        // FLOWIP-115b: hook-bound control middleware that attaches to the
-        // sink-delivery surface is materialized into a sink policy composed at
-        // the delivery boundary. Observers arrive through their own lane.
-        let mut sink_policies: Vec<Arc<dyn SinkPolicy>> = Vec::new();
-        let observer_placement = plan_stage_observers(
-            &config,
-            StageType::Sink,
-            observer_factories,
-            &control_middleware,
-        )?;
-        let observers = observer_placement.observers;
-        for factory in sink_policy_factories {
-            let policy = crate::dsl::binder::materialize_sink_delivery(
-                factory.as_ref(),
-                &config,
-                StageType::Sink,
-                &control_middleware,
-                MiddlewareAttachmentSite::Implementation,
-            )?;
-            sink_policies.push(policy);
-        }
-        let sink_delivery_boundary: Option<Arc<dyn SinkDeliveryBoundary>> =
-            if sink_policies.is_empty() {
-                None
-            } else {
-                Some(Arc::new(PerSinkDeliveryPolicyBoundary::new(sink_policies))
-                    as Arc<dyn SinkDeliveryBoundary>)
-            };
-
-        instrumentation
-            .bind_control_plane(
-                &config.stage_id,
-                &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
-            )
-            .map_err(|e| e.to_string())?;
-        let instrumentation = Arc::new(instrumentation);
-
-        // The typed factory captured this exactly once before erasure and
-        // middleware wrapping. The binding-derived fallback is resolved only
-        // now, after the final stage name exists.
-        let receipt_destination = self.description.destination_name().map(str::to_owned);
-        let logical_destination = receipt_destination
-            .clone()
-            .unwrap_or_else(|| config.name.clone());
-        let default_delivery_method = self.description.default_method().clone();
-
-        // Create the stage configuration
-        let mut sink_config = JournalSinkConfig::new(
-            config.stage_id,
-            &config.name,
-            &config.flow_name,
-            resources.upstream_stages.clone(),
-            default_delivery_method.clone(),
-        )
-        .with_observer_bindings(observers.into_bindings());
-        sink_config.control_strategy = Some(control_strategy);
-        sink_config.sink_delivery_boundary = sink_delivery_boundary;
-        sink_config.receipt_destination = receipt_destination;
-
-        // Open the configured connector only at stage materialisation, then
-        // erase its unique mutable writer behind the journal sink boundary.
-        let writer_context = SinkWriterInitContext::new(
-            config.stage_id,
-            config.name.clone(),
-            config.flow_name.clone(),
-        );
-        let writer = match self.connector.open(writer_context).await {
-            Ok(writer) => writer,
-            Err(error) => {
-                record_sink_lifecycle_operation_failure(SinkLifecycleFailureCommit {
-                    stage_id: config.stage_id,
-                    stage_key: &config.name,
-                    flow_id: &resources.flow_id.to_string(),
-                    flow_name: &config.flow_name,
-                    logical_destination: &logical_destination,
-                    phase: SinkOperationPhase::Open,
-                    error: &error,
-                    error_journal: &resources.error_journal,
-                    data_journal: &resources.data_journal,
-                    instrumentation: &instrumentation,
-                })
-                .await
-                .map_err(|record_error| {
-                    format!(
-                        "Failed to record sink connector open failure ({error}): {record_error}"
-                    )
-                })?;
-                return Err(format!("Failed to open sink connector: {error}").into());
-            }
-        };
-        let handler = SinkWriterAdapter::new(writer, config.stage_id, default_delivery_method);
-        let handle = JournalSinkBuilder::new(handler, sink_config, resources)
-            .with_instrumentation(instrumentation)
-            .build()
-            .await
-            .map_err(|e| format!("Failed to build sink: {e:?}"))?;
-
-        // Create adapter to bridge to StageHandle
-        let adapter = StageHandleAdapter::new(
-            handle,
-            config.stage_id,
-            config.name,
-            StageType::Sink,
-            translate_stage_event_to_sink,
-            check_sink_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -2482,40 +2077,6 @@ fn check_transform_state<H>(state: &TransformState<H>) -> crate::stage_handle_ad
     }
 }
 
-fn translate_stage_event_to_sink<H>(event: StageEvent) -> Result<JournalSinkEvent<H>, String> {
-    match event {
-        StageEvent::Initialize => Ok(JournalSinkEvent::Initialize),
-        StageEvent::Ready | StageEvent::Start => Ok(JournalSinkEvent::Ready), // Sinks don't have Start, they use Ready
-        StageEvent::BeginDrain => Ok(JournalSinkEvent::BeginDrain),
-        StageEvent::ForceShutdown => {
-            Ok(JournalSinkEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string()))
-        }
-        _ => Err(format!("Unsupported stage event for sink: {event:?}")),
-    }
-}
-
-fn check_sink_state<H>(state: &JournalSinkState<H>) -> crate::stage_handle_adapter::StageStatus {
-    use crate::stage_handle_adapter::StageStatus;
-    match state {
-        JournalSinkState::Created => StageStatus::Created,
-        JournalSinkState::Initializing => StageStatus::Initializing,
-        JournalSinkState::Starting => StageStatus::Starting,
-        JournalSinkState::Finalizing => StageStatus::Finalizing,
-        JournalSinkState::Flushing => StageStatus::Flushing,
-        JournalSinkState::DrainingWriter => StageStatus::DrainingWriter,
-        JournalSinkState::CheckingContracts => StageStatus::CheckingContracts,
-        JournalSinkState::Failing(_) => StageStatus::Failing,
-        JournalSinkState::Cancelling(_) => StageStatus::Cancelling,
-        JournalSinkState::Cancelled(_) => StageStatus::Cancelled,
-        JournalSinkState::Initialized => StageStatus::Ready,
-        JournalSinkState::Running => StageStatus::Running,
-        JournalSinkState::Draining => StageStatus::Draining,
-        JournalSinkState::Drained => StageStatus::Drained,
-        JournalSinkState::Failed(_) => StageStatus::Failed,
-        JournalSinkState::_Phantom(_) => unreachable!("phantom stage state is never entered"),
-    }
-}
-
 // ============================================================================
 // Stateful Descriptor (FLOWIP-080b)
 // ============================================================================
@@ -2555,10 +2116,6 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
 
     fn stage_type(&self) -> StageType {
         StageType::Stateful
-    }
-
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
@@ -2702,6 +2259,11 @@ where
             &self.effects,
             &mut self.observers,
             &mut self.effect_policies,
+        )?;
+        crate::dsl::attachment_plan::refuse_observer_input::<H::Input>(
+            &self.name,
+            &self.observers,
+            &self.effect_policies,
         )
     }
 
@@ -2715,10 +2277,6 @@ where
 
     fn stage_type(&self) -> StageType {
         StageType::Stateful
-    }
-
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
@@ -2966,10 +2524,6 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
         StageType::Join
     }
 
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
-    }
-
     fn source_continuation(&self) -> Option<SourceContinuation> {
         None
     }
@@ -3189,10 +2743,6 @@ impl StageDescriptor for MergeDescriptor {
         StageType::Merge
     }
 
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        None
-    }
-
     fn source_continuation(&self) -> Option<SourceContinuation> {
         None
     }
@@ -3297,8 +2847,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> sealed::Sealed
 }
 impl<H: TransformHandler + 'static> sealed::Sealed for TransformDescriptor<H> {}
 impl<H: EffectfulTransformHandler + 'static> sealed::Sealed for EffectfulTransformDescriptor<H> {}
-impl<C: SinkConnector + 'static> sealed::Sealed for SinkDescriptor<C> {}
-impl sealed::Sealed for ConfiguredSinkDescriptor {}
 impl<H: UnifiedStatefulHandler + 'static> sealed::Sealed for StatefulDescriptor<H> {}
 impl<H: EffectfulStatefulHandler + 'static> sealed::Sealed for EffectfulStatefulDescriptor<H> {}
 impl<H: UnifiedJoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}
@@ -4171,7 +3719,6 @@ mod tests {
         let mut observers = vec![];
         crate::dsl::attachment_plan::prepare_io(
             "accounts",
-            StageType::InfiniteSource,
             true,
             &mut controls,
             &mut ingress,
@@ -4505,7 +4052,6 @@ mod tests {
             flow_id: FlowId::new(),
             lineage_policy: obzenflow_core::config::LineagePolicy::default(),
             heartbeat_interval: 1000,
-            sink_resume_edges: None,
             data_journal,
             error_journal,
             flow_context: obzenflow_core::event::provenance::FlowContext::new(
@@ -4578,15 +4124,15 @@ mod tests {
 mod observer_placement_negative_tests {
     use super::*;
     use obzenflow_adapters::middleware::{
-        sink_delivery_observer, validate_attachment_request, MiddlewareAttachmentRequest,
+        source_poll_observer, validate_attachment_request, MiddlewareAttachmentRequest,
         MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
         MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurface,
         MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SourceAdmission, SourcePolicy,
         SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
     };
     use obzenflow_runtime::stages::observer::{
-        EffectObserver, HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver,
-        StageLifecycleObserver, StatefulObserver,
+        EffectObserver, HandlerObserver, JoinObserver, SourcePollObserver, StageLifecycleObserver,
+        StatefulObserver,
     };
     use std::sync::Mutex;
 
@@ -4597,19 +4143,8 @@ mod observer_placement_negative_tests {
     impl StatefulObserver for NoopObserver {}
     impl JoinObserver for NoopObserver {}
     impl SourcePollObserver for NoopObserver {}
-    impl SinkDeliveryObserver for NoopObserver {}
-    impl obzenflow_adapters::middleware::SinkDeliveryObserver for NoopObserver {
-        type Input = ObserverInput;
-    }
     impl StageLifecycleObserver for NoopObserver {}
     impl EffectObserver for NoopObserver {}
-
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct ObserverInput;
-
-    impl obzenflow_core::TypedPayload for ObserverInput {
-        const EVENT_TYPE: &'static str = "observer_placement.input";
-    }
 
     /// An observer factory used to prove the planner reaches typed materialization.
     struct LoudObserverFactory;
@@ -4813,7 +4348,6 @@ mod observer_placement_negative_tests {
                     MiddlewareSurfaceKind::Stateful,
                     MiddlewareSurfaceKind::Join,
                     MiddlewareSurfaceKind::SourcePoll,
-                    MiddlewareSurfaceKind::SinkDelivery,
                 ],
             )
         }
@@ -4845,9 +4379,6 @@ mod observer_placement_negative_tests {
                 MiddlewareSurfaceKind::SourcePoll => {
                     Ok(MiddlewareSurfaceAttachment::source_poll_observer(observer))
                 }
-                MiddlewareSurfaceKind::SinkDelivery => Ok(
-                    MiddlewareSurfaceAttachment::sink_delivery_observer(observer),
-                ),
                 other => Err(MiddlewareFactoryError::materialization_failed(
                     self.label(),
                     &context.config.name,
@@ -5070,7 +4601,6 @@ mod observer_placement_negative_tests {
                 vec![Box::new(MultiSurfaceCustomControl { explicit })];
             let result = crate::dsl::attachment_plan::prepare_io(
                 "hosted",
-                StageType::InfiniteSource,
                 true,
                 &mut controls,
                 &mut None,
@@ -5329,19 +4859,16 @@ mod observer_placement_negative_tests {
         let error = match plan_stage_observers(
             &config,
             StageType::Transform,
-            vec![Box::new(sink_delivery_observer(
-                "delivery-trace",
-                NoopObserver,
-            ))],
+            vec![Box::new(source_poll_observer("poll-trace", NoopObserver))],
             &control,
         ) {
-            Ok(_) => panic!("sink-delivery observer cannot attach to a transform"),
+            Ok(_) => panic!("a source-poll observer cannot attach to a transform"),
             Err(error) => error,
         };
 
         assert_eq!(
             error.to_string(),
-            "observer 'delivery-trace' requires surface 'sink_delivery', but stage 'authorize_payment' (Transform) does not expose it; exposed observer surfaces: ['handler', 'stage_lifecycle']"
+            "observer 'poll-trace' requires surface 'source_poll', but stage 'authorize_payment' (Transform) does not expose it; exposed observer surfaces: ['handler', 'stage_lifecycle']"
         );
     }
 }

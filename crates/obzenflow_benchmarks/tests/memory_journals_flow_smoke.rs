@@ -2,15 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::pipeline::PipelineState;
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
@@ -57,26 +54,17 @@ impl TypedFiniteSourceHandler for TestSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+struct Received;
+
 struct CountingSink {
     received: Arc<AtomicU64>,
 }
 
+#[obzenflow_runtime::effects::port(system = "smoke-counter", effects = obzenflow_runtime::effects)]
 impl CountingSink {
-    fn new(received: Arc<AtomicU64>) -> Self {
-        Self { received }
-    }
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = SmokeEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-    }
-
-    async fn write(&mut self, _event: SmokeEvent) -> Result<(), SinkWriteFailure> {
+    #[effect(type = "bench.smoke.receive", at_least_once, records = reply)]
+    fn receive(&self, _: &Received) -> Result<(), EffectError> {
         self.received.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -91,7 +79,9 @@ async fn memory_journals_flow_runs_to_completion() {
     let handle = tokio::time::timeout(Duration::from_secs(10), async {
         FlowDefinition::materialize(move |_runtime_config| {
             let source = TestSource::new(total_events);
-            let sink = CountingSink::new(received_for_flow);
+            let sink = perform(|_: &SmokeEvent| Received).through(Port::to(CountingSink {
+                received: received_for_flow,
+            }));
 
             Ok(flow! {
                 journals: memory_journals(),

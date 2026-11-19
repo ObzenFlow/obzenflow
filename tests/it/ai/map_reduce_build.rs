@@ -4,21 +4,20 @@
 
 use crate::fake_ai;
 
-use async_trait::async_trait;
 use fake_ai::{build_context, chat_model, FakeChatModels};
 use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk, Partials,
     TriggeredMapReduce, Unkeyed,
 };
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow::stages::sinks::DiscardSink;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
-    TypedJoinHandler,
+    JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
@@ -153,44 +152,21 @@ impl TypedFiniteSourceHandler for ItemSource {
     }
 }
 
-#[derive(Debug)]
-struct Collect<T> {
-    rows: Arc<Mutex<Vec<T>>>,
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+trait CollectOutPort: Send + Sync {
+    #[effect(type = "regression.amr.collect", at_least_once, records = reply)]
+    fn collect(&self, out: &BuildOnlyOut) -> Result<(), EffectError>;
 }
 
-impl<T> Clone for Collect<T> {
-    fn clone(&self) -> Self {
-        Self {
-            rows: Arc::clone(&self.rows),
-        }
-    }
+/// Keeps every output its sink is called with.
+struct Collect {
+    rows: Arc<Mutex<Vec<BuildOnlyOut>>>,
 }
 
-impl<T> Collect<T> {
-    fn new() -> (Self, Arc<Mutex<Vec<T>>>) {
-        let rows = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                rows: Arc::clone(&rows),
-            },
-            rows,
-        )
-    }
-}
-
-#[async_trait]
-impl<T> InlineSink for Collect<T>
-where
-    T: TypedPayload + Send + Sync + std::fmt::Debug + 'static,
-{
-    type Input = T;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
-    }
-
-    async fn write(&mut self, row: T) -> Result<(), SinkWriteFailure> {
-        self.rows.lock().expect("collected rows").push(row);
+#[obzenflow_runtime::effects::system("amr-collector", effects = obzenflow_runtime::effects)]
+impl CollectOutPort for Collect {
+    fn collect(&self, out: &BuildOnlyOut) -> Result<(), EffectError> {
+        self.rows.lock().expect("collected rows").push(out.clone());
         Ok(())
     }
 }
@@ -199,7 +175,7 @@ where
 async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
     let result = FlowDefinition::materialize(|_| {
         let items = NoEventSource;
-        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
         Ok(flow! {
@@ -231,7 +207,9 @@ async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
 #[tokio::test]
 async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of_input() {
     let fake = models();
-    let (out, rows) = Collect::<BuildOnlyOut>::new();
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let out =
+        perform(|out: &BuildOnlyOut| out.clone()).through(Port::to(Collect { rows: rows.clone() }));
     let handle = FlowDefinition::materialize(move |_| {
         let items = ItemSource::one_to(5);
         let digest = ai::map(SumMap)
@@ -277,7 +255,7 @@ async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of
 async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
     let result = FlowDefinition::materialize(|_| {
         let items = NoEventSource;
-        let (wrong, _) = Collect::<BuildOnlyItem>::new();
+        let wrong = DiscardSink::<BuildOnlyItem>::new();
         let digest = digest();
 
         Ok(flow! {
@@ -374,7 +352,7 @@ async fn join_reference_resolves_through_composite_boundary_port() {
         let items = NoEventSource;
         let stream_handler = NoStreamSource;
         let join_handler = LocalNoopJoin;
-        let (joined, _) = Collect::<JoinedP>::new();
+        let joined = DiscardSink::<JoinedP>::new();
         let digest = digest();
 
         Ok(flow! {
@@ -411,7 +389,7 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
     let fake = models();
     let result = async {
         let items = NoEventSource;
-        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
         obzenflow_dsl::test_flow! {
@@ -440,7 +418,7 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
 async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
     let handle = FlowDefinition::materialize(|_| {
         let items = NoEventSource;
-        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
         Ok(flow! {
@@ -528,9 +506,9 @@ async fn infer_map_and_map_reduce_lower_to_one_two_and_four_members() {
         let brief = ai::infer(TagOne);
         let tag = ai::map(SumMap).chunks(2);
         let digest = digest();
-        let (briefs, _) = Collect::<BuildOnlyPartial>::new();
-        let (tags, _) = Collect::<BuildOnlyPartial>::new();
-        let (digests, _) = Collect::<BuildOnlyOut>::new();
+        let briefs = DiscardSink::<BuildOnlyPartial>::new();
+        let tags = DiscardSink::<BuildOnlyPartial>::new();
+        let digests = DiscardSink::<BuildOnlyOut>::new();
 
         Ok(flow! {
             name: "amr_shapes",
@@ -604,7 +582,7 @@ async fn infer_map_and_map_reduce_lower_to_one_two_and_four_members() {
 async fn a_zero_reduce_trigger_fails_the_build_naming_the_stage() {
     let result = FlowDefinition::materialize(|_| {
         let items = NoEventSource;
-        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = ai::map(SumMap)
             .chunks(1)
             .reduce(SumReduce)
@@ -642,7 +620,7 @@ async fn a_zero_reduce_trigger_fails_the_build_naming_the_stage() {
 async fn a_build_without_a_chat_provider_fails_naming_the_stage() {
     let result = FlowDefinition::materialize(|_| {
         let items = NoEventSource;
-        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
         Ok(flow! {

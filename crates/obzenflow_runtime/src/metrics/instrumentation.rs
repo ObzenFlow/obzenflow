@@ -119,13 +119,10 @@ pub struct StageInstrumentation {
 
     // Observability positions
     pub reader_seq: AtomicU64,
-    pub receipted_seq: AtomicU64,
     pub writer_seq: AtomicU64,
     pub last_consumed_event_id: RwLock<Option<EventId>>,
     pub last_consumed_writer: RwLock<Option<JournalWriterId>>,
     pub last_consumed_vector_clock: RwLock<Option<VectorClock>>,
-    pub last_receipted_event_id: RwLock<Option<EventId>>,
-    pub last_receipted_vector_clock: RwLock<Option<VectorClock>>,
     pub last_emitted_event_id: RwLock<Option<EventId>>,
     pub last_emitted_writer: RwLock<Option<WriterId>>,
     authored_data_frontier: RwLock<AuthoredDataFrontier>,
@@ -223,13 +220,10 @@ impl StageInstrumentation {
 
             // Observability positions
             reader_seq: AtomicU64::new(0),
-            receipted_seq: AtomicU64::new(0),
             writer_seq: AtomicU64::new(0),
             last_consumed_event_id: RwLock::new(None),
             last_consumed_writer: RwLock::new(None),
             last_consumed_vector_clock: RwLock::new(None),
-            last_receipted_event_id: RwLock::new(None),
-            last_receipted_vector_clock: RwLock::new(None),
             last_emitted_event_id: RwLock::new(None),
             last_emitted_writer: RwLock::new(None),
             authored_data_frontier: RwLock::new(AuthoredDataFrontier::default()),
@@ -611,18 +605,6 @@ impl StageInstrumentation {
         }
     }
 
-    /// Note the latest durable delivery watermark for sink stages.
-    pub fn record_receipted_position(
-        &self,
-        seq: u64,
-        event_id: EventId,
-        vector_clock: VectorClock,
-    ) {
-        self.receipted_seq.store(seq, Ordering::Relaxed);
-        *self.last_receipted_event_id.write().unwrap() = Some(event_id);
-        *self.last_receipted_vector_clock.write().unwrap() = Some(vector_clock);
-    }
-
     /// Note an emitted record for wide-event observability.
     pub fn record_emitted(&self, record: &JournalRecord<ChainPayload>) {
         self.writer_seq.fetch_add(1, Ordering::Relaxed);
@@ -923,9 +905,8 @@ mod tests {
     use super::StageInstrumentation;
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::vector_clock::VectorClock;
     use obzenflow_core::event::{ChainEventFactory, ChainPayload};
-    use obzenflow_core::{EventId, EventType, JournalId, JournalRecord, StageId, WriterId};
+    use obzenflow_core::{EventType, JournalId, JournalRecord, StageId, WriterId};
 
     #[test]
     fn repeated_state_observation_preserves_state_age() {
@@ -976,33 +957,6 @@ mod tests {
         assert_eq!(
             snapshot.accounting.errors_by_kind.get(&ErrorKind::Timeout),
             Some(&2)
-        );
-    }
-
-    #[test]
-    fn record_receipted_position_updates_snapshot() {
-        let instrumentation = std::sync::Arc::new(StageInstrumentation::new());
-        let execution =
-            crate::execution::RuntimeExecution::new(crate::execution::RuntimeMode::Live, None);
-        instrumentation.bind_observations(
-            obzenflow_core::FlowId::new(),
-            StageId::new().into(),
-            &execution,
-        );
-        let event_id = EventId::new();
-        let mut vector_clock = VectorClock::new();
-        vector_clock
-            .clocks
-            .insert(crate::testing::causal_fixture::coordinate("sink"), 7);
-
-        instrumentation.record_receipted_position(7, event_id, vector_clock.clone());
-
-        let snapshot = instrumentation.capture_runtime().observation.unwrap();
-        assert_eq!(snapshot.progress.receipted_seq, 7);
-        assert_eq!(snapshot.progress.last_receipted_event_id, Some(event_id));
-        assert_eq!(
-            snapshot.progress.last_receipted_vector_clock,
-            Some(vector_clock)
         );
     }
 

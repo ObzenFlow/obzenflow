@@ -6,15 +6,15 @@
 //! Timing is external to this oracle; no performance logs or trace data are parsed.
 
 use anyhow::{bail, ensure, Context, Result};
-use obzenflow_core::event::payloads::delivery_payload::{
-    DeliveryMethod, DeliveryPayload, DeliveryResult,
-};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::effect_payload::EffectOutcomePayload;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{ChainPayload, JournalCommitRef};
 use obzenflow_core::journal::read::{
     RunJournalKind, RunOutcome, RunRecord, RunRecordData, TailRead,
 };
+use obzenflow_core::EventId;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -52,6 +52,13 @@ impl Cohort {
     }
 }
 
+/// One settled sink call, by its effect type, outcome and consumed input.
+struct SinkCall {
+    effect_type: String,
+    succeeded: bool,
+    input: Option<EventId>,
+}
+
 #[derive(Default)]
 struct ArchiveCohorts {
     sources: Cohort,
@@ -59,7 +66,7 @@ struct ArchiveCohorts {
     errors: Cohort,
     source_poll_errors: u64,
     summaries: Vec<(JournalCommitRef, u64)>,
-    receipts: Vec<DeliveryPayload>,
+    sink_calls: Vec<SinkCall>,
     projected_records: u64,
 }
 
@@ -158,12 +165,25 @@ impl ArchiveCohorts {
                 );
                 self.source_poll_errors += 1;
             }
-            ChainPayload::Delivery(receipt) => {
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+                if stage.stage_type == StageType::Sink =>
+            {
                 ensure!(
                     physical == ("summary_sink", RunJournalKind::Data),
-                    "delivery in unexpected physical journal {physical:?}"
+                    "sink call in unexpected physical journal {physical:?}"
                 );
-                self.receipts.push(receipt.clone());
+                self.sink_calls.push(SinkCall {
+                    effect_type: record.descriptor.effect_type.to_string(),
+                    succeeded: matches!(record.outcome, EffectOutcomePayload::Succeeded { .. }),
+                    input: row
+                        .envelope
+                        .provenance
+                        .event
+                        .causality
+                        .parent_ids
+                        .first()
+                        .copied(),
+                });
             }
             _ if projected.journal.kind == RunJournalKind::Error => {
                 bail!("unexpected non-business error in physical journal {physical:?}");
@@ -214,18 +234,14 @@ impl ArchiveCohorts {
             *summary_count == expected_successes,
             "incorrect summary count"
         );
-        let [receipt] = self.receipts.as_slice() else {
-            bail!("expected exactly one delivery receipt");
+        let [call] = self.sink_calls.as_slice() else {
+            bail!("expected exactly one settled summary sink call");
         };
-        let summary = serde_json::from_value(json!({"event_count": expected_successes}))?;
-        let expected_bytes = format!("{}\n", super::support::format_summary(&summary)).len();
         ensure!(
-            matches!(receipt.result, DeliveryResult::Success { .. })
-                && receipt.delivery_method == DeliveryMethod::ConsoleStdout
-                && receipt.items_delivered == Some(1)
-                && receipt.bytes_processed == Some(expected_bytes as u64)
-                && receipt.subject.input == *summary_commitment,
-            "summary delivery did not successfully settle the recorded summary"
+            call.succeeded
+                && call.effect_type == "obzenflow.console.output"
+                && call.input == Some(summary_commitment.event_id),
+            "the summary sink's call did not successfully settle the recorded summary"
         );
         Ok(())
     }
@@ -362,7 +378,7 @@ pub(super) async fn inspect_archive(archive: &Path, count: u64) -> Result<Value>
     );
     cohorts.verify_complete(count)?;
     Ok(json!({
-        "measurement_contract": "complete-demo-outcomes-v1",
+        "measurement_contract": "complete-demo-outcomes-v2",
         "flow_id": identity.flow_id,
         "counts": {
             "expected_inputs": count,
@@ -371,7 +387,7 @@ pub(super) async fn inspect_archive(archive: &Path, count: u64) -> Result<Value>
             "transform_intended_errors": cohorts.errors.rows.len(),
             "source_poll_errors": cohorts.source_poll_errors,
             "summaries": cohorts.summaries.len(),
-            "successful_summary_receipts": cohorts.receipts.len(),
+            "settled_summary_calls": cohorts.sink_calls.len(),
             "projected_records": cohorts.projected_records
         }
     }))

@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload, EdgeLivenessState};
 use obzenflow_core::journal::Journal;
@@ -15,8 +14,7 @@ use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure,
-    TypedAsyncFiniteSourceHandler, TypedJoinHandler,
+    JoinReferenceView, TypedAsyncFiniteSourceHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -153,21 +151,7 @@ impl TypedJoinHandler for SlowJoin {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NoopSink;
-
-#[async_trait]
-impl InlineSink for NoopSink {
-    type Input = EnrichedRecord;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
-    }
-
-    async fn write(&mut self, _input: EnrichedRecord) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NoopSink = obzenflow_adapters::sinks::DiscardSink<EnrichedRecord>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
@@ -206,7 +190,7 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         let slow_join = SlowJoin {
             release: join_release,
         };
-        let noop_sink = NoopSink;
+        let noop_sink = NoopSink::new();
 
         Ok(flow! {
             name: "liveness_join_fan_in",

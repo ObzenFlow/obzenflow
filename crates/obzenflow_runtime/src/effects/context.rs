@@ -46,6 +46,14 @@ pub struct EffectContext {
     pub(super) input_seq: StageInputPosition,
     pub(super) ports: super::ports::EffectPortView,
     pub(super) transaction: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    pub(super) answers: Option<RecordedAnswers>,
+}
+
+#[derive(Clone)]
+pub(super) struct RecordedAnswers {
+    pub(super) history: Arc<EffectHistory>,
+    pub(super) effect_type: &'static str,
+    pub(super) cursor: EffectCursor,
 }
 
 impl EffectContext {
@@ -69,11 +77,30 @@ impl EffectContext {
             input_seq: StageInputPosition(input_seq),
             ports: super::ports::EffectPortView::default(),
             transaction: None,
+            answers: None,
         }
     }
 
     pub fn is_replaying(&self) -> bool {
         self.is_replaying
+    }
+
+    /// The reply this stage last recorded for this effect in the history the
+    /// run continues, or `None` for a new history. A system that keeps state
+    /// outside the journal, such as a file it appends to, reads it before its
+    /// first live write.
+    pub fn last_answer<T: DeserializeOwned>(&self) -> Result<Option<T>, EffectError> {
+        let Some(answers) = &self.answers else {
+            return Ok(None);
+        };
+        answers
+            .history
+            .last_reply_before(answers.effect_type, &answers.cursor)
+            .map(|reply| {
+                serde_json::from_value(reply.clone())
+                    .map_err(|error| EffectError::Serialization(error.to_string()))
+            })
+            .transpose()
     }
 
     pub fn flow_id(&self) -> FlowId {
@@ -136,7 +163,7 @@ impl EffectContext {
     ///
     /// ```
     /// # use async_trait::async_trait;
-    /// # use obzenflow_runtime::effects::{CallRequest, EffectCommitHandle, EffectContext, EffectError, Transactional};
+    /// # use obzenflow_runtime::effects::{CallRequest, DomainFacts, EffectCommitHandle, EffectContext, EffectError, Transactional};
     /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     /// # struct Entry;
     /// # impl obzenflow_core::TypedPayload for Entry { const EVENT_TYPE: &'static str = "docs.transaction.entry"; }
@@ -154,6 +181,7 @@ impl EffectContext {
     ///     type Safety = Transactional;
     ///     type Port = dyn LedgerPort;
     ///     type Outcome = Entry;
+    ///     type Records = DomainFacts;
     ///
     ///     async fn call(
     ///         &self,
@@ -170,7 +198,7 @@ impl EffectContext {
     ///
     /// ```compile_fail,E0271
     /// # use async_trait::async_trait;
-    /// # use obzenflow_runtime::effects::{CallRequest, EffectCommitHandle, EffectContext, EffectError, Idempotent};
+    /// # use obzenflow_runtime::effects::{CallRequest, DomainFacts, EffectCommitHandle, EffectContext, EffectError, Idempotent};
     /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     /// # struct Entry;
     /// # impl obzenflow_core::TypedPayload for Entry { const EVENT_TYPE: &'static str = "docs.transaction.entry"; }
@@ -186,6 +214,7 @@ impl EffectContext {
     ///     type Safety = Idempotent;
     ///     type Port = dyn LedgerPort;
     ///     type Outcome = Entry;
+    ///     type Records = DomainFacts;
     ///
     ///     async fn call(
     ///         &self,
