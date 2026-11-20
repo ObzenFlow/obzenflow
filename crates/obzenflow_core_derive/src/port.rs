@@ -6,7 +6,7 @@ use crate::effects_path::EffectsPath;
 use crate::system::name_error;
 use proc_macro2::{Span, TokenStream, TokenTree};
 use quote::{quote, quote_spanned, ToTokens};
-use syn::parse::{Parse, ParseStream};
+use syn::parse::{ParseStream, Parser};
 use syn::spanned::Spanned;
 use syn::{
     parse_quote, Attribute, FnArg, GenericParam, Generics, Ident, ImplItem, Item, ItemImpl,
@@ -59,15 +59,17 @@ const SYSTEM_ON_TRAIT: &str =
                                trait's systems name themselves with \
                                `#[obzenflow::system(\"…\")]` on their `impl` blocks";
 
-#[derive(Default)]
 struct PortArgs {
     effects: EffectsPath,
     system: Option<LitStr>,
 }
 
-impl Parse for PortArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let mut args = Self::default();
+impl PortArgs {
+    fn parse(input: ParseStream<'_>, effects: EffectsPath) -> syn::Result<Self> {
+        let mut args = Self {
+            effects,
+            system: None,
+        };
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             if key != "effects" && key != "system" {
@@ -75,7 +77,7 @@ impl Parse for PortArgs {
             }
             input.parse::<Token![=]>()?;
             if key == "effects" {
-                args.effects = EffectsPath::written(input.parse::<Path>()?);
+                args.effects = EffectsPath::Written(input.parse::<Path>()?);
             } else {
                 args.system = Some(input.parse::<LitStr>()?);
             }
@@ -87,8 +89,9 @@ impl Parse for PortArgs {
     }
 }
 
-pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = match syn::parse2::<PortArgs>(attr) {
+pub(crate) fn expand(attr: TokenStream, item: TokenStream, default: EffectsPath) -> TokenStream {
+    let parser = |input: ParseStream<'_>| PortArgs::parse(input, default);
+    let args = match parser.parse2(attr) {
         Ok(args) => args,
         Err(error) => return refused(item, error),
     };
@@ -876,7 +879,7 @@ mod tests {
     use super::*;
 
     fn expanded(item: Item) -> String {
-        expand_item(&PortArgs::default(), item).to_string()
+        expand(quote!(), item.to_token_stream(), EffectsPath::Facade).to_string()
     }
 
     #[test]
@@ -914,8 +917,12 @@ mod tests {
 
     #[test]
     fn system_arg_expands_system_name_impl() {
-        let expanded =
-            expand(quote!(system = "audit-ledger"), quote!(impl AuditLedger {})).to_string();
+        let expanded = expand(
+            quote!(system = "audit-ledger"),
+            quote!(impl AuditLedger {}),
+            EffectsPath::Facade,
+        )
+        .to_string();
         assert!(
             expanded.contains(
                 "SystemName for AuditLedger { const NAME : & 'static str = \"audit-ledger\" ; }"
@@ -926,8 +933,12 @@ mod tests {
 
     #[test]
     fn invalid_system_arg_refused() {
-        let expanded =
-            expand(quote!(system = "audit ledger"), quote!(impl AuditLedger {})).to_string();
+        let expanded = expand(
+            quote!(system = "audit ledger"),
+            quote!(impl AuditLedger {}),
+            EffectsPath::Facade,
+        )
+        .to_string();
         assert!(
             expanded.contains("a system name is 1 to 64 characters"),
             "{expanded}"
@@ -941,6 +952,7 @@ mod tests {
             quote!(
                 trait CardPort: Send + Sync {}
             ),
+            EffectsPath::Facade,
         )
         .to_string();
         assert!(expanded.contains("trait CardPort"), "{expanded}");
@@ -952,7 +964,12 @@ mod tests {
 
     #[test]
     fn unknown_args_refused() {
-        let expanded = expand(quote!(uses = Card), quote!(impl AuditLedger {})).to_string();
+        let expanded = expand(
+            quote!(uses = Card),
+            quote!(impl AuditLedger {}),
+            EffectsPath::Facade,
+        )
+        .to_string();
         assert!(
             expanded.contains("`#[obzenflow::port]` takes"),
             "{expanded}"

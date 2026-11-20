@@ -255,13 +255,13 @@ where
     /// #[derive(Clone, Debug, Serialize)]
     /// struct ChargeCardRequest;
     ///
-    /// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// #[obzenflow_runtime::effects::port]
     /// trait CardPort: Send + Sync {
     ///     #[effect(type = "docs.call.charge_card", exactly_once)]
     ///     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
     /// }
     ///
-    /// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    /// #[obzenflow_runtime::effects::command]
     /// #[derive(Clone, Debug)]
     /// struct Checkout {
     ///     #[port]
@@ -301,12 +301,12 @@ where
     /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.call.charged"; }
     /// # #[derive(Clone, Debug, Serialize)]
     /// # struct ChargeCardRequest;
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait CardPort: Send + Sync {
     /// #     #[effect(type = "docs.call.charge_card", exactly_once)]
     /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
     /// # }
-    /// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::command]
     /// # #[derive(Clone, Debug)]
     /// # struct Checkout { card: Port<dyn CardPort> }
     /// #[async_trait]
@@ -344,14 +344,14 @@ where
     /// # struct ChargeCardRequest;
     /// # #[derive(Clone, Debug, Serialize)]
     /// # struct RefundRequest;
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait CardPort: Send + Sync {
     /// #     #[effect(type = "docs.call.charge_card", exactly_once)]
     /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
     /// #     #[effect(type = "docs.call.refund", exactly_once)]
     /// #     fn refund(&self, request: &RefundRequest) -> Result<Charged, EffectError>;
     /// # }
-    /// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::command]
     /// # #[derive(Clone, Debug)]
     /// # struct Checkout { #[port(RefundRequest)] card: Port<dyn CardPort> }
     /// #[async_trait]
@@ -389,17 +389,17 @@ where
     /// # struct ChargeCardRequest;
     /// # #[derive(Clone, Debug, Serialize)]
     /// # struct RefundRequest;
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait CardPort: Send + Sync {
     /// #     #[effect(type = "docs.call.charge_card", exactly_once)]
     /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
     /// # }
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait RefundPort: Send + Sync {
     /// #     #[effect(type = "docs.call.refund", exactly_once)]
     /// #     fn refund(&self, request: &RefundRequest) -> Result<Charged, EffectError>;
     /// # }
-    /// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::command]
     /// # #[derive(Clone, Debug)]
     /// # struct Checkout { #[port] card: Port<dyn CardPort> }
     /// #[async_trait]
@@ -438,12 +438,12 @@ where
     /// # impl TypedPayload for Shipped { const EVENT_TYPE: &'static str = "docs.call.shipped"; }
     /// # #[derive(Clone, Debug, Serialize)]
     /// # struct ChargeCardRequest;
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait CardPort: Send + Sync {
     /// #     #[effect(type = "docs.call.charge_card", exactly_once)]
     /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
     /// # }
-    /// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::command]
     /// # #[derive(Clone, Debug)]
     /// # struct Checkout { #[port] card: Port<dyn CardPort> }
     /// #[async_trait]
@@ -474,7 +474,7 @@ where
     /// # #[derive(Clone, Debug, Serialize, Deserialize)]
     /// # struct Order;
     /// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "docs.call.order"; }
-    /// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::command]
     /// # #[derive(Clone, Debug)]
     /// # struct Stamper;
     /// #[async_trait]

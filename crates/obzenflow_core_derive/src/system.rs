@@ -5,7 +5,7 @@
 use crate::effects_path::EffectsPath;
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::parse::{Parse, ParseStream};
+use syn::parse::{ParseStream, Parser};
 use syn::{Ident, Item, ItemImpl, LitStr, Path, Token};
 
 const ARGUMENTS: &str =
@@ -24,19 +24,18 @@ struct SystemArgs {
     effects: EffectsPath,
 }
 
-impl Parse for SystemArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+impl SystemArgs {
+    fn parse(input: ParseStream<'_>, mut effects: EffectsPath) -> syn::Result<Self> {
         let Ok(name) = input.parse::<LitStr>() else {
             return Err(syn::Error::new(input.span(), ARGUMENTS));
         };
-        let mut effects = EffectsPath::default();
         if input.parse::<Option<Token![,]>>()?.is_some() && !input.is_empty() {
             let key: Ident = input.parse()?;
             if key != "effects" {
                 return Err(syn::Error::new(key.span(), ARGUMENTS));
             }
             input.parse::<Token![=]>()?;
-            effects = EffectsPath::written(input.parse::<Path>()?);
+            effects = EffectsPath::Written(input.parse::<Path>()?);
         }
         if !input.is_empty() {
             return Err(input.error(ARGUMENTS));
@@ -57,8 +56,9 @@ pub(crate) fn name_error(name: &LitStr) -> Option<syn::Error> {
     (!within_grammar).then(|| syn::Error::new(name.span(), NAME_GRAMMAR))
 }
 
-pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = match syn::parse2::<SystemArgs>(attr) {
+pub(crate) fn expand(attr: TokenStream, item: TokenStream, default: EffectsPath) -> TokenStream {
+    let parser = |input: ParseStream<'_>| SystemArgs::parse(input, default);
+    let args = match parser.parse2(attr) {
         Ok(args) => args,
         Err(error) => return refused(item, error),
     };
@@ -109,7 +109,7 @@ mod tests {
     use super::*;
 
     fn expanded(attr: TokenStream, item: TokenStream) -> String {
-        expand(attr, item).to_string()
+        expand(attr, item, EffectsPath::Facade).to_string()
     }
 
     #[test]
@@ -150,15 +150,35 @@ mod tests {
     }
 
     #[test]
-    fn effects_path_override() {
-        let expanded = expanded(
-            quote!("ledger", effects = crate::effects),
+    fn system_runtime_default_expands_runtime_path() {
+        let expanded = expand(
+            quote!("ledger"),
             quote!(impl LedgerPort for Ledger {}),
+            EffectsPath::Runtime,
         );
-        assert!(
-            expanded.contains("crate :: effects :: SystemName for Ledger"),
-            "{expanded}"
-        );
+        let expected = quote! {
+            impl LedgerPort for Ledger {}
+            impl ::obzenflow_runtime::effects::SystemName for Ledger {
+                const NAME: &'static str = "ledger";
+            }
+        };
+        assert_eq!(expanded.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn effects_path_override() {
+        for default in [EffectsPath::Facade, EffectsPath::Runtime] {
+            let expanded = expand(
+                quote!("ledger", effects = crate::effects),
+                quote!(impl LedgerPort for Ledger {}),
+                default,
+            )
+            .to_string();
+            assert!(
+                expanded.contains("crate :: effects :: SystemName for Ledger"),
+                "{expanded}"
+            );
+        }
     }
 
     #[test]

@@ -1169,7 +1169,7 @@ impl Effect for FailingEffect {
     }
 }
 
-#[crate::effects::port(effects = crate::effects)]
+#[crate::effects::port]
 #[async_trait]
 trait TransactionalLedger: Send + Sync {
     async fn write(
@@ -1219,7 +1219,7 @@ impl CallRequests for EffectsCore {
     }
 }
 
-#[crate::effects::command(effects = crate::effects)]
+#[crate::effects::command]
 #[derive(Clone, Debug)]
 struct TransactionalBoundaryStateful {
     #[port(TransactionalCounting)]
@@ -1452,7 +1452,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTransla
     }
 }
 
-#[crate::effects::command(effects = crate::effects)]
+#[crate::effects::command]
 #[derive(Clone, Debug)]
 struct EmitThenErrorStateful;
 
@@ -1495,7 +1495,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for EmitThenError
     }
 }
 
-#[crate::effects::command(effects = crate::effects)]
+#[crate::effects::command]
 #[derive(Clone, Debug)]
 struct SingleFactErrorStateful {
     emit: bool,
@@ -1533,7 +1533,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SingleFactErr
     }
 }
 
-#[crate::effects::command(effects = crate::effects)]
+#[crate::effects::command]
 #[derive(Clone, Debug)]
 struct SecondFactApplyErrorStateful;
 
@@ -1755,7 +1755,7 @@ fn registry_with_binding<E: NamedEffect>(binding: &EffectBinding<E>) -> EffectPo
     EffectPortRegistry::collect_from_declarations([&declaration]).unwrap()
 }
 
-#[crate::effects::system("tx", effects = crate::effects)]
+#[crate::effects::system("tx")]
 #[async_trait]
 impl TransactionalLedger for TransactionalCountingPort {
     async fn write(
@@ -1781,7 +1781,7 @@ struct DivergentTransactionalPort {
     calls: Arc<AtomicUsize>,
 }
 
-#[crate::effects::system("tx", effects = crate::effects)]
+#[crate::effects::system("tx")]
 #[async_trait]
 impl TransactionalLedger for DivergentTransactionalPort {
     async fn write(
@@ -1807,7 +1807,7 @@ struct CommittedFailureTransactionalPort {
     calls: Arc<AtomicUsize>,
 }
 
-#[crate::effects::system("tx", effects = crate::effects)]
+#[crate::effects::system("tx")]
 #[async_trait]
 impl TransactionalLedger for CommittedFailureTransactionalPort {
     async fn write(

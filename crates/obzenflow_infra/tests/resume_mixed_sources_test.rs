@@ -210,7 +210,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "call-counter", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "call-counter")]
 impl CallCounter {
     #[effect(type = "resume_mixed.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<EffectValue, EffectError> {
@@ -221,7 +221,7 @@ impl CallCounter {
     }
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct EffectfulTail {
     #[port]
@@ -1553,7 +1553,7 @@ async fn committed_offsets(run: &Path) -> Vec<u64> {
 #[derive(Clone, Debug, Serialize)]
 struct CountOrder;
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 #[async_trait]
 trait DelayedCountPort {
     #[effect(type = "test.resume_mixed.count_order", at_least_once, records = reply)]
@@ -1567,7 +1567,7 @@ struct DelayedCount {
     delay: Duration,
 }
 
-#[obzenflow_runtime::effects::system("delayed-count", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("delayed-count")]
 #[async_trait]
 impl DelayedCountPort for DelayedCount {
     async fn count(&self, _: &CountOrder) -> Result<(), EffectError> {

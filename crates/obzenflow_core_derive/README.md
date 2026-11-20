@@ -38,10 +38,10 @@ facade dependency needs no attribute.
 ## Compiler integration
 
 Core's `outcome!` passes its own path to the list macro, so a list expands the same under
-any dependency name. The command, system and port attributes expand to paths under
-`::obzenflow::effects`, and code that depends on the runtime crate directly names the
-module with `effects = <path>`. The compiler crate has no dependency on the facade or
-other ObzenFlow workspace crates.
+any dependency name. The command, system and port attributes resolve through
+`::obzenflow::effects` when imported from the facade and `::obzenflow_runtime::effects`
+when imported from Runtime. A renamed dependency supplies `effects = <path>`. The
+compiler crate has no dependency on the facade or other ObzenFlow workspace crates.
 
 ## License
 

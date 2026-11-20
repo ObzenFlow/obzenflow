@@ -138,7 +138,7 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command]
     #[derive(Clone, Debug)]
     struct FxTr;
     #[async_trait]
@@ -158,7 +158,7 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command]
     #[derive(Clone, Debug)]
     struct TxFxTr {
         #[port]
@@ -196,7 +196,7 @@ mod tests {
         fn post_emit(&self, _: &mut Self::State) {}
     }
 
-    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command]
     #[derive(Clone, Debug)]
     struct FxSt;
     #[async_trait]
@@ -230,7 +230,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct PolicyRequest;
 
-    #[obzenflow_runtime::effects::port(system = "policy", effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::port(system = "policy")]
     impl PolicyPort {
         #[effect(type = "test.stateful_policy_effect", at_most_once)]
         fn apply(&self, _: &PolicyRequest) -> Result<Out, EffectError> {
@@ -238,7 +238,7 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command]
     #[derive(Clone, Debug)]
     struct FxPolicySt {
         #[port]
@@ -314,7 +314,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct TxRequest;
 
-    #[obzenflow_runtime::effects::port(system = "tx", effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::port(system = "tx")]
     impl TxPort {
         #[effect(type = "test.tx_effect", exactly_once)]
         async fn post(

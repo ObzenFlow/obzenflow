@@ -75,7 +75,7 @@ impl TypedFiniteSourceHandler for TwoEventSource {
     }
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct SlowAiTransform {
     calls: Arc<AtomicUsize>,

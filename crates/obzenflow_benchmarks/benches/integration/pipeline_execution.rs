@@ -102,7 +102,7 @@ struct DeliveryLog {
     delivered: Arc<Mutex<Vec<u64>>>,
 }
 
-#[obzenflow_runtime::effects::port(system = "delivery-log", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "delivery-log")]
 impl DeliveryLog {
     #[effect(type = "bench.pipeline.deliver", at_least_once, records = reply)]
     fn deliver(&self, delivered: &Delivered) -> Result<(), EffectError> {

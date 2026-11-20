@@ -12,7 +12,7 @@ use obzenflow_core::SystemBindingEvidence;
 #[error("the ledger refused the write")]
 struct LedgerRefused;
 
-#[crate::effects::port(effects = crate::effects)]
+#[crate::effects::port]
 #[async_trait]
 trait LedgerPort: Send + Sync {
     async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError>;
@@ -22,7 +22,7 @@ struct CountingLedger {
     calls: Arc<AtomicUsize>,
 }
 
-#[crate::effects::system("simulated-ledger", effects = crate::effects)]
+#[crate::effects::system("simulated-ledger")]
 #[async_trait]
 impl LedgerPort for CountingLedger {
     async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError> {
@@ -33,7 +33,7 @@ impl LedgerPort for CountingLedger {
 
 struct RefusingLedger;
 
-#[crate::effects::system("ledger-outage", effects = crate::effects)]
+#[crate::effects::system("ledger-outage")]
 #[async_trait]
 impl LedgerPort for RefusingLedger {
     async fn write(&self, _: u64) -> Result<LedgerWritten, EffectError> {
@@ -431,7 +431,7 @@ struct UnkeyedWrite {
     value: u64,
 }
 
-#[crate::effects::port(system = "keyed-ledger", effects = crate::effects)]
+#[crate::effects::port(system = "keyed-ledger")]
 impl KeyedLedger {
     #[effect(type = "test.keyed_write", exactly_once)]
     fn keyed(
@@ -721,7 +721,7 @@ struct SinkWrite {
 
 struct CountWrites(Arc<AtomicUsize>);
 
-#[crate::effects::port(system = "count-writes", effects = crate::effects)]
+#[crate::effects::port(system = "count-writes")]
 impl CountWrites {
     #[effect(type = "test.sink_write", at_least_once, records = reply)]
     fn write(&self, _: &SinkWrite) -> Result<(), EffectError> {
@@ -808,7 +808,7 @@ struct RefusedWrite {
 
 struct RefuseAfterFirst(Arc<AtomicUsize>);
 
-#[crate::effects::port(system = "refuse-after-first", effects = crate::effects)]
+#[crate::effects::port(system = "refuse-after-first")]
 impl RefuseAfterFirst {
     #[effect(type = "test.refused_write", at_least_once, records = reply)]
     fn write(&self, _: &RefusedWrite) -> Result<(), EffectError> {

@@ -321,7 +321,7 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command]
     #[derive(Clone, Debug)]
     struct EffectfulExactTransform;
 
@@ -342,7 +342,7 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command]
     #[derive(Clone, Debug)]
     struct EffectfulMultiOutputTransform;
 
@@ -406,7 +406,7 @@ mod tests {
         fn post_emit(&self, _: &mut Self::State) {}
     }
 
-    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command]
     #[derive(Clone, Debug)]
     struct EffectfulProductStateful;
 
@@ -438,7 +438,7 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::command]
     #[derive(Clone, Debug)]
     struct EffectfulExactStateful;
 
@@ -793,7 +793,7 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::port]
     trait VerdictPort {
         #[effect(type = "test.typed.verdict", exactly_once)]
         fn verdict(
@@ -804,7 +804,7 @@ mod tests {
 
     struct Verdicts;
 
-    #[obzenflow_runtime::effects::system("verdicts", effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::system("verdicts")]
     impl VerdictPort for Verdicts {
         fn verdict(
             &self,

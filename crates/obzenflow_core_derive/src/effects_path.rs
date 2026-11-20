@@ -6,18 +6,18 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Path;
 
-#[derive(Default)]
-pub(crate) struct EffectsPath(Option<Path>);
+pub(crate) enum EffectsPath {
+    Facade,
+    Runtime,
+    Written(Path),
+}
 
 impl EffectsPath {
-    pub(crate) fn written(path: Path) -> Self {
-        Self(Some(path))
-    }
-
     pub(crate) fn tokens(&self) -> TokenStream {
-        match &self.0 {
-            Some(path) => quote!(#path),
-            None => quote!(::obzenflow::effects),
+        match self {
+            Self::Facade => quote!(::obzenflow::effects),
+            Self::Runtime => quote!(::obzenflow_runtime::effects),
+            Self::Written(path) => quote!(#path),
         }
     }
 }

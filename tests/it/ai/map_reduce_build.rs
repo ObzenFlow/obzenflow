@@ -152,7 +152,7 @@ impl TypedFiniteSourceHandler for ItemSource {
     }
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait CollectOutPort: Send + Sync {
     #[effect(type = "regression.amr.collect", at_least_once, records = reply)]
     fn collect(&self, out: &BuildOnlyOut) -> Result<(), EffectError>;
@@ -162,7 +162,7 @@ struct Collect {
     rows: Arc<Mutex<Vec<BuildOnlyOut>>>,
 }
 
-#[obzenflow_runtime::effects::system("amr-collector", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("amr-collector")]
 impl CollectOutPort for Collect {
     fn collect(&self, out: &BuildOnlyOut) -> Result<(), EffectError> {
         self.rows.lock().expect("collected rows").push(out.clone());

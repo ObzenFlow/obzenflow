@@ -235,7 +235,7 @@ struct SeedKind {
     kind: String,
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait DoneCounterPort: Send + Sync {
     #[effect(type = "cycle_guard_fan_out.count_done", at_least_once, records = reply)]
     fn count(&self, seed: &SeedKind) -> Result<(), EffectError>;
@@ -245,7 +245,7 @@ struct DoneCounter {
     done_count: Arc<AtomicU64>,
 }
 
-#[obzenflow_runtime::effects::system("done-counter", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("done-counter")]
 impl DoneCounterPort for DoneCounter {
     fn count(&self, seed: &SeedKind) -> Result<(), EffectError> {
         if seed.kind == "done" {

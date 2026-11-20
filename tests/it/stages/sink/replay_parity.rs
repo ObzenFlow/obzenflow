@@ -111,7 +111,7 @@ struct StoreRecord {
     id: u64,
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait RecordStorePort: Send + Sync {
     #[effect(type = "sink_replay_parity.store", at_least_once, records = reply)]
     fn store(&self, request: &StoreRecord) -> Result<(), EffectError>;
@@ -121,7 +121,7 @@ struct RecordStore {
     calls: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::system("record-store", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("record-store")]
 impl RecordStorePort for RecordStore {
     fn store(&self, _: &StoreRecord) -> Result<(), EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);

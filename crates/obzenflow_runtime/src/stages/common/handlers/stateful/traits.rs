@@ -718,7 +718,7 @@ mod tests {
         );
     }
 
-    #[crate::effects::command(effects = crate::effects)]
+    #[crate::effects::command]
     #[derive(Clone, Debug)]
     struct DecideOnly;
 

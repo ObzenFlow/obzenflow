@@ -6,7 +6,9 @@
 
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{Command, DeclaredEffectSet, EffectError, Port, SinkRole};
+use obzenflow_runtime::effects::{
+    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkRole,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
 use std::marker::PhantomData;
@@ -18,7 +20,7 @@ pub struct Discarded;
 
 /// The port a discard sink sends through. Discarding twice changes nothing,
 /// so the method is `exactly_once`.
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[port]
 pub trait DiscardPort {
     #[effect(type = "obzenflow.discard.record", exactly_once, records = reply)]
     fn discard(&self, discarded: &Discarded) -> Result<(), EffectError>;
@@ -26,7 +28,7 @@ pub trait DiscardPort {
 
 struct Discard;
 
-#[obzenflow_runtime::effects::system("discard", effects = obzenflow_runtime::effects)]
+#[system("discard")]
 impl DiscardPort for Discard {
     fn discard(&self, _: &Discarded) -> Result<(), EffectError> {
         Ok(())

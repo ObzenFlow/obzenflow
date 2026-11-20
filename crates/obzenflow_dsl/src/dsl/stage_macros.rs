@@ -2787,14 +2787,14 @@ macro_rules! effectful_stateful {
 /// # struct FirstRequest;
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct SecondRequest;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait GroupPort: Send + Sync {
 /// #     #[effect(type = "group.first", exactly_once)]
 /// #     fn first(&self, request: &FirstRequest) -> Result<Fact, EffectError>;
 /// #     #[effect(type = "group.second", exactly_once)]
 /// #     fn second(&self, request: &SecondRequest) -> Result<Fact, EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command]
 /// # #[derive(Clone, Debug)]
 /// # struct Handler {
 /// #     #[port]
@@ -2823,7 +2823,7 @@ macro_rules! effectful_stateful {
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "row.fact"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct Notice;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait NoticePort {
 /// #     #[effect(type = "row.notice", at_most_once)]
 /// #     fn notify(&self, _: &Notice) -> Result<Fact, EffectError>;
@@ -2847,12 +2847,12 @@ macro_rules! effectful_stateful {
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "group.fact"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct FirstRequest;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait GroupPort: Send + Sync {
 /// #     #[effect(type = "group.first", exactly_once)]
 /// #     fn first(&self, request: &FirstRequest) -> Result<Fact, EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command]
 /// # #[derive(Clone, Debug)]
 /// # struct Handler {
 /// #     #[port]
@@ -2887,17 +2887,17 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # struct Card;
-/// # #[obzenflow_runtime::effects::system("card", effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::system("card")]
 /// # impl CardPort for Card { fn charge(&self, _: &ChargeCardRequest) -> Result<Charged, EffectError> { Ok(Charged) } }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// #[obzenflow_runtime::effects::command(through = CardPort, effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command(through = CardPort)]
 /// #[derive(Clone, Debug)]
 /// struct Checkout;
 ///
@@ -2938,13 +2938,13 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # impl ChargeCardRequest { fn for_order(_: &Order) -> Self { Self } }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # struct Card;
-/// # #[obzenflow_runtime::effects::system("card", effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::system("card")]
 /// # impl CardPort for Card { fn charge(&self, _: &ChargeCardRequest) -> Result<Charged, EffectError> { Ok(Charged) } }
 /// let charge = perform(ChargeCardRequest::for_order).through(Port::to(Card));
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => charge);
@@ -2966,7 +2966,7 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # impl ChargeCardRequest { fn for_order(_: &Order) -> Self { Self } }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
@@ -2991,14 +2991,14 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct Checkout {
 ///     card: Port<dyn CardPort>,
@@ -3033,16 +3033,16 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait LedgerPort: Send + Sync {}
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct Checkout {
 ///     #[port]
@@ -3080,14 +3080,14 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct Checkout {
 ///     #[port]
@@ -3127,14 +3127,14 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command]
 /// # #[derive(Clone, Debug)]
 /// # struct Checkout {
 /// #     #[port]
@@ -3167,14 +3167,14 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command]
 /// # #[derive(Clone, Debug)]
 /// # struct Checkout {
 /// #     #[port]
@@ -3207,14 +3207,14 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command]
 /// # #[derive(Clone, Debug)]
 /// # struct Checkout {
 /// #     #[port]
@@ -3251,12 +3251,12 @@ macro_rules! effectful_stateful {
 /// # impl TypedPayload for Posted { const EVENT_TYPE: &'static str = "row_doc.posted"; }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct LedgerPosting;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait LedgerPort: Send + Sync {
 /// #     #[effect(type = "row_doc.post", exactly_once)]
 /// #     fn post(&self, request: &LedgerPosting, tx: EffectCommitHandle<Posted>) -> Result<Posted, EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command]
 /// # #[derive(Clone, Debug)]
 /// # struct Post {
 /// #     #[port]
@@ -3290,14 +3290,14 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command]
 /// # #[derive(Clone, Debug)]
 /// # struct Checkout {
 /// #     #[port]
@@ -3330,14 +3330,14 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CardPort: Send + Sync {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
-/// # #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::command]
 /// # #[derive(Clone, Debug)]
 /// # struct Checkout {
 /// #     #[port]
@@ -4033,7 +4033,7 @@ macro_rules! join {
 /// #[derive(Clone, Debug, serde::Serialize)]
 /// struct Entry;
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait LedgerPort {
 ///     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 ///     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
@@ -4041,7 +4041,7 @@ macro_rules! join {
 ///
 /// struct Ledger;
 ///
-/// #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::system("ledger")]
 /// impl LedgerPort for Ledger {
 ///     fn record(&self, _: &Entry) -> Result<(), EffectError> {
 ///         Ok(())
@@ -4065,7 +4065,7 @@ macro_rules! join {
 /// #[derive(Clone, Debug, serde::Serialize)]
 /// struct Entry;
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait LedgerPort {
 ///     #[effect(type = "sink_doc.record", exactly_once)]
 ///     fn record(&self, entry: &Entry) -> Result<Recorded, EffectError>;
@@ -4073,7 +4073,7 @@ macro_rules! join {
 ///
 /// struct Ledger;
 ///
-/// #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::system("ledger")]
 /// impl LedgerPort for Ledger {
 ///     fn record(&self, _: &Entry) -> Result<Recorded, EffectError> {
 ///         Ok(Recorded)
@@ -4104,13 +4104,13 @@ macro_rules! join {
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct Entry;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait LedgerPort {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
 /// # struct Ledger;
-/// # #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::system("ledger")]
 /// # impl LedgerPort for Ledger {
 /// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
 /// # }
@@ -4125,13 +4125,13 @@ macro_rules! join {
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct Entry;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait LedgerPort {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
 /// # struct Ledger;
-/// # #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::system("ledger")]
 /// # impl LedgerPort for Ledger {
 /// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
 /// # }
@@ -4148,13 +4148,13 @@ macro_rules! join {
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct Entry;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait LedgerPort {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
 /// # struct Ledger;
-/// # #[obzenflow_runtime::effects::system("ledger", effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::system("ledger")]
 /// # impl LedgerPort for Ledger {
 /// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
 /// # }
@@ -4174,12 +4174,12 @@ macro_rules! join {
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct Entry;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait LedgerPort {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct RecordEntry {
 ///     #[port]

@@ -231,7 +231,7 @@ impl TypedFiniteSourceHandler for ItemSource {
     }
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait CollectOutPort: Send + Sync {
     #[effect(type = "hn_digest_fixture.collect", at_least_once, records = reply)]
     fn collect(&self, output: &DigestOut) -> Result<(), EffectError>;
@@ -241,7 +241,7 @@ struct CollectOut {
     outputs: Arc<Mutex<Vec<DigestOut>>>,
 }
 
-#[obzenflow_runtime::effects::system("digest-collector", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("digest-collector")]
 impl CollectOutPort for CollectOut {
     fn collect(&self, output: &DigestOut) -> Result<(), EffectError> {
         self.outputs

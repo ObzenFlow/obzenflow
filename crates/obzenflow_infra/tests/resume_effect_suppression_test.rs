@@ -118,7 +118,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "call-counter", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "call-counter")]
 impl CallCounter {
     #[effect(type = "resume_effects.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<EffectValue, EffectError> {
@@ -129,7 +129,7 @@ impl CallCounter {
     }
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct EnrichTransform {
     #[port]

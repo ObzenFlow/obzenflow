@@ -9,7 +9,9 @@
 
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{Command, DeclaredEffectSet, EffectError, Port, SinkRole};
+use obzenflow_runtime::effects::{
+    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkRole,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
 use serde_json::Value;
@@ -26,7 +28,7 @@ pub struct RecordedInput {
 
 /// The port a recording sink sends through. Keeping an input twice changes
 /// what a test reads, so the method is `at_least_once`.
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[port]
 pub trait RecordingPort {
     #[effect(type = "obzenflow.testing.record", at_least_once, records = reply)]
     fn record(&self, input: &RecordedInput) -> Result<(), EffectError>;
@@ -37,7 +39,7 @@ struct Recorder {
     arrived: Arc<Notify>,
 }
 
-#[obzenflow_runtime::effects::system("recording", effects = obzenflow_runtime::effects)]
+#[system("recording")]
 impl RecordingPort for Recorder {
     fn record(&self, input: &RecordedInput) -> Result<(), EffectError> {
         self.rows
@@ -179,7 +181,7 @@ pub struct Counted;
 
 /// The port a counting sink sends through. Counting an input twice changes
 /// what a test reads, so the method is `at_least_once`.
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[port]
 pub trait CountingPort {
     #[effect(type = "obzenflow.testing.count", at_least_once, records = reply)]
     fn count(&self, counted: &Counted) -> Result<(), EffectError>;
@@ -204,7 +206,7 @@ impl CallCounter for AtomicU64 {
 
 struct Counter(Arc<dyn CallCounter>);
 
-#[obzenflow_runtime::effects::system("counting", effects = obzenflow_runtime::effects)]
+#[system("counting")]
 impl CountingPort for Counter {
     fn count(&self, _: &Counted) -> Result<(), EffectError> {
         self.0.add_one();

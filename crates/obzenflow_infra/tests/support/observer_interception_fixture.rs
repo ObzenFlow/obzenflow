@@ -144,7 +144,7 @@ struct AuthoriseShippingRequest {
     order_id: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "shipping-desk", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "shipping-desk")]
 impl ShippingDesk {
     #[effect(type = "shipping.authorise", exactly_once)]
     fn authorise(
@@ -159,7 +159,7 @@ impl ShippingDesk {
     }
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct AuthoriseShipping {
     #[port]
@@ -202,7 +202,7 @@ struct ShippingHandoff {
     writes: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::port(system = "shipping-handoff", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "shipping-handoff")]
 impl ShippingHandoff {
     #[effect(type = "shipping.hand_off", at_least_once, records = reply)]
     fn hand_off(&self, request: &HandOffRequest) -> Result<(), EffectError> {

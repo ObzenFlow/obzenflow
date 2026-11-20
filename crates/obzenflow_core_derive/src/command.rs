@@ -6,7 +6,7 @@ use crate::effects_path::EffectsPath;
 use proc_macro2::{Group, Span, TokenStream, TokenTree};
 use quote::{format_ident, quote, ToTokens};
 use syn::ext::IdentExt;
-use syn::parse::{Parse, ParseStream};
+use syn::parse::{ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{
@@ -32,10 +32,9 @@ struct CommandArgs {
     effects: EffectsPath,
 }
 
-impl Parse for CommandArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+impl CommandArgs {
+    fn parse(input: ParseStream<'_>, mut effects: EffectsPath) -> syn::Result<Self> {
         let mut through = None;
-        let mut effects = EffectsPath::default();
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             if key != "through" && key != "effects" {
@@ -43,7 +42,7 @@ impl Parse for CommandArgs {
             }
             input.parse::<Token![=]>()?;
             if key == "effects" {
-                effects = EffectsPath::written(input.parse::<Path>()?);
+                effects = EffectsPath::Written(input.parse::<Path>()?);
             } else if input.peek(token::Paren) {
                 let ports: TokenTree = input.parse()?;
                 return Err(syn::Error::new(ports.span(), THROUGH_ONE));
@@ -64,8 +63,9 @@ struct HeldPort {
     listed: Option<Vec<Type>>,
 }
 
-pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = match syn::parse2::<CommandArgs>(attr) {
+pub(crate) fn expand(attr: TokenStream, item: TokenStream, default: EffectsPath) -> TokenStream {
+    let parser = |input: ParseStream<'_>| CommandArgs::parse(input, default);
+    let args = match parser.parse2(attr) {
         Ok(args) => args,
         Err(error) => return refused(item, error),
     };
@@ -390,7 +390,7 @@ mod tests {
     use super::*;
 
     fn expanded(attr: TokenStream, item: TokenStream) -> String {
-        expand(attr, item).to_string()
+        expand(attr, item, EffectsPath::Facade).to_string()
     }
 
     #[test]

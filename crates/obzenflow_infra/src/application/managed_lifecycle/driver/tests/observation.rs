@@ -76,7 +76,7 @@ impl TypedAsyncInfiniteSourceHandler for PendingSource {
 #[derive(Clone, Debug, serde::Serialize)]
 struct Hold;
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 #[async_trait::async_trait]
 trait HoldPort {
     #[effect(type = "test.observation_hold", at_least_once, records = reply)]
@@ -90,7 +90,7 @@ struct CountingSink {
     released: Arc<Notify>,
 }
 
-#[obzenflow_runtime::effects::system("holding", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("holding")]
 #[async_trait::async_trait]
 impl HoldPort for CountingSink {
     async fn hold(&self, _: &Hold) -> Result<(), EffectError> {

@@ -64,7 +64,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct FixtureRequest;
 
-    #[obzenflow_runtime::effects::port(system = "fixture", effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::port(system = "fixture")]
     impl FixturePort {
         #[effect(type = "test.fixture_effect", exactly_once)]
         fn fixture(&self, _: &FixtureRequest) -> Result<MidP, EffectError> {

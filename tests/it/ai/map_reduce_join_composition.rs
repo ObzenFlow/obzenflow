@@ -306,7 +306,7 @@ impl AiRole<SeedValue> for TriageRole {
     }
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait CollectRowsPort: Send + Sync {
     #[effect(type = "ai_composition.collect_row", at_least_once, records = reply)]
     fn collect(&self, row: &Row) -> Result<(), EffectError>;
@@ -316,7 +316,7 @@ struct CollectRows {
     delivered: Arc<Mutex<Vec<Row>>>,
 }
 
-#[obzenflow_runtime::effects::system("row-collector", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("row-collector")]
 impl CollectRowsPort for CollectRows {
     fn collect(&self, row: &Row) -> Result<(), EffectError> {
         self.delivered.lock().unwrap().push(row.clone());
@@ -324,7 +324,7 @@ impl CollectRowsPort for CollectRows {
     }
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait CollectHeldPort: Send + Sync {
     #[effect(type = "ai_composition.collect_held", at_least_once, records = reply)]
     fn collect(&self, held: &HeldValue) -> Result<(), EffectError>;
@@ -334,7 +334,7 @@ struct CollectHeld {
     held: Arc<Mutex<Vec<HeldValue>>>,
 }
 
-#[obzenflow_runtime::effects::system("held-collector", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("held-collector")]
 impl CollectHeldPort for CollectHeld {
     fn collect(&self, held: &HeldValue) -> Result<(), EffectError> {
         self.held.lock().unwrap().push(held.clone());

@@ -15,6 +15,7 @@ mod outcome_list;
 mod port;
 mod system;
 
+use effects_path::EffectsPath;
 use proc_macro::TokenStream;
 
 /// Expand `$crate; A | (B, C)` to the nested outcome list type with its
@@ -41,12 +42,19 @@ pub fn sorted_outcomes(input: TokenStream) -> TokenStream {
 /// marks each with a `#[port]` field, and a command that works through no
 /// port has no such field.
 ///
-/// Generated code resolves `::obzenflow::effects`; code that depends on the
-/// runtime crate directly names its effects module with
-/// `#[command(effects = <path>)]`.
+/// The facade export resolves contracts through the facade's effects module.
+/// A renamed dependency can supply its module with `effects = <path>`.
 #[proc_macro_attribute]
 pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
-    command::expand(attr.into(), item.into()).into()
+    command::expand(attr.into(), item.into(), EffectsPath::Facade).into()
+}
+
+/// Declares the ports a command works through, using Runtime's effects module.
+/// See [`#[command]`](macro@command) for the supported forms.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn runtime_command(attr: TokenStream, item: TokenStream) -> TokenStream {
+    command::expand(attr.into(), item.into(), EffectsPath::Runtime).into()
 }
 
 /// Name a system on its `impl` of a port, as in
@@ -58,11 +66,19 @@ pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// itself once, on either `impl`. A struct that serves as its own port names
 /// itself with `#[port(system = "name")]` instead.
 ///
-/// Generated code resolves `::obzenflow::effects`; code that depends on the
-/// runtime crate directly writes `#[system("name", effects = <path>)]`.
+/// The facade export resolves contracts through the facade's effects module.
+/// A renamed dependency can supply its module with `effects = <path>`.
 #[proc_macro_attribute]
 pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
-    system::expand(attr.into(), item.into()).into()
+    system::expand(attr.into(), item.into(), EffectsPath::Facade).into()
+}
+
+/// Names the system implementing a port, using Runtime's effects module.
+/// See [`#[system]`](macro@system) for the supported forms.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn runtime_system(attr: TokenStream, item: TokenStream) -> TokenStream {
+    system::expand(attr.into(), item.into(), EffectsPath::Runtime).into()
 }
 
 /// Mark a port trait, or the inherent `impl` block of a struct that serves as
@@ -103,9 +119,17 @@ pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// A struct that serves as its own port is also its own system, and names itself
 /// here with `#[port(system = "name")]`.
 ///
-/// Generated code resolves `::obzenflow::effects`; code that depends on the
-/// runtime crate directly writes `#[port(effects = <path>)]`.
+/// The facade export resolves contracts through the facade's effects module.
+/// A renamed dependency can supply its module with `effects = <path>`.
 #[proc_macro_attribute]
 pub fn port(attr: TokenStream, item: TokenStream) -> TokenStream {
-    port::expand(attr.into(), item.into()).into()
+    port::expand(attr.into(), item.into(), EffectsPath::Facade).into()
+}
+
+/// Declares a port and its effects, using Runtime's effects module.
+/// See [`#[port]`](macro@port) for the supported forms.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn runtime_port(attr: TokenStream, item: TokenStream) -> TokenStream {
+    port::expand(attr.into(), item.into(), EffectsPath::Runtime).into()
 }

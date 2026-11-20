@@ -189,7 +189,7 @@ impl TypedPayload for TransactionProbeOutput {
     const EVENT_TYPE: &'static str = "test.transaction_probe_output";
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 #[async_trait]
 trait TransactionProbeLedger: Send + Sync {
     #[effect(type = "effect.retry", exactly_once)]
@@ -216,7 +216,7 @@ enum TransactionProbeMode {
     MissingCommit,
 }
 
-#[obzenflow_runtime::effects::system("tx", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("tx")]
 #[async_trait]
 impl TransactionProbeLedger for TransactionProbePort {
     async fn write(
@@ -304,7 +304,7 @@ async fn effect_context(
     (context, ledger)
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct TransactionProbeHandler {
     terminal_error: Arc<Mutex<Option<EffectError>>>,

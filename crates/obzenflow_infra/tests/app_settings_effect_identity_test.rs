@@ -178,7 +178,7 @@ struct ScoreRequest {
     threshold: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "scorer", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "scorer")]
 impl Scorer {
     #[effect(type = "app_identity.score", exactly_once)]
     fn score(&self, request: &ScoreRequest) -> Result<Score, EffectError> {
@@ -191,7 +191,7 @@ impl Scorer {
 
 const RESCORE_OFFSET: u64 = 1_000;
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct ScoreTransform {
     app: App,

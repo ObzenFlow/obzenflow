@@ -202,7 +202,7 @@ impl AiRole<TicketSummarised> for EmbedSummary {
     }
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait CollectEmbeddedPort: Send + Sync {
     #[effect(type = "standalone_ai_fixture.collect", at_least_once, records = reply)]
     fn collect(&self, output: &TicketEmbedded) -> Result<(), EffectError>;
@@ -212,7 +212,7 @@ struct CollectEmbedded {
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
 }
 
-#[obzenflow_runtime::effects::system("embedded-collector", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("embedded-collector")]
 impl CollectEmbeddedPort for CollectEmbedded {
     fn collect(&self, output: &TicketEmbedded) -> Result<(), EffectError> {
         self.outputs

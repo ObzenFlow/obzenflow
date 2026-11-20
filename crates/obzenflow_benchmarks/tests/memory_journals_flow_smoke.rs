@@ -61,7 +61,7 @@ struct CountingSink {
     received: Arc<AtomicU64>,
 }
 
-#[obzenflow_runtime::effects::port(system = "smoke-counter", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "smoke-counter")]
 impl CountingSink {
     #[effect(type = "bench.smoke.receive", at_least_once, records = reply)]
     fn receive(&self, _: &Received) -> Result<(), EffectError> {

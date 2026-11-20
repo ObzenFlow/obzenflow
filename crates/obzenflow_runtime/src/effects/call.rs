@@ -21,7 +21,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve")]
 ///     fn reserve(&self, request: &Reserve) -> Result<Reserved, EffectError>;
@@ -37,7 +37,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(exactly_once)]
 ///     fn reserve(&self, request: &Reserve) -> Result<Reserved, EffectError>;
@@ -53,7 +53,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, request: Reserve) -> Result<Reserved, EffectError>;
@@ -70,7 +70,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, request: &Reserve, count: u32) -> Result<Reserved, EffectError>;
@@ -87,7 +87,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Authorized;
 /// # impl obzenflow_core::TypedPayload for Authorized { const EVENT_TYPE: &'static str = "docs.authorized"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait GatewayPort: Send + Sync {
 ///     #[effect(type = "docs.authorize", at_least_once)]
 ///     fn authorize(&self, request: &Authorize, key: &IdempotencyKey) -> Result<Authorized, EffectError>;
@@ -103,7 +103,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Posted;
 /// # impl obzenflow_core::TypedPayload for Posted { const EVENT_TYPE: &'static str = "docs.posted"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait LedgerPort: Send + Sync {
 ///     #[effect(type = "docs.post", at_least_once)]
 ///     fn post(&self, request: &Post, tx: EffectCommitHandle<Posted>) -> Result<Posted, EffectError>;
@@ -119,7 +119,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Posted;
 /// # impl obzenflow_core::TypedPayload for Posted { const EVENT_TYPE: &'static str = "docs.posted"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait LedgerPort: Send + Sync {
 ///     #[effect(type = "docs.post", exactly_once)]
 ///     fn post(
@@ -140,7 +140,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, request: &Reserve) -> Result<Reserved, EffectError>;
@@ -160,7 +160,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, request: &Reserve) -> Result<Reserved, EffectError>;
@@ -187,7 +187,7 @@ use serde::Serialize;
 /// A struct port is marked on its inherent `impl` block, not on the struct:
 ///
 /// ```compile_fail
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// struct CallCounter;
 /// ```
 ///
@@ -201,7 +201,7 @@ use serde::Serialize;
 /// # trait WarehousePort: Send + Sync { fn reserve(&self) -> Result<Reserved, EffectError>; }
 /// struct Warehouse;
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// impl WarehousePort for Warehouse {
 ///     fn reserve(&self) -> Result<Reserved, EffectError> {
 ///         Ok(Reserved)
@@ -220,7 +220,7 @@ use serde::Serialize;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
 /// struct Counter<T>(T);
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// impl<T> Counter<T> {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, _: &Reserve) -> Result<Reserved, EffectError> {
@@ -242,7 +242,7 @@ use serde::Serialize;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
 /// struct CallCounter;
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// impl CallCounter {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, _: &Reserve) -> Result<Reserved, EffectError> {
@@ -250,7 +250,7 @@ use serde::Serialize;
 ///     }
 /// }
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// impl CallCounter {
 ///     #[effect(type = "docs.release", exactly_once)]
 ///     fn release(&self, _: &Release) -> Result<Reserved, EffectError> {
@@ -299,7 +299,7 @@ pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'stat
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Scored;
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.keyed.scored"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// #[async_trait]
 /// trait RiskEnginePort: Send + Sync {
 ///     #[effect(type = "docs.keyed.score", exactly_once)]
@@ -332,7 +332,7 @@ pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'stat
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.keyed.scored"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct ScoreRequest { txn_id: u64 }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// #[async_trait]
 /// trait RiskEnginePort: Send + Sync {
 ///     #[effect(type = "docs.keyed.score", exactly_once)]

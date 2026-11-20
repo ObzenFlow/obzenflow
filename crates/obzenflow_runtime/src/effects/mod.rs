@@ -116,7 +116,14 @@ pub use context::{
 pub(crate) use current_run::CurrentRunFailure;
 pub use current_run::CurrentRunHistory;
 pub use obzenflow_core::SystemBindingEvidence;
-pub use obzenflow_core_derive::{command, port, system};
+#[doc(inline)]
+pub use obzenflow_core_derive::{
+    runtime_command as command, runtime_port as port, runtime_system as system,
+};
+#[doc(hidden)]
+pub mod __facade {
+    pub use obzenflow_core_derive::{command, port, system};
+}
 #[doc(hidden)]
 pub use perform::PerformedRequest;
 pub use perform::{perform, Perform, PerformRequest};

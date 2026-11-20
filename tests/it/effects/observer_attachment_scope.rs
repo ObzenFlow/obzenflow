@@ -146,7 +146,7 @@ struct CountDeliveries {
     deliveries: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::port(system = "scope-delivery-counter", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "scope-delivery-counter")]
 impl CountDeliveries {
     #[effect(type = "effect_observer_scope.deliver", at_least_once, records = reply)]
     fn deliver(&self, _: &Delivered) -> Result<(), EffectError> {

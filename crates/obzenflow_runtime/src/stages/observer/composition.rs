@@ -1084,7 +1084,7 @@ mod tests {
     #[derive(Clone, Debug, serde::Serialize)]
     struct DeclaredRequestB;
 
-    #[crate::effects::port(system = "fixture", effects = crate::effects)]
+    #[crate::effects::port(system = "fixture")]
     impl FixturePort {
         #[effect(type = "effect.a", exactly_once)]
         fn declared_a(&self, _: &DeclaredRequestA) -> Result<FixtureFact, EffectError> {

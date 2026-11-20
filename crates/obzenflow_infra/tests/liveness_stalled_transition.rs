@@ -65,7 +65,7 @@ impl TypedFiniteSourceHandler for OneEventSource {
     }
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct StallingTransform;
 

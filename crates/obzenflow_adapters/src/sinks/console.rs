@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
-    Command, DeclaredEffectSet, EffectContext, EffectError, Port, SinkBatchDefaults,
+    port, system, Command, DeclaredEffectSet, EffectContext, EffectError, Port, SinkBatchDefaults,
     SinkGroupSystem, SinkRole,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -515,7 +515,7 @@ fn is_wide(code: u32) -> bool {
 
 /// The port a console sink writes through. A console line that a crash left
 /// in doubt may print again after a resume, so the method is `at_least_once`.
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[port]
 #[async_trait]
 pub trait ConsolePort {
     #[effect(type = "obzenflow.console.output", at_least_once, records = reply)]
@@ -524,7 +524,7 @@ pub trait ConsolePort {
 
 struct Stdout;
 
-#[obzenflow_runtime::effects::system("console", effects = obzenflow_runtime::effects)]
+#[system("console")]
 #[async_trait]
 impl ConsolePort for Stdout {
     async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError> {
@@ -534,7 +534,7 @@ impl ConsolePort for Stdout {
 
 struct Stderr;
 
-#[obzenflow_runtime::effects::system("console-stderr", effects = obzenflow_runtime::effects)]
+#[system("console-stderr")]
 #[async_trait]
 impl ConsolePort for Stderr {
     async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError> {
@@ -657,7 +657,7 @@ pub struct TableRow {
     pub cells: Vec<String>,
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[port]
 #[async_trait]
 pub trait ConsoleTablePort {
     /// Write the cells from one input. The built-in table system renders a whole group together.
@@ -671,7 +671,7 @@ struct ConsoleTable {
     destination: OutputDestination,
 }
 
-#[obzenflow_runtime::effects::system("console-table", effects = obzenflow_runtime::effects)]
+#[system("console-table")]
 #[async_trait]
 impl ConsoleTablePort for ConsoleTable {
     async fn write_row(&self, row: &TableRow, ctx: &EffectContext) -> Result<(), EffectError> {
@@ -815,7 +815,7 @@ mod tests {
 
     struct Captured(Arc<Mutex<Vec<ConsoleOutput>>>);
 
-    #[obzenflow_runtime::effects::system("captured-console", effects = obzenflow_runtime::effects)]
+    #[system("captured-console")]
     #[async_trait]
     impl ConsolePort for Captured {
         async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError> {

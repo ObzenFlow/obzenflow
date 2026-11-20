@@ -289,7 +289,7 @@ struct Product {
     value: u64,
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait CollectOutputPort: Send + Sync {
     #[effect(type = "effect_replay.collect", at_least_once, records = reply)]
     fn collect(&self, output: &ReplayOutput) -> Result<(), EffectError>;
@@ -299,7 +299,7 @@ struct CollectSink {
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 }
 
-#[obzenflow_runtime::effects::system("replay-output-collector", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("replay-output-collector")]
 impl CollectOutputPort for CollectSink {
     fn collect(&self, output: &ReplayOutput) -> Result<(), EffectError> {
         self.outputs

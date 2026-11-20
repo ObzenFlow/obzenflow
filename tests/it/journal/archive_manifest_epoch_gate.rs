@@ -27,7 +27,7 @@ impl TypedPayload for Input {
 #[derive(Clone, Debug, Serialize)]
 struct Record;
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait ArchiveGatePort: Send + Sync {
     #[effect(type = "archive_gate.record", at_least_once, records = reply)]
     fn record(&self, request: &Record) -> Result<(), EffectError>;
@@ -35,7 +35,7 @@ trait ArchiveGatePort: Send + Sync {
 
 struct ArchiveGateDestination;
 
-#[obzenflow_runtime::effects::system("archive-gate", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("archive-gate")]
 impl ArchiveGatePort for ArchiveGateDestination {
     fn record(&self, _: &Record) -> Result<(), EffectError> {
         Ok(())

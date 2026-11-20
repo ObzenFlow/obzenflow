@@ -83,7 +83,7 @@ struct Recorder {
     delivered: Delivered,
     constrained: bool,
 }
-#[obzenflow_runtime::effects::port(system = "throughput-recorder", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "throughput-recorder")]
 impl Recorder {
     #[effect(type = "bench.throughput.record", at_least_once, records = reply)]
     async fn record(&self, event: &Input) -> Result<(), EffectError> {
@@ -253,7 +253,7 @@ struct Ledger;
 struct Settle {
     index: u64,
 }
-#[obzenflow_runtime::effects::port(system = "ledger", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "ledger")]
 impl Ledger {
     #[effect(type = "bench.settle", exactly_once)]
     fn settle(&self, request: &Settle) -> Result<Settled, EffectError> {
@@ -262,7 +262,7 @@ impl Ledger {
         })
     }
 }
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct SettleEach {
     #[port]
@@ -286,7 +286,7 @@ impl EffectfulTransformHandler for SettleEach {
 struct SettledLog {
     settled: Arc<Mutex<Vec<u64>>>,
 }
-#[obzenflow_runtime::effects::port(system = "settled-log", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "settled-log")]
 impl SettledLog {
     #[effect(type = "bench.throughput.settled", at_least_once, records = reply)]
     fn record(&self, event: &Settled) -> Result<(), EffectError> {

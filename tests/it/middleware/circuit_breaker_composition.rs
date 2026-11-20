@@ -196,7 +196,7 @@ impl EffectfulTransformHandler for RetryTransform {
     }
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait CollectOutputPort: Send + Sync {
     #[effect(type = "cb_composition.collect", at_least_once, records = reply)]
     fn collect(&self, output: &CompOutput) -> Result<(), EffectError>;
@@ -206,7 +206,7 @@ struct CollectSink {
     outputs: Arc<Mutex<Vec<CompOutput>>>,
 }
 
-#[obzenflow_runtime::effects::system("composition-collector", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("composition-collector")]
 impl CollectOutputPort for CollectSink {
     fn collect(&self, output: &CompOutput) -> Result<(), EffectError> {
         self.outputs

@@ -820,7 +820,7 @@ async fn command_narrowed_port_builds() {
     .expect("the port method declares at-least-once safety");
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait ResendPort: Send + Sync {
     #[effect(type = "effect_control_composition.resend", at_least_once)]
     fn resend(&self, _: &ResendRequest) -> Result<CompositionFact, EffectError>;
@@ -831,14 +831,14 @@ struct ResendRequest;
 
 struct Resender;
 
-#[obzenflow_runtime::effects::system("resender", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("resender")]
 impl ResendPort for Resender {
     fn resend(&self, _: &ResendRequest) -> Result<CompositionFact, EffectError> {
         Ok(CompositionFact)
     }
 }
 
-#[obzenflow_runtime::effects::command(through = ResendPort, effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command(through = ResendPort)]
 #[derive(Clone, Debug)]
 struct ThroughResend;
 

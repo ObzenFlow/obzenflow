@@ -30,13 +30,13 @@ use std::marker::PhantomData;
 /// # impl ChargeRequest {
 /// #     fn for_invoice(_: &Invoice) -> Self { Self }
 /// # }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait PaymentGatewayPort: Send + Sync {
 /// #     #[effect(type = "docs.perform.charge", exactly_once)]
 /// #     fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError>;
 /// # }
 /// # struct Scripted;
-/// # #[obzenflow_runtime::effects::system("scripted", effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::system("scripted")]
 /// # impl PaymentGatewayPort for Scripted {
 /// #     fn charge(&self, _: &ChargeRequest) -> Result<Paid, EffectError> { Ok(Paid) }
 /// # }
@@ -213,7 +213,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct ResendRequest;
 
-    #[crate::effects::port(effects = crate::effects)]
+    #[crate::effects::port]
     trait GatewayPort: Send + Sync {
         #[effect(type = "perform_test.charge", exactly_once)]
         fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError>;
@@ -227,7 +227,7 @@ mod tests {
 
     struct Scripted;
 
-    #[crate::effects::system("scripted", effects = crate::effects)]
+    #[crate::effects::system("scripted")]
     impl GatewayPort for Scripted {
         fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError> {
             Ok(Paid {

@@ -17,8 +17,8 @@ use csv::{ReaderBuilder, WriterBuilder};
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
-    Command, DeclaredEffectSet, EffectContext, EffectError, EffectPortResolutionError, Port,
-    SinkRole,
+    port, system, Command, DeclaredEffectSet, EffectContext, EffectError,
+    EffectPortResolutionError, Port, SinkRole,
 };
 use obzenflow_runtime::effects::{SinkBatchDefaults, SinkGroupSystem};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -61,7 +61,7 @@ pub struct Appended {
 /// The port a CSV sink appends through. A resume truncates what no record
 /// holds before its first write, so each row lands once and the method is
 /// `exactly_once`.
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[port]
 #[async_trait]
 pub trait CsvRegisterPort {
     #[effect(type = "obzenflow.csv.row", exactly_once, records = reply)]
@@ -101,7 +101,7 @@ struct CsvRegister {
     state: Arc<Mutex<RegisterState>>,
 }
 
-#[obzenflow_runtime::effects::system("csv-register", effects = obzenflow_runtime::effects)]
+#[system("csv-register")]
 #[async_trait]
 impl CsvRegisterPort for CsvRegister {
     async fn append(&self, row: &CsvRow, ctx: &EffectContext) -> Result<Appended, EffectError> {

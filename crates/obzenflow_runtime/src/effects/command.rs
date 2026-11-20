@@ -24,10 +24,10 @@ use std::sync::Arc;
 /// refused at its own `impl`:
 ///
 /// ```compile_fail,E0277
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait CustomerMessaging {}
 /// struct SimulatedMessaging(std::rc::Rc<()>);
-/// #[obzenflow_runtime::effects::system("simulated", effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::system("simulated")]
 /// impl CustomerMessaging for SimulatedMessaging {}
 /// ```
 pub struct Port<P: ?Sized + Send + Sync + 'static> {
@@ -45,10 +45,10 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// ```
     /// # use obzenflow_runtime::effects::Port;
     /// # use std::sync::Arc;
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait RiskEnginePort: Send + Sync {}
     /// # struct RiskEngineOutage;
-    /// # #[obzenflow_runtime::effects::system("risk-engine-outage", effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::system("risk-engine-outage")]
     /// # impl RiskEnginePort for RiskEngineOutage {}
     /// let outage = Port::to(RiskEngineOutage);
     /// let shared = Port::to(Arc::new(RiskEngineOutage));
@@ -61,7 +61,7 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// # use obzenflow_runtime::effects::Port;
     /// trait RiskEnginePort: Send + Sync {}
     /// struct RiskEngineOutage;
-    /// # #[obzenflow_runtime::effects::system("risk-engine-outage", effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::system("risk-engine-outage")]
     /// impl RiskEnginePort for RiskEngineOutage {}
     /// # fn main() {
     /// let outage = Port::to(RiskEngineOutage);
@@ -74,10 +74,10 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// ```compile_fail,E0277
     /// # use obzenflow_runtime::effects::Port;
     /// # use std::sync::Arc;
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait RiskEnginePort: Send + Sync {}
     /// # struct RiskEngineOutage;
-    /// # #[obzenflow_runtime::effects::system("risk-engine-outage", effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::system("risk-engine-outage")]
     /// # impl RiskEnginePort for RiskEngineOutage {}
     /// # fn main() {
     /// let erased: Arc<dyn RiskEnginePort> = Arc::new(RiskEngineOutage);
@@ -98,7 +98,7 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// # impl obzenflow_core::TypedPayload for AuditAppended { const EVENT_TYPE: &'static str = "docs.audit.appended"; }
     /// struct AuditLedger;
     ///
-    /// #[obzenflow_runtime::effects::port(system = "audit-ledger", effects = obzenflow_runtime::effects)]
+    /// #[obzenflow_runtime::effects::port(system = "audit-ledger")]
     /// impl AuditLedger {
     ///     #[effect(type = "docs.audit.append", exactly_once)]
     ///     fn append(&self, _: &AuditEntry) -> Result<AuditAppended, EffectError> {
@@ -128,7 +128,7 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     ///
     /// ```compile_fail,E0080
     /// # use obzenflow_runtime::effects::{Port, SystemName};
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait RiskEnginePort: Send + Sync {}
     /// struct RiskEngineOutage;
     /// impl RiskEnginePort for RiskEngineOutage {}
@@ -158,10 +158,10 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     ///
     /// ```
     /// # use obzenflow_runtime::effects::{EffectPortResolutionError, Port};
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait RiskEnginePort: Send + Sync {}
     /// # struct SimulatedRiskEngine;
-    /// # #[obzenflow_runtime::effects::system("simulated-risk-engine", effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::system("simulated-risk-engine")]
     /// # impl RiskEnginePort for SimulatedRiskEngine {}
     /// # impl SimulatedRiskEngine {
     /// #     fn from_env() -> Result<Self, EffectPortResolutionError> {
@@ -178,10 +178,10 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// ```compile_fail,E0277
     /// # use obzenflow_runtime::effects::{EffectPortResolutionError, Port};
     /// # use std::sync::Arc;
-    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::port]
     /// # trait RiskEnginePort: Send + Sync {}
     /// # struct SimulatedRiskEngine;
-    /// # #[obzenflow_runtime::effects::system("simulated-risk-engine", effects = obzenflow_runtime::effects)]
+    /// # #[obzenflow_runtime::effects::system("simulated-risk-engine")]
     /// # impl RiskEnginePort for SimulatedRiskEngine {}
     /// # fn main() {
     /// let engine = Port::deferred(|| -> Result<Arc<SimulatedRiskEngine>, EffectPortResolutionError> {
@@ -272,7 +272,7 @@ const fn checked_system_name<T: SystemName>() -> &'static str {
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_runtime::effects::Port;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {}
 /// struct RiskEngineOutage;
 /// impl RiskEnginePort for RiskEngineOutage {}
@@ -288,7 +288,7 @@ const fn checked_system_name<T: SystemName>() -> &'static str {
 /// # use obzenflow_runtime::effects::Port;
 /// struct AuditLedger;
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// impl AuditLedger {}
 /// # fn main() {
 /// let ledger = Port::to(AuditLedger);
@@ -299,16 +299,16 @@ const fn checked_system_name<T: SystemName>() -> &'static str {
 /// Two names for one type do not compile:
 ///
 /// ```compile_fail,E0119
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {}
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CaseSystemPort: Send + Sync {}
 /// struct Vendor;
 ///
-/// #[obzenflow_runtime::effects::system("vendor-risk", effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::system("vendor-risk")]
 /// impl RiskEnginePort for Vendor {}
 ///
-/// #[obzenflow_runtime::effects::system("vendor-cases", effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::system("vendor-cases")]
 /// impl CaseSystemPort for Vendor {}
 /// ```
 #[diagnostic::on_unimplemented(
@@ -375,7 +375,7 @@ pub trait ServesPort<P: ?Sized, T> {
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.port.charged"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait CardPort: Send + Sync {
 ///     fn charge(&self) -> Result<Charged, EffectError>;
 /// }
@@ -387,7 +387,7 @@ pub trait ServesPort<P: ?Sized, T> {
 /// # use obzenflow_runtime::effects::EffectError;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # enum GatewayResponse { Charged }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait GatewayPort: Send + Sync {
 ///     fn authorize(&self) -> Result<GatewayResponse, EffectError>;
 /// }
@@ -402,7 +402,7 @@ pub trait ServesPort<P: ?Sized, T> {
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.port.charged"; }
 /// # #[derive(Debug)]
 /// # struct GatewayError;
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait GatewayPort: Send + Sync {
 ///     fn authorize(&self) -> Result<Charged, GatewayError>;
 /// }
@@ -415,7 +415,7 @@ pub trait ServesPort<P: ?Sized, T> {
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.port.charged"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait CardPort: Send + Sync {
 ///     fn charge(&self) -> Charged;
 /// }
@@ -503,20 +503,20 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// `#[port(RequestA, RequestB)]` allows only the requests it lists.
 ///
 /// ```
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {}
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CaseSystemPort: Send + Sync {}
 /// # struct Vendor;
-/// # #[obzenflow_runtime::effects::system("vendor", effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::system("vendor")]
 /// # impl RiskEnginePort for Vendor {}
 /// # impl CaseSystemPort for Vendor {}
 /// # use obzenflow_runtime::effects::Port;
-/// #[obzenflow_runtime::effects::command(through = RiskEnginePort, effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command(through = RiskEnginePort)]
 /// #[derive(Clone, Debug)]
 /// struct Scorer;
 ///
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct Triage {
 ///     #[port]
@@ -536,9 +536,9 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 ///
 /// ```
 /// # use obzenflow_runtime::effects::Port;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {}
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct Scorer {
 ///     #[port]
@@ -580,7 +580,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 ///
 /// ```compile_fail,E0277
 /// trait RiskEnginePort: Send + Sync {}
-/// #[obzenflow_runtime::effects::command(through = RiskEnginePort, effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command(through = RiskEnginePort)]
 /// #[derive(Clone, Debug)]
 /// struct Scorer;
 /// ```
@@ -588,9 +588,9 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// Nor does a `through` struct with a field of its own:
 ///
 /// ```compile_fail
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {}
-/// #[obzenflow_runtime::effects::command(through = RiskEnginePort, effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command(through = RiskEnginePort)]
 /// #[derive(Clone, Debug)]
 /// struct Scorer {
 ///     limit: u32,
@@ -601,9 +601,9 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::Port;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {}
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct Scorer {
 ///     #[port]
@@ -616,7 +616,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// Nor a `#[port]` field that holds no port:
 ///
 /// ```compile_fail,E0277
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct Scorer {
 ///     #[port]
@@ -635,17 +635,17 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// # struct ScoreRequest;
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct CaseRequest;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {
 /// #     #[effect(type = "docs.handler.score", exactly_once)]
 /// #     fn score(&self, request: &ScoreRequest) -> Result<Scored, EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait CasePort: Send + Sync {
 /// #     #[effect(type = "docs.handler.case", exactly_once)]
 /// #     fn open(&self, request: &CaseRequest) -> Result<Scored, EffectError>;
 /// # }
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct ScoreHandler {
 ///     #[port(CaseRequest)]
@@ -662,12 +662,12 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.handler.scored"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct ScoreRequest;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {
 /// #     #[effect(type = "docs.handler.score", exactly_once)]
 /// #     fn score(&self, request: &ScoreRequest) -> Result<Scored, EffectError>;
 /// # }
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct ScoreHandler {
 ///     #[port(ScoreRequest, ScoreRequest)]
@@ -684,12 +684,12 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.handler.scored"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct ScoreRequest;
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {
 /// #     #[effect(type = "docs.handler.score", exactly_once)]
 /// #     fn score(&self, request: &ScoreRequest) -> Result<Scored, EffectError>;
 /// # }
-/// #[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::command]
 /// #[derive(Clone, Debug)]
 /// struct ScoreHandler {
 ///     #[port()]

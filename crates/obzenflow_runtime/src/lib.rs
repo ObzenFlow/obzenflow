@@ -4,6 +4,8 @@
 
 #![doc = include_str!("../README.md")]
 
+extern crate self as obzenflow_runtime;
+
 // Core modules
 pub mod ai;
 pub mod backpressure;

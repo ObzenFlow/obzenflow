@@ -134,7 +134,7 @@ impl TypedTransformHandler for DropTransform {
 #[derive(Clone, Debug, Serialize)]
 struct Settle;
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 #[async_trait]
 trait SleepingPort {
     #[effect(type = "metrics_exporter.settle", at_least_once, records = reply)]
@@ -145,7 +145,7 @@ struct Sleeper {
     sleep_per_event: Duration,
 }
 
-#[obzenflow_runtime::effects::system("sleeper", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("sleeper")]
 #[async_trait]
 impl SleepingPort for Sleeper {
     async fn settle(&self, _: &Settle) -> Result<(), EffectError> {

@@ -8,7 +8,9 @@
 use async_trait::async_trait;
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{Command, DeclaredEffectSet, EffectError, Port, SinkRole};
+use obzenflow_runtime::effects::{
+    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkRole,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -76,7 +78,7 @@ impl TracingOutput {
 
 /// The port a tracing sink emits through. An event a crash left in doubt may
 /// be emitted again after a resume, so the method is `at_least_once`.
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[port]
 #[async_trait]
 pub trait TracingPort {
     #[effect(type = "obzenflow.tracing.event", at_least_once, records = reply)]
@@ -85,7 +87,7 @@ pub trait TracingPort {
 
 struct Tracing;
 
-#[obzenflow_runtime::effects::system("tracing", effects = obzenflow_runtime::effects)]
+#[system("tracing")]
 #[async_trait]
 impl TracingPort for Tracing {
     async fn emit(&self, output: &TracingOutput) -> Result<(), EffectError> {

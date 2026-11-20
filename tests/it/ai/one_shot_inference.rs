@@ -167,7 +167,7 @@ impl AiRole<DecisionBrief> for ReviewRole {
     }
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait CollectBriefPort: Send + Sync {
     #[effect(type = "one_shot_fixture.collect", at_least_once, records = reply)]
     fn collect(&self, brief: &DecisionBrief) -> Result<(), EffectError>;
@@ -177,7 +177,7 @@ struct CollectBrief {
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
 }
 
-#[obzenflow_runtime::effects::system("brief-collector", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("brief-collector")]
 impl CollectBriefPort for CollectBrief {
     fn collect(&self, brief: &DecisionBrief) -> Result<(), EffectError> {
         self.outputs

@@ -874,14 +874,14 @@ impl Hold {
 #[derive(Clone, Debug, Serialize)]
 struct Discard;
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 #[async_trait]
 trait DiscardOrderPort {
     #[effect(type = "test.ingress_discard", at_least_once, records = reply)]
     async fn discard(&self, request: &Discard) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("ingress-discard", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("ingress-discard")]
 #[async_trait]
 impl DiscardOrderPort for DiscardSink {
     async fn discard(&self, _: &Discard) -> Result<(), EffectError> {

@@ -80,7 +80,7 @@ pub struct LatencyRecorder {
     delivered: Delivered,
 }
 
-#[obzenflow_runtime::effects::port(system = "latency-recorder", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "latency-recorder")]
 impl LatencyRecorder {
     #[effect(type = "bench.latency.record", at_least_once, records = reply)]
     fn record(&self, event: &Event) -> Result<(), EffectError> {

@@ -34,7 +34,7 @@ struct CountReceived {
     received: Arc<AtomicU64>,
 }
 
-#[obzenflow_runtime::effects::port(system = "async-finite-counter", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "async-finite-counter")]
 impl CountReceived {
     #[effect(type = "async_finite_source.receive", at_least_once, records = reply)]
     fn receive(&self, _: &Received) -> Result<(), EffectError> {

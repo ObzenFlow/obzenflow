@@ -6,9 +6,10 @@
 //! command works through, and the systems the flow builder chooses for them.
 
 pub use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
+pub use obzenflow_runtime::effects::__facade::{command, port, system};
 pub use obzenflow_runtime::effects::{
-    command, perform, port, system, Command, Keyed, Perform, PerformRequest, Port, SinkRequest,
-    SinkRole, StagePort, SystemName,
+    perform, Command, Keyed, Perform, PerformRequest, Port, SinkRequest, SinkRole, StagePort,
+    SystemName,
 };
 pub use obzenflow_runtime::effects::{
     BindingAuthorityFault, BindingMismatchKind, EffectAttemptOrdinal, EffectCursor,

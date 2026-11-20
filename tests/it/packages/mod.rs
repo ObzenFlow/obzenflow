@@ -3,5 +3,6 @@
 // https://obzenflow.dev
 
 mod core_derive_boundary;
+mod facade_attributes;
 mod postgres_connector_boundary;
 mod root_facade_shape;
