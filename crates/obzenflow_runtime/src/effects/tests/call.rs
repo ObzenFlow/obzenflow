@@ -860,3 +860,54 @@ async fn two_request_group_refusal_keeps_success() {
         "{outcomes:?}"
     );
 }
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct FailedWrite {
+    value: u64,
+}
+
+struct FailEveryWrite(Arc<AtomicUsize>);
+
+#[crate::effects::port(system = "fail-every-write")]
+impl FailEveryWrite {
+    #[effect(type = "test.failed_write", exactly_once, records = reply)]
+    fn write(&self, _: &FailedWrite) -> Result<(), EffectError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(EffectError::unavailable("ledger", "refused", LedgerRefused))
+    }
+}
+
+#[tokio::test]
+async fn grouped_late_refusal_records_failure() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let port = Port::to(FailEveryWrite(calls.clone()));
+    let declaration = declaration_for::<Call<FailedWrite>, _>(&port);
+    let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+        .unwrap()
+        .into_run_registry();
+    let ctx = ledger_context(
+        journal.clone(),
+        stage,
+        registry,
+        vec![declaration.runtime_projection()],
+        None,
+    );
+    let role = perform(|row: &LedgerWritten| FailedWrite { value: row.value }).through(port);
+    let mut group = Box::new(super::super::runtime::SinkGroup::new(
+        Arc::new(role),
+        Arc::new(ExecuteThenRefuseBoundary),
+    ));
+    admit_ledger_rows(group.as_mut(), &ctx, stage, 1).await;
+    let results = group.finish().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(results[0].is_err(), "{results:?}");
+    let records = effect_records(&journal);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].observation,
+        EffectObservation::returned_failure()
+    );
+    assert_eq!(journal.events()[0].event_type(), "effect.execution_failed");
+}

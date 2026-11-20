@@ -52,10 +52,13 @@ impl SinkBatch {
     }
 
     pub(super) fn expired(&self) -> bool {
-        !self.max_wait.is_zero()
-            && self
-                .opened
-                .is_some_and(|instant| instant.elapsed() >= self.max_wait)
+        self.closes_before(Duration::ZERO)
+    }
+
+    fn closes_before(&self, admission_wait: Duration) -> bool {
+        let remaining = self.idle_wait();
+        self.opened.is_some()
+            && ((!self.max_wait.is_zero() && remaining.is_zero()) || admission_wait > remaining)
     }
 }
 
@@ -67,7 +70,12 @@ pub(super) async fn enqueue<H: UnifiedTransformHandler>(
     upstream: Option<StageId>,
     generation: Option<obzenflow_core::ReaderGeneration>,
 ) -> Result<(), DispatchError> {
-    if ctx.sink_batch.as_ref().is_some_and(SinkBatch::expired) {
+    if ctx.sink_batch.as_ref().is_some_and(|batch| {
+        batch
+            .group
+            .as_ref()
+            .is_some_and(|group| batch.closes_before(group.admission_wait()))
+    }) {
         flush(ctx, flow).await?;
     }
     let scope = ctx
@@ -222,4 +230,28 @@ pub(super) async fn flush<H: UnifiedTransformHandler>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn outlasting_admission_closes_group() {
+        let mut queued = SinkBatch::new(64, Duration::ZERO);
+        let tick = Duration::from_millis(1);
+        assert!(!queued.closes_before(tick));
+        queued.opened = Some(Instant::now());
+        assert!(!queued.closes_before(Duration::ZERO));
+        assert!(queued.closes_before(tick));
+
+        let mut timed = SinkBatch::new(64, Duration::from_millis(200));
+        timed.opened = Some(Instant::now());
+        tokio::time::advance(Duration::from_millis(150)).await;
+        let remaining = Duration::from_millis(50);
+        assert!(!timed.closes_before(remaining));
+        assert!(timed.closes_before(remaining + tick));
+        tokio::time::advance(remaining).await;
+        assert!(timed.expired());
+    }
 }

@@ -2043,6 +2043,49 @@ async fn grouped_failure_records_one_breaker_attempt() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn sink_admission_wait_reports_limiter_delay() {
+    use obzenflow_runtime::effects::SinkAdmission;
+
+    let factory = EffectPlanFactory::empty()
+        .rate_limit_each_attempt(
+            crate::middleware::control::rate_limit(1.0)
+                .burst_capacity(4.0)
+                .cost(2.0),
+        )
+        .build()
+        .unwrap();
+    let (attachment, control, stage) = materialized_resilience(factory);
+    let boundary = boundary_with_chain(vec![attachment]);
+    for seq in 1..=2 {
+        let identity = identity_at(seq);
+        assert_eq!(
+            boundary.sink_admission_wait(identity.effect_type),
+            Duration::ZERO
+        );
+        let SinkAdmission::Admitted(permit) =
+            boundary.admit_sink_request(&identity, &data_event()).await
+        else {
+            panic!("expected an available burst permit");
+        };
+        permit.started.unwrap()();
+    }
+    let effect_type = identity_at(3).effect_type;
+    assert_eq!(
+        boundary.sink_admission_wait(effect_type),
+        Duration::from_secs(2)
+    );
+    assert_eq!(boundary.sink_admission_wait("other.effect"), Duration::ZERO);
+    tokio::time::advance(Duration::from_millis(500)).await;
+    assert_eq!(
+        boundary.sink_admission_wait(effect_type),
+        Duration::from_millis(1500)
+    );
+    tokio::time::advance(Duration::from_millis(1500)).await;
+    assert_eq!(boundary.sink_admission_wait(effect_type), Duration::ZERO);
+    assert_eq!(effect_limiter_events(&control, stage), 2);
+}
+
+#[tokio::test(start_paused = true)]
 async fn grouped_limiter_charges_each_request() {
     use obzenflow_runtime::effects::SinkAdmission;
     let factory = EffectPlanFactory::with_breaker(

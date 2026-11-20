@@ -204,6 +204,13 @@ impl<C: SinkRole<In>, In> SinkGroup<C, In> {
 
 #[async_trait]
 impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> OpenSinkBatch for SinkGroup<C, In> {
+    fn admission_wait(&self) -> std::time::Duration {
+        if Call::<C::Request>::SAFETY == EffectSafety::Transactional {
+            return std::time::Duration::ZERO;
+        }
+        self.boundary.sink_admission_wait(C::Request::EFFECT_TYPE)
+    }
+
     async fn admit(&mut self, mut ctx: EffectInvocationContext) -> Result<bool, HandlerError> {
         let index = self.cores.len();
         let first = self
@@ -635,13 +642,13 @@ async fn shared_call<R: SinkRequest>(
     }
     let actual = write.replies.lock().expect("sink replies").take();
     let (outcome, replies) = match (outcome, actual) {
-        (EffectBoundaryOutcome::Aborted(reason), _) => {
-            (EffectBoundaryOutcome::Aborted(reason), vec![])
-        }
         (_, Some(Ok(replies))) if replies.len() == pending.len() => {
             (EffectBoundaryOutcome::Executed(Ok(Vec::new())), replies)
         }
         (_, Some(Err(e))) => (EffectBoundaryOutcome::Executed(Err(e)), Vec::new()),
+        (EffectBoundaryOutcome::Aborted(reason), None) => {
+            (EffectBoundaryOutcome::Aborted(reason), vec![])
+        }
         (EffectBoundaryOutcome::Executed(Err(e)), None) => return Err(e),
         _ => {
             return Err(EffectError::Execution(

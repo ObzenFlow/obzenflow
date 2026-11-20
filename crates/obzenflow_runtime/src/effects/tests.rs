@@ -8065,6 +8065,10 @@ struct ExecuteThenRefuseBoundary;
 
 #[async_trait]
 impl EffectBoundary for ExecuteThenRefuseBoundary {
+    fn supports_sink_groups(&self) -> bool {
+        true
+    }
+
     async fn around_repeatable_effect(
         &self,
         identity: &EffectIdentity,

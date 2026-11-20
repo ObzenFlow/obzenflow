@@ -197,6 +197,15 @@ impl EffectBoundary for PerEffectPolicyBoundary {
         true
     }
 
+    fn sink_admission_wait(&self, effect_type: &'static str) -> std::time::Duration {
+        match self.chains.get(effect_type) {
+            Some(CompiledEffectChain::Resilient { resilience, .. }) => {
+                resilience.sink_admission_wait()
+            }
+            _ => std::time::Duration::ZERO,
+        }
+    }
+
     async fn admit_sink_request(
         &self,
         identity: &EffectIdentity,

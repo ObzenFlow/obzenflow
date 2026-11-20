@@ -2701,6 +2701,15 @@ mod tests {
     }
 
     #[test]
+    fn placeholder_sink_declares_no_batch() {
+        let placeholder = crate::sink!(name: "sink", OutputEvent => placeholder!());
+        assert!(placeholder.sink_batch_defaults().is_none());
+        let output = exact_sink();
+        let typed = crate::sink!(name: "sink", OutputEvent => output);
+        assert!(typed.sink_batch_defaults().is_some());
+    }
+
+    #[test]
     fn sink_fan_ins_marked_canonical() {
         let source_a_id = StageId::new();
         let source_b_id = StageId::new();

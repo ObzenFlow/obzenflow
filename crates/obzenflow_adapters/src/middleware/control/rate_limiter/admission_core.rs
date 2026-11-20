@@ -84,23 +84,29 @@ impl TokenBucket {
     }
 
     /// Get time until enough tokens are available.
-    fn time_until_available(&mut self, tokens: f64, now: Instant) -> Option<Duration> {
-        self.refill(now);
-
-        if self.tokens >= tokens {
+    fn time_until_available(&self, tokens: f64, now: Instant) -> Option<Duration> {
+        let available = self.available_at(now);
+        if available >= tokens {
             return None; // Already available
         }
 
-        let needed = tokens - self.tokens;
+        let needed = tokens - available;
         let seconds_needed = needed / self.refill_rate;
         Some(Duration::from_secs_f64(seconds_needed))
+    }
+
+    fn available_at(&self, now: Instant) -> f64 {
+        (self.tokens + self.tokens_since_refill(now)).min(self.capacity)
+    }
+
+    fn tokens_since_refill(&self, now: Instant) -> f64 {
+        now.duration_since(self.last_refill).as_secs_f64() * self.refill_rate
     }
 
     /// Refill tokens based on elapsed time.
     fn refill(&mut self, now: Instant) {
         let elapsed = now.duration_since(self.last_refill);
-
-        let tokens_to_add = elapsed.as_secs_f64() * self.refill_rate;
+        let tokens_to_add = self.tokens_since_refill(now);
         let old_tokens = self.tokens;
         self.tokens = (self.tokens + tokens_to_add).min(self.capacity);
         self.last_refill = now;
@@ -279,6 +285,14 @@ impl RateLimiterCore {
         self.cost_per_event
     }
 
+    pub(super) fn permit_wait_at(&self, now: Instant) -> Duration {
+        self.bucket
+            .lock()
+            .unwrap()
+            .time_until_available(self.cost_per_event, now)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn limit_rate(&self) -> f64 {
         self.limit_rate
     }
@@ -369,12 +383,7 @@ impl RateLimiterCore {
             delayed_total: stats.delayed_total,
             tokens_consumed_total: stats.tokens_consumed_total,
             delay_seconds_total: stats.delay_seconds_total,
-            bucket_tokens: (bucket.tokens
-                + Instant::now()
-                    .duration_since(bucket.last_refill)
-                    .as_secs_f64()
-                    * bucket.refill_rate)
-                .min(bucket.capacity),
+            bucket_tokens: bucket.available_at(Instant::now()),
             bucket_capacity: bucket.capacity,
         })
     }

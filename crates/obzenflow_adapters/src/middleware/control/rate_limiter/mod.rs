@@ -210,6 +210,10 @@ impl RateLimiterMiddleware {
         self.core.limit_rate()
     }
 
+    pub(in crate::middleware::control) fn permit_wait(&self) -> std::time::Duration {
+        self.core.permit_wait_at(Instant::now())
+    }
+
     fn maybe_emit_activity_pulse(&self, ctx: &mut MiddlewareContext) {
         if let Some(pulse) = self.core.take_due_pulse(Instant::now()) {
             ctx.observe(ObservationRecord::RateLimiterActivity {

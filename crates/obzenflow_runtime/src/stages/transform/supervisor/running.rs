@@ -374,7 +374,8 @@ async fn dispatch_running_inner<
                             tracing::info!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event_type(),
-                                "Transform stage transitioning to draining"
+                                "{} stage transitioning to draining",
+                                ctx.stage_label()
                             );
                             sup.forward_control_event_guarded(&envelope, &ctx.stage_name)
                                 .await?;

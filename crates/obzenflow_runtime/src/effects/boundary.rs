@@ -806,6 +806,11 @@ pub trait EffectBoundary: Send + Sync {
     }
 
     #[doc(hidden)]
+    fn sink_admission_wait(&self, _effect_type: &'static str) -> Duration {
+        Duration::ZERO
+    }
+
+    #[doc(hidden)]
     async fn admit_sink_request(
         &self,
         _identity: &EffectIdentity,

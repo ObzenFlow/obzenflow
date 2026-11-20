@@ -920,11 +920,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         }
         let effects: Vec<_> = text
             .lines()
-            .filter(|line| line.contains("mEFFECT (stage:"))
+            .filter(|line| line.contains("mSINK (stage:"))
             .collect();
         assert!(!effects.is_empty());
         for line in effects {
-            assert!(line.starts_with("\x1b[38;5;217mEFFECT (stage: "));
+            assert!(line.starts_with("\x1b[38;5;217mSINK (stage: "));
             assert!(line.ends_with(")\x1b[0m"));
         }
         let mut in_clock = false;
@@ -975,7 +975,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             ),
             (
                 "paid_orders",
-                "EFFECT",
+                "SINK",
                 "effect.execution_succeeded",
                 "payment.authorized",
                 "38;5;217",
@@ -1180,7 +1180,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         )));
     assert!(human.lines().any(|line| line
         == format!(
-            "EFFECT (stage: paid_orders, journal: {})",
+            "SINK (stage: paid_orders, journal: {})",
             numbers["paid_orders"]
         )));
     assert!(!human.contains("RUNTIME"));

@@ -596,11 +596,13 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         Vec::new()
     }
 
-    /// The open-key limit this stage enforces, as the run manifest records it.
+    /// The group size and maximum wait a sink's command sets in code, `None`
+    /// for a stage that sends no groups.
     fn sink_batch_defaults(&self) -> Option<obzenflow_runtime::effects::SinkBatchDefaults> {
         None
     }
 
+    /// The open-key limit this stage enforces, as the run manifest records it.
     fn max_open_keys(&self) -> Option<u64> {
         None
     }
@@ -1560,7 +1562,6 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
     ) -> Self {
         let mut descriptor = Self::new(name, handler, effects, middleware);
         descriptor.role = StageType::Sink;
-        descriptor.batch_defaults = Some(Default::default());
         descriptor
     }
 
@@ -1921,7 +1922,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         transform_config.control_strategy = Some(control_strategy);
         transform_config.cycle_guard = config.cycle_guard;
 
-        if self.role == StageType::Sink {
+        if self.batch_defaults.is_some() {
             use obzenflow_runtime::runtime_config::{SINK_BATCH_MAX_WAIT_MS, SINK_BATCH_SIZE};
             let scope = obzenflow_core::config::ConfigScope::stage(config.name.as_str());
             let setting = |key| {

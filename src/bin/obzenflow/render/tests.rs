@@ -2416,6 +2416,28 @@ fn the_summary_counts_each_record_once_with_errors_by_kind() {
 }
 
 #[test]
+fn sink_effect_record_headed_sink() {
+    let reading = fact(1, 100, &[], json!({"id": 1}));
+    let classified = fact(2, 101, &[100], json!({"id": 1}));
+    let mid_flow_call = on_stage(
+        sink_call(102, 100, false),
+        2,
+        "classify",
+        StageType::Transform,
+    );
+    let delivered = sink_call(103, 101, true);
+    let records = [reading, classified, mid_flow_call, delivered];
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    assert!(text.contains("\nSINK (stage: written, journal: "), "{text}");
+    assert!(
+        text.contains("\nEFFECT (stage: classify, journal: "),
+        "{text}"
+    );
+    assert!(!text.contains("EFFECT (stage: written"), "{text}");
+}
+
+#[test]
 fn an_earlier_runs_rejection_and_its_repeat_are_listed_and_counted_once() {
     let mut killed_rejection = rejected_row(100, 164);
     killed_rejection.run = RunIdentity {

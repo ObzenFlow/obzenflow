@@ -2095,9 +2095,6 @@ pub fn validate_effect_fact_containment(
     };
 
     for (name, descriptor) in descriptors {
-        // Sinks have no output contract for effect facts to be members of;
-        // an effectful sink is rejected at materialisation by the FLOWIP-120b
-        // retirement path with the message that explains the policy.
         if descriptor.stage_type() == StageType::Sink {
             continue;
         }

@@ -1091,6 +1091,12 @@ impl Drop for AffineLimiterSettlementGuard {
 }
 
 impl EffectResilienceMiddleware {
+    pub(in crate::middleware::control) fn sink_admission_wait(&self) -> Duration {
+        self.limiter
+            .as_ref()
+            .map_or(Duration::ZERO, |limiter| limiter.permit_wait())
+    }
+
     pub(in crate::middleware::control) fn needs_probe(&self) -> bool {
         self.breaker
             .as_ref()

@@ -291,15 +291,19 @@ impl Category {
     }
 
     fn heading(self, record: &RunRecord) -> &'static str {
-        if let (RunJournalKind::Error, Some(stage)) = (record.journal.kind, &record.journal.stage) {
+        let stage = record.journal.stage.as_ref();
+        if let (RunJournalKind::Error, Some(stage)) = (record.journal.kind, stage) {
             return stage_error_heading(stage.stage_type, stage.is_effectful);
         }
-        if self != Self::Fact {
-            return self.label();
+        match stage {
+            Some(stage)
+                if self == Self::Fact
+                    || (self == Self::Effect && stage.stage_type == StageType::Sink) =>
+            {
+                stage_heading(stage.stage_type, stage.is_effectful)
+            }
+            _ => self.label(),
         }
-        record.journal.stage.as_ref().map_or("FACT", |stage| {
-            stage_heading(stage.stage_type, stage.is_effectful)
-        })
     }
 }
 

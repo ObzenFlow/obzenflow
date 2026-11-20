@@ -844,6 +844,15 @@ pub(crate) struct TransformResources<H: UnifiedTransformHandler> {
     pub(crate) flow_context: Arc<FlowContext>,
 }
 
+impl<H: UnifiedTransformHandler> TransformResources<H> {
+    pub(crate) fn stage_label(&self) -> &'static str {
+        match self.flow_context.stage_type {
+            obzenflow_core::event::context::StageType::Sink => "Sink",
+            _ => "Transform",
+        }
+    }
+}
+
 pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub(crate) resources: Option<TransformResources<H>>,
     pub(crate) instrumentation: Arc<StageInstrumentation>,
@@ -987,7 +996,8 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     upstream_count = ctx.upstream_subscription_factory.upstream_stage_ids().len(),
-                    "Transform allocated resources and created subscription"
+                    "{} allocated resources and created subscription",
+                    ctx.stage_label()
                 );
                 Ok(())
             }
@@ -1115,7 +1125,8 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Transform forwarded EOF downstream"
+                    "{} forwarded EOF downstream",
+                    ctx.stage_label()
                 );
                 Ok(())
             }
@@ -1201,9 +1212,11 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                     heartbeat.cancel();
                 }
 
-                lifecycle_actions::cleanup_best_effort("Transform", &ctx.stage_name, || async {
-                    Ok::<(), ()>(())
-                })
+                lifecycle_actions::cleanup_best_effort(
+                    ctx.stage_label(),
+                    &ctx.stage_name,
+                    || async { Ok::<(), ()>(()) },
+                )
                 .await;
                 Ok(())
             }

@@ -467,7 +467,7 @@ async fn dispatch_draining_inner<
                     .into_result()?;
             }
 
-            tracing::info!(stage_name = %ctx.stage_name, "Transform queue drained");
+            tracing::info!(stage_name = %ctx.stage_name, "{} queue drained", ctx.stage_label());
             let drained = if ctx
                 .cycle_guard_config
                 .as_ref()
