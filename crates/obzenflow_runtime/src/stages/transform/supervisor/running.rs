@@ -6,7 +6,7 @@
 
 use crate::effects::EffectInvocationContext;
 use crate::messaging::PollResult;
-use crate::metrics::instrumentation::process_with_instrumentation;
+use crate::metrics::instrumentation::process_input_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{
@@ -501,8 +501,10 @@ async fn dispatch_running_inner<
                     let writer_id = WriterId::from(ctx.stage_id);
                     let lineage = ctx.lineage_policy;
                     let error_flow_context = flow_context;
-                    let result =
-                        process_with_instrumentation(&ctx.instrumentation, || async move {
+                    let result = process_input_with_instrumentation(
+                        &ctx.instrumentation,
+                        flow_context.stage_type,
+                        || async move {
                             let event = envelope_clone.authored();
                             let event_id = event.id;
 
@@ -539,8 +541,9 @@ async fn dispatch_running_inner<
                                     Ok(vec![error_event])
                                 }
                             }
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
 
                     let scope = ctx.runtime_execution.dispatch_scope(
                         ctx.stage_id,

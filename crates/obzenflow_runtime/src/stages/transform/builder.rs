@@ -240,7 +240,12 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         let state_watcher_for_task = state_watcher.clone();
 
         // Spawn the supervisor task
-        let supervisor_name = format!("transform_{}", self.config.stage_name);
+        let supervisor_name = match stage_type {
+            obzenflow_core::event::context::StageType::Sink => {
+                format!("sink_{}", self.config.stage_name)
+            }
+            _ => format!("transform_{}", self.config.stage_name),
+        };
         let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
             supervisor,
             event_receiver,

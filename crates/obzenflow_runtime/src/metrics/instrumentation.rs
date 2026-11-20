@@ -895,6 +895,26 @@ where
     result
 }
 
+/// Processes one input, counting a sink's input before `f` runs and any other
+/// stage's input after `f` succeeds.
+pub async fn process_input_with_instrumentation<T, F, Fut>(
+    instrumentation: &Arc<StageInstrumentation>,
+    stage_type: obzenflow_core::event::context::StageType,
+    f: F,
+) -> Result<T, Box<dyn Error + Send + Sync>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, Box<dyn Error + Send + Sync>>>,
+{
+    if stage_type != obzenflow_core::event::context::StageType::Sink {
+        return process_with_instrumentation(instrumentation, f).await;
+    }
+    instrumentation
+        .events_processed_total
+        .fetch_add(1, Ordering::Relaxed);
+    process_with_instrumentation_no_count(instrumentation, f).await
+}
+
 /// Terminal accounting comes from the stage owner at the terminal boundary.
 pub fn snapshot_stage_accounting(instrumentation: &StageInstrumentation) -> ExecutionAccounting {
     instrumentation.snapshot().accounting

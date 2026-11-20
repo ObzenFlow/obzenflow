@@ -155,6 +155,9 @@ pub(super) async fn flush<H: UnifiedTransformHandler>(
     let inputs = std::mem::take(&mut batch.inputs);
     batch.opened = None;
     let group = batch.group.take().ok_or("sink group has no handler")?;
+    ctx.instrumentation
+        .events_processed_total
+        .fetch_add(inputs.len() as u64, Ordering::Relaxed);
     let results = crate::metrics::instrumentation::process_with_instrumentation_no_count(
         &ctx.instrumentation,
         || group.finish(),
@@ -217,9 +220,6 @@ pub(super) async fn flush<H: UnifiedTransformHandler>(
         if let Some(heartbeat) = &ctx.heartbeat {
             heartbeat.state.record_last_consumed(parent.view().id);
         }
-        ctx.instrumentation
-            .events_processed_total
-            .fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
 }

@@ -796,34 +796,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 env: EnvBinding::Canonical,
             },
             KnobSpec {
-                key_path: super::SINK_BATCH_SIZE,
-                file_path: None,
-                value_type: KnobType::U64 {
-                    min: 1,
-                    max: obzenflow_core::journal::limits::MAX_GROUP_RECORDS as u64,
-                },
-                target: KnobTarget::StageConsumer,
-                default: KnobDefault::Value(ConfigValue::U64(1)),
-                mutability: Mutability::Restartful,
-                role: KnobRole::Configuration,
-                redaction: Redaction::Plain,
-                env: EnvBinding::None,
-            },
-            KnobSpec {
-                key_path: super::SINK_BATCH_MAX_WAIT_MS,
-                file_path: None,
-                value_type: KnobType::U64 {
-                    min: 0,
-                    max: u64::MAX,
-                },
-                target: KnobTarget::StageConsumer,
-                default: KnobDefault::Value(ConfigValue::U64(0)),
-                mutability: Mutability::Restartful,
-                role: KnobRole::Configuration,
-                redaction: Redaction::Plain,
-                env: EnvBinding::None,
-            },
-            KnobSpec {
                 key_path: "runtime.ai.max_open_keys",
                 file_path: None,
                 value_type: KnobType::U64 {
@@ -1037,6 +1009,34 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 role: KnobRole::Invocation,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Named("OBZENFLOW_REPLAY_VERIFY"),
+            },
+            KnobSpec {
+                key_path: super::SINK_BATCH_MAX_WAIT_MS,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 0,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::StageConsumer,
+                default: KnobDefault::Value(ConfigValue::U64(0)),
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::None,
+            },
+            KnobSpec {
+                key_path: super::SINK_BATCH_SIZE,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: obzenflow_core::journal::limits::MAX_GROUP_RECORDS as u64,
+                },
+                target: KnobTarget::StageConsumer,
+                default: KnobDefault::Value(ConfigValue::U64(1)),
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::None,
             },
         ]
     })
