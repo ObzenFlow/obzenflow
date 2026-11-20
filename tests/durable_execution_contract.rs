@@ -639,6 +639,7 @@ fn durable_execution_contract_child() {
             .run_blocking(ai_digest::build_flow(scenario, plan.hold)),
         Graph::AtMostOnce => app.run_blocking(at_most_once::build_flow(scenario, plan.hold)),
         Graph::CsvRegister => app.run_blocking(csv_register::build_flow(scenario, plan.hold)),
+        Graph::CsvRegisterFanIn => app.run_blocking(csv_register::fan_in_flow(scenario, plan.hold)),
     };
     if let Err(error) = result {
         eprintln!("{error}");
@@ -681,6 +682,7 @@ enum Graph {
     AiDigest,
     AtMostOnce,
     CsvRegister,
+    CsvRegisterFanIn,
 }
 
 fn payment_config(scenario: &Scenario) -> PathBuf {
@@ -6619,13 +6621,28 @@ mod csv_register {
         scenario.inputs.join("entries.yaml")
     }
 
-    fn fresh(name: &str) -> Scenario {
-        let scenario = Scenario::for_graph(name, Graph::CsvRegister);
-        let entries: String = ENTRIES
+    fn side_input(scenario: &Scenario, side: &str) -> PathBuf {
+        scenario.inputs.join(format!("{side}.yaml"))
+    }
+
+    fn write_entries(path: &Path, entries: &[&str]) {
+        let entries: String = entries
             .iter()
             .map(|entry| format!("  - entry_id: \"{entry}\"\n"))
             .collect();
-        std::fs::write(input(&scenario), format!("entries:\n{entries}")).expect("write entries");
+        std::fs::write(path, format!("entries:\n{entries}")).expect("write entries");
+    }
+
+    fn fresh(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::CsvRegister);
+        write_entries(&input(&scenario), &ENTRIES);
+        scenario
+    }
+
+    fn fresh_fan_in(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::CsvRegisterFanIn);
+        write_entries(&side_input(&scenario, "left"), &ENTRIES[..2]);
+        write_entries(&side_input(&scenario, "right"), &ENTRIES[2..]);
         scenario
     }
 
@@ -6702,13 +6719,19 @@ mod csv_register {
         }
     }
 
-    pub(super) fn build_flow(scenario: &Scenario, hold: Option<Hold>) -> FlowDefinition {
-        let entries_input = YamlSource::builder(EntryYaml)
-            .path(input(scenario))
+    fn entries_source(path: PathBuf) -> YamlSource<EntryYaml> {
+        YamlSource::builder(EntryYaml)
+            .path(path)
             .selection(YamlSelection::SequenceAt("/entries".into()))
             .batch_size(1)
             .build()
-            .expect("the entry channel is configured");
+            .expect("the entry channel is configured")
+    }
+
+    fn register_parts(
+        scenario: &Scenario,
+        hold: Option<Hold>,
+    ) -> (CsvSink<EntryRow>, HoldAfterWrite) {
         let register_csv = CsvSink::builder(EntryRow)
             .path(register_file(scenario))
             .build()
@@ -6719,6 +6742,36 @@ mod csv_register {
                 _ => None,
             },
         };
+        (register_csv, hold_after_write)
+    }
+
+    pub(super) fn fan_in_flow(scenario: &Scenario, hold: Option<Hold>) -> FlowDefinition {
+        let left_input = entries_source(side_input(scenario, "left"));
+        let right_input = entries_source(side_input(scenario, "right"));
+        let (register_csv, hold_after_write) = register_parts(scenario, hold);
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            Ok(flow! {
+                name: "durable_execution_contract_csv_register_fan_in",
+                journals: disk_journals(journals),
+
+                stages: {
+                    left = source!(LedgerEntry => left_input);
+                    right = source!(LedgerEntry => right_input);
+                    register = sink!(LedgerEntry with hold_after_write => register_csv);
+                },
+
+                topology: {
+                    left |> register;
+                    right |> register;
+                }
+            })
+        })
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario, hold: Option<Hold>) -> FlowDefinition {
+        let entries_input = entries_source(input(scenario));
+        let (register_csv, hold_after_write) = register_parts(scenario, hold);
         let journals = scenario.journals();
         FlowDefinition::materialize(move |_runtime_config| {
             Ok(flow! {
@@ -6809,6 +6862,64 @@ mod csv_register {
             .collect();
         assert_eq!(frames.len(), 1);
         remove_input(&input(&scenario));
+        let candidate = Child::spawn(
+            &scenario,
+            [replay(&resumed), sink_group_config(&scenario, 64)].concat(),
+            None,
+        )
+        .completed()
+        .await;
+        assert_eq!(file(), held);
+        assert_eq!(damage_files(&scenario), damage);
+        let (code, report) = verify_exit(&resumed, &candidate);
+        assert_eq!(code, Some(0), "{report}");
+    }
+
+    fn sorted_rows(content: &str) -> Vec<&str> {
+        let mut rows: Vec<&str> = content.lines().skip(1).collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fan_in_group_interruption_recovers_rows() {
+        let scenario = fresh_fan_in("fan_in_group");
+        let file = || std::fs::read_to_string(register_file(&scenario)).unwrap_or_default();
+        let config = sink_group_config(&scenario, ENTRIES.len());
+        let child = Child::spawn(&scenario, config.clone(), Some(Hold::RegisterWrite(1)));
+        let run = child.run().await;
+        until(&run, "fan-in group write before records", |archive| {
+            let written = file();
+            written.ends_with('\n') && sorted_rows(&written) == ENTRIES && appended(archive) == 0
+        })
+        .await;
+        let held = file();
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success());
+        let killed = Archive::read(&run).await;
+        assert_eq!(appended(&killed), 0);
+        let resumed = Child::spawn(&scenario, [resume(&run), config].concat(), None)
+            .completed()
+            .await;
+        assert_eq!(file(), held);
+        let damage = damage_files(&scenario);
+        assert_eq!(damage.len(), 1);
+        assert_eq!(std::fs::read_to_string(&damage[0]).unwrap(), held);
+        let archive = Archive::read(&resumed).await;
+        let parents: BTreeSet<_> = archive
+            .rows("register", RunJournalKind::Data)
+            .filter(|row| settled_input(row).is_some())
+            .map(|row| row.envelope.provenance.event.causality.parent_ids[0])
+            .collect();
+        assert_eq!(parents.len(), ENTRIES.len());
+        let recorded = killed.decision_rows("register");
+        let rows = archive.decision_rows("register");
+        assert!(
+            rows.iter().zip(&recorded).all(|(row, then)| row == then),
+            "the resume's decision rows {rows:?} depart from {recorded:?}"
+        );
+        remove_input(&side_input(&scenario, "left"));
+        remove_input(&side_input(&scenario, "right"));
         let candidate = Child::spawn(
             &scenario,
             [replay(&resumed), sink_group_config(&scenario, 64)].concat(),

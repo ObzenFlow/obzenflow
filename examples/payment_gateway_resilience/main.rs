@@ -38,7 +38,7 @@ fn banner_for(mode: &RunMode) -> Banner {
                     "Source config and env vars are ignored; recorded order events are re-admitted".to_string(),
                     "Gateway calls are suppressed; recorded effect outcomes are reused as facts".to_string(),
                     "Retry, circuit breaker, and rate limiter are configured for topology validation only; no live state moves".to_string(),
-                    "Sink lines below are archived outcomes re-emitted deterministically, marked [replay]".to_string(),
+                    "Replay prints no sink lines, since it makes no sink calls".to_string(),
                 ],
             )
             .config("journal_dir", "target/payment-gateway-logs"),

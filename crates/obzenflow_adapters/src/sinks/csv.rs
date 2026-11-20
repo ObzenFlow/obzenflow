@@ -592,6 +592,48 @@ mod tests {
         assert_ne!(east.system_name(), west.system_name());
     }
 
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct Entry {
+        id: u64,
+    }
+
+    impl TypedPayload for Entry {
+        const EVENT_TYPE: &'static str = "csv_test.entry";
+    }
+
+    #[derive(Clone)]
+    struct EntryRow;
+
+    impl CsvProjection for EntryRow {
+        type Input = Entry;
+        type Row = Entry;
+
+        fn project(&self, entry: &Entry) -> Result<Entry, HandlerError> {
+            Ok(entry.clone())
+        }
+    }
+
+    #[test]
+    fn csv_sinks_sharing_path_refused() {
+        use obzenflow_runtime::effects::{
+            effectful_transform_effects, EffectPortRegistry, EffectRegistrationCollectionError,
+            SinkHandler,
+        };
+        let declarations = || {
+            let sink = CsvSink::builder(EntryRow)
+                .path("shared/register.csv")
+                .build()
+                .unwrap();
+            effectful_transform_effects(&SinkHandler::<_, Entry>::new(sink)).unwrap()
+        };
+        let (first, second) = (declarations(), declarations());
+        let refused = EffectPortRegistry::collect_from_declarations(first.iter().chain(&second));
+        assert!(matches!(
+            refused,
+            Err(EffectRegistrationCollectionError::DistinctBindings { .. })
+        ));
+    }
+
     #[test]
     fn new_history_starts_file_empty() {
         let dir = tempfile::tempdir().unwrap();
