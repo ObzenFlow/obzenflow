@@ -89,7 +89,6 @@ pub mod testing;
 /// [`TypedFiniteSourceHandler`](crate::stages::TypedFiniteSourceHandler),
 /// [`TypedInfiniteSourceHandler`](crate::stages::TypedInfiniteSourceHandler),
 /// [`TypedTransformHandler`](crate::stages::TypedTransformHandler),
-/// [`SinkWriter`](crate::stages::SinkWriter),
 /// [`TypedStatefulHandler`](crate::stages::TypedStatefulHandler),
 /// [`TypedJoinHandler`](crate::stages::TypedJoinHandler),
 /// [`ObserverHandler`](crate::stages::ObserverHandler), and the
@@ -97,6 +96,10 @@ pub mod testing;
 /// that own resources. Also includes
 /// [`SourceError`](crate::stages::SourceError) for source-specific error
 /// reporting.
+///
+/// Sink commands implement [`SinkRole`](crate::effects::SinkRole). Its
+/// [`prepare`](crate::effects::SinkRole::prepare) method builds one request per
+/// input. The runtime sends that request through the command's [`Port`](crate::effects::Port).
 ///
 /// **Event flow** —
 /// [`UpstreamSubscription`](crate::messaging::UpstreamSubscription) for

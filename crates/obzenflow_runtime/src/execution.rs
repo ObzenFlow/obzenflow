@@ -2,17 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Runtime execution strategy (FLOWIP-120r).
+//! Execution modes for live runs, replay and resume.
 //!
-//! One runtime-owned authority for the question "is this work reconstructing
-//! recorded history, or is it live?". The strategy is selected once from the
-//! operator verb at bootstrap; every consumer then queries the strategy
-//! instead of branching on `replay_archive.is_some()` or the retired
-//! `EffectRuntimeMode`.
-//!
-//! FLOWIP-120r ships [`Live`] and [`Replay`]. FLOWIP-120n adds the operational
-//! `Resume` strategy (continue-live, position-based) plus a `ResumeControl`
-//! handle, without changing the read-only query trait below.
+//! At startup, [`RuntimeExecution`] selects a strategy from the operator's
+//! [`RuntimeMode`]. [`Live`](RuntimeMode::Live) processes new work.
+//! [`Replay`](RuntimeMode::Replay) reconstructs the recording and drains at its
+//! end. [`Resume`](RuntimeMode::Resume) catches up to the recorded position
+//! for each stage, then continues live.
 
 use crate::metrics::observations::ObservationRegistry;
 use crate::stages::source::SourceContinuation;

@@ -49,6 +49,7 @@
 //! | Destination | Command |
 //! |---|---|
 //! | Console | [`ConsoleSink::new`] with a formatter |
+//! | Console table | [`ConsoleSink::new`] with a [`TableFormatter`], then [`batch_size`](ConsoleSink::batch_size) to print one table per group |
 //! | Structured diagnostics | [`TracingSink::new`] with a callback that returns a [`TracingOutput`] |
 //! | Intentional discard | [`DiscardSink::new`] |
 //! | CSV or TSV register | [`CsvSink::builder`] |
@@ -65,10 +66,14 @@
 //!
 //! ## PostgreSQL
 //!
-//! PostgreSQL output is an application's port, with a system that writes through
-//! the framework's client in [`crate::effects::postgres`]. An insert with
-//! `ON CONFLICT ... DO NOTHING` is `exactly_once`, and a plain insert is
-//! `at_least_once`.
+//! A PostgreSQL sink declares its own port. Enable the `postgres` feature to
+//! use `obzenflow::effects::postgres`. A plain insert can declare `at_least_once`.
+//! For an `exactly_once` insert using `ON CONFLICT ... DO NOTHING`, retries
+//! must use the same key and the database must enforce its uniqueness.
+#![cfg_attr(
+    feature = "postgres",
+    doc = "\nSee [`PostgresClient`](crate::effects::postgres::PostgresClient) for statement execution."
+)]
 
 pub use obzenflow_adapters::sinks::{
     Appended, ConsoleFormatError, ConsoleOutput, ConsolePort, ConsoleSink, ConsoleTablePort,
