@@ -118,7 +118,9 @@ pub(super) mod private {
 pub trait OpenSinkBatch: private::Sealed + Send + Sync {
     fn admission_wait(&self) -> std::time::Duration;
     async fn admit(&mut self, input: super::EffectInvocationContext) -> Result<bool, HandlerError>;
-    async fn finish(self: Box<Self>) -> Result<Vec<Result<(), HandlerError>>, HandlerError>;
+    async fn finish(
+        self: Box<Self>,
+    ) -> Result<Vec<Result<(), HandlerError>>, (usize, HandlerError)>;
 }
 
 #[async_trait]

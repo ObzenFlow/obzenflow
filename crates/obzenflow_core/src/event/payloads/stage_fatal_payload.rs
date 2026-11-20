@@ -47,6 +47,8 @@ pub enum StageFatalReason {
     MissingRecordedFact,
     /// A resume skipped a fact its recording holds.
     UnusedFactHistory,
+    /// The destination cannot continue from its last recorded state.
+    DestinationChanged,
     ConfigurationInvariant,
     EffectTargetAssertionMismatch,
     EffectPortRegistrationMissing,
@@ -70,6 +72,7 @@ impl StageFatalReason {
                 | Self::UnusedEffectHistory
                 | Self::MissingRecordedFact
                 | Self::UnusedFactHistory
+                | Self::DestinationChanged
         )
     }
 }

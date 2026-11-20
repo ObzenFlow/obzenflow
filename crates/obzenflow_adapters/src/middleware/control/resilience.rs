@@ -2165,6 +2165,7 @@ fn error_has_health_observation(error: &EffectError) -> bool {
                 | "execution"
         ),
         EffectError::BindingAuthority { .. }
+        | EffectError::DestinationChanged { .. }
         | EffectError::Serialization(_)
         | EffectError::Journal(_)
         | EffectError::MissingRecordedEffect { .. }

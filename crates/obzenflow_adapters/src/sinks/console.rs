@@ -16,9 +16,10 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::marker::PhantomData;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// Output destination for `ConsoleSink`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -665,10 +666,37 @@ pub trait ConsoleTablePort {
     async fn write_row(&self, row: &TableRow, ctx: &EffectContext) -> Result<(), EffectError>;
 }
 
+#[derive(Clone)]
 struct ConsoleTable {
     columns: Vec<String>,
     max_width: usize,
     destination: OutputDestination,
+}
+
+impl ConsoleTable {
+    fn port(self) -> Result<Port<dyn ConsoleTablePort>, ConsoleFormatError> {
+        static PORTS: OnceLock<Mutex<HashMap<String, Port<dyn ConsoleTablePort>>>> =
+            OnceLock::new();
+        let shape = serde_json::to_vec(&(
+            &self.columns,
+            self.max_width,
+            matches!(self.destination, OutputDestination::Stderr),
+        ))
+        .map_err(|error| ConsoleFormatError::new(error.to_string()))?;
+        let digest = ring::digest::digest(&ring::digest::SHA256, &shape);
+        let instance = super::hex(&digest.as_ref()[..16]);
+        let mut ports = PORTS
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Ok(ports
+            .entry(instance.clone())
+            .or_insert_with(|| {
+                Port::deferred_grouped::<TableRow, _, _>(move || Ok(self.clone()))
+                    .instance(&instance)
+            })
+            .clone())
+    }
 }
 
 #[system("console-table")]
@@ -729,15 +757,12 @@ impl<T, E> ConsoleSink<T, TableFormatter<T, E>> {
         let destination = self.destination.ok_or_else(|| {
             ConsoleFormatError::new("select the table system with through() after batch_size()")
         })?;
-        let columns = self.formatter.columns.clone();
-        let max_width = self.formatter.max_col_width;
-        let port = Port::deferred_grouped::<TableRow, _, _>(move || {
-            Ok(ConsoleTable {
-                columns: columns.clone(),
-                max_width,
-                destination,
-            })
-        });
+        let port = ConsoleTable {
+            columns: self.formatter.columns.clone(),
+            max_width: self.formatter.max_col_width,
+            destination,
+        }
+        .port()?;
         Ok(TableConsoleSink {
             formatter: self.formatter,
             port,
@@ -861,6 +886,40 @@ mod tests {
             .prepare(&TestEvent { value: "x".into() })
             .expect_err("one cell for two columns");
         assert!(error.to_string().contains("does not match its columns"));
+    }
+
+    #[test]
+    fn distinct_console_tables_collect() {
+        use obzenflow_runtime::effects::{
+            effectful_transform_effects, EffectPortRegistry, SinkHandler,
+        };
+        let table = |column: &str, width, stderr, size| {
+            let formatter =
+                TableFormatter::new(&[column], |row: &TestEvent| vec![row.value.clone()])
+                    .max_width(width);
+            let sink = ConsoleSink::new(formatter);
+            let sink = if stderr { sink.to_stderr() } else { sink };
+            sink.batch_size(size).unwrap()
+        };
+        let tables = [
+            table("customer", 30, false, 8),
+            table("invoice", 30, false, 8),
+            table("customer", 40, false, 8),
+            table("customer", 30, true, 8),
+            table("customer", 30, false, 16),
+        ];
+        let names: std::collections::HashSet<_> = tables
+            .iter()
+            .map(|table| table.port.system_name())
+            .collect();
+        assert_eq!(names.len(), 4);
+        let declarations: Vec<_> = tables
+            .into_iter()
+            .flat_map(|table| {
+                effectful_transform_effects(&SinkHandler::<_, TestEvent>::new(table)).unwrap()
+            })
+            .collect();
+        EffectPortRegistry::collect_from_declarations(&declarations).unwrap();
     }
 
     #[tokio::test]

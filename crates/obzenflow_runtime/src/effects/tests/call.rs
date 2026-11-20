@@ -866,6 +866,57 @@ struct FailedWrite {
     value: u64,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+struct RegisterAppend(u64);
+
+struct ChangedRegister;
+
+#[crate::effects::port(system = "changed-register")]
+impl ChangedRegister {
+    #[effect(type = "test.register_append", exactly_once, records = reply)]
+    fn append(&self, _: &RegisterAppend) -> Result<(), EffectError> {
+        Err(EffectError::DestinationChanged {
+            message: "register prefix changed".into(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn destination_refusal_records_no_outcome() {
+    for boundary in [
+        test_allow_all_effect_boundary(),
+        recording_entry_point_boundary().0,
+    ] {
+        let stage = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+        let port = Port::to(ChangedRegister);
+        let declaration = declaration_for::<Call<RegisterAppend>, _>(&port);
+        let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+            .unwrap()
+            .into_run_registry();
+        let ctx = ledger_context(
+            journal.clone(),
+            stage,
+            registry,
+            vec![declaration.runtime_projection()],
+            None,
+        );
+        let role = perform(|row: &LedgerWritten| RegisterAppend(row.value)).through(port);
+        let mut group = Box::new(super::super::runtime::SinkGroup::new(
+            Arc::new(role),
+            boundary,
+        ));
+        admit_ledger_rows(group.as_mut(), &ctx, stage, 2).await;
+        let (index, error) = group.finish().await.unwrap_err();
+        assert_eq!(index, 0);
+        assert_eq!(
+            error.as_fatal().unwrap().reason,
+            obzenflow_core::event::StageFatalReason::DestinationChanged
+        );
+        assert!(journal.events().is_empty());
+    }
+}
+
 struct FailEveryWrite(Arc<AtomicUsize>);
 
 #[crate::effects::port(system = "fail-every-write")]

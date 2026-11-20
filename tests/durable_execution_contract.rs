@@ -6976,6 +6976,87 @@ mod csv_register {
         check_register_cut("csv_register", 3).await;
     }
 
+    async fn refuse_changed_register(name: &str) -> (Scenario, PathBuf) {
+        let scenario = fresh(name);
+        let file = register_file(&scenario);
+        let child = Child::spawn(&scenario, Vec::new(), Some(Hold::RegisterWrite(3)));
+        let run = child.run().await;
+        let held = rows(&ENTRIES[..3]);
+        until(&run, name, |archive| {
+            appended(archive) == 2 && std::fs::read_to_string(&file).unwrap_or_default() == held
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success());
+        let changed = held.replace("R-01", "X-01");
+        std::fs::write(&file, &changed).unwrap();
+
+        let child = Child::spawn(
+            &scenario,
+            [resume(&run), sink_group_config(&scenario, 4)].concat(),
+            None,
+        );
+        let refused = child.run().await;
+        let log = child.log.clone();
+        assert!(!child.exit().await.success());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), changed);
+        let output = read_log(&log);
+        let remedy = output
+            .lines()
+            .find(|line| line.starts_with("To continue this run, restore what "))
+            .unwrap_or_else(|| panic!("missing recovery instructions: {output}"));
+        assert!(
+            remedy.contains(&flow_id(&run)) && remedy.ends_with(&flow_id(&refused)),
+            "{remedy}"
+        );
+        (scenario, refused)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn changed_register_stops_resume() {
+        let (_, refused) = refuse_changed_register("changed_register").await;
+        let archive = Archive::read(&refused).await;
+        let records: Vec<_> = archive
+            .rows("register", RunJournalKind::Data)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .all(|record| matches!(record.outcome, EffectOutcomePayload::Succeeded { .. })));
+        let errors: Vec<_> = archive.rows("register", RunJournalKind::Error).collect();
+        let fatal = errors
+            .iter()
+            .find_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) => Some(fatal),
+                _ => None,
+            })
+            .expect("register refusal in the error journal");
+        assert_eq!(
+            fatal.reason,
+            obzenflow_core::event::StageFatalReason::DestinationChanged
+        );
+        assert_eq!(fatal.input_position, Some(3));
+        assert!(errors
+            .iter()
+            .all(|row| row.event_type() != "runtime.stage.processing_failed"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restored_register_resume_completes() {
+        let (scenario, refused) = refuse_changed_register("restored_register").await;
+        let file = register_file(&scenario);
+        std::fs::write(&file, rows(&ENTRIES[..2])).unwrap();
+        let resumed = Child::spawn(&scenario, resume(&refused), None)
+            .completed()
+            .await;
+        assert_eq!(std::fs::read_to_string(file).unwrap(), rows(&ENTRIES));
+        assert_eq!(appended(&Archive::read(&resumed).await), ENTRIES.len());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn csv_first_write_preserves_tail() {
         check_register_cut("csv_register_first", 1).await;

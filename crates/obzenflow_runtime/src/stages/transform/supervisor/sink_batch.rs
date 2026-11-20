@@ -5,6 +5,7 @@
 use super::TransformResources;
 use crate::effects::EffectInvocationContext;
 use crate::messaging::{upstream_subscription::StageInputPosition, DeliveredRecord};
+use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
@@ -119,19 +120,7 @@ pub(super) async fn enqueue<H: UnifiedTransformHandler>(
         Ok(close) => close,
         Err(error) => {
             if let Some(fatal) = error.as_fatal() {
-                record_stage_fatal(
-                    fatal,
-                    StageFatalCommit {
-                        error_journal: &ctx.error_journal,
-                        writer_id: ctx.stage_id.into(),
-                        stage_id: ctx.stage_id,
-                        stage_key: &ctx.stage_name,
-                        input_position: Some(position),
-                        parent: Some(&parent),
-                        lineage: ctx.lineage_policy,
-                    },
-                )
-                .await?;
+                record_fatal(ctx, fatal, position, &parent).await?;
             }
             return Err(error.into());
         }
@@ -170,7 +159,17 @@ pub(super) async fn flush<H: UnifiedTransformHandler>(
         &ctx.instrumentation,
         || group.finish(),
     )
-    .await?;
+    .await;
+    let results = match results {
+        Ok(results) => results,
+        Err((index, error)) => {
+            if let Some(fatal) = error.as_fatal() {
+                let input = &inputs[index];
+                record_fatal(ctx, fatal, input.position, &input.parent).await?;
+            }
+            return Err(error.into());
+        }
+    };
     if results.len() != inputs.len() {
         return Err("sink group failed to account for every input".into());
     }
@@ -184,19 +183,7 @@ pub(super) async fn flush<H: UnifiedTransformHandler>(
         let mut outputs = Vec::new();
         if let Err(error) = result {
             if let Some(fatal) = error.as_fatal() {
-                record_stage_fatal(
-                    fatal,
-                    StageFatalCommit {
-                        error_journal: &ctx.error_journal,
-                        writer_id: WriterId::from(ctx.stage_id),
-                        stage_id: ctx.stage_id,
-                        stage_key: &ctx.stage_name,
-                        input_position: Some(input.position),
-                        parent: Some(parent),
-                        lineage: ctx.lineage_policy,
-                    },
-                )
-                .await?;
+                record_fatal(ctx, fatal, input.position, parent).await?;
                 return Err(error.into());
             }
             ctx.instrumentation.record_error(error.kind());
@@ -229,6 +216,28 @@ pub(super) async fn flush<H: UnifiedTransformHandler>(
             heartbeat.state.record_last_consumed(parent.view().id);
         }
     }
+    Ok(())
+}
+
+async fn record_fatal<H: UnifiedTransformHandler>(
+    ctx: &TransformResources<H>,
+    fatal: &StageFatal,
+    position: StageInputPosition,
+    parent: &DeliveredRecord<ChainPayload>,
+) -> Result<(), DispatchError> {
+    record_stage_fatal(
+        fatal,
+        StageFatalCommit {
+            error_journal: &ctx.error_journal,
+            writer_id: ctx.stage_id.into(),
+            stage_id: ctx.stage_id,
+            stage_key: &ctx.stage_name,
+            input_position: Some(position),
+            parent: Some(parent),
+            lineage: ctx.lineage_policy,
+        },
+    )
+    .await?;
     Ok(())
 }
 

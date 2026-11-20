@@ -286,14 +286,28 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> OpenSinkBatch fo
         Ok(close)
     }
 
-    async fn finish(self: Box<Self>) -> Result<Vec<Result<(), HandlerError>>, HandlerError> {
+    async fn finish(
+        self: Box<Self>,
+    ) -> Result<Vec<Result<(), HandlerError>>, (usize, HandlerError)> {
+        let mut input = 0;
+        self.finish_group(&mut input)
+            .await
+            .map_err(|error| (input, error))
+    }
+}
+
+impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> SinkGroup<C, In> {
+    async fn finish_group(
+        self,
+        input: &mut usize,
+    ) -> Result<Vec<Result<(), HandlerError>>, HandlerError> {
         let Self {
             mut cores,
             mut results,
             mut guards,
             admitted,
             ..
-        } = *self;
+        } = self;
         if let Some(head) = admitted.first() {
             let core = &cores[head.index];
             let group = head.live.effect.binding_context.ports.group::<C::Request>();
@@ -323,6 +337,7 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> OpenSinkBatch fo
                 }
                 let mut remaining = admitted.into_iter();
                 while let Some(first) = remaining.next() {
+                    *input = first.index;
                     let mut calls = vec![first];
                     if group.is_some() {
                         calls.extend(&mut remaining);
@@ -379,6 +394,7 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> OpenSinkBatch fo
                 }
             } else {
                 for p in admitted {
+                    *input = p.index;
                     let core = &mut cores[p.index];
                     let LiveCall {
                         effect: live,
@@ -390,6 +406,9 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> OpenSinkBatch fo
                         .execute_live(p.call, live, prior_attempts)
                         .await
                         .map(drop);
+                    if let Err(error @ EffectError::DestinationChanged { .. }) = result {
+                        return Err(error.into());
+                    }
                     results[p.index] = core
                         .check_binding_result::<Call<C::Request>, _>(&p.declaration, result)
                         .map_err(Into::into);
@@ -645,6 +664,7 @@ async fn shared_call<R: SinkRequest>(
         (_, Some(Ok(replies))) if replies.len() == pending.len() => {
             (EffectBoundaryOutcome::Executed(Ok(Vec::new())), replies)
         }
+        (_, Some(Err(e @ EffectError::DestinationChanged { .. }))) => return Err(e),
         (_, Some(Err(e))) => (EffectBoundaryOutcome::Executed(Err(e)), Vec::new()),
         (EffectBoundaryOutcome::Aborted(reason), None) => {
             (EffectBoundaryOutcome::Aborted(reason), vec![])

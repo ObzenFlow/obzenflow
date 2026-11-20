@@ -12,6 +12,7 @@
 //! named `<file>.<length>.damage`.
 
 use super::blocking::blocking_io;
+use super::hex;
 use async_trait::async_trait;
 use csv::{ReaderBuilder, WriterBuilder};
 use obzenflow_core::event::schema::{EmptySet, WithMember};
@@ -26,7 +27,7 @@ use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -143,7 +144,9 @@ impl SinkGroupSystem<CsvRow> for CsvRegister {
             let register = match &mut *state {
                 RegisterState::Open(register) => register,
                 RegisterState::Poisoned(reason) => {
-                    return Err(EffectError::Execution(reason.clone()));
+                    return Err(EffectError::DestinationChanged {
+                        message: reason.clone(),
+                    });
                 }
                 RegisterState::Closed => unreachable!("a closed register is opened above"),
             };
@@ -155,7 +158,7 @@ impl SinkGroupSystem<CsvRow> for CsvRegister {
                         layout.path.display()
                     );
                     *state = RegisterState::Poisoned(reason.clone());
-                    Err(EffectError::Execution(reason))
+                    Err(EffectError::DestinationChanged { message: reason })
                 }
             }
         })
@@ -208,23 +211,39 @@ impl OpenRegister {
         if actual < recorded.length {
             return Err(no_longer_matches(&layout.path, recorded));
         }
-        let mut prefix = vec![0u8; usize::try_from(recorded.length).unwrap_or(usize::MAX)];
-        file.read_exact(&mut prefix)
-            .map_err(|error| io_failure(&layout.path, error))?;
         let mut digest = Context::new(&SHA256);
-        digest.update(&prefix);
+        let mut prefix = BufReader::new(Read::by_ref(&mut file).take(recorded.length));
+        loop {
+            let chunk = prefix
+                .fill_buf()
+                .map_err(|error| io_failure(&layout.path, error))?;
+            if chunk.is_empty() {
+                break;
+            }
+            digest.update(chunk);
+            let consumed = chunk.len();
+            prefix.consume(consumed);
+        }
         if hex(digest.clone().finish().as_ref()) != recorded.sha256 {
             return Err(no_longer_matches(&layout.path, recorded));
         }
         if actual > recorded.length {
             set_aside_tail(&mut file, &layout.path, recorded.length)?;
         }
+        let columns = match &layout.columns {
+            Some(columns) => Some(columns.clone()),
+            None => {
+                file.rewind()
+                    .map_err(|error| io_failure(&layout.path, error))?;
+                header_columns(
+                    Read::by_ref(&mut file).take(recorded.length),
+                    layout.delimiter,
+                )
+                .map_err(|error| io_failure(&layout.path, error.into()))?
+            }
+        };
         file.seek(SeekFrom::Start(recorded.length))
             .map_err(|error| io_failure(&layout.path, error))?;
-        let columns = layout
-            .columns
-            .clone()
-            .or_else(|| header_columns(&prefix, layout.delimiter));
         Ok(Self {
             file,
             length: recorded.length,
@@ -318,15 +337,15 @@ fn damage_path(path: &Path, length: u64) -> PathBuf {
     candidate
 }
 
-fn header_columns(prefix: &[u8], delimiter: u8) -> Option<Vec<String>> {
+fn header_columns(prefix: impl Read, delimiter: u8) -> csv::Result<Option<Vec<String>>> {
     ReaderBuilder::new()
         .has_headers(false)
         .delimiter(delimiter)
         .from_reader(prefix)
         .records()
         .next()
-        .and_then(Result::ok)
-        .map(|record| record.iter().map(str::to_string).collect())
+        .map(|result| result.map(|record| record.iter().map(str::to_string).collect()))
+        .transpose()
 }
 
 fn cell(value: Option<&Value>) -> String {
@@ -340,7 +359,18 @@ fn cell(value: Option<&Value>) -> String {
 }
 
 fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
-    let path = &layout.path;
+    let path = layout.path.canonicalize().unwrap_or_else(|_| {
+        let parent = layout
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        parent
+            .canonicalize()
+            .or_else(|_| std::path::absolute(parent))
+            .unwrap_or_else(|_| parent.to_path_buf())
+            .join(layout.path.file_name().unwrap_or_default())
+    });
     let digest = ring::digest::digest(&SHA256, path.as_os_str().as_encoded_bytes());
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let instance = format!("{}.{name}", hex(&digest.as_ref()[..16]));
@@ -353,12 +383,10 @@ fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
     .instance(&instance)
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn poisoned_lock() -> EffectError {
-    EffectError::Execution("CSV register lock poisoned".to_string())
+    EffectError::DestinationChanged {
+        message: "CSV register lock poisoned".to_string(),
+    }
 }
 
 fn io_failure(path: &Path, error: io::Error) -> EffectError {
@@ -367,12 +395,14 @@ fn io_failure(path: &Path, error: io::Error) -> EffectError {
 
 fn no_longer_matches(path: &Path, recorded: &Appended) -> EffectError {
     let short = recorded.sha256.get(..4).unwrap_or(&recorded.sha256);
-    EffectError::Execution(format!(
-        "{} no longer holds what this run's history recorded (length {}, SHA-256 {short}…); \
+    EffectError::DestinationChanged {
+        message: format!(
+            "{} no longer holds what this run's history recorded (length {}, SHA-256 {short}…); \
          restore it as the history recorded it, then resume again",
-        path.display(),
-        recorded.length
-    ))
+            path.display(),
+            recorded.length
+        ),
+    }
 }
 
 /// Builder for a CSV projection whose input contract is owned by `P`.
@@ -485,33 +515,36 @@ impl<P> CsvSinkBuilder<P> {
         Ok(CsvSink {
             projection: self.projection,
             batch: self.batch,
-            port: register_port(layout),
+            destination: CsvDestination::File(layout),
         })
     }
 }
 
 /// A sink that appends each input, projected by `P`, as one CSV row.
+#[derive(Clone)]
 pub struct CsvSink<P> {
     projection: P,
     batch: SinkBatchDefaults,
-    port: Port<dyn CsvRegisterPort>,
+    destination: CsvDestination,
 }
 
-impl<P: Clone> Clone for CsvSink<P> {
-    fn clone(&self) -> Self {
-        Self {
-            projection: self.projection.clone(),
-            batch: self.batch,
-            port: self.port.clone(),
-        }
-    }
+#[derive(Clone)]
+enum CsvDestination {
+    File(CsvLayout),
+    Port(Port<dyn CsvRegisterPort>),
 }
 
 impl<P> std::fmt::Debug for CsvSink<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CsvSink")
             .field("projection", &std::any::type_name::<P>())
-            .field("port", &self.port)
+            .field(
+                "port",
+                &match &self.destination {
+                    CsvDestination::File(_) => "csv-register",
+                    CsvDestination::Port(port) => port.system_name(),
+                },
+            )
             .finish()
     }
 }
@@ -529,7 +562,7 @@ impl<P> CsvSink<P> {
     /// Append through another system that answers `CsvRegisterPort`, such as
     /// a test port.
     pub fn through(mut self, port: Port<dyn CsvRegisterPort>) -> Self {
-        self.port = port;
+        self.destination = CsvDestination::Port(port);
         self
     }
 }
@@ -539,7 +572,11 @@ impl<P> Command for CsvSink<P> {
     type AllowedEffects = DeclaredEffectSet<WithMember<CsvRow, EmptySet>>;
 
     fn ports(&self) -> Self::Ports {
-        (self.port.clone(), ())
+        let port = match &self.destination {
+            CsvDestination::File(layout) => register_port(layout.clone()),
+            CsvDestination::Port(port) => port.clone(),
+        };
+        (port, ())
     }
 }
 
@@ -615,21 +652,57 @@ mod tests {
 
     #[test]
     fn csv_sinks_sharing_path_refused() {
+        assert_registers_conflict(
+            Path::new("shared/register.csv"),
+            Path::new("shared/register.csv"),
+        );
+    }
+
+    #[test]
+    fn csv_sinks_sharing_resolved_path_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("reports");
+        std::fs::create_dir(&subdir).unwrap();
+        let file = dir.path().join("register.csv");
+        assert_registers_conflict(&file, &subdir.join("../register.csv"));
+        assert!(!file.exists());
+    }
+
+    fn assert_registers_conflict(first: &Path, second: &Path) {
         use obzenflow_runtime::effects::{
             effectful_transform_effects, EffectPortRegistry, EffectRegistrationCollectionError,
             SinkHandler,
         };
-        let declarations = || {
-            let sink = CsvSink::builder(EntryRow)
-                .path("shared/register.csv")
-                .build()
-                .unwrap();
+        let declarations = |path: &Path| {
+            let sink = CsvSink::builder(EntryRow).path(path).build().unwrap();
             effectful_transform_effects(&SinkHandler::<_, Entry>::new(sink)).unwrap()
         };
-        let (first, second) = (declarations(), declarations());
+        let (first, second) = (declarations(first), declarations(second));
         let refused = EffectPortRegistry::collect_from_declarations(first.iter().chain(&second));
         assert!(matches!(
             refused,
+            Err(EffectRegistrationCollectionError::DistinctBindings { .. })
+        ));
+    }
+
+    #[test]
+    fn cloned_register_stages_refused() {
+        use obzenflow_runtime::effects::{
+            effectful_transform_effects, EffectPortRegistry, EffectRegistrationCollectionError,
+            SinkHandler,
+        };
+        let sink = CsvSink::builder(EntryRow)
+            .path("register.csv")
+            .build()
+            .unwrap();
+        let declarations: Vec<_> = [sink.clone(), sink]
+            .into_iter()
+            .flat_map(|sink| {
+                effectful_transform_effects(&SinkHandler::<_, Entry>::new(sink)).unwrap()
+            })
+            .collect();
+        assert!(matches!(
+            EffectPortRegistry::collect_from_declarations(&declarations),
             Err(EffectRegistrationCollectionError::DistinctBindings { .. })
         ));
     }
@@ -692,6 +765,55 @@ mod tests {
             .err()
             .expect("a changed file is refused");
         assert!(error.to_string().contains("no longer holds"), "{error}");
+    }
+
+    #[test]
+    fn large_prefix_resume_preserves_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let layout = layout(&path);
+        let mut first = fields(1);
+        first.insert("name".into(), Value::from("x".repeat(128 * 1024)));
+        let recorded = OpenRegister::open(&layout, None, false)
+            .unwrap()
+            .append_group(&layout, &[CsvRow { fields: first }])
+            .unwrap()
+            .remove(0);
+        let mut next = fields(2);
+        next.insert("extra".into(), Value::from("ignored"));
+        let resumed = OpenRegister::open(&layout, Some(&recorded), true)
+            .unwrap()
+            .append_group(&layout, &[CsvRow { fields: next }])
+            .unwrap()
+            .remove(0);
+        let file = std::fs::read(path).unwrap();
+        assert!(file.ends_with(b"2,row-2\n"));
+        assert_eq!(
+            resumed.sha256,
+            hex(ring::digest::digest(&SHA256, &file).as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_register_refuses_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let layout = layout(&path);
+        let mut register = OpenRegister::open(&layout, None, false).unwrap();
+        register.file = File::open(&path).unwrap();
+        let register = CsvRegister {
+            layout,
+            state: Arc::new(Mutex::new(RegisterState::Open(Box::new(register)))),
+        };
+        let ctx = EffectContext::for_test(FlowId::new(), "register", 1);
+        for id in 1..=2 {
+            let error = register
+                .append(&CsvRow { fields: fields(id) }, &ctx)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, EffectError::DestinationChanged { .. }));
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
     }
 
     #[tokio::test]

@@ -197,6 +197,13 @@ impl From<EffectError> for HandlerError {
     fn from(error: EffectError) -> Self {
         let retry_after = match &error {
             EffectError::BindingAuthority { fault } => return Self::Fatal(fault.stage_fatal()),
+            EffectError::DestinationChanged { message } => {
+                return Self::Fatal(StageFatal::new(
+                    StageFatalCode::Replay,
+                    StageFatalReason::DestinationChanged,
+                    message,
+                ));
+            }
             EffectError::RateLimited { retry_after, .. } => Some(*retry_after),
             _ => None,
         };

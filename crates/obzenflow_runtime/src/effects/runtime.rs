@@ -1226,6 +1226,15 @@ impl EffectsCore {
         result: Result<T, EffectError>,
     ) -> Result<T, EffectError> {
         if let Err(error) = &result {
+            if let EffectError::DestinationChanged { message } = error {
+                self.halt.get_or_insert_with(|| {
+                    AuthoringHalt::Crossing(crate::stages::common::handler_error::StageFatal::new(
+                        obzenflow_core::event::StageFatalCode::Replay,
+                        obzenflow_core::event::StageFatalReason::DestinationChanged,
+                        message,
+                    ))
+                });
+            }
             if let Some(fault) = self.binding_fault_for_error::<E>(declaration, error) {
                 return Err(self.latch_binding_fault(fault));
             }
@@ -2226,6 +2235,7 @@ impl EffectsCore {
         mut control_events: Vec<ChainEvent>,
     ) -> Result<(), EffectError> {
         let (observation, error) = observed_failure;
+        error.ensure_recordable_failure()?;
         if matches!(error, EffectError::EffectTargetInvariantViolation { .. }) {
             let (preterminal, terminal) =
                 split_invariant_control_events(&cursor, attempt, control_events)?;
@@ -2378,6 +2388,7 @@ impl EffectsCore {
         observation: EffectObservation,
         err: &EffectError,
     ) -> Result<(), EffectError> {
+        err.ensure_recordable_failure()?;
         self.append_record(
             EffectRecord {
                 observation,
@@ -2407,6 +2418,7 @@ impl EffectsCore {
         err: &EffectError,
         control_events: Vec<ChainEvent>,
     ) -> Result<(), EffectError> {
+        err.ensure_recordable_failure()?;
         let record = EffectRecord {
             observation,
             cursor: cursor.clone(),

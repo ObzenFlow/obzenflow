@@ -11,6 +11,10 @@ pub enum EffectError {
     #[error("{fault}")]
     BindingAuthority { fault: BindingAuthorityFault },
 
+    /// The destination's state must be restored before this input can settle.
+    #[error("{message}")]
+    DestinationChanged { message: String },
+
     #[error("effect serialization failed: {0}")]
     Serialization(String),
 
@@ -292,6 +296,13 @@ fn descriptor_mismatch_message(
 }
 
 impl EffectError {
+    pub(super) fn ensure_recordable_failure(&self) -> Result<(), Self> {
+        match self {
+            Self::DestinationChanged { .. } => Err(self.clone()),
+            _ => Ok(()),
+        }
+    }
+
     /// The named system did not act on the call, and a later call may succeed.
     /// A call that may have reached the system is a maybe, not a no, and maps to
     /// `Timeout` or `Transport`.
@@ -341,7 +352,7 @@ impl EffectError {
 
     fn recovery_eligible_by_default(&self) -> bool {
         match self {
-            EffectError::BindingAuthority { .. } => false,
+            EffectError::BindingAuthority { .. } | EffectError::DestinationChanged { .. } => false,
             EffectError::RecordedFailure { retry, .. }
             | EffectError::BoundaryRejected { retry, .. }
             | EffectError::DependencyFailed { retry, .. } => retry.is_retryable(),
@@ -390,6 +401,7 @@ impl EffectError {
             "authentication"
             | "other"
             | "binding_authority_fault"
+            | "destination_changed"
             | "serialization"
             | "journal"
             | "missing_recorded_effect"
@@ -419,6 +431,7 @@ impl EffectError {
     pub(super) fn error_type(&self) -> EffectFailureKind {
         match self {
             EffectError::BindingAuthority { .. } => "binding_authority_fault",
+            EffectError::DestinationChanged { .. } => "destination_changed",
             EffectError::Serialization(_) => "serialization",
             EffectError::Journal(_) => "journal",
             EffectError::MissingRecordedEffect { .. } => "missing_recorded_effect",
@@ -463,7 +476,8 @@ impl EffectError {
     /// fields fall back to their Display rendering.
     pub fn semantic_reason(&self) -> std::borrow::Cow<'_, str> {
         match self {
-            EffectError::Execution(message)
+            EffectError::DestinationChanged { message }
+            | EffectError::Execution(message)
             | EffectError::Timeout(message)
             | EffectError::Transport(message)
             | EffectError::Permanent(message)
