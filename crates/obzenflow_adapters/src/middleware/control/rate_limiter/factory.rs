@@ -15,8 +15,7 @@ use super::config::{
     DEFAULT_COST_PER_EVENT,
 };
 use super::hook_adapters::{
-    RateLimiterIngressPolicy, RateLimiterSinkPolicy, RateLimiterSourcePolicy,
-    SourceRateLimitPosition,
+    RateLimiterIngressPolicy, RateLimiterSourcePolicy, SourceRateLimitPosition,
 };
 use super::{RateLimiterFamily, RateLimiterMiddleware};
 use crate::middleware::{
@@ -24,7 +23,7 @@ use crate::middleware::{
     MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface,
     MiddlewareSurfaceAttachment, MiddlewareSurfaceAttachmentKind, MiddlewareSurfaceKind,
-    SinkPolicy, SourcePolicy, SourcePollAttachment, TopologyMiddlewareConfigSlot,
+    SourcePolicy, SourcePollAttachment, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
@@ -168,7 +167,6 @@ impl MiddlewareFactory for RateLimiter {
             vec![
                 MiddlewareSurfaceKind::SourcePoll,
                 MiddlewareSurfaceKind::Effect,
-                MiddlewareSurfaceKind::SinkDelivery,
                 MiddlewareSurfaceKind::Ingress,
             ],
         )
@@ -265,36 +263,6 @@ impl MiddlewareFactory for RateLimiter {
                     MiddlewareSurfaceAttachmentKind::Effect(EffectPolicyAttachment::neutral(
                         Arc::new(middleware),
                     )),
-                    MaterializationClaim::RateLimiter,
-                    context,
-                )
-                .map_err(|error| {
-                    MiddlewareFactoryError::materialization_failed(
-                        self.label(),
-                        &context.config.name,
-                        error,
-                    )
-                })
-            }
-            MiddlewareSurface::SinkDelivery(_) => {
-                let middleware = Arc::new(
-                    RateLimiterMiddleware::new(
-                        context.config.stage_id,
-                        validated,
-                        context,
-                        MaterializationClaim::RateLimiter,
-                    )
-                    .map_err(|message| {
-                        MiddlewareFactoryError::invalid_configuration(
-                            self.label(),
-                            &context.config.name,
-                            std::io::Error::other(message),
-                        )
-                    })?,
-                );
-                let policy: Arc<dyn SinkPolicy> = Arc::new(RateLimiterSinkPolicy::new(middleware));
-                MiddlewareSurfaceAttachment::claimed(
-                    MiddlewareSurfaceAttachmentKind::SinkDelivery(policy),
                     MaterializationClaim::RateLimiter,
                     context,
                 )

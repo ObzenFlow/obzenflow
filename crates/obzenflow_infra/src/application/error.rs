@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_core::journal::archive_actions::{ArchiveRefusal, ReplayVerb};
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
@@ -119,5 +120,64 @@ impl ApplicationError {
 impl From<std::io::Error> for ApplicationError {
     fn from(err: std::io::Error) -> Self {
         ApplicationError::IoError(err)
+    }
+}
+
+impl From<&ArchiveRefusal> for ApplicationError {
+    fn from(refusal: &ArchiveRefusal) -> Self {
+        let message = match refusal {
+            ArchiveRefusal::Cycle {
+                verb: ReplayVerb::Replay,
+                members,
+                run,
+            } => format!(
+                "--replay-from does not support cyclic topologies; cycle members: {}\nTo read \
+                 this run without replaying it, run: obzenflow show {}",
+                members.join(", "),
+                run.display()
+            ),
+            ArchiveRefusal::Cycle {
+                verb: ReplayVerb::Resume,
+                members,
+                ..
+            } => format!(
+                "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle \
+                 members: {}",
+                members.join(", ")
+            ),
+            other => other.to_string(),
+        };
+        match refusal.verb() {
+            ReplayVerb::Replay => Self::ReplayRefused(message),
+            ReplayVerb::Resume => Self::ResumeRefused(message),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cycle_refusal_renders_requested_verb() {
+        for (verb, expected) in [
+            (
+                ReplayVerb::Replay,
+                "--replay-from does not support cyclic topologies; cycle members: review, triage\n\
+             To read this run without replaying it, run: obzenflow show /runs/r1",
+            ),
+            (
+                ReplayVerb::Resume,
+                "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle \
+             members: review, triage",
+            ),
+        ] {
+            let refusal = ArchiveRefusal::Cycle {
+                verb,
+                run: PathBuf::from("/runs/r1"),
+                members: vec!["review".into(), "triage".into()],
+            };
+            assert_eq!(ApplicationError::from(&refusal).to_string(), expected);
+        }
     }
 }

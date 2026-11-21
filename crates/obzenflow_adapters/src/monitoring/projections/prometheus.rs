@@ -8,7 +8,6 @@ use crate::monitoring::read_model::MetricsReadView;
 use obzenflow_core::event::observability::{HttpPullState, WaitReason};
 use obzenflow_core::event::provenance::RetryCallOutcome;
 use obzenflow_core::event::status::processing_status::ErrorKind;
-use obzenflow_core::event::{SinkOperationPhase, SinkWritePhase};
 use obzenflow_core::metrics::{
     AppMetricsSnapshot, ContractMetricEdgeKey, ControlUnit, HistogramSnapshot,
     InfraMetricsSnapshot, StageMetadata,
@@ -537,50 +536,6 @@ impl PrometheusProjection {
                         count
                     )?;
                 }
-            }
-            writeln!(output)?;
-        }
-
-        if !snapshot.sink_operation_failures.is_empty() {
-            writeln!(
-                output,
-                "# HELP obzenflow_sink_operation_failures_total Durable sink connector operation failures"
-            )?;
-            writeln!(
-                output,
-                "# TYPE obzenflow_sink_operation_failures_total counter"
-            )?;
-            for failure in &snapshot.sink_operation_failures {
-                let Some(metadata) = snapshot.stage_metadata.get(&failure.stage_id) else {
-                    continue;
-                };
-                let phase = match failure.phase {
-                    SinkOperationPhase::Open => "open",
-                    SinkOperationPhase::Write(SinkWritePhase::Encode) => "encode",
-                    SinkOperationPhase::Write(SinkWritePhase::Acquire) => "acquire",
-                    SinkOperationPhase::Write(SinkWritePhase::Execute) => "execute",
-                    SinkOperationPhase::Write(SinkWritePhase::Commit) => "commit",
-                    SinkOperationPhase::Flush => "flush",
-                    SinkOperationPhase::Drain => "drain",
-                };
-                let error_kind = match &failure.error_kind {
-                    ErrorKind::Timeout => "timeout",
-                    ErrorKind::Remote => "remote",
-                    ErrorKind::RateLimited => "rate_limited",
-                    ErrorKind::PermanentFailure => "permanent_failure",
-                    ErrorKind::Deserialization => "deserialization",
-                    ErrorKind::Validation => "validation",
-                    ErrorKind::Domain => "domain",
-                    ErrorKind::Unknown => "unknown",
-                };
-                writeln!(
-                    output,
-                    "obzenflow_sink_operation_failures_total{{{},phase=\"{}\",error_kind=\"{}\"}} {}",
-                    format_stage_labels(&failure.stage_id, metadata),
-                    phase,
-                    error_kind,
-                    failure.count
-                )?;
             }
             writeln!(output)?;
         }
@@ -2977,7 +2932,6 @@ mod tests {
         AiChunkingMetricsSnapshot, BoundaryDirection, CompositeContract, CompositeDurationBucket,
         CompositeDurationHistogram, CompositeDurationInvalid, CompositeMemberHealth,
         CompositePortTraffic, ContractViolationCauseLabel, InfraMetricsSnapshot,
-        SinkOperationFailureMetric,
     };
     use std::collections::HashMap;
 
@@ -3239,64 +3193,6 @@ mod tests {
             escape_label(&upstream.to_string()),
             escape_label(&downstream.to_string()),
         )));
-    }
-
-    #[test]
-    fn sink_operation_failures_use_only_bounded_phase_and_kind_labels() {
-        let exporter = PrometheusProjection::new();
-        let stage_id = StageId::new();
-        let mut snapshot = AppMetricsSnapshot::default();
-        snapshot.stage_metadata.insert(
-            stage_id,
-            StageMetadata {
-                name: "payments".to_string(),
-                flow_name: "checkout".to_string(),
-                stage_type: obzenflow_core::event::context::StageType::Sink,
-                reference_mode: None,
-                flow_id: None,
-            },
-        );
-        for (phase, count) in [
-            (SinkOperationPhase::Open, 1),
-            (SinkOperationPhase::Write(SinkWritePhase::Encode), 2),
-            (SinkOperationPhase::Write(SinkWritePhase::Acquire), 3),
-            (SinkOperationPhase::Write(SinkWritePhase::Execute), 4),
-            (SinkOperationPhase::Write(SinkWritePhase::Commit), 5),
-            (SinkOperationPhase::Flush, 6),
-            (SinkOperationPhase::Drain, 7),
-        ] {
-            snapshot
-                .sink_operation_failures
-                .push(SinkOperationFailureMetric {
-                    stage_id,
-                    phase,
-                    error_kind: ErrorKind::Remote,
-                    count,
-                });
-        }
-        let view = MetricsReadView {
-            app: Some(std::sync::Arc::new(snapshot)),
-            ..Default::default()
-        };
-
-        let output = exporter.render(&view).unwrap();
-        for phase in [
-            "open", "encode", "acquire", "execute", "commit", "flush", "drain",
-        ] {
-            assert!(output.contains(&format!("phase=\"{phase}\",error_kind=\"remote\"")));
-        }
-        for forbidden in [
-            "logical_destination",
-            "destination_error_code",
-            "destination_code",
-            "detail=",
-            "phase=\"write_",
-        ] {
-            assert!(
-                !output.contains(forbidden),
-                "forbidden metric label: {forbidden}"
-            );
-        }
     }
 
     #[test]

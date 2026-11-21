@@ -142,43 +142,6 @@ pub(crate) fn commit_control_output(
     })
 }
 
-/// Error-journal Data participates in emitted-output accounting without
-/// advancing the authored data-journal transport frontier.
-pub(crate) fn commit_error_output(
-    journal: &Arc<dyn Journal<ChainEvent>>,
-    instrumentation: &Arc<StageInstrumentation>,
-    mut event: ChainEvent,
-    parent: Option<&DeliveredRecord<ChainPayload>>,
-) -> futures::future::BoxFuture<'static, Result<JournalRecord<ChainPayload>, CommitError>> {
-    use futures::FutureExt;
-    let journal = journal.clone();
-    let instrumentation = instrumentation.clone();
-    let parent = parent.cloned();
-    crate::supervised_base::publication::commit(async move {
-        let mut snapshot = instrumentation.capture_accounting();
-        if event.consumes_data_credit() {
-            snapshot.accounting.events_emitted_total =
-                snapshot.accounting.events_emitted_total.saturating_add(1);
-            snapshot.project_emission(&event);
-        }
-        let emitted = u64::from(event.consumes_data_credit());
-        event = snapshot.attach_to(event);
-        let capture = instrumentation.journal_capture(None, vec![(emitted, true)]);
-        let written = crate::supervised_base::publication::append_inline(
-            &journal,
-            event,
-            AppendOptions::from_record(parent.as_ref().map(DeliveredRecord::record))?
-                .with_capture(capture),
-        )
-        .await?;
-        if written.consumes_data_credit() {
-            instrumentation.record_error_journal_output_event(&written);
-        }
-        Ok(written)
-    })
-    .boxed()
-}
-
 enum PhysicalDataReservation {
     Legacy(BackpressureReservation),
     Direct(DirectFactClaim),
@@ -271,8 +234,7 @@ pub(crate) struct CommitOptions {
 ///
 /// Only the five wired variants exist. Other stage-runtime appends are
 /// out-of-surface raw appends today: error-journal and error-routed-data writes,
-/// backpressure activity pulses, sink delivery receipts, forwarded sink-boundary
-/// control rows, source/stage lifecycle events, ingress refusal facts, and the
+/// backpressure activity pulses, source/stage lifecycle events, ingress refusal facts, and the
 /// `fx.emit` / domain-effect-outcome / framework-effect-record facts (which flow
 /// through `NonDataStageFact`) each append directly to their journal (and mirror
 /// directly where applicable) rather than through this seam. Routing them through
@@ -283,6 +245,40 @@ pub(crate) enum StageAppendIntent {
     NonDataStageFact,
     FrameworkTerminal,
     FrameworkObservability,
+}
+
+enum GroupParents<'a> {
+    Shared(Option<&'a DeliveredRecord<ChainPayload>>),
+    Members(&'a [DeliveredRecord<ChainPayload>]),
+}
+
+impl GroupParents<'_> {
+    fn member(&self, index: usize) -> Option<&DeliveredRecord<ChainPayload>> {
+        match self {
+            Self::Shared(parent) => *parent,
+            Self::Members(parents) => Some(&parents[index]),
+        }
+    }
+
+    fn append_options(&self) -> Result<AppendOptions<ChainEvent>, CommitError> {
+        match self {
+            Self::Shared(parent) => Ok(AppendOptions::from_record(
+                parent.map(DeliveredRecord::record),
+            )?),
+            Self::Members(parents) => {
+                let frontiers = parents
+                    .iter()
+                    .map(|parent| {
+                        obzenflow_core::event::CausalFrontier::from_record(parent.record())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(AppendOptions {
+                    frontier: obzenflow_core::journal::AppendFrontiers::Members(frontiers),
+                    capture: Default::default(),
+                })
+            }
+        }
+    }
 }
 
 /// One member of a policy-neutral atomic journal group.
@@ -638,7 +634,27 @@ impl OutputCommitter<'_> {
         crate::supervised_base::publication::commit(async move {
             owned
                 .borrowed()
-                .commit_atomic_group_inline(&group_id, entries, parent.as_ref())
+                .commit_atomic_group_inline(
+                    &group_id,
+                    entries,
+                    GroupParents::Shared(parent.as_ref()),
+                )
+                .await
+        })
+        .await
+    }
+
+    pub(crate) async fn commit_group_with_parents(
+        &self,
+        group_id: String,
+        members: Vec<(AtomicCommitEntry, DeliveredRecord<ChainPayload>)>,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
+        let owned = self.owned();
+        let (entries, parents): (Vec<_>, Vec<_>) = members.into_iter().unzip();
+        crate::supervised_base::publication::commit(async move {
+            owned
+                .borrowed()
+                .commit_atomic_group_inline(&group_id, entries, GroupParents::Members(&parents))
                 .await
         })
         .await
@@ -648,7 +664,7 @@ impl OutputCommitter<'_> {
         &self,
         group_id: &str,
         entries: Vec<AtomicCommitEntry>,
-        parent: Option<&DeliveredRecord<ChainPayload>>,
+        parents: GroupParents<'_>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
         if entries.is_empty() {
             return Ok(Vec::new());
@@ -661,9 +677,14 @@ impl OutputCommitter<'_> {
         let mut snapshot = self
             .instrumentation
             .map(|instrumentation| instrumentation.capture_accounting());
-        for entry in entries {
+        for (index, entry) in entries.into_iter().enumerate() {
             let mut event = self
-                .prepare_prebuilt_with_intent(entry.event, parent, entry.options, entry.intent)
+                .prepare_prebuilt_with_intent(
+                    entry.event,
+                    parents.member(index),
+                    entry.options,
+                    entry.intent,
+                )
                 .await?;
             if let Some(snapshot) = &mut snapshot {
                 self.project_committed_output(snapshot, &event, entry.options);
@@ -694,7 +715,8 @@ impl OutputCommitter<'_> {
             self.data_journal,
             group_id,
             prepared,
-            AppendOptions::from_record(parent.map(DeliveredRecord::record))?
+            parents
+                .append_options()?
                 .with_capture(self.observation_capture(projections)),
         )
         .await

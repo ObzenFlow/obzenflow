@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload, EdgeLivenessState};
 use obzenflow_core::journal::Journal;
@@ -15,8 +14,7 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -67,7 +65,7 @@ impl TypedFiniteSourceHandler for OneEventSource {
     }
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct StallingTransform;
 
@@ -95,21 +93,7 @@ impl EffectfulTransformHandler for StallingTransform {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NoopSink;
-
-#[async_trait]
-impl InlineSink for NoopSink {
-    type Input = ProbeOutputEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
-    }
-
-    async fn write(&mut self, _input: ProbeOutputEvent) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NoopSink = obzenflow_adapters::sinks::DiscardSink<ProbeOutputEvent>;
 
 #[tokio::test(flavor = "current_thread")]
 async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
@@ -137,7 +121,7 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let numbers_handler = OneEventSource::new();
         let slow_handler = StallingTransform::new();
-        let sink_handler = NoopSink;
+        let sink_handler = NoopSink::new();
 
         Ok(flow! {
             name: "liveness_stalled_transition",

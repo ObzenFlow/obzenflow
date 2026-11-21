@@ -14,8 +14,8 @@
 
 pub mod ai;
 pub mod application;
+pub mod clients;
 pub mod env;
-pub mod http_client;
 pub mod journal;
 pub mod simulated;
 #[cfg(feature = "test-support")]

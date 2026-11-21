@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::collect_rust_sources;
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 const CORE: &str = "obzenflow_core";
@@ -138,48 +139,34 @@ fn assert_codegen_names_only_permitted_roots() {
     for source_path in sources {
         let source = std::fs::read_to_string(&source_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", source_path.display()));
-        for forbidden in [
-            "obzenflow_runtime",
-            "obzenflow_adapters",
-            "obzenflow_dsl",
-            "obzenflow_infra",
-        ] {
+        for forbidden in ["obzenflow_adapters", "obzenflow_dsl", "obzenflow_infra"] {
             assert!(
                 !source.contains(forbidden),
                 "{} must not name outer crate root `{forbidden}`",
                 source_path.display()
             );
         }
-        for (offset, _) in source.match_indices("obzenflow::") {
-            let named = source[offset..]
-                .split(|character: char| {
-                    !character.is_alphanumeric() && character != '_' && character != ':'
-                })
-                .next()
-                .unwrap_or_default();
-            assert!(
-                PERMITTED_FACADE_PATHS.into_iter().any(|permitted| {
-                    named
-                        .strip_prefix(permitted)
-                        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
-                }),
-                "{} must not name facade path `{named}`; the satellite names only {PERMITTED_FACADE_PATHS:?}",
-                source_path.display()
-            );
-        }
-    }
-}
-
-fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("read source directory {}: {error}", directory.display()));
-    for entry in entries {
-        let entry = entry.expect("read source directory entry");
-        let path = entry.path();
-        if path.is_dir() {
-            collect_rust_sources(&path, sources);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            sources.push(path);
+        for (root, allowed) in [
+            ("obzenflow::", PERMITTED_FACADE_PATHS.as_slice()),
+            (RUNTIME, ["obzenflow_runtime::effects"].as_slice()),
+        ] {
+            for (offset, _) in source.match_indices(root) {
+                let named = source[offset..]
+                    .split(|character: char| {
+                        !character.is_alphanumeric() && character != '_' && character != ':'
+                    })
+                    .next()
+                    .unwrap_or_default();
+                assert!(
+                    allowed.iter().any(|permitted| {
+                        named
+                            .strip_prefix(permitted)
+                            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+                    }),
+                    "{} names `{named}`; permitted paths for {root}: {allowed:?}",
+                    source_path.display()
+                );
+            }
         }
     }
 }

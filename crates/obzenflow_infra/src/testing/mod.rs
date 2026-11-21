@@ -5,4 +5,3 @@
 //! Application-level conformance kits.
 
 pub mod journal;
-pub mod sink;

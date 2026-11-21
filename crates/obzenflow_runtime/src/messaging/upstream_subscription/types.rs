@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use crate::control_plane::ControlPlaneProvider;
-use crate::messaging::DeliveredRecord;
 use obzenflow_core::contracts::SubscriptionFeed;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::flow_control_payload::SelectedInput;
@@ -16,7 +15,7 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::id::CompositeId;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{EventId, EventType, JournalRecord, StageId, WriterId};
+use obzenflow_core::{EventType, JournalRecord, StageId, WriterId};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -544,38 +543,16 @@ mod selected_feed_sequence_tests {
 /// This struct is intentionally pure contract state (no I/O handles) so that it
 /// can be owned by FSM contexts and inspected/snapshotted independently of the
 /// subscription mechanics.
-#[derive(Debug, Clone)]
-pub(crate) struct PendingReceiptMeta {
-    pub seq: SeqNo,
-    pub event_id: EventId,
-    pub vector_clock: VectorClock,
-}
-
-/// Exact delivered input retained until the sink authors a terminal receipt.
-///
-/// This registry is intentionally broader than `pending_receipts`: forwarded
-/// data still needs an exact durable parent even though it does not contribute
-/// to the immediate upstream writer's receipt watermark.
-pub(crate) type PendingDeliveryInput = DeliveredRecord<ChainPayload>;
-
 #[derive(Debug)]
 pub struct ReaderProgress {
     pub stage_id: StageId,
 
     /// Sequences and positions
     pub reader_seq: SeqNo,
-    pub receipted_seq: SeqNo,
     pub advertised_writer_seq: Option<SeqNo>,
     pub advertised_vector_clock: Option<VectorClock>,
     pub last_event_id: Option<obzenflow_core::EventId>,
     pub last_vector_clock: Option<VectorClock>,
-    pub last_receipted_event_id: Option<EventId>,
-    pub last_receipted_vector_clock: Option<VectorClock>,
-    pub(crate) pending_delivery_inputs:
-        HashMap<obzenflow_core::event::JournalCommitRef, PendingDeliveryInput>,
-    pub(crate) pending_receipts:
-        HashMap<obzenflow_core::event::JournalCommitRef, PendingReceiptMeta>,
-    pub(crate) committed_out_of_order: BTreeMap<SeqNo, PendingReceiptMeta>,
 
     /// Position of the last progress record
     pub last_progress_seq: SeqNo,
@@ -597,81 +574,15 @@ impl ReaderProgress {
         Self {
             stage_id,
             reader_seq: SeqNo(0),
-            receipted_seq: SeqNo(0),
             advertised_writer_seq: None,
             advertised_vector_clock: None,
             last_event_id: None,
             last_vector_clock: None,
-            last_receipted_event_id: None,
-            last_receipted_vector_clock: None,
-            pending_delivery_inputs: HashMap::new(),
-            pending_receipts: HashMap::new(),
-            committed_out_of_order: BTreeMap::new(),
             last_progress_seq: SeqNo(0),
             last_contract_result_seq: SeqNo(0),
             final_emitted: false,
             contract_violated: false,
         }
-    }
-
-    /// Retain the exact parent of any delivered data input until terminal settlement.
-    pub(crate) fn track_pending_delivery_input(&mut self, record: PendingDeliveryInput) {
-        self.pending_delivery_inputs
-            .insert(record.commitment(), record);
-    }
-
-    /// Stores watermark metadata for an accounted just-read event.
-    ///
-    /// `reader_seq` at the time of tracking is used as the receipt-ordering key for advancing
-    /// the contiguous receipt watermark (`receipted_seq`).
-    pub(crate) fn track_pending_receipt(
-        &mut self,
-        input: obzenflow_core::event::JournalCommitRef,
-        vector_clock: VectorClock,
-    ) {
-        let meta = PendingReceiptMeta {
-            seq: self.reader_seq,
-            event_id: input.event_id,
-            vector_clock,
-        };
-        self.pending_receipts.insert(input, meta);
-    }
-
-    /// Mark a pending event as durably receipted.
-    ///
-    /// Returns `false` if the event is not pending (duplicate receipt or missing read-side
-    /// bookkeeping). When receipts arrive out-of-order, this buffers them until the receipt
-    /// watermark can advance contiguously.
-    pub(crate) fn mark_receipted(
-        &mut self,
-        input: obzenflow_core::event::JournalCommitRef,
-    ) -> bool {
-        let Some(meta) = self.pending_receipts.remove(&input) else {
-            return false;
-        };
-
-        let next_seq = SeqNo(self.receipted_seq.0.saturating_add(1));
-        if meta.seq == next_seq {
-            self.advance_receipted(meta);
-            loop {
-                let next_seq = SeqNo(self.receipted_seq.0.saturating_add(1));
-                let Some(next_meta) = self.committed_out_of_order.remove(&next_seq) else {
-                    break;
-                };
-                self.advance_receipted(next_meta);
-            }
-        } else if meta.seq.0 > self.receipted_seq.0 {
-            let seq = meta.seq;
-            self.committed_out_of_order.insert(seq, meta);
-        }
-
-        true
-    }
-
-    fn advance_receipted(&mut self, meta: PendingReceiptMeta) {
-        self.receipted_seq = meta.seq;
-        self.last_receipted_event_id = Some(meta.event_id);
-        self.last_receipted_vector_clock = Some(meta.vector_clock);
     }
 }
 
@@ -688,7 +599,6 @@ pub struct ContractTracker {
     pub(super) writer_id: WriterId,
     pub(super) journal: Arc<dyn Journal<ChainEvent>>,
     pub(super) reader_stage: Option<StageId>,
-    pub(super) receipt_aware_progress: bool,
 
     /// Immutable context of the consuming stage for newly authored contract facts.
     /// Public subscriptions without framework attachment retain their legacy context.
@@ -714,7 +624,6 @@ pub struct ContractsWiring {
     pub config: ContractConfig,
     pub reader_stage: Option<StageId>,
     pub control_plane: Arc<dyn ControlPlaneProvider>,
-    pub include_delivery_contract: bool,
     pub cycle_guard_config: Option<CycleGuardConfig>,
 }
 

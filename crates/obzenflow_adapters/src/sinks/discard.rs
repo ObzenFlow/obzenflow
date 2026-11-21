@@ -4,27 +4,53 @@
 
 //! Explicit terminal consumption without an external delivery.
 
-use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::sink::{
-    SinkConnector, SinkDescription, SinkOperationResult, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
+use obzenflow_runtime::effects::{
+    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkRole,
 };
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use serde::Serialize;
 use std::marker::PhantomData;
+use std::sync::OnceLock;
 
-/// Consume inputs deliberately without storing or publishing them.
-///
-/// Each input still receives a terminal receipt. Its method is `Noop`, with zero
-/// physical bytes and items delivered. Use a real connector when delivery matters.
+/// The request a discard sink sends for each input, which holds nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Discarded;
+
+/// The port a discard sink sends through. Discarding twice changes nothing,
+/// so the method is `exactly_once`.
+#[port]
+pub trait DiscardPort {
+    #[effect(type = "obzenflow.discard.record", exactly_once, records = reply)]
+    fn discard(&self, discarded: &Discarded) -> Result<(), EffectError>;
+}
+
+struct Discard;
+
+#[system("discard")]
+impl DiscardPort for Discard {
+    fn discard(&self, _: &Discarded) -> Result<(), EffectError> {
+        Ok(())
+    }
+}
+
+fn discard_port() -> Port<dyn DiscardPort> {
+    static PORT: OnceLock<Port<dyn DiscardPort>> = OnceLock::new();
+    PORT.get_or_init(|| Port::to(Discard)).clone()
+}
+
+/// Consume inputs deliberately without storing or publishing them. Each input
+/// still settles with a recorded call that changes nothing outside the flow.
 pub struct DiscardSink<T> {
+    port: Port<dyn DiscardPort>,
     _input: PhantomData<fn() -> T>,
 }
 
 impl<T: TypedPayload + Send + Sync + 'static> DiscardSink<T> {
     pub fn new() -> Self {
         Self {
+            port: discard_port(),
             _input: PhantomData,
         }
     }
@@ -36,6 +62,15 @@ impl<T: TypedPayload + Send + Sync + 'static> Default for DiscardSink<T> {
     }
 }
 
+impl<T> Clone for DiscardSink<T> {
+    fn clone(&self) -> Self {
+        Self {
+            port: self.port.clone(),
+            _input: PhantomData,
+        }
+    }
+}
+
 impl<T> std::fmt::Debug for DiscardSink<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DiscardSink")
@@ -44,101 +79,19 @@ impl<T> std::fmt::Debug for DiscardSink<T> {
     }
 }
 
-/// The stateless execution of a [`DiscardSink`].
-pub struct DiscardWriter<T> {
-    _input: PhantomData<fn() -> T>,
-}
+impl<T> Command for DiscardSink<T> {
+    type Ports = (Port<dyn DiscardPort>, ());
+    type AllowedEffects = DeclaredEffectSet<WithMember<Discarded, EmptySet>>;
 
-#[async_trait]
-impl<T: TypedPayload + Send + Sync + 'static> SinkConnector for DiscardSink<T> {
-    type Input = T;
-    type Writer = DiscardWriter<T>;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn open(&self, _context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {
-        Ok(DiscardWriter {
-            _input: PhantomData,
-        })
+    fn ports(&self) -> Self::Ports {
+        (self.port.clone(), ())
     }
 }
 
-#[async_trait]
-impl<T: TypedPayload + Send + Sync + 'static> SinkWriter for DiscardWriter<T> {
-    type Input = T;
+impl<T: TypedPayload + Send + Sync + 'static> SinkRole<T> for DiscardSink<T> {
+    type Request = Discarded;
 
-    async fn write(&mut self, _input: T, _context: SinkWriteContext) -> SinkWriteResult {
-        Ok(SinkWriteReport::terminal(
-            SinkTerminalOutcome::success(Some(0)).with_items(0),
-        ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
-    use obzenflow_core::event::JournalRecord;
-    use obzenflow_core::{JournalWriterId, StageId};
-    use obzenflow_runtime::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Deserialize, Serialize)]
-    struct Item(u64);
-    impl TypedPayload for Item {
-        const EVENT_TYPE: &'static str = "discard.test.item";
-    }
-
-    #[tokio::test]
-    async fn discarded_input_is_terminal_without_claiming_physical_delivery() {
-        let connector = DiscardSink::<Item>::new();
-        let description = connector.describe();
-        assert_eq!(description.default_method(), &DeliveryMethod::Noop);
-        assert_eq!(
-            description.redelivery_safety(),
-            Some(SinkRedeliverySafety::SafeToRepeat)
-        );
-        let stage = StageId::new();
-        let writer = connector
-            .open(SinkWriterInitContext::new(
-                stage,
-                "discard".into(),
-                "test".into(),
-            ))
-            .await
-            .unwrap();
-        let mut adapter =
-            SinkWriterAdapter::new(writer, stage, description.default_method().clone());
-        let input = JournalRecord::new(
-            JournalWriterId::new(),
-            Item(7).to_event(StageId::new().into()),
-        );
-        let report = adapter
-            .consume_committed_report(input.into(), Default::default())
-            .await
-            .unwrap();
-        assert!(matches!(
-            report.primary.result,
-            DeliveryResult::Success { .. }
-        ));
-        assert_eq!(report.primary.delivery_method, DeliveryMethod::Noop);
-        assert_eq!(report.primary.items_delivered, Some(0));
-        assert_eq!(report.primary.bytes_processed, Some(0));
-        assert!(report.commit_receipts.is_empty());
-        assert!(adapter
-            .flush_report()
-            .await
-            .unwrap()
-            .commit_receipts
-            .is_empty());
-        assert!(adapter
-            .drain_report()
-            .await
-            .unwrap()
-            .commit_receipts
-            .is_empty());
+    fn prepare(&self, _input: T) -> Result<Discarded, HandlerError> {
+        Ok(Discarded)
     }
 }

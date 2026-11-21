@@ -106,7 +106,6 @@ mod strict_replay_tests {
         ReplayBootstrap {
             archive_path: "archive".into(),
             allow_incomplete_archive: false,
-            allow_duplicate_sink_delivery: false,
             verb,
         }
     }
@@ -152,26 +151,24 @@ pub use carrier::{
     MiddlewareAttachmentSite, MiddlewareAttachmentValidationError, MiddlewareAuthorityError,
     MiddlewareCapability, MiddlewareDeclaration, MiddlewareMaterializationContext,
     MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
-    ProtectedUnitId, ProtectedUnitOwner, SinkConfiguredTargetKey, SinkDeliverySurface,
-    SinkDeliveryTarget, SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface,
-    SourcePollUnitId, SourceStageIngressOwner,
+    ProtectedUnitId, ProtectedUnitOwner, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
+    SourceStageIngressOwner,
 };
 pub(crate) use carrier::{MaterializationClaim, MiddlewareSurfaceAttachmentKind};
 pub use context::MiddlewareContext;
 pub use control::policy::{
     EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy,
-    MiddlewareAbortCause, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
-    PerSourcePolicyBoundary, PolicyAdmission, SinkAdmission, SinkAdmissionGuard,
-    SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard,
-    SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    MiddlewareAbortCause, PerEffectPolicyBoundary, PerSourcePolicyBoundary, PolicyAdmission,
+    SourceAdmission, SourceAdmissionGuard, SourceAfterPoll, SourceBatchFacts, SourcePolicy,
+    SourcePolicyCtx, SourcePollOutcome,
 };
 pub use hints::{BatchingHint, MiddlewareHints};
 pub use observer::{
-    effect_observer, handler_observer, join_observer, sink_delivery_observer, source_poll_observer,
-    stage_lifecycle_observer, stateful_observer, EffectObserverFactory, HandlerObserverFactory,
-    JoinObserverFactory, SinkDeliveryObserver, SinkDeliveryObserverFactory,
-    SourcePollObserverFactory, StageLifecycleObserverFactory, StageObserverSet,
-    StatefulObserverFactory,
+    effect_observer, handler_observer, join_observer, source_poll_observer,
+    stage_lifecycle_observer, stateful_observer, typed_effect_observer, EffectObserverFactory,
+    HandlerObserverFactory, JoinObserverFactory, SourcePollObserverFactory,
+    StageLifecycleObserverFactory, StageObserverSet, StatefulObserverFactory, TypedEffectObserver,
+    TypedEffectObserverFactory,
 };
 pub use obzenflow_runtime::stages::observer::{ObserverError, ObserverResult};
 

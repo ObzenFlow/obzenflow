@@ -214,14 +214,8 @@ struct ObservationArchive {
     observed: [JournalCommitRef; 3],
 }
 
-// The two grouped source placements and their forwarded placement share one
-// event id. Physical filename order deliberately differs from public export
-// order. A receipt refers to the second source placement, not just its event id.
 async fn observation_archive() -> ObservationArchive {
     use obzenflow_core::event::context::StageType;
-    use obzenflow_core::event::payloads::delivery_payload::{
-        DeliveryMethod, DeliveryOutcome, DeliveryPayload, DeliverySubject,
-    };
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::journal::archive::manifest::RunManifestStage;
     use obzenflow_core::StageId;
@@ -275,14 +269,6 @@ async fn observation_archive() -> ObservationArchive {
         .await
         .unwrap();
     let forwarded = sink.append(event, Default::default()).await.unwrap();
-    let receipt = ChainEventFactory::delivery_event(
-        stages[1].into(),
-        DeliveryPayload {
-            subject: DeliverySubject::from_record(&group[1]),
-            outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
-        },
-    );
-    sink.append(receipt, Default::default()).await.unwrap();
     let observed = [
         group[0].commitment(),
         group[1].commitment(),
@@ -348,7 +334,7 @@ async fn observation_archive() -> ObservationArchive {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 4);
     ObservationArchive {
         directory,
         rows,
@@ -394,7 +380,7 @@ async fn archive_export_verification_preserves_grouped_and_forwarded_commitments
         );
         assert_eq!(
             read::<ChainEvent>(&root.join("a-sink.log")).unwrap(),
-            expected[3..5]
+            expected[3..4]
         );
     }
 }
@@ -415,7 +401,6 @@ async fn archive_export_verification_rejects_incomplete_or_changed_oracles() {
         "missing-retained-observation",
         "payload",
         "descriptor",
-        "receipt-subject",
         "group",
         "member",
         "missing-row",
@@ -433,7 +418,6 @@ async fn archive_export_verification_rejects_incomplete_or_changed_oracles() {
             "descriptor" => {
                 wrong[1]["envelope"]["provenance"]["event"]["payload_schema_version"] = 2.into()
             }
-            "receipt-subject" => wrong[4]["payload"]["subject"]["input"]["sequence"] = 1.into(),
             "group" => {
                 wrong[1]["envelope"]["provenance"]["journal"]["journal_group_id"] = "changed".into()
             }
@@ -444,7 +428,7 @@ async fn archive_export_verification_rejects_incomplete_or_changed_oracles() {
             "missing-row" => {
                 wrong.pop();
             }
-            "extra-row" => wrong.push(wrong[4].clone()),
+            "extra-row" => wrong.push(wrong[3].clone()),
             "duplicate-row" => wrong[3] = wrong[2].clone(),
             "reordered-rows" => wrong.swap(1, 2),
             _ => unreachable!(),

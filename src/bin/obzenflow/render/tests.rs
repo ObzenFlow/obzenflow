@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::context::{event_id, event_type, writer_id};
+use super::context::{event_type, writer_id};
 use super::payload::{abbreviated, compact};
 use super::*;
 use obzenflow::journal::ProcessingStatus;
@@ -829,7 +829,7 @@ fn all_six_effect_occurrences_retain_their_names_and_evidence_in_human_and_jsonl
             origin: None,
         };
         body.validate().unwrap();
-        let record = execution(100, &[], ExecutionPayload::EffectRecord(body));
+        let record = execution(100, &[], ExecutionPayload::EffectRecord(Box::new(body)));
         for jsonl in [false, true] {
             let view = ViewArgs {
                 jsonl,
@@ -861,44 +861,24 @@ fn all_six_effect_occurrences_retain_their_names_and_evidence_in_human_and_jsonl
 #[test]
 fn primary_execution_failures_remain_visible_in_default_human_and_jsonl_views() {
     use obzenflow_core::event::{
-        SinkOperationFailed, SinkOperationPhase, StageFatalCode, StageFatalReason,
-        StageFatalRecorded, StageFatalSeverity,
+        StageFatalCode, StageFatalReason, StageFatalRecorded, StageFatalSeverity,
     };
-    let records = [
-        execution(
-            100,
-            &[],
-            ExecutionPayload::StageFatalRecorded(StageFatalRecorded {
-                severity: StageFatalSeverity::Primary,
-                stage_id: id(2).parse().unwrap(),
-                stage_key: "classify".into(),
-                causal_event_id: None,
-                input_position: None,
-                primary_cause_event_id: None,
-                code: StageFatalCode::Journal,
-                reason: StageFatalReason::JournalFailure,
-                detail: "journal append failed".into(),
-                departure: None,
-            }),
-        ),
-        execution(
-            101,
-            &[],
-            ExecutionPayload::SinkOperationFailed(SinkOperationFailed {
-                stage_id: id(2).parse().unwrap(),
-                stage_key: "classify".into(),
-                logical_destination: "console".into(),
-                causal_event_id: None,
-                input_position: None,
-                failed_delivery_event_id: None,
-                operation_subject_event_id: None,
-                phase: SinkOperationPhase::Flush,
-                kind: obzenflow_core::event::status::processing_status::ErrorKind::Remote,
-                destination_error_code: None,
-                detail: "stream flush failed".into(),
-            }),
-        ),
-    ];
+    let records = [execution(
+        100,
+        &[],
+        ExecutionPayload::StageFatalRecorded(StageFatalRecorded {
+            severity: StageFatalSeverity::Primary,
+            stage_id: id(2).parse().unwrap(),
+            stage_key: "classify".into(),
+            causal_event_id: None,
+            input_position: None,
+            primary_cause_event_id: None,
+            code: StageFatalCode::Journal,
+            reason: StageFatalReason::JournalFailure,
+            detail: "journal append failed".into(),
+            departure: None,
+        }),
+    )];
     for jsonl in [false, true] {
         let view = ViewArgs {
             jsonl,
@@ -919,17 +899,13 @@ fn primary_execution_failures_remain_visible_in_default_human_and_jsonl_views() 
             output.contains("obzenflow.stage_fatal_recorded"),
             "{output}"
         );
-        assert!(
-            output.contains("obzenflow.sink_operation_failed"),
-            "{output}"
-        );
         if jsonl {
             let rows: Vec<RunRecord> = output
                 .lines()
                 .map(|row| serde_json::from_str(row).unwrap())
                 .collect();
-            assert_eq!(rows.len(), 2);
-            for (row, version) in rows.iter().zip([1, 2]) {
+            assert_eq!(rows.len(), 1);
+            for (row, version) in rows.iter().zip([1]) {
                 let RunRecordData::Chain(record) = &row.record else {
                     panic!("chain row")
                 };
@@ -2051,9 +2027,6 @@ fn in_error_journal(mut record: RunRecord, payload: ExecutionPayload) -> RunReco
         ExecutionPayload::SourceRecordRejected(rejected) => {
             (rejected.detail.clone(), rejected.kind.clone())
         }
-        ExecutionPayload::SinkOperationFailed(failure) => {
-            (failure.detail.clone(), failure.kind.clone())
-        }
         _ => unreachable!("error records only"),
     };
     record.kind = RunRecordKind::Execution;
@@ -2114,43 +2087,40 @@ fn rejected_row(event: u64, index: u64) -> RunRecord {
     )
 }
 
-fn receipt(stage: u64, event: u64, input: &RunRecord, result: Value) -> RunRecord {
-    use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
-    let mut record = on_stage(
-        fact(stage, event, &[], json!({})),
-        stage,
+fn sink_call(event: u64, parent: u64, succeeded: bool) -> RunRecord {
+    use obzenflow_core::event::payloads::effect_payload::EffectRecord;
+    let (observation, outcome) = if succeeded {
+        (
+            json!({"observation": "execution_succeeded", "authority": "port_return"}),
+            json!({"outcome": "succeeded", "output": null}),
+        )
+    } else {
+        (
+            json!({"observation": "execution_failed", "authority": "port_return", "external_completion": "unknown"}),
+            json!({"outcome": "failed", "error_type": "remote", "error_message": "unavailable", "retry": "not_retryable"}),
+        )
+    };
+    let call: EffectRecord = serde_json::from_value(json!({
+        "cursor": {"recorded_flow_id": id(10), "stage_key": "written", "input_seq": event, "effect_ordinal": 0},
+        "descriptor_hash": "fixture",
+        "descriptor": {
+            "effect_type": "sensor.write", "label": "write", "schema_version": 1,
+            "stage_logic_version": "v1", "canonical_input_hash": "fixture", "binding": {"mode": "portless"}
+        },
+        "observation": observation,
+        "outcome": outcome
+    }))
+    .unwrap();
+    on_stage(
+        execution(
+            event,
+            &[parent],
+            ExecutionPayload::EffectRecord(Box::new(call)),
+        ),
+        3,
         "written",
         StageType::Sink,
-    );
-    record.kind = RunRecordKind::Delivery;
-    let input_id = event_id(input);
-    if let RunRecordData::Chain(row) = &mut record.record {
-        let payload: DeliveryPayload = serde_json::from_value(json!({
-            "subject": {
-                "input": {
-                    "run_id": id(10),
-                    "journal_writer_id": id(2),
-                    "sequence": 1,
-                    "event_id": input_id
-                },
-                "event_kind": "fact",
-                "event_type": "sensor.classified",
-                "payload_schema_version": 1
-            },
-            "result": result,
-            "destination": "written",
-            "delivery_method": "noop",
-            "bytes_processed": null,
-            "processed_at": "2026-09-23T00:00:00Z"
-        }))
-        .unwrap();
-        row.envelope.provenance.event.event_type = payload.event_type().into();
-        row.payload = ChainPayload::Delivery(payload);
-        row.envelope.provenance.event.event_kind = row.payload.kind();
-        row.envelope.provenance.event.causality.parent_ids =
-            vec![serde_json::from_value(json!(input_id)).unwrap()];
-    }
-    record
+    )
 }
 
 fn manifest_for(records: &[&RunRecord]) -> RunManifest {
@@ -2370,7 +2340,6 @@ fn an_output_printed_before_its_input_names_the_input_type_it_recorded() {
 fn the_summary_counts_each_record_once_with_errors_by_kind() {
     use obzenflow_core::event::payloads::effect_payload::EffectRecord;
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::{SinkOperationFailed, SinkOperationPhase, SinkWritePhase};
 
     let first = fact(1, 100, &[], json!({"id": 1}));
     let second = fact(1, 101, &[], json!({"id": 2}));
@@ -2387,42 +2356,19 @@ fn the_summary_counts_each_record_once_with_errors_by_kind() {
         "outcome": {"outcome": "failed", "error_type": "timeout", "error_message": "calibration unavailable", "retry": "retryable"}
     }))
     .unwrap();
-    let effect = execution(104, &[102], ExecutionPayload::EffectRecord(failed_call));
+    let effect = execution(
+        104,
+        &[102],
+        ExecutionPayload::EffectRecord(Box::new(failed_call)),
+    );
     let rejected = processing_failed(2, 105, 101, "reading 2 has no temperature");
     let classified_three = fact(2, 106, &[102], json!({"id": 3}));
-    let buffered = receipt(3, 107, &classified, json!({"result": "buffered"}));
-    let delivered = receipt(3, 108, &classified, json!({"result": "success"}));
-    let failed_receipt = receipt(
-        3,
-        109,
-        &classified_three,
-        json!({"result": "failed", "error_type": "sink_write_current_only_failed", "error_message": "unavailable"}),
-    );
-    let sink_stage: obzenflow_core::StageId = serde_json::from_value(json!(id(3))).unwrap();
-    let operation = in_error_journal(
-        on_stage(
-            fact(3, 110, &[109], json!({})),
-            3,
-            "written",
-            StageType::Sink,
-        ),
-        ExecutionPayload::SinkOperationFailed(SinkOperationFailed {
-            stage_id: sink_stage,
-            stage_key: "written".into(),
-            logical_destination: "written".into(),
-            causal_event_id: Some(serde_json::from_value(json!(id(106))).unwrap()),
-            input_position: Some(2),
-            failed_delivery_event_id: Some(serde_json::from_value(json!(id(109))).unwrap()),
-            operation_subject_event_id: None,
-            phase: SinkOperationPhase::Write(SinkWritePhase::Execute),
-            kind: ErrorKind::Remote,
-            destination_error_code: None,
-            detail: "unavailable".into(),
-        }),
-    );
+    let delivered = sink_call(108, 103, true);
+    let failed_call_at_sink = sink_call(109, 106, false);
     let mut write_failed = processing_failed(3, 111, 106, "unavailable");
+    let error_journal = write_failed.journal.id;
     write_failed = on_stage(write_failed, 3, "written", StageType::Sink);
-    write_failed.journal = operation.journal.clone();
+    write_failed.journal.id = error_journal;
     if let RunRecordData::Chain(row) = &mut write_failed.record {
         if let ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) =
             &mut row.payload
@@ -2442,10 +2388,8 @@ fn the_summary_counts_each_record_once_with_errors_by_kind() {
         effect,
         rejected,
         classified_three,
-        buffered,
         delivered,
-        failed_receipt,
-        operation,
+        failed_call_at_sink,
         write_failed,
     ];
     let mut renderer = renderer_over(&records);
@@ -2469,6 +2413,28 @@ fn the_summary_counts_each_record_once_with_errors_by_kind() {
     assert!(text.contains("\nRecords in an error journal were delivered but not processed.\n"));
     assert!(!text.contains("Journal counts include every observed entry"));
     assert!(text.contains("SINK ERROR (stage: written, error journal: "));
+}
+
+#[test]
+fn sink_effect_record_headed_sink() {
+    let reading = fact(1, 100, &[], json!({"id": 1}));
+    let classified = fact(2, 101, &[100], json!({"id": 1}));
+    let mid_flow_call = on_stage(
+        sink_call(102, 100, false),
+        2,
+        "classify",
+        StageType::Transform,
+    );
+    let delivered = sink_call(103, 101, true);
+    let records = [reading, classified, mid_flow_call, delivered];
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    assert!(text.contains("\nSINK (stage: written, journal: "), "{text}");
+    assert!(
+        text.contains("\nEFFECT (stage: classify, journal: "),
+        "{text}"
+    );
+    assert!(!text.contains("EFFECT (stage: written"), "{text}");
 }
 
 #[test]

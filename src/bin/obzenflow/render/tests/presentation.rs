@@ -17,7 +17,6 @@ fn progress() -> RunRecord {
                 selection: obzenflow_core::contracts::SubscriptionSelection::All,
             },
             consumed_count: obzenflow_core::event::types::Count(2),
-            receipts: None,
             reader_seq: SeqNo(2),
             last_event_id: Some(serde_json::from_value(json!(id(100))).unwrap()),
             vector_clock: Some(watermark(7)),
@@ -159,7 +158,7 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
             "upstream": "thermometer", "upstream_journal": 1,
             "reader_seq": 2, "eof_seen": false,
             "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
-            "consumed_count": 2, "receipts": null,
+            "consumed_count": 2,
         })
     );
     assert!(!text.contains("Input:") && !text.contains("Progress:"));
@@ -192,7 +191,7 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
             "upstream": "thermometer", "upstream_journal": 1,
             "reader_seq": u64::MAX, "eof_seen": true,
             "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
-            "consumed_count": u64::MAX, "receipts": null,
+            "consumed_count": u64::MAX,
             "advertised_writer_seq": 0,
         })
     );
@@ -220,7 +219,7 @@ fn explain_keeps_the_json_summary_and_only_underlines_the_event_clock() {
                 "upstream": "thermometer", "upstream_journal": 1,
                 "reader_seq": 2, "eof_seen": false,
             "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
-            "consumed_count": 2, "receipts": null,
+            "consumed_count": 2,
             })
         );
         assert_eq!(text.matches('⟨').count(), 1);
@@ -250,7 +249,7 @@ fn unresolved_input_identity_is_json_escaped_and_ambiguous_journals_are_not_gues
         "reader_path": "unresolved\u{1b}[2J\n\u{202e}", "reader_index": 99,
         "reader_seq": 2, "eof_seen": false,
             "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
-            "consumed_count": 2, "receipts": null,
+            "consumed_count": 2,
     });
     assert_eq!(json_body(&text), expected);
     assert!(!text.contains('\x1b') && !text.contains('\u{202e}'));
@@ -280,7 +279,7 @@ fn unresolved_input_identity_is_json_escaped_and_ambiguous_journals_are_not_gues
         json!({
             "upstream": "thermometer", "reader_seq": 2, "eof_seen": false,
             "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
-            "consumed_count": 2, "receipts": null,
+            "consumed_count": 2,
         })
     );
     assert!(!text.contains("Input: thermometer"));

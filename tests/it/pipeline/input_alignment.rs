@@ -16,8 +16,6 @@
 //!
 use std::collections::HashMap;
 
-use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::id::StageId;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::stage_descriptor::StageDescriptor;
@@ -26,8 +24,7 @@ use obzenflow_dsl::{sink, source, stateful, transform};
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission, TypedFiniteSourceHandler,
-    TypedStatefulHandler,
+    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
@@ -134,20 +131,7 @@ impl TypedStatefulHandler for IngestAggregator {
     fn post_emit(&self, _: &mut Self::State) {}
 }
 
-#[derive(Clone, Debug)]
-struct NullSink;
-#[async_trait]
-impl InlineSink for NullSink {
-    type Input = IngestSummary;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
-    }
-
-    async fn write(&mut self, _event: IngestSummary) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NullSink = obzenflow::stages::sinks::DiscardSink<IngestSummary>;
 
 #[test]
 fn aligned_inputs_satisfy_typed_fan_in_invariants() {
@@ -166,7 +150,7 @@ fn aligned_inputs_satisfy_typed_fan_in_invariants() {
     let align_webhook_handler = align_to_ingested::<WebhookEnvelope>();
     let align_file_handler = align_to_ingested::<FileLine>();
     let aggregator_handler = IngestAggregator;
-    let summary_sink_handler = NullSink;
+    let summary_sink_handler = NullSink::new();
 
     let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
     descriptors.insert(

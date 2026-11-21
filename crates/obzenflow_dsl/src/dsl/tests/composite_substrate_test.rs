@@ -64,7 +64,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct FixtureRequest;
 
-    #[obzenflow_runtime::effects::port(system = "fixture", effects = obzenflow_runtime::effects)]
+    #[obzenflow_runtime::effects::port(system = "fixture")]
     impl FixturePort {
         #[effect(type = "test.fixture_effect", exactly_once)]
         fn fixture(&self, _: &FixtureRequest) -> Result<MidP, EffectError> {
@@ -74,7 +74,7 @@ mod tests {
 
     fn fixture_declaration() -> EffectDeclaration {
         let system = Port::to(FixturePort);
-        AnswersEffect::<<FixtureRequest as EffectName>::Effect>::declaration(&system, None)
+        AnswersEffect::<<FixtureRequest as EffectName>::Effect>::declaration(&system)
             .expect("fixture declaration")
     }
 
@@ -116,12 +116,6 @@ mod tests {
 
         fn stage_type(&self) -> obzenflow_core::event::context::StageType {
             obzenflow_core::event::context::StageType::Transform
-        }
-
-        fn sink_description(
-            &self,
-        ) -> Option<&obzenflow_runtime::stages::common::handlers::SinkDescription> {
-            None
         }
 
         fn source_continuation(

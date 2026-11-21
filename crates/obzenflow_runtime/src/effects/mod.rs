@@ -28,7 +28,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
 use ring::digest::{digest, SHA256};
 use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,6 +66,7 @@ mod ports;
 mod recovery;
 mod replay;
 mod runtime;
+mod sink;
 mod typed;
 
 #[cfg(test)]
@@ -83,26 +84,27 @@ pub use binding::{
 };
 pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
-    AffineEffectBoundaryReport, AffineEffectExecution, AffineEffectOperation, EffectAbortReason,
-    EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
+    AffineEffectBoundaryReport, AffineEffectExecution, AffineEffectOperation, CallIdentity,
+    EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
     PhysicalCallObservation, PhysicalCallOutcome, PhysicalCallReceipt, PreparedAffineEffectCall,
     PreparedRepeatableEffectCall, PreparedSingleUseEffectCall, RepeatableEffectOperation,
     SingleUseEffectBoundaryReport, SingleUseEffectExecution, SingleUseEffectOperation,
+    SinkAdmission, SinkFinalizer, SinkPermit,
 };
 #[doc(hidden)]
 pub use call::KeyRule;
 pub use call::{
-    AtLeastOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey, Transactional,
+    AtLeastOnce, AtMostOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey,
+    Transactional,
 };
 #[doc(hidden)]
 pub use command::{
     assert_command, assert_handler_performs_no_ai_effect, assert_port_answer,
     assert_stateful_handler_performs_no_ai_effect, effectful_stateful_effects,
-    effectful_transform_effects, AcknowledgedSafety, AnswersEffect, BuiltSystem, DeclareEffects,
-    EffectAcknowledgement, EveryPortAnswers, FieldEffects, FieldsEffects, FindPort,
-    HandlerPerformableEffects, JoinMembers, MarkPortUsed, NarrowedPort, PortAfter, PortAnswer,
-    PortAnswersAnEffect, PortEffects, PortField, PortFound, PortImpl, PortList, PortMark,
-    PortServesRequest, RowAcknowledgedEffect, ServesPort, StageEffectsError, Unused, Used,
+    effectful_transform_effects, AnswersEffect, BuiltSystem, DeclareEffects, EveryPortAnswers,
+    FieldEffects, FieldsEffects, FindPort, HandlerPerformableEffects, JoinMembers, MarkPortUsed,
+    NarrowedPort, PortAfter, PortAnswer, PortAnswersAnEffect, PortEffects, PortFound, PortImpl,
+    PortList, PortMark, PortReply, PortServesRequest, ServesPort, StageEffectsError, Unused, Used,
     WholePort,
 };
 pub use command::{Command, Port, StagePort, SystemName};
@@ -114,10 +116,20 @@ pub use context::{
 pub(crate) use current_run::CurrentRunFailure;
 pub use current_run::CurrentRunHistory;
 pub use obzenflow_core::SystemBindingEvidence;
-pub use obzenflow_core_derive::{command, port, system};
+#[doc(inline)]
+pub use obzenflow_core_derive::{
+    runtime_command as command, runtime_port as port, runtime_system as system,
+};
+#[doc(hidden)]
+pub mod __facade {
+    pub use obzenflow_core_derive::{command, port, system};
+}
 #[doc(hidden)]
 pub use perform::PerformedRequest;
 pub use perform::{perform, Perform, PerformRequest};
+#[doc(hidden)]
+pub use sink::{OpenSinkBatch, SinkHandler};
+pub use sink::{SinkBatchDefaults, SinkGroupSystem, SinkRequest, SinkRole};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[doc(hidden)]
 pub use async_trait::async_trait as __async_trait;
@@ -127,7 +139,7 @@ pub(crate) use context::EffectRuntimeMode;
 pub use declaration::{DomainFacts, Effect, EffectOutcomeSemantics, RecordedReply};
 pub use declaration::{
     EffectDeclaration, EffectOutcomeKind, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
-    PreparedEffectSuccess, SinkRedeliverySafety,
+    PreparedEffectSuccess,
 };
 pub use effect_set::{
     assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectName, EffectSet,

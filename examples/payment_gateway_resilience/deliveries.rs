@@ -2,27 +2,26 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::domain::{PaymentAuthorizationUnavailable, PaymentAuthorized};
-use obzenflow::middleware::{ObserverResult, SinkDeliveryObserver, SinkDeliveryObserverContext};
+use super::domain::PaymentAuthorizationUnavailable;
+use obzenflow::middleware::{
+    EffectObserver, EffectObserverContext, ObserverResult, TypedEffectObserver,
+};
 
 pub struct ShippingDeliveryLog;
 
-impl SinkDeliveryObserver for ShippingDeliveryLog {
-    type Input = PaymentAuthorized;
-
-    fn on_attempt(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
+impl EffectObserver for ShippingDeliveryLog {
+    fn after_effect(&self, ctx: &EffectObserverContext<'_>) {
         tracing::info!(
             stage = ctx.stage_name(),
             outcome = ?ctx.outcome(),
             "shipping delivery observed"
         );
-        Ok(())
     }
 }
 
 pub struct ManualReviewDeliveryLog;
 
-impl SinkDeliveryObserver for ManualReviewDeliveryLog {
+impl TypedEffectObserver for ManualReviewDeliveryLog {
     type Input = PaymentAuthorizationUnavailable;
 
     fn on_delivered(&self, unavailable: &Self::Input) -> ObserverResult {

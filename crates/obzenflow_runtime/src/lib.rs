@@ -4,6 +4,8 @@
 
 #![doc = include_str!("../README.md")]
 
+extern crate self as obzenflow_runtime;
+
 // Core modules
 pub mod ai;
 pub mod backpressure;
@@ -44,7 +46,6 @@ pub mod __private {
     pub use crate::stages::common::handlers::join::{
         ErasedJoinInvocation, JoinBinding, TypedJoinHandlerAdapter, UnifiedJoinHandler,
     };
-    pub use crate::stages::common::handlers::sink::SinkWriterAdapter;
     pub use crate::stages::common::handlers::source::typed::{
         TypedAsyncFiniteSourceHandlerAdapter, TypedAsyncInfiniteSourceHandlerAdapter,
         TypedFiniteSourceHandlerAdapter, TypedInfiniteSourceHandlerAdapter,
@@ -88,7 +89,6 @@ pub mod testing;
 /// [`TypedFiniteSourceHandler`](crate::stages::TypedFiniteSourceHandler),
 /// [`TypedInfiniteSourceHandler`](crate::stages::TypedInfiniteSourceHandler),
 /// [`TypedTransformHandler`](crate::stages::TypedTransformHandler),
-/// [`SinkWriter`](crate::stages::SinkWriter),
 /// [`TypedStatefulHandler`](crate::stages::TypedStatefulHandler),
 /// [`TypedJoinHandler`](crate::stages::TypedJoinHandler),
 /// [`ObserverHandler`](crate::stages::ObserverHandler), and the
@@ -96,6 +96,10 @@ pub mod testing;
 /// that own resources. Also includes
 /// [`SourceError`](crate::stages::SourceError) for source-specific error
 /// reporting.
+///
+/// Sink commands implement [`SinkRole`](crate::effects::SinkRole). Its
+/// [`prepare`](crate::effects::SinkRole::prepare) method builds one request per
+/// input. The runtime sends that request through the command's [`Port`](crate::effects::Port).
 ///
 /// **Event flow** —
 /// [`UpstreamSubscription`](crate::messaging::UpstreamSubscription) for
@@ -116,11 +120,10 @@ pub mod prelude {
     // Handlers
     pub use crate::stages::{
         EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource,
-        IngressDecodeError, IngressDecoder, IngressRecord, InlineSink, ObserverHandler,
-        ResourceManaged, SinkConnector, SinkDescription, SinkWriter, SourceError,
-        SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
-        TypedStatefulHandler, TypedTransformHandler,
+        IngressDecodeError, IngressDecoder, IngressRecord, ObserverHandler, ResourceManaged,
+        SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     pub use crate::typing::{SourceTyping, TransformTyping};
 
@@ -128,7 +131,7 @@ pub mod prelude {
     pub use crate::effects::{
         Command, EffectCommitHandle, EffectContext, EffectDeclaration, EffectError,
         EffectOutcomeKind, EffectOutcomePayload, EffectSafety, Effects, IdempotencyKey, Keyed,
-        Port, SinkRedeliverySafety,
+        Port,
     };
     pub use crate::messaging::UpstreamSubscription;
 

@@ -11,7 +11,6 @@
 
 use crate::replay_testkit;
 
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -19,12 +18,9 @@ use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
 };
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::transform::strategies::MapTyped;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -59,21 +55,7 @@ impl TypedFiniteSourceHandler for OneShotSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NullSink;
-
-#[async_trait]
-impl InlineSink for NullSink {
-    type Input = Item;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Null".to_string()))
-    }
-
-    async fn write(&mut self, _event: Item) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NullSink = obzenflow::stages::sinks::DiscardSink<Item>;
 
 /// Five deriving hops (src event -> t1 -> t2 -> t3 -> t4). Uncapped, t4's
 /// output would carry four parent ids; the policy caps it at three.
@@ -101,7 +83,7 @@ async fn file_configured_lineage_depth_caps_journalled_parent_ids() {
         let t2 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
         let t3 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
         let t4 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
-        let sink = NullSink;
+        let sink = NullSink::new();
 
         Ok(flow! {
             name: "lineage_policy_flow",

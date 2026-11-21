@@ -6,7 +6,7 @@
 //! effectful stage, before live I/O.
 
 use async_trait::async_trait;
-use obzenflow_core::{event::payloads::delivery_payload::DeliveryMethod, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
 use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
@@ -17,8 +17,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -135,36 +134,7 @@ impl EffectfulTransformHandler for PerformTransform {
     }
 }
 
-#[derive(Debug)]
-struct DropSink<T>(std::marker::PhantomData<fn() -> T>);
-
-impl<T> Clone for DropSink<T> {
-    fn clone(&self) -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-impl<T> DropSink<T> {
-    fn new() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-#[async_trait]
-impl<T> InlineSink for DropSink<T>
-where
-    T: TypedPayload + Send + Sync + 'static,
-{
-    type Input = T;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Memory".to_string()))
-    }
-
-    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type DropSink<T> = obzenflow::stages::sinks::DiscardSink<T>;
 
 fn erased_effectful_descriptor<H>(
     name: &str,
@@ -194,7 +164,7 @@ where
 
 fn missing_effect_fact_descriptor() -> Box<dyn StageDescriptor> {
     let handler = PerformTransform::new();
-    let effects = effectful_transform_effects(&handler, &[]);
+    let effects = effectful_transform_effects(&handler);
     erased_effectful_descriptor(
         "effectful",
         handler,
@@ -370,7 +340,7 @@ impl EffectfulTransformHandler for CollidingTransform {
 
 fn colliding_effect_descriptor() -> Box<dyn StageDescriptor> {
     let handler = CollidingTransform::new();
-    let effects = effectful_transform_effects(&handler, &[]);
+    let effects = effectful_transform_effects(&handler);
     erased_effectful_descriptor(
         "effectful",
         handler,

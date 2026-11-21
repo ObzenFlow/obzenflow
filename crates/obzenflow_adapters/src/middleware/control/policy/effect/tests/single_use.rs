@@ -110,7 +110,11 @@ impl obzenflow_core::journal::JournalStorage<ChainEvent> for AppendOnlyJournal {
                 source: "test journal rejected append".into(),
             });
         }
-        self.prepare(event, &options.frontier, &mut self.clocks.lock().unwrap())
+        self.prepare(
+            event,
+            options.frontier.member(0)?,
+            &mut self.clocks.lock().unwrap(),
+        )
     }
 
     async fn storage_append_group(
@@ -133,8 +137,8 @@ impl obzenflow_core::journal::JournalStorage<ChainEvent> for AppendOnlyJournal {
         let mut clocks = self.clocks.lock().unwrap();
         let mut prepared = clocks.clone();
         let mut records = Vec::new();
-        for event in events {
-            let record = self.prepare(event, &options.frontier, &mut prepared)?;
+        for (index, event) in events.into_iter().enumerate() {
+            let record = self.prepare(event, options.frontier.member(index)?, &mut prepared)?;
             records.push(record);
         }
         *clocks = prepared;
@@ -185,7 +189,7 @@ impl TypedPayload for TransactionProbeOutput {
     const EVENT_TYPE: &'static str = "test.transaction_probe_output";
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 #[async_trait]
 trait TransactionProbeLedger: Send + Sync {
     #[effect(type = "effect.retry", exactly_once)]
@@ -212,7 +216,7 @@ enum TransactionProbeMode {
     MissingCommit,
 }
 
-#[obzenflow_runtime::effects::system("tx", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("tx")]
 #[async_trait]
 impl TransactionProbeLedger for TransactionProbePort {
     async fn write(
@@ -260,10 +264,8 @@ async fn effect_context(
         .unwrap();
     let ledger = Port::to(TransactionProbePort { calls, trace, mode });
     let authored_declaration =
-        AnswersEffect::<<TransactionProbeRequest as EffectName>::Effect>::declaration(
-            &ledger, None,
-        )
-        .unwrap();
+        AnswersEffect::<<TransactionProbeRequest as EffectName>::Effect>::declaration(&ledger)
+            .unwrap();
     let effect_ports =
         EffectPortRegistry::collect_from_declarations([&authored_declaration]).unwrap();
 
@@ -302,7 +304,7 @@ async fn effect_context(
     (context, ledger)
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct TransactionProbeHandler {
     terminal_error: Arc<Mutex<Option<EffectError>>>,

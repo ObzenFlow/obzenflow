@@ -321,8 +321,6 @@ fn event_table(
                 )
             {
                 format!("{kind}/runtime.{name}")
-            } else if kind == "delivery" {
-                format!("delivery/delivery.{name}")
             } else {
                 event
             };
@@ -618,7 +616,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
     assert!(human.ends_with("Run completed. CLI reached the recorded end of execution.\n"));
     assert!(human.contains("cli_verify.tick ← ticks()"), "{human}");
     assert!(
-        human.contains("delivery.succeeded ← out(cli_verify.tick)"),
+        human.contains("effect.execution_succeeded ← out(cli_verify.tick)"),
         "{human}"
     );
     assert!(human.contains("\"n\": 1") && human.contains("\"n\": 3"));
@@ -830,9 +828,9 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         CustomerOrderPlaced, OrderChannel, PaymentMethodState, TrafficPhase,
     };
     use obzenflow::journal::read::{
-        DeliveryResult, RunJournalKind, RunRecord, RunRecordData, RunRecordKind, SystemPayload,
+        RunJournalKind, RunRecord, RunRecordData, RunRecordKind, StageType, SystemPayload,
     };
-    use obzenflow::journal::ProcessingStatus;
+    use obzenflow::journal::{EffectOutcomePayload, ProcessingStatus};
     use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
     use obzenflow_core::event::ChainPayload;
 
@@ -920,13 +918,13 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         for line in facts {
             assert!(line.starts_with("\x1b[1;38;5;208m"));
         }
-        let deliveries: Vec<_> = text
+        let effects: Vec<_> = text
             .lines()
-            .filter(|line| line.contains("mDELIVERY (stage:"))
+            .filter(|line| line.contains("mSINK (stage:"))
             .collect();
-        assert!(!deliveries.is_empty());
-        for line in deliveries {
-            assert!(line.starts_with("\x1b[38;5;217mDELIVERY (stage: "));
+        assert!(!effects.is_empty());
+        for line in effects {
+            assert!(line.starts_with("\x1b[38;5;217mSINK (stage: "));
             assert!(line.ends_with(")\x1b[0m"));
         }
         let mut in_clock = false;
@@ -977,8 +975,8 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             ),
             (
                 "paid_orders",
-                "DELIVERY",
-                "delivery.succeeded",
+                "SINK",
+                "effect.execution_succeeded",
                 "payment.authorized",
                 "38;5;217",
                 231,
@@ -1023,10 +1021,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         let mut expected = std::collections::BTreeMap::new();
         for row in rows {
             match row.kind {
-                RunRecordKind::SourceFact
-                | RunRecordKind::Fact
-                | RunRecordKind::Effect
-                | RunRecordKind::Delivery => {}
+                RunRecordKind::SourceFact | RunRecordKind::Fact | RunRecordKind::Effect => {}
                 _ => continue,
             };
             let RunRecordData::Chain(chain) = &row.record else {
@@ -1154,7 +1149,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "commerce.customer_order_placed ← web_orders()",
         "payment.order_validated ← validate_order(commerce.customer_order_placed)",
         "payment.authorized ← authorize_payment(payment.order_validated)",
-        "delivery.succeeded ← paid_orders(payment.authorized)",
+        "effect.execution_succeeded ← paid_orders(payment.authorized)",
         "Clocks ⟨",
         "\"reason\": \"InvalidPaymentMethod\"",
         "order.cancelled ← validate_order(commerce.customer_order_placed)",
@@ -1185,7 +1180,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         )));
     assert!(human.lines().any(|line| line
         == format!(
-            "DELIVERY (stage: paid_orders, journal: {})",
+            "SINK (stage: paid_orders, journal: {})",
             numbers["paid_orders"]
         )));
     assert!(!human.contains("RUNTIME"));
@@ -1299,7 +1294,10 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     }
     for row in &rows {
         if let Some(stage) = &row.journal.stage {
-            assert_eq!(stage.is_effectful, stage.key == "authorize_payment");
+            assert_eq!(
+                stage.is_effectful,
+                stage.key == "authorize_payment" || stage.stage_type == StageType::Sink
+            );
         }
     }
     assert_record_outputs(&human, &rows);
@@ -1355,8 +1353,12 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                         .processing
                         .status
                         .is_success(),
-                    ChainPayload::Delivery(delivery) => {
-                        matches!(delivery.result, DeliveryResult::Success { .. })
+                    ChainPayload::Execution(ExecutionPayload::EffectRecord(effect)) => {
+                        row.journal
+                            .stage
+                            .as_ref()
+                            .is_some_and(|owner| owner.stage_type == StageType::Sink)
+                            && matches!(effect.outcome, EffectOutcomePayload::Succeeded { .. })
                     }
                     _ => false,
                 },
@@ -1403,10 +1405,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .filter(|row| {
             matches!(
                 row.kind,
-                RunRecordKind::SourceFact
-                    | RunRecordKind::Fact
-                    | RunRecordKind::Effect
-                    | RunRecordKind::Delivery
+                RunRecordKind::SourceFact | RunRecordKind::Fact | RunRecordKind::Effect
             )
         })
         .count();
@@ -1495,10 +1494,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             .or_default() += 1;
         if matches!(
             row.kind,
-            RunRecordKind::SourceFact
-                | RunRecordKind::Fact
-                | RunRecordKind::Effect
-                | RunRecordKind::Delivery
+            RunRecordKind::SourceFact | RunRecordKind::Fact | RunRecordKind::Effect
         ) {
             *displayed_journals
                 .entry(heading)
@@ -2493,46 +2489,27 @@ mod hosted {
     }
 }
 
-/// Run the CLI test flow with `args`, returning the run it wrote.
-async fn run_cli_flow(journal_base: &Path, args: &[&std::ffi::OsStr]) -> PathBuf {
-    replay_testkit::unsynced_application()
-        .with_cli_args(
-            std::iter::once(std::ffi::OsStr::new("obzenflow")).chain(args.iter().copied()),
-        )
-        .run_async(build_flow(journal_base.to_path_buf()))
-        .await
-        .expect("the flow completes");
-    std::fs::canonicalize(latest_run_dir(journal_base)).expect("the run resolves")
+#[derive(Clone, Debug, serde::Serialize)]
+struct Discard;
+
+struct SlowDiscard {
+    delay: Duration,
 }
 
-async fn stop_cli_flow_with_a_lagging_sink(journal_base: &Path) -> PathBuf {
-    #[derive(Clone, Debug)]
-    struct SlowDiscard;
-
-    #[async_trait::async_trait]
-    impl obzenflow::stages::sinks::InlineSink for SlowDiscard {
-        type Input = Tick;
-
-        fn describe(&self) -> obzenflow::stages::sinks::SinkDescription {
-            obzenflow::stages::sinks::SinkDescription::method(
-                obzenflow::stages::sinks::DeliveryMethod::Noop,
-            )
-            .with_redelivery_safety(obzenflow::stages::sinks::SinkRedeliverySafety::SafeToRepeat)
-        }
-
-        async fn write(
-            &mut self,
-            _input: Tick,
-        ) -> Result<(), obzenflow::stages::sinks::SinkWriteFailure> {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            Ok(())
-        }
+#[obzenflow::port(system = "slow-discard")]
+impl SlowDiscard {
+    #[effect(type = "cli_verify.slow_discard", at_least_once, records = reply)]
+    async fn discard(&self, _: &Discard) -> Result<(), obzenflow::effects::EffectError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(())
     }
+}
 
-    let root = journal_base.to_path_buf();
-    let handle = FlowDefinition::materialize(move |_runtime_config| {
+fn lagging_sink_flow(root: PathBuf, delay: Duration) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
         let ticks_handler = Ticks::new();
-        let out_handler = SlowDiscard;
+        let out_handler = obzenflow::effects::perform(|_: &Tick| Discard)
+            .through(obzenflow::effects::Port::to(SlowDiscard { delay }));
         Ok(flow! {
             name: "cli_verify",
             journals: disk_journals(root),
@@ -2547,9 +2524,27 @@ async fn stop_cli_flow_with_a_lagging_sink(journal_base: &Path) -> PathBuf {
             }
         })
     })
-    .build(replay_testkit::unsynced_context())
-    .await
-    .expect("the flow builds");
+}
+
+async fn run_lagging_cli_flow(journal_base: &Path, args: &[&std::ffi::OsStr]) -> PathBuf {
+    replay_testkit::unsynced_application()
+        .with_cli_args(
+            std::iter::once(std::ffi::OsStr::new("obzenflow")).chain(args.iter().copied()),
+        )
+        .run_async(lagging_sink_flow(
+            journal_base.to_path_buf(),
+            Duration::ZERO,
+        ))
+        .await
+        .expect("the flow completes");
+    std::fs::canonicalize(latest_run_dir(journal_base)).expect("the run resolves")
+}
+
+async fn stop_cli_flow_with_a_lagging_sink(journal_base: &Path) -> PathBuf {
+    let handle = lagging_sink_flow(journal_base.to_path_buf(), Duration::from_millis(500))
+        .build(replay_testkit::unsynced_context())
+        .await
+        .expect("the flow builds");
     let run = std::fs::canonicalize(latest_run_dir(journal_base)).expect("the run resolves");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !replay_testkit::read_stage_envelopes_appended(&run, "ticks")
@@ -2602,8 +2597,9 @@ async fn show_reports_lineage_and_source_continuation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
     let r0 = stop_cli_flow_with_a_lagging_sink(&journal_base).await;
-    let r1 = run_cli_flow(&journal_base, &["--resume-from".as_ref(), r0.as_os_str()]).await;
-    let replay = run_cli_flow(&journal_base, &["--replay-from".as_ref(), r1.as_os_str()]).await;
+    let r1 = run_lagging_cli_flow(&journal_base, &["--resume-from".as_ref(), r0.as_os_str()]).await;
+    let replay =
+        run_lagging_cli_flow(&journal_base, &["--replay-from".as_ref(), r1.as_os_str()]).await;
     let (r0_dir, r1_dir) = (r0.display(), r1.display());
 
     assert_eq!(
@@ -2655,7 +2651,7 @@ async fn resumed_lineage_names_left_bytes() {
         &[0; 4096],
     )
     .unwrap();
-    let r1 = run_cli_flow(&journal_base, &["--resume-from".as_ref(), r0.as_os_str()]).await;
+    let r1 = run_lagging_cli_flow(&journal_base, &["--resume-from".as_ref(), r0.as_os_str()]).await;
 
     let output = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
         .arg("show")

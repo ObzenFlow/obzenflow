@@ -18,7 +18,7 @@
 
 use super::control::circuit_breaker::CircuitBreakerMiddleware;
 use super::control::policy::{
-    EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy, SinkPolicy, SourcePolicy,
+    EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy, SourcePolicy,
 };
 use super::control::provider::PendingControlRegistration;
 use super::control::{ControlMiddlewareAggregator, RateLimiterMiddleware};
@@ -28,8 +28,8 @@ use obzenflow_core::{StageId, StageKey};
 use obzenflow_runtime::effects::EffectSafety;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::observer::{
-    EffectObserver, HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver,
-    StageLifecycleObserver, StatefulObserver,
+    EffectObserver, HandlerObserver, JoinObserver, SourcePollObserver, StageLifecycleObserver,
+    StatefulObserver,
 };
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use ring::digest::{Context, SHA256};
@@ -67,11 +67,6 @@ impl From<&str> for EffectTypeKey {
     }
 }
 
-/// A sink-delivery target declared before consume (replay-stable). Refines the
-/// sink-delivery protected unit beyond the default stage-level identity.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SinkConfiguredTargetKey(pub String);
-
 // ---------------------------------------------------------------------------
 // Capability
 // ---------------------------------------------------------------------------
@@ -100,14 +95,6 @@ pub struct EffectSurface {
     pub stage_id: StageId,
     pub effect_type: EffectTypeKey,
     pub safety: EffectSafety,
-}
-
-/// The sink-delivery call site for one sink stage, optionally refined by a
-/// configured target declared before consume.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SinkDeliverySurface {
-    pub stage_id: StageId,
-    pub configured_target: Option<SinkConfiguredTargetKey>,
 }
 
 // ---------------------------------------------------------------------------
@@ -179,16 +166,12 @@ pub struct IngressUnitId {
     pub target: HostedIngressTargetKey,
 }
 
-/// The call-site shape a middleware attaches to. Broad and non-exhaustive so
-/// later slices consume the same foundation. This slice implements
-/// `SourcePoll`, `Effect`, and `SinkDelivery`; the remaining variants are
-/// reserved (FLOWIP-115d ingress, FLOWIP-115f observers).
+/// The call-site shape a middleware attaches to.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MiddlewareSurface {
     SourcePoll(SourcePollSurface),
     Effect(EffectSurface),
-    SinkDelivery(SinkDeliverySurface),
     /// FLOWIP-115d: source-backed hosted listener admission (not source polling).
     Ingress(IngressSurface),
     Handler {
@@ -212,7 +195,6 @@ pub enum MiddlewareSurface {
 pub enum MiddlewareSurfaceKind {
     SourcePoll,
     Effect,
-    SinkDelivery,
     Ingress,
     Handler,
     Stateful,
@@ -225,7 +207,6 @@ impl MiddlewareSurface {
         match self {
             Self::SourcePoll(_) => MiddlewareSurfaceKind::SourcePoll,
             Self::Effect(_) => MiddlewareSurfaceKind::Effect,
-            Self::SinkDelivery(_) => MiddlewareSurfaceKind::SinkDelivery,
             Self::Ingress(_) => MiddlewareSurfaceKind::Ingress,
             Self::Handler { .. } => MiddlewareSurfaceKind::Handler,
             Self::Stateful { .. } => MiddlewareSurfaceKind::Stateful,
@@ -239,7 +220,6 @@ impl MiddlewareSurface {
         match self {
             Self::SourcePoll(s) => Some(s.stage_id),
             Self::Effect(s) => Some(s.stage_id),
-            Self::SinkDelivery(s) => Some(s.stage_id),
             // FLOWIP-115d: source-backed hosted ingress is owned by its linked
             // source stage, so it returns that stage id and keeps the existing
             // stage-keyed validation flow additive.
@@ -253,15 +233,11 @@ impl MiddlewareSurface {
 }
 
 impl MiddlewareSurfaceKind {
-    /// Whether a `Control`-capability middleware may attach to this surface in
-    /// this slice. Control is legal on the live-I/O boundary surfaces (source
-    /// poll, effect, sink delivery) and, since FLOWIP-115d, on hosted ingress;
-    /// The remaining observer surfaces are never control surfaces.
+    /// Whether a `Control`-capability middleware may attach to this surface.
+    /// Control is legal on the live-I/O boundary surfaces, source poll, effect
+    /// and hosted ingress; the observer surfaces are never control surfaces.
     pub fn allows_control(self) -> bool {
-        matches!(
-            self,
-            Self::SourcePoll | Self::Effect | Self::SinkDelivery | Self::Ingress
-        )
+        matches!(self, Self::SourcePoll | Self::Effect | Self::Ingress)
     }
 }
 
@@ -280,19 +256,6 @@ pub struct EffectUnitId {
     pub effect_type: EffectTypeKey,
 }
 
-/// Default stage-level sink delivery, or a refined configured target.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SinkDeliveryTarget {
-    Stage,
-    Configured(SinkConfiguredTargetKey),
-}
-
-/// The sink-delivery protected unit, stage-level by default.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SinkDeliveryUnitId {
-    pub target: SinkDeliveryTarget,
-}
-
 /// The cross-attempt state and accounting key for one attached unit.
 ///
 /// This must not carry per-attempt data (effect cursor, event id, request
@@ -303,7 +266,6 @@ pub struct SinkDeliveryUnitId {
 pub enum ProtectedUnit {
     SourcePoll(SourcePollUnitId),
     Effect(EffectUnitId),
-    SinkDelivery(SinkDeliveryUnitId),
     /// FLOWIP-115d: source-backed hosted listener admission.
     Ingress(IngressUnitId),
     /// Reserved (FLOWIP-115f).
@@ -413,16 +375,6 @@ fn push_surface(context: &mut Context, surface: &MiddlewareSurface) {
             push_field(context, "surface.kind", "effect");
             push_field(context, "surface.effect_type", surface.effect_type.as_str());
         }
-        MiddlewareSurface::SinkDelivery(surface) => {
-            push_field(context, "surface.kind", "sink_delivery");
-            match &surface.configured_target {
-                Some(target) => {
-                    push_field(context, "surface.sink_target.kind", "configured");
-                    push_field(context, "surface.sink_target", &target.0);
-                }
-                None => push_field(context, "surface.sink_target.kind", "stage"),
-            }
-        }
         MiddlewareSurface::Ingress(surface) => {
             push_field(context, "surface.kind", "ingress");
             push_field(
@@ -467,17 +419,6 @@ fn push_protected_unit(context: &mut Context, protected_unit: &ProtectedUnitId) 
                 unit.effect_type.as_str(),
             );
         }
-        ProtectedUnit::SinkDelivery(unit) => match &unit.target {
-            SinkDeliveryTarget::Stage => {
-                push_field(context, "protected_unit.kind", "sink_delivery");
-                push_field(context, "protected_unit.sink_target.kind", "stage");
-            }
-            SinkDeliveryTarget::Configured(target) => {
-                push_field(context, "protected_unit.kind", "sink_delivery");
-                push_field(context, "protected_unit.sink_target.kind", "configured");
-                push_field(context, "protected_unit.sink_target", &target.0);
-            }
-        },
         ProtectedUnit::Ingress(unit) => {
             push_field(context, "protected_unit.kind", "ingress");
             push_field(
@@ -519,7 +460,7 @@ pub struct MiddlewareDeclaration {
     pub family_label: &'static str,
     pub capability: MiddlewareCapability,
     /// The surfaces this factory can attach to. A control middleware may span
-    /// several (the rate limiter declares source poll, effect, sink delivery,
+    /// several (the rate limiter declares source poll, effect,
     /// and ingress); contextual binding supplies the concrete
     /// surface and this carrier validates membership. A declaration always
     /// names at least one surface.
@@ -923,15 +864,6 @@ pub fn validate_attachment_request(
         (MiddlewareSurface::Effect(surface), ProtectedUnit::Effect(unit)) => {
             surface.effect_type == unit.effect_type
         }
-        (MiddlewareSurface::SinkDelivery(surface), ProtectedUnit::SinkDelivery(unit)) => {
-            match (&surface.configured_target, &unit.target) {
-                (None, SinkDeliveryTarget::Stage) => true,
-                (Some(surface_target), SinkDeliveryTarget::Configured(unit_target)) => {
-                    surface_target == unit_target
-                }
-                _ => false,
-            }
-        }
         (MiddlewareSurface::Ingress(surface), ProtectedUnit::Ingress(unit)) => {
             // FLOWIP-115d: the ingress surface and protected unit agree when the
             // replay-stable source stage key and the typed hosted target match.
@@ -1022,7 +954,7 @@ pub struct MiddlewareMaterializationContext<'a> {
     /// The type of the stage being attached to. Source-poll materialization uses
     /// this to choose the FLOWIP-114m charge position (infinite sources charge
     /// pre-poll, finite sources charge after a clean non-empty delivery); the
-    /// effect and sink-delivery surfaces ignore it.
+    /// effect surface ignores it.
     pub stage_type: StageType,
     middleware: &'static str,
     surface: MiddlewareSurfaceKind,
@@ -1227,21 +1159,12 @@ pub struct SourcePollAttachment {
     pub completion_gate: Option<Arc<dyn CompletionGate>>,
 }
 
-/// The single typed attachment a factory materializes for one surface.
-///
-/// Adapter-owned: the DSL binder collects the per-surface policies, composes
-/// them into the neutral runtime/core boundary, and passes only that neutral
-/// seam to runtime/infra. Non-exhaustive; this slice implements `SourcePoll`,
-/// `Effect`, and `SinkDelivery`, and FLOWIP-115d adds `Ingress`, whose neutral
-/// port is the core-owned `IngressBoundaryMiddleware` that infra calls.
 pub(crate) enum MiddlewareSurfaceAttachmentKind {
     SourcePoll(SourcePollAttachment),
     Effect(EffectPolicyAttachment),
-    SinkDelivery(Arc<dyn SinkPolicy>),
     Ingress(Arc<dyn IngressBoundaryMiddleware>),
     SourcePollObserver(Arc<dyn SourcePollObserver>),
     EffectObserver(Arc<dyn EffectObserver>),
-    SinkDeliveryObserver(Arc<dyn SinkDeliveryObserver>),
     HandlerObserver(Arc<dyn HandlerObserver>),
     StatefulObserver(Arc<dyn StatefulObserver>),
     JoinObserver(Arc<dyn JoinObserver>),
@@ -1294,10 +1217,6 @@ impl MiddlewareSurfaceAttachment {
         ))
     }
 
-    pub fn sink_delivery(policy: Arc<dyn SinkPolicy>) -> Self {
-        Self::ordinary(MiddlewareSurfaceAttachmentKind::SinkDelivery(policy))
-    }
-
     pub fn ingress(boundary: Arc<dyn IngressBoundaryMiddleware>) -> Self {
         Self::ordinary(MiddlewareSurfaceAttachmentKind::Ingress(boundary))
     }
@@ -1310,12 +1229,6 @@ impl MiddlewareSurfaceAttachment {
 
     pub fn effect_observer(observer: Arc<dyn EffectObserver>) -> Self {
         Self::ordinary(MiddlewareSurfaceAttachmentKind::EffectObserver(observer))
-    }
-
-    pub fn sink_delivery_observer(observer: Arc<dyn SinkDeliveryObserver>) -> Self {
-        Self::ordinary(MiddlewareSurfaceAttachmentKind::SinkDeliveryObserver(
-            observer,
-        ))
     }
 
     pub fn handler_observer(observer: Arc<dyn HandlerObserver>) -> Self {
@@ -1378,13 +1291,6 @@ impl CheckedMiddlewareSurfaceAttachment {
         }
     }
 
-    pub fn into_sink_delivery(self) -> Option<Arc<dyn SinkPolicy>> {
-        match self.kind {
-            MiddlewareSurfaceAttachmentKind::SinkDelivery(policy) => Some(policy),
-            _ => None,
-        }
-    }
-
     pub fn into_ingress(self) -> Option<Arc<dyn IngressBoundaryMiddleware>> {
         match self.kind {
             MiddlewareSurfaceAttachmentKind::Ingress(boundary) => Some(boundary),
@@ -1408,10 +1314,6 @@ fn capability_and_surface(
         MiddlewareSurfaceAttachmentKind::Effect(_) => {
             (MiddlewareCapability::Control, MiddlewareSurfaceKind::Effect)
         }
-        MiddlewareSurfaceAttachmentKind::SinkDelivery(_) => (
-            MiddlewareCapability::Control,
-            MiddlewareSurfaceKind::SinkDelivery,
-        ),
         MiddlewareSurfaceAttachmentKind::Ingress(_) => (
             MiddlewareCapability::Control,
             MiddlewareSurfaceKind::Ingress,
@@ -1423,10 +1325,6 @@ fn capability_and_surface(
         MiddlewareSurfaceAttachmentKind::EffectObserver(_) => (
             MiddlewareCapability::Observer,
             MiddlewareSurfaceKind::Effect,
-        ),
-        MiddlewareSurfaceAttachmentKind::SinkDeliveryObserver(_) => (
-            MiddlewareCapability::Observer,
-            MiddlewareSurfaceKind::SinkDelivery,
         ),
         MiddlewareSurfaceAttachmentKind::HandlerObserver(_) => (
             MiddlewareCapability::Observer,
@@ -1722,19 +1620,6 @@ mod tests {
                     }),
                 },
             ),
-            MiddlewareSurfaceKind::SinkDelivery => (
-                MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
-                    stage_id,
-                    configured_target: None,
-                }),
-                ProtectedUnitId {
-                    stage_id,
-                    owner: ProtectedUnitOwner::Stage,
-                    unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
-                        target: SinkDeliveryTarget::Stage,
-                    }),
-                },
-            ),
             MiddlewareSurfaceKind::Ingress => ingress_fixture(stage_id),
             MiddlewareSurfaceKind::Handler => (
                 MiddlewareSurface::Handler { stage_id },
@@ -1818,7 +1703,6 @@ mod tests {
         let surfaces = [
             MiddlewareSurfaceKind::SourcePoll,
             MiddlewareSurfaceKind::Effect,
-            MiddlewareSurfaceKind::SinkDelivery,
             MiddlewareSurfaceKind::Ingress,
             MiddlewareSurfaceKind::Handler,
             MiddlewareSurfaceKind::Stateful,
@@ -1944,51 +1828,6 @@ mod tests {
         assert_ne!(
             validate_attachment_request(&effect_declaration, &http_request).unwrap(),
             validate_attachment_request(&effect_declaration, &sql_request).unwrap()
-        );
-
-        let sink_declaration = MiddlewareDeclaration::control_with_family(
-            "sink_control",
-            "sink_control",
-            vec![MiddlewareSurfaceKind::SinkDelivery],
-        );
-        let stage_sink_surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
-            stage_id,
-            configured_target: None,
-        });
-        let stage_sink_unit = ProtectedUnitId {
-            stage_id,
-            owner: ProtectedUnitOwner::Stage,
-            unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
-                target: SinkDeliveryTarget::Stage,
-            }),
-        };
-        let configured_target = SinkConfiguredTargetKey("primary".to_string());
-        let configured_sink_surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
-            stage_id,
-            configured_target: Some(configured_target.clone()),
-        });
-        let configured_sink_unit = ProtectedUnitId {
-            stage_id,
-            owner: ProtectedUnitOwner::Stage,
-            unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
-                target: SinkDeliveryTarget::Configured(configured_target),
-            }),
-        };
-        let stage_sink_request = MiddlewareAttachmentRequest {
-            stage_key: "test_stage",
-            surface: &stage_sink_surface,
-            protected_unit: &stage_sink_unit,
-            authored_site: MiddlewareAttachmentSite::Implementation,
-        };
-        let configured_sink_request = MiddlewareAttachmentRequest {
-            stage_key: "test_stage",
-            surface: &configured_sink_surface,
-            protected_unit: &configured_sink_unit,
-            authored_site: MiddlewareAttachmentSite::Implementation,
-        };
-        assert_ne!(
-            validate_attachment_request(&sink_declaration, &stage_sink_request).unwrap(),
-            validate_attachment_request(&sink_declaration, &configured_sink_request).unwrap()
         );
 
         let ingress_declaration = MiddlewareDeclaration::control_with_family(

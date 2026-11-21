@@ -19,8 +19,7 @@
 use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_adapters::sinks::CountingSink;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord, ReplayLifecycleEvent};
@@ -35,12 +34,10 @@ use obzenflow_infra::journal::read::{
     read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing,
 };
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedInfiniteSourceHandler,
-    TypedTransformHandler,
+    TypedInfiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use replay_testkit::ReattachingSource;
@@ -124,29 +121,6 @@ impl TypedTransformHandler for DoubleTransform {
     }
 }
 
-/// Counts consumed `Doubled` events. Catch-up deliveries are suppressed at
-/// the sink under resume, so in a resumed run the counter witnesses exactly
-/// the live tail.
-#[derive(Clone, Debug)]
-struct CountingSink {
-    delivered: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = Doubled;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _input: Doubled) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 fn build_flow(
     journal_base: PathBuf,
     first_n: u64,
@@ -156,7 +130,7 @@ fn build_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let ticker = ReattachingSource(BoundedTicker::new(first_n, count));
         let double = DoubleTransform::new();
-        let counting_sink = CountingSink { delivered };
+        let counting_sink = CountingSink::<Doubled>::new(delivered);
 
         Ok(flow! {
             name: "resume_squared",
@@ -320,15 +294,11 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r0.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
         );
-        // The sink re-consumes the recorded prefix during catch-up (F14), so
-        // the wait target is prefix + live; a live-only target races the stop
-        // into the catch-up phase.
-        run_until_delivered(&journal_base, R0_EVENTS + 1, R1_LIVE, R0_EVENTS + R1_LIVE).await?;
+        run_until_delivered(&journal_base, R0_EVENTS + 1, R1_LIVE, R1_LIVE).await?;
     }
     let r1 = replay_testkit::latest_run_dir(&journal_base);
     assert_ne!(r0, r1);
@@ -344,18 +314,11 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
         );
-        run_until_delivered(
-            &journal_base,
-            R0_EVENTS + R1_LIVE + 1,
-            R2_LIVE,
-            R0_EVENTS + R1_LIVE + R2_LIVE,
-        )
-        .await?;
+        run_until_delivered(&journal_base, R0_EVENTS + R1_LIVE + 1, R2_LIVE, R2_LIVE).await?;
     }
     let r2 = replay_testkit::latest_run_dir(&journal_base);
     assert_ne!(r1, r2);
@@ -424,7 +387,6 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Replay,
             })
             .await,
@@ -466,7 +428,6 @@ fn bootstrap(archive: &Path, verb: ReplayVerb) -> ReplayBootstrap {
     ReplayBootstrap {
         archive_path: archive.to_path_buf(),
         allow_incomplete_archive: true,
-        allow_duplicate_sink_delivery: false,
         verb,
     }
 }
@@ -477,7 +438,7 @@ async fn resume(journal_base: &Path, archive: &Path, recorded: u64, live: u64) -
     let _bootstrap = install_bootstrap_config(
         replay_testkit::bootstrap_with_archive(bootstrap(archive, ReplayVerb::Resume)).await,
     );
-    run_until_delivered(journal_base, recorded + 1, live, recorded + live).await?;
+    run_until_delivered(journal_base, recorded + 1, live, live).await?;
     Ok(std::fs::canonicalize(replay_testkit::latest_run_dir(
         journal_base,
     ))?)
@@ -760,7 +721,6 @@ async fn a_run_still_being_written_refuses_until_its_process_stops() -> Result<(
             &FlowEvidence::default(),
             ArchiveOverrides {
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: true,
             },
         )
         .expect_err("a live run must refuse");

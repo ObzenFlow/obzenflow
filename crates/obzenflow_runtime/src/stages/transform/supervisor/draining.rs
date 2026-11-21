@@ -6,7 +6,7 @@
 
 use crate::effects::EffectInvocationContext;
 use crate::messaging::PollResult;
-use crate::metrics::instrumentation::process_with_instrumentation;
+use crate::metrics::instrumentation::process_input_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{
@@ -111,6 +111,14 @@ async fn dispatch_draining_inner<
         ));
     };
 
+    if ctx
+        .sink_batch
+        .as_ref()
+        .is_some_and(super::sink_batch::SinkBatch::expired)
+    {
+        super::sink_batch::flush(ctx, flow_context).await?;
+    }
+
     let poll_result = {
         let subscription = sup
             .subscription
@@ -152,6 +160,10 @@ async fn dispatch_draining_inner<
                 }
             }
 
+            if !envelope.consumes_data_credit() || envelope.is_control() {
+                super::sink_batch::flush(ctx, flow_context).await?;
+            }
+
             let suppress_event = sup
                 .check_cycle_guard_data_event(
                     ctx,
@@ -188,6 +200,18 @@ async fn dispatch_draining_inner<
             let scope =
                 ctx.runtime_execution
                     .dispatch_scope(ctx.stage_id, stage_input_position, None);
+            if ctx.sink_batch.is_some() {
+                super::sink_batch::enqueue(
+                    ctx,
+                    flow_context,
+                    envelope,
+                    observer_input_position,
+                    upstream_stage,
+                    None,
+                )
+                .await?;
+                return Ok(EventLoopDirective::Continue);
+            }
             if super::direct_fact_continuation::start_if_eligible(
                 ctx,
                 &envelope,
@@ -232,8 +256,10 @@ async fn dispatch_draining_inner<
             let writer_id = WriterId::from(ctx.stage_id);
             let lineage = ctx.lineage_policy;
             let error_flow_context = flow_context;
-            let transformed_result =
-                process_with_instrumentation(&ctx.instrumentation, || async move {
+            let transformed_result = process_input_with_instrumentation(
+                &ctx.instrumentation,
+                flow_context.stage_type,
+                || async move {
                     let event = envelope_clone.authored();
                     let event_id = event.id;
 
@@ -267,8 +293,9 @@ async fn dispatch_draining_inner<
                             Ok(vec![error_event])
                         }
                     }
-                })
-                .await;
+                },
+            )
+            .await;
             let transformed_events = match transformed_result {
                 Ok(events) => events,
                 Err(error) => {
@@ -432,6 +459,7 @@ async fn dispatch_draining_inner<
             Ok(EventLoopDirective::Continue)
         }
         PollResult::NoEvents => {
+            super::sink_batch::flush(ctx, flow_context).await?;
             if let Some(subscription) = sup.subscription.as_mut() {
                 subscription
                     .check_contracts(&mut ctx.contract_state[..])
@@ -439,7 +467,7 @@ async fn dispatch_draining_inner<
                     .into_result()?;
             }
 
-            tracing::info!(stage_name = %ctx.stage_name, "Transform queue drained");
+            tracing::info!(stage_name = %ctx.stage_name, "{} queue drained", ctx.stage_label());
             let drained = if ctx
                 .cycle_guard_config
                 .as_ref()

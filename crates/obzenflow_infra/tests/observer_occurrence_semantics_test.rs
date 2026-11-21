@@ -5,11 +5,8 @@
 //! Behavioural occurrence proof for ordinary observer surfaces.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{
-    handler_observer, join_observer, sink_delivery_observer, stage_lifecycle_observer,
-    ObserverResult, SinkDeliveryObserver,
-};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_adapters::middleware::{handler_observer, join_observer, stage_lifecycle_observer};
+use obzenflow_adapters::sinks::{CountingSink, DiscardSink};
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{Outcomes, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, join, sink, source, transform, FlowDefinition};
@@ -18,19 +15,13 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
+    EffectfulTransformHandler, JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler,
+    TypedTransformHandler,
 };
-use obzenflow_runtime::stages::observer::SinkDeliveryObserverContext;
 use obzenflow_runtime::stages::observer::{
     HandlerObserver, HandlerObserverContext, JoinObserver, JoinObserverContext,
     JoinObserverOccurrence, JoinSide, JoinSignalKind, StageInputPosition, StageLifecycleObserver,
     StageLifecycleObserverContext, StageLifecyclePhase,
-};
-use obzenflow_runtime::stages::sink::{
-    PendingSinkInput, SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkOperationResult,
-    SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriteResult, SinkWriter,
-    SinkWriterInitContext, SinkWriterLifecycleReport,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -38,254 +29,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Barrier;
-
-#[derive(Debug, Clone, Copy)]
-enum DeliveryTiming {
-    Immediate,
-    LaterWrite,
-    Flush,
-    Drain,
-    Noop,
-    Partial,
-}
-
-#[derive(Clone, Default, Debug)]
-struct DeliveryProbe {
-    committed: Arc<Mutex<Vec<u64>>>,
-    delivered: Arc<Mutex<Vec<u64>>>,
-    attempts: Arc<AtomicUsize>,
-    fault_attempts: Arc<AtomicUsize>,
-    fault_deliveries: Arc<AtomicUsize>,
-}
-
-#[derive(Clone, Debug)]
-struct ObservedConnector {
-    timing: DeliveryTiming,
-    probe: DeliveryProbe,
-}
-
-#[async_trait]
-impl SinkConnector for ObservedConnector {
-    type Input = HandlerInput;
-    type Writer = ObservedWriter;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("observer-fixture".into()))
-    }
-
-    async fn open(&self, _context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {
-        Ok(ObservedWriter {
-            timing: self.timing,
-            probe: self.probe.clone(),
-            pending: Vec::new(),
-        })
-    }
-}
-
-struct ObservedWriter {
-    timing: DeliveryTiming,
-    probe: DeliveryProbe,
-    pending: Vec<(u64, PendingSinkInput)>,
-}
-
-impl ObservedWriter {
-    fn commit_pending(&mut self) -> Vec<SinkCommitReceipt> {
-        self.pending
-            .drain(..)
-            .map(|(value, pending)| {
-                self.probe.committed.lock().unwrap().push(value);
-                // Unknown item counts still establish successful input delivery.
-                SinkCommitReceipt::new(pending, SinkTerminalOutcome::success(None))
-            })
-            .collect()
-    }
-}
-
-#[async_trait]
-impl SinkWriter for ObservedWriter {
-    type Input = HandlerInput;
-
-    async fn write(&mut self, input: HandlerInput, context: SinkWriteContext) -> SinkWriteResult {
-        match self.timing {
-            DeliveryTiming::Immediate => {
-                self.probe.committed.lock().unwrap().push(input.value);
-                Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success(
-                    None,
-                )))
-            }
-            DeliveryTiming::Noop => Ok(SinkWriteReport::terminal(
-                SinkTerminalOutcome::success_via(DeliveryMethod::Noop, Some(0)).with_items(0),
-            )),
-            DeliveryTiming::Partial => Ok(SinkWriteReport::terminal(SinkTerminalOutcome::partial(
-                1,
-                1,
-                "one sub-item failed",
-                None,
-            ))),
-            DeliveryTiming::LaterWrite | DeliveryTiming::Flush | DeliveryTiming::Drain => {
-                self.pending.push((input.value, context.defer()));
-                let receipts = if matches!(self.timing, DeliveryTiming::LaterWrite)
-                    && self.pending.len() == 2
-                {
-                    self.commit_pending()
-                } else {
-                    Vec::new()
-                };
-                Ok(
-                    SinkWriteReport::buffered(SinkBufferedOutcome::accepted(None))
-                        .with_commit_receipts(receipts),
-                )
-            }
-        }
-    }
-
-    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        let receipts = if matches!(
-            self.timing,
-            DeliveryTiming::LaterWrite | DeliveryTiming::Flush
-        ) {
-            self.commit_pending()
-        } else {
-            Vec::new()
-        };
-        Ok(SinkWriterLifecycleReport::default().with_commit_receipts(receipts))
-    }
-
-    async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        Ok(SinkWriterLifecycleReport::default().with_commit_receipts(self.commit_pending()))
-    }
-}
-
-struct ObservesDelivery(DeliveryProbe);
-
-impl SinkDeliveryObserver for ObservesDelivery {
-    type Input = HandlerInput;
-
-    fn on_delivered(&self, input: &Self::Input) -> ObserverResult {
-        assert!(
-            self.0.committed.lock().unwrap().contains(&input.value),
-            "delivery notification must follow the destination commit"
-        );
-        self.0.delivered.lock().unwrap().push(input.value);
-        Ok(())
-    }
-
-    fn on_attempt(&self, _context: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
-        self.0.attempts.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ObserverFault {
-    None,
-    Attempt,
-    Delivered,
-    Panic,
-}
-
-struct FaultingDeliveryObserver {
-    fault: ObserverFault,
-    probe: DeliveryProbe,
-}
-
-impl SinkDeliveryObserver for FaultingDeliveryObserver {
-    type Input = HandlerInput;
-
-    fn on_delivered(&self, _input: &Self::Input) -> ObserverResult {
-        self.probe.fault_deliveries.fetch_add(1, Ordering::SeqCst);
-        match self.fault {
-            ObserverFault::Delivered => {
-                Err(std::io::Error::other("observer delivery error").into())
-            }
-            ObserverFault::Panic => panic!("observer delivery panic"),
-            ObserverFault::None | ObserverFault::Attempt => Ok(()),
-        }
-    }
-
-    fn on_attempt(&self, _context: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
-        self.probe.fault_attempts.fetch_add(1, Ordering::SeqCst);
-        if matches!(self.fault, ObserverFault::Attempt) {
-            Err(std::io::Error::other("observer attempt error").into())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-async fn observe_sink(timing: DeliveryTiming, fault: ObserverFault) -> DeliveryProbe {
-    let probe = DeliveryProbe::default();
-    let for_flow = probe.clone();
-    FlowApplication::builder()
-        .with_cli_args(["obzenflow"])
-        .run_async(FlowDefinition::materialize(move |_config| {
-            let source = obzenflow_adapters::sources::ValuesSource::new(
-                (0..3).map(|value| HandlerInput { value }),
-            );
-            let connector = ObservedConnector {
-                timing,
-                probe: for_flow.clone(),
-            };
-            Ok(flow! {
-                name: "sink_delivery_occurrences",
-                journals: memory_journals(),
-                stages: {
-                    input = source!(HandlerInput => source);
-                    output = sink!(HandlerInput with { sink_delivery_observer("faulting", FaultingDeliveryObserver {
-                            fault, probe: for_flow.clone(),
-                        }),
-                        sink_delivery_observer("healthy", ObservesDelivery(for_flow)) } => connector);
-                },
-                topology: { input |> output; }
-            })
-        }))
-        .await
-        .expect("observer health must not change the sink's completion");
-    probe
-}
-
-#[tokio::test]
-async fn sink_delivery_observer_notifies_original_inputs_after_each_completion_path() {
-    for timing in [
-        DeliveryTiming::Immediate,
-        DeliveryTiming::LaterWrite,
-        DeliveryTiming::Flush,
-        DeliveryTiming::Drain,
-    ] {
-        let probe = observe_sink(timing, ObserverFault::None).await;
-        assert_eq!(*probe.committed.lock().unwrap(), [0, 1, 2], "{timing:?}");
-        assert_eq!(*probe.delivered.lock().unwrap(), [0, 1, 2], "{timing:?}");
-        assert_eq!(probe.attempts.load(Ordering::SeqCst), 3, "{timing:?}");
-    }
-}
-
-#[tokio::test]
-async fn sink_delivery_observer_excludes_noop_and_partial_outcomes() {
-    for timing in [DeliveryTiming::Noop, DeliveryTiming::Partial] {
-        let probe = observe_sink(timing, ObserverFault::None).await;
-        assert!(probe.delivered.lock().unwrap().is_empty(), "{timing:?}");
-        assert_eq!(probe.attempts.load(Ordering::SeqCst), 3, "{timing:?}");
-    }
-}
-
-#[tokio::test]
-async fn sink_observer_errors_and_panics_share_quarantine_without_suppressing_siblings() {
-    for fault in [
-        ObserverFault::Attempt,
-        ObserverFault::Delivered,
-        ObserverFault::Panic,
-    ] {
-        let probe = observe_sink(DeliveryTiming::LaterWrite, fault).await;
-        assert_eq!(*probe.committed.lock().unwrap(), [0, 1, 2]);
-        assert_eq!(*probe.delivered.lock().unwrap(), [0, 1, 2]);
-        assert_eq!(probe.attempts.load(Ordering::SeqCst), 3);
-        assert_eq!(probe.fault_attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            probe.fault_deliveries.load(Ordering::SeqCst),
-            usize::from(!matches!(fault, ObserverFault::Attempt)),
-        );
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Reference {
@@ -368,21 +111,7 @@ impl TypedJoinHandler for LookupJoin {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NoopSink;
-
-#[async_trait]
-impl InlineSink for NoopSink {
-    type Input = Joined;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-    }
-
-    async fn write(&mut self, _input: Joined) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NoopSink = DiscardSink<Joined>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -467,7 +196,7 @@ async fn join_observer_distinguishes_deliveries_from_signals_without_synthetic_p
             let reference_source = OneEventSource::new(Reference { key: 7 });
             let stream_source = OneEventSource::new(StreamInput { key: 7 });
             let join_handler = LookupJoin;
-            let sink_handler = NoopSink;
+            let sink_handler = NoopSink::new();
 
             Ok(flow! {
                 name: "observer_join_occurrences",
@@ -703,26 +432,6 @@ impl HandlerObserver for RecordsHandlerOccurrences {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountsHandlerOutputs {
-    deliveries: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl InlineSink for CountsHandlerOutputs {
-    type Input = HandlerOutput;
-    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-        obzenflow_runtime::stages::sink::SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-        )
-    }
-
-    async fn write(&mut self, _input: HandlerOutput) -> Result<(), SinkWriteFailure> {
-        self.deliveries.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn handler_observer_runs_once_for_zero_output_and_reports_the_whole_fan_out_slice() {
     let observations = Arc::new(Mutex::new(Vec::new()));
@@ -735,9 +444,7 @@ async fn handler_observer_runs_once_for_zero_output_and_reports_the_whole_fan_ou
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let inputs = TwoHandlerInputs { emitted: false };
             let handler = ZeroThenFanOut;
-            let output = CountsHandlerOutputs {
-                deliveries: deliveries_for_flow,
-            };
+            let output = CountingSink::<HandlerOutput>::new(deliveries_for_flow);
 
             Ok(flow! {
                 name: "observer_zero_and_fan_out_occurrences",
@@ -841,7 +548,7 @@ impl TypedFiniteSourceHandler for OneConcurrentInput {
     }
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct ConcurrentTransform {
     branch: &'static str,
@@ -870,26 +577,6 @@ impl EffectfulTransformHandler for ConcurrentTransform {
         })
         .await?;
         Ok(fx.complete()?)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CountsConcurrentOutputs {
-    deliveries: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl InlineSink for CountsConcurrentOutputs {
-    type Input = ConcurrentOutput;
-    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-        obzenflow_runtime::stages::sink::SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-        )
-    }
-
-    async fn write(&mut self, _input: ConcurrentOutput) -> Result<(), SinkWriteFailure> {
-        self.deliveries.fetch_add(1, Ordering::SeqCst);
-        Ok(())
     }
 }
 
@@ -923,9 +610,7 @@ async fn graph_fan_out_dispatches_once_per_concurrent_stage_occurrence() {
                 active: active_for_flow,
                 max_active: max_active_for_flow,
             };
-            let output = CountsConcurrentOutputs {
-                deliveries: deliveries_for_flow,
-            };
+            let output = CountingSink::<ConcurrentOutput>::new(deliveries_for_flow);
 
             Ok(flow! {
                 name: "observer_concurrent_graph_fan_out",
@@ -1029,9 +714,7 @@ async fn fatal_handler_return_has_before_without_after_and_one_failed_lifecycle(
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let input = OneHandlerInput { emitted: false };
             let fatal = FatalTransform;
-            let output = CountsHandlerOutputs {
-                deliveries: deliveries_for_flow,
-            };
+            let output = CountingSink::<HandlerOutput>::new(deliveries_for_flow);
 
             Ok(flow! {
                 name: "observer_fatal_handler_occurrence",

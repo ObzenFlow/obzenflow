@@ -10,7 +10,6 @@
 use crate::messaging::DeliveredRecord;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
-use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
@@ -713,6 +712,7 @@ impl<H> std::fmt::Debug for TransformAction<H> {
 
 /// Context for transform handlers - contains everything actions need
 pub(crate) struct TransformResources<H: UnifiedTransformHandler> {
+    pub(crate) sink_batch: Option<super::supervisor::sink_batch::SinkBatch>,
     /// The handler instance (owned - allows `drain(&mut self)` without locks)
     pub handler: Option<H>,
 
@@ -844,6 +844,15 @@ pub(crate) struct TransformResources<H: UnifiedTransformHandler> {
     pub(crate) flow_context: Arc<FlowContext>,
 }
 
+impl<H: UnifiedTransformHandler> TransformResources<H> {
+    pub(crate) fn stage_label(&self) -> &'static str {
+        match self.flow_context.stage_type {
+            obzenflow_core::event::context::StageType::Sink => "Sink",
+            _ => "Transform",
+        }
+    }
+}
+
 pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub(crate) resources: Option<TransformResources<H>>,
     pub(crate) instrumentation: Arc<StageInstrumentation>,
@@ -909,7 +918,6 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                         config: ContractConfig::default(),
                         reader_stage: Some(ctx.stage_id),
                         control_plane: ctx.instrumentation.control_plane().clone(),
-                        include_delivery_contract: false,
                         cycle_guard_config: ctx.cycle_guard_config.clone(),
                     })
                     .await
@@ -923,7 +931,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                         &ctx.flow_id.to_string(),
                         &ctx.stage_name,
                         ctx.stage_id,
-                        StageType::Transform,
+                        ctx.flow_context.stage_type,
                     ));
 
                 ctx.subscription = Some(subscription);
@@ -988,7 +996,8 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     upstream_count = ctx.upstream_subscription_factory.upstream_stage_ids().len(),
-                    "Transform allocated resources and created subscription"
+                    "{} allocated resources and created subscription",
+                    ctx.stage_label()
                 );
                 Ok(())
             }
@@ -1001,7 +1010,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                         &ctx.flow_id.to_string(),
                         &ctx.stage_name,
                         ctx.stage_id,
-                        obzenflow_core::event::context::StageType::Transform,
+                        ctx.flow_context.stage_type,
                     ),
                 )
                 .await?;
@@ -1018,7 +1027,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
                                 stage_id: ctx.stage_id,
-                                stage_type: StageType::Transform,
+                                stage_type: ctx.flow_context.stage_type,
                             },
                         )
                     },
@@ -1100,7 +1109,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                     flow_id: ctx.flow_id.to_string(),
                     stage_name: ctx.stage_name.clone(),
                     stage_id: ctx.stage_id,
-                    stage_type: StageType::Transform,
+                    stage_type: ctx.flow_context.stage_type,
                 };
                 eof_event.runtime = Some(runtime_context);
 
@@ -1116,7 +1125,8 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Transform forwarded EOF downstream"
+                    "{} forwarded EOF downstream",
+                    ctx.stage_label()
                 );
                 Ok(())
             }
@@ -1133,7 +1143,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                         &ctx.flow_id.to_string(),
                         &ctx.stage_name,
                         ctx.stage_id,
-                        obzenflow_core::event::context::StageType::Transform,
+                        ctx.flow_context.stage_type,
                     ),
                     ctx.instrumentation.as_ref(),
                 )
@@ -1151,7 +1161,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
                                 stage_id: ctx.stage_id,
-                                stage_type: StageType::Transform,
+                                stage_type: ctx.flow_context.stage_type,
                             },
                         )
                     },
@@ -1167,7 +1177,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                         &ctx.flow_id.to_string(),
                         &ctx.stage_name,
                         ctx.stage_id,
-                        obzenflow_core::event::context::StageType::Transform,
+                        ctx.flow_context.stage_type,
                     ),
                     message,
                     ctx.instrumentation.as_ref(),
@@ -1187,7 +1197,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
                                 stage_id: ctx.stage_id,
-                                stage_type: StageType::Transform,
+                                stage_type: ctx.flow_context.stage_type,
                             },
                         )
                     },
@@ -1202,9 +1212,11 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                     heartbeat.cancel();
                 }
 
-                lifecycle_actions::cleanup_best_effort("Transform", &ctx.stage_name, || async {
-                    Ok::<(), ()>(())
-                })
+                lifecycle_actions::cleanup_best_effort(
+                    ctx.stage_label(),
+                    &ctx.stage_name,
+                    || async { Ok::<(), ()>(()) },
+                )
                 .await;
                 Ok(())
             }

@@ -49,26 +49,26 @@ pub use obzenflow_adapters::middleware::control::rate_limiter::RateLimiterConfig
 pub use obzenflow_adapters::middleware::control::ControlConfigurationError;
 pub use obzenflow_adapters::middleware::{
     circuit_breaker, effect_observer, handler_observer, join_observer, rate_limit, retry,
-    sink_delivery_observer, source_poll_observer, stage_lifecycle_observer, stateful_observer,
+    source_poll_observer, stage_lifecycle_observer, stateful_observer, typed_effect_observer,
     CircuitBreaker, CircuitBreakerConfigError, EffectObserverFactory, EffectScoped, FailureHealth,
     HandlerObserverFactory, JoinObserverFactory, MiddlewareFactory, MiddlewareFactoryError,
-    MiddlewareFactoryResult, OnRefusal, RateLimiter, Retry, SinkDeliveryObserver,
-    SinkDeliveryObserverFactory, SourcePollObserverFactory, StageLifecycleObserverFactory,
-    StatefulObserverFactory,
+    MiddlewareFactoryResult, OnRefusal, RateLimiter, Retry, SourcePollObserverFactory,
+    StageLifecycleObserverFactory, StatefulObserverFactory, TypedEffectObserver,
+    TypedEffectObserverFactory,
 };
 // Application-owned control factories use the same checked attachment contract
 // as built-in policies, without importing implementation crates.
 pub use obzenflow_adapters::middleware::{
-    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    validate_attachment_request, EffectAttemptOutcome, EffectPolicy, MiddlewareAbortCause,
+    MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceKind, SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx,
+    MiddlewareSurfaceKind, PolicyAdmission,
 };
 pub use obzenflow_runtime::stages::observer::{
     EffectObserver, EffectObserverContext, EffectObserverOutcome, HandlerObserver,
     HandlerObserverContext, JoinDeliverySnapshot, JoinObserver, JoinObserverContext,
     JoinObserverOccurrence, JoinSide, JoinSignalKind, JoinSignalSnapshot, ObserverError,
-    ObserverResult, SinkDeliveryAttemptResult, SinkDeliveryObserverContext,
-    SinkDeliveryObserverOutcome, SourcePollObserver, SourcePollObserverContext,
-    SourcePollObserverOutcome, StageInputPosition, StageLifecycleObserver,
-    StageLifecycleObserverContext, StageLifecyclePhase, StatefulObserver, StatefulObserverContext,
+    ObserverResult, SourcePollObserver, SourcePollObserverContext, SourcePollObserverOutcome,
+    StageInputPosition, StageLifecycleObserver, StageLifecycleObserverContext, StageLifecyclePhase,
+    StatefulObserver, StatefulObserverContext,
 };

@@ -220,7 +220,7 @@ fn optional_custom_json_preserves_missing_null_and_empty_through_disk_and_jsonl(
     let store = DefinitionStore::default();
     let records = [
         test_data::record(test_data::Stage::Source, 0),
-        test_data::record(test_data::Stage::Receipt, 0),
+        test_data::record(test_data::Stage::Enrich, 0),
     ];
     for metadata in [
         None,
@@ -241,9 +241,6 @@ fn optional_custom_json_preserves_missing_null_and_empty_through_disk_and_jsonl(
                 .as_mut()
                 .unwrap()
                 .metadata = metadata.clone();
-            if let ChainPayload::Delivery(delivery) = &mut record.payload {
-                delivery.outcome.middleware_context = metadata.clone();
-            }
             let original = serde_json::to_vec(&serde_json::to_value(&record).unwrap()).unwrap();
             let (offset, bytes) = persist(&path, &record, store.clone());
             let restored = decode(&path, offset, &bytes).unwrap();
@@ -301,9 +298,6 @@ fn representative_records_preserve_all_fields_and_attribute_complete_origin_cost
         family.1 += sizes.provenance as f64 + sizes.shared as f64 / 2.0;
         family.2 += sizes.inline_definition_counts[2];
     }
-    // The first input has no successful transform or receipt; the downstream
-    // samples extend one input beyond the source sample. All shared origins
-    // must be references after their first committed definition.
     assert_eq!(origin_count, test_data::RECORDS_PER_STAGE + 1);
     assert!(references > 0);
     println!("Representative stream: {} records, {frame_bytes} frame bytes, {provenance} provenance, {inline_origins} complete inline origins, {references} definition references", records.len());
@@ -499,8 +493,6 @@ fn complete_observation_record() -> JournalRecord<ChainPayload> {
         "journal_writer_id": JournalWriterId::new(), "sequence": u64::MAX
     }));
     value["envelope"]["provenance"]["journal"]["vector_clock"] = clock.clone();
-    let mut different_clock = clock.clone();
-    different_clock["entries"][1]["sequence"] = json!(u64::MAX - 1);
     let packet = json!({
         "capture": capture,
         "processing_time": u64::MAX,
@@ -515,9 +507,9 @@ fn complete_observation_record() -> JournalRecord<ChainPayload> {
             "effect_circuit_breakers":[{"effect_type":"payments.authorise","cb_requests_total":u64::MAX,"cb_successes_total":1,"cb_failures_total":2,"cb_slow_total":3,"cb_rejections_total":4,"cb_opened_total":5,
                 "cb_time_closed_seconds":-0.0,"cb_time_open_seconds":0.25,"cb_time_half_open_seconds":0.5,"cb_state":0.5}],
             "effect_rate_limiters":[{"effect_type":"payments.authorise","rl_events_total":u64::MAX,"rl_delayed_total":1001,"rl_tokens_consumed_total":-0.0,"rl_delay_seconds_total":f64::MIN_POSITIVE,"rl_bucket_tokens":12.5,"rl_bucket_capacity":100.0}]},
-        "runtime_snapshot":{"capture":snapshot_capture,"fsm_state":"Running","progress":{"reader_seq":u64::MAX,"receipted_seq":1001,"writer_seq":1000,
+        "runtime_snapshot":{"capture":snapshot_capture,"fsm_state":"Running","progress":{"reader_seq":u64::MAX,"writer_seq":1000,
             "last_consumed_event_id":parent,"last_consumed_writer":JournalWriterId::new(),"last_consumed_vector_clock":clock,
-            "last_receipted_event_id":parent,"last_receipted_vector_clock":different_clock,"last_emitted_event_id":value["envelope"]["provenance"]["event"]["id"],"last_emitted_writer":author}},
+            "last_emitted_event_id":value["envelope"]["provenance"]["event"]["id"],"last_emitted_writer":author}},
         "metrics":{"events_processed":u64::MAX,"events_in_flight":u32::MAX,"queue_depth":0,"processing_rate":-0.0,"error_rate":0.0,"latency_p50_ms":f64::MIN_POSITIVE,"latency_p99_ms":f64::MAX},
         "sli":{"availability":1.0,"error_budget_remaining":-0.0,"latency_budget_used":0.125},
         "records":[
@@ -576,15 +568,6 @@ fn every_observation_family_and_absolute_boundary_survives_full_record_roundtrip
         if observations {
             let packet = &value["envelope"]["observability"];
             assert_ne!(packet["capture"], packet["runtime_snapshot"]["capture"]);
-            let progress = &packet["runtime_snapshot"]["progress"];
-            assert_eq!(
-                progress["last_consumed_event_id"],
-                progress["last_receipted_event_id"]
-            );
-            assert_ne!(
-                progress["last_consumed_vector_clock"],
-                progress["last_receipted_vector_clock"]
-            );
         }
     }
 }

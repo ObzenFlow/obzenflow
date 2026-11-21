@@ -10,6 +10,7 @@
 mod fixture;
 
 use fixture::{build_flow, ObserverTreatment, Probe, ProbeSnapshot, ORDER_COUNT};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::journal::archive::manifest::{RunManifest, RUN_MANIFEST_FILENAME};
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -60,27 +61,16 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<Chai
         .unwrap_or_else(|error| panic!("read {stage_key} journal: {error}"))
 }
 
-async fn delivery_receipts(run_dir: &Path) -> Vec<Value> {
-    let inputs = stage_events(run_dir, "authorised").await;
+async fn sink_calls(run_dir: &Path) -> Vec<Value> {
     stage_events(run_dir, "delivered")
         .await
         .into_iter()
         .filter_map(|envelope| match envelope.into_parts().1 {
-            ChainPayload::Delivery(payload) => {
-                let input = inputs
-                    .iter()
-                    .find(|input| payload.subject.matches_record(input))
-                    .expect("receipt names an exact committed input, including its descriptor");
-                let mut value = serde_json::to_value(payload).expect("serialise delivery receipt");
-                // Run and journal placement differ across independent runs. Compare
-                // the resolved business input after proving its exact local subject.
-                value["subject"]["input"] = input.payload();
-                value
-                    .as_object_mut()
-                    .expect("delivery receipt is an object")
-                    .remove("processed_at");
-                Some(value)
-            }
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) => Some(json!({
+                "descriptor_hash": record.descriptor_hash,
+                "descriptor": record.descriptor,
+                "outcome": record.outcome,
+            })),
             _ => None,
         })
         .collect()
@@ -100,7 +90,9 @@ async fn effect_facts(run_dir: &Path) -> Vec<Value> {
             {
                 continue;
             }
-            if envelope.consumes_data_credit() {
+            if envelope.consumes_data_credit()
+                && !matches!(envelope.payload, ChainPayload::Execution(_))
+            {
                 facts.push(json!({
                     "stage": stage_key,
                     "event_type": envelope.event_type(),
@@ -249,15 +241,12 @@ async fn observer_interception_non_interference() {
         "without observers versus panicking observer",
     );
 
-    let expected_receipts = delivery_receipts(&without_observers.run_dir).await;
-    assert_eq!(expected_receipts.len(), ORDER_COUNT);
+    let expected_sink_calls = sink_calls(&without_observers.run_dir).await;
+    assert_eq!(expected_sink_calls.len(), ORDER_COUNT);
+    assert_eq!(sink_calls(&observers.run_dir).await, expected_sink_calls);
     assert_eq!(
-        delivery_receipts(&observers.run_dir).await,
-        expected_receipts
-    );
-    assert_eq!(
-        delivery_receipts(&panicking_observer.run_dir).await,
-        expected_receipts
+        sink_calls(&panicking_observer.run_dir).await,
+        expected_sink_calls
     );
 
     let expected_effect_facts = effect_facts(&without_observers.run_dir).await;
@@ -309,14 +298,14 @@ async fn observer_interception_non_interference() {
             ProbeSnapshot {
                 source_polls: 0,
                 effect_calls: 0,
-                sink_writes: ORDER_COUNT,
+                sink_writes: 0,
                 effect_callbacks: 0,
                 delivery_callbacks: 0,
                 delivered_callbacks: 0,
                 lifecycle_callbacks: 0,
                 panicking_callbacks: 0,
             },
-            "{} strict replay must suppress source polling and every observer callback while re-driving the idempotent sink identically",
+            "{} strict replay must suppress source polling, every effect and sink call, and every observer callback",
             treatment.label()
         );
         assert_eq!(
@@ -328,7 +317,7 @@ async fn observer_interception_non_interference() {
             &replay.run_dir,
             &format!("{} live versus strict replay", treatment.label()),
         );
-        assert_eq!(delivery_receipts(&replay.run_dir).await, expected_receipts);
+        assert_eq!(sink_calls(&replay.run_dir).await, expected_sink_calls);
         assert_eq!(effect_facts(&replay.run_dir).await, expected_effect_facts);
     }
 }

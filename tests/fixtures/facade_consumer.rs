@@ -195,14 +195,20 @@ impl joins::TypedAsOfJoinHandler for PointInTime {
     }
 }
 
-#[async_trait]
-impl sinks::InlineSink for Pure {
-    type Input = Fact;
-    fn describe(&self) -> sinks::SinkDescription {
-        sinks::SinkDescription::method(sinks::DeliveryMethod::Noop)
-    }
+#[derive(Clone, Debug, Serialize)]
+struct PrintFact;
 
-    async fn write(&mut self, _input: Fact) -> Result<(), sinks::SinkWriteFailure> {
+#[of::port(effects = of::effects)]
+trait PrintPort: Send + Sync {
+    #[effect(type = "facade.print_fact", at_least_once, records = reply)]
+    fn print(&self, request: &PrintFact) -> Result<(), of::effects::EffectError>;
+}
+
+struct Printer;
+
+#[of::system("facade-printer", effects = of::effects)]
+impl PrintPort for Printer {
+    fn print(&self, _: &PrintFact) -> Result<(), of::effects::EffectError> {
         Ok(())
     }
 }
@@ -288,7 +294,8 @@ fn renamed_facade_macros_and_constructors_compile() {
         let mapped = transforms::map(|fact: Fact| fact);
         let folded = stateful::reduce(Fact(0), |sum: &mut Fact, fact: &Fact| sum.0 += fact.0)
             .emit(stateful::emit::on_eof);
-        let output = Pure;
+        let output =
+            of::effects::perform(|_: &Fact| PrintFact).through(of::effects::Port::to(Printer));
         Ok(of::flow::flow! {
             name: "facade",
             journals: of::journal::memory_journals(),
@@ -360,17 +367,18 @@ fn renamed_facade_macros_and_constructors_compile() {
     transform!(Fact -> Fact => Pure);
     stateful!(Fact -> Fact => Pure);
     join!(catalog input: Fact, Fact -> Fact => Pure);
-    sink!(Fact => Pure);
+    let printed =
+        of::effects::perform(|_: &Fact| PrintFact).through(of::effects::Port::to(Printer));
+    sink!(Fact => printed);
 
     FlowDefinition::materialize(|_config| {
         let input = sources::ValuesSource::new([Fact(1)]);
-        let first = Pure;
-        let second = sinks::ConsoleSink::<Fact, _>::new(sinks::DebugFormatter);
+        let console = sinks::ConsoleSink::<Fact, _>::new(sinks::DebugFormatter);
         Ok(flow! {
             journals: of::journal::memory_journals(),
             stages: {
                 input = source!(Fact => input);
-                output = of::flow::sink!(Fact => handler_set!(first, second))?;
+                output = of::flow::sink!(Fact => console);
             },
             topology: { input |> output; }
         })

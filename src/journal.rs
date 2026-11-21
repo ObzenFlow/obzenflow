@@ -7,7 +7,6 @@
 /// Consumer handles for read-only snapshots, live tails and journal-derived progress.
 pub mod read {
     pub use obzenflow_core::event::context::StageType;
-    pub use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
     pub use obzenflow_core::event::payloads::execution_payload::{
         ExecutionPayload, StageLifecycleFact,
     };

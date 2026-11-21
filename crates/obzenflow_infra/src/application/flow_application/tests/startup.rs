@@ -18,8 +18,8 @@ impl IngressDecoder for IdleIngress {
 #[cfg(feature = "reqwest-client")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_ingress_builder_hosts_multiple_sources() {
+    use obzenflow_adapters::sinks::RecordingSink;
     use obzenflow_dsl::async_infinite_source;
-    use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
 
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("obzenflow.toml");
@@ -64,30 +64,8 @@ enabled = false
     };
     let first = app.http_ingress(IdleIngress, config("/first"));
     let second = app.http_ingress(IdleIngress, config("/second"));
-    let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (output, delivered) = RecordingSink::<IdlePayload>::new();
     let definition = FlowDefinition::materialize(move |_| {
-        #[derive(Clone, Debug)]
-        struct NotifyDelivery {
-            delivered: tokio::sync::mpsc::UnboundedSender<()>,
-        }
-        #[async_trait::async_trait]
-        impl InlineSink for NotifyDelivery {
-            type Input = IdlePayload;
-            fn describe(&self) -> SinkDescription {
-                SinkDescription::method(
-                    obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                        "test_observer".into(),
-                    ),
-                )
-            }
-            async fn write(&mut self, _input: IdlePayload) -> Result<(), SinkWriteFailure> {
-                self.delivered.send(()).unwrap();
-                Ok(())
-            }
-        }
-        let output = NotifyDelivery {
-            delivered: delivered_tx,
-        };
         Ok(flow! {
             name: "http_ingress_builder",
             journals: crate::journal::memory_journals(),
@@ -106,7 +84,7 @@ enabled = false
         let flow = flow_rx.await.unwrap();
         let port = bound_rx.await.unwrap().port();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        for path in ["/first", "/second"] {
+        for (sent, path) in ["/first", "/second"].into_iter().enumerate() {
             let base = format!("http://127.0.0.1:{port}{path}");
             loop {
                 if client
@@ -127,10 +105,7 @@ enabled = false
                 .await
                 .unwrap();
             assert_eq!(response.status().as_u16(), 202);
-            delivered_rx
-                .recv()
-                .await
-                .expect("HTTP event reaches its source and sink");
+            delivered.wait_for(sent + 1).await;
         }
         flow.stop_cancel().await.unwrap();
         application.await.unwrap().unwrap();
@@ -168,12 +143,13 @@ enabled = false
     );
     let definition = FlowDefinition::materialize(move |_| {
         let input = OneShotSource::new();
+        let output = noop_sink();
         Ok(flow! {
             name: "missing_ingress_source",
             journals: crate::journal::memory_journals(),
             stages: {
                 input = source!(IdlePayload => input);
-                output = sink!(IdlePayload => NoopSink);
+                output = sink!(IdlePayload => output);
             },
             topology: { input |> output; }
         })
@@ -234,7 +210,7 @@ enabled = false
     let hook_observed = observed.clone();
     let definition = FlowDefinition::new(move |context| async move {
         let source = CountingSource(source_calls);
-        let sink = NoopSink;
+        let sink = noop_sink();
         let handle = flow! {
             name: "auth_admission_no_automatic_run",
             journals: crate::journal::memory_journals(),
@@ -329,7 +305,7 @@ enabled = false
     let hook_observed = observed.clone();
     let definition = FlowDefinition::new(move |context| async move {
         let source = CountingSource(source_calls);
-        let sink = NoopSink;
+        let sink = noop_sink();
         let handle = flow! {
             name: "bind_admission_no_automatic_run",
             journals: disk_journals(flow_journal_dir),
@@ -399,9 +375,9 @@ enabled = false
     for record in records {
         let event = &record["envelope"]["provenance"]["event"];
         let event_kind = event["event_kind"].as_str().expect("record event kind");
-        assert_ne!(
-            event_kind, "delivery",
-            "failed bind cannot commit sink receipts"
+        assert!(
+            event.get("effect_provenance").is_none(),
+            "failed bind cannot commit sink calls"
         );
         if event_kind == "system" {
             let row: obzenflow_core::JournalRecord<SystemFact> =
@@ -490,7 +466,7 @@ enabled = false
         FlowApplication::launch(
             FlowDefinition::materialize(move |_runtime_config| {
                 let source = IdleInfiniteSource;
-                let sink = NoopSink;
+                let sink = noop_sink();
 
                 Ok(flow! {
                     name: "server_auto_double_run_regression",
@@ -562,7 +538,7 @@ enabled = false
         FlowApplication::launch(
             FlowDefinition::materialize(move |_runtime_config| {
                 let source = OneShotSource::new();
-                let sink = NoopSink;
+                let sink = noop_sink();
 
                 Ok(flow! {
                     name: "server_terminal_journal_regression",
@@ -755,7 +731,7 @@ shutdown_timeout_secs = 2
         FlowApplication::launch(
             FlowDefinition::materialize(move |_runtime_config| {
                 let source = IdleInfiniteSource;
-                let sink = NoopSink;
+                let sink = noop_sink();
 
                 Ok(flow! {
                     name: "gap24_deregister_regression",

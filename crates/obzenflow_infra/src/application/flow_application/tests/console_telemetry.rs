@@ -324,7 +324,7 @@ fn blocking_console_disk_flow_preserves_filtering_and_completed_journal() {
             |_: &mut IdlePayload, _: &IdlePayload| {},
         )
         .emit(obzenflow_runtime::stages::stateful::emit::on_eof);
-        let sink = NoopSink;
+        let sink = noop_sink();
         Ok(flow! {
             name: "blocking_console_disk",
             journals: disk_journals(journal_root),
@@ -357,7 +357,8 @@ fn blocking_console_disk_flow_preserves_filtering_and_completed_journal() {
 }
 
 async fn assert_completed_disk_cohort(run_path: &std::path::Path, inputs: usize) {
-    use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
+    use obzenflow_core::event::payloads::effect_payload::EffectOutcomePayload;
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
     use obzenflow_core::event::{ChainPayload, PipelineLifecycleEvent, SystemPayload};
     use obzenflow_core::journal::read::{RunJournalKind, RunOutcome, RunRecordData, TailRead};
     use std::collections::BTreeMap;
@@ -374,11 +375,13 @@ async fn assert_completed_disk_cohort(run_path: &std::path::Path, inputs: usize)
                     assert!(row.envelope.provenance.event.processing.status.is_success());
                     *facts.entry(record.journal.stage.unwrap().key).or_insert(0) += 1;
                 }
-                ChainPayload::Delivery(receipt) => {
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(effect)) => {
                     assert_eq!(record.journal.kind, RunJournalKind::Data);
                     assert_eq!(record.journal.stage.unwrap().key, "console_sink");
-                    assert!(row.envelope.provenance.event.processing.status.is_success());
-                    assert!(matches!(receipt.result, DeliveryResult::Success { .. }));
+                    assert!(matches!(
+                        effect.outcome,
+                        EffectOutcomePayload::Succeeded { .. }
+                    ));
                     deliveries += 1;
                 }
                 _ => {}
@@ -594,7 +597,7 @@ fn telemetry_proof(cancel: bool) {
                     },
                 )
                 .emit(obzenflow_runtime::stages::stateful::emit::on_eof);
-                let sink = NoopSink;
+                let sink = noop_sink();
                 Ok(flow! {
                     name: "console_telemetry",
                     journals: crate::journal::memory_journals(),

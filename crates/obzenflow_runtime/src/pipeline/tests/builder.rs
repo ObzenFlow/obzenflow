@@ -124,13 +124,12 @@ fn edges_from_sources_carry_the_contracts_the_runtime_evaluates() {
     let attachments = derive_contract_attachments(&topology, &FeedPlan::default(), HashMap::new());
 
     let transport = TransportContract::NAME.to_string();
-    let delivery = DeliveryContract::NAME.to_string();
     assert_eq!(
         attachments,
         HashMap::from([
             ((source, transform), vec![transport.clone()]),
-            ((transform, sink), vec![transport.clone(), delivery.clone()]),
-            ((source, audit), vec![transport, delivery]),
+            ((transform, sink), vec![transport.clone()]),
+            ((source, audit), vec![transport]),
         ])
     );
 }

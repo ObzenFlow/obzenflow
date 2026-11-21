@@ -191,10 +191,9 @@ Payload decoding and validation remain Core's `JournalPayload` methods.
 ## Tests and fixtures
 
 `test_data.rs` builds deterministic records using current Core types. Its stream
-contains 16 source facts, 16 transformed facts and 16 delivery receipts, with
+contains 16 source facts, 16 transformed facts and 16 enriched facts, with
 distinct event IDs, varying absolute accounting and clocks, and 17 complete
-origins reused across related records. Source and transform records carry runtime
-measurements; receipts carry snapshots only. Separate tests exercise boundary
+origins reused across related records. All three stages carry runtime measurements and snapshots. Separate tests exercise boundary
 values and optional application metadata.
 
 The timing test repeats this 48-record stream to compare the compact codec and

@@ -153,7 +153,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        frontier: &CausalFrontier,
+        frontiers: &obzenflow_core::journal::AppendFrontiers,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
         obzenflow_core::journal::limits::validate_group_size(events.len())?;
@@ -184,7 +184,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
                 CausalCoordinate::new(self.journal_id.into()),
                 *event.id(),
                 next_last_commit.as_ref(),
-                frontier,
+                frontiers.member(index)?,
             )?;
 
             next_last_commit = Some(commitment.clone());
@@ -246,7 +246,7 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for M
         let AppendOptions { frontier, capture } = options;
         let (mut events, reservation) = self.observability.prepare(vec![event], capture);
         let result = self
-            .append_record(events.pop().expect("one event"), &frontier)
+            .append_record(events.pop().expect("one event"), frontier.member(0)?)
             .map(|record| vec![record]);
         reservation.finish::<T>(&result);
         result.map(|mut records| records.pop().expect("one record"))

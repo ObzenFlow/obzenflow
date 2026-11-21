@@ -61,7 +61,7 @@ cargo run -p obzenflow --example payment_gateway_resilience -- \
   --resume-from <archive>
 ```
 
-Inspect the same run, including framework evidence and sink lifecycle audits:
+Inspect the same run, including the effect records for the gateway and its output sinks:
 
 ```sh
 cargo run -p obzenflow --features cli --bin obzenflow -- \

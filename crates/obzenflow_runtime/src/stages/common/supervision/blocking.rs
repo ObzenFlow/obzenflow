@@ -78,7 +78,7 @@ where
     }
 }
 
-/// Drops a source reader or sink writer on the blocking pool, because `Drop`
+/// Drops a source reader on the blocking pool, because `Drop`
 /// is connector code, such as closing a file.
 pub(crate) async fn release_on_blocking_pool<H: Send + 'static>(handler: H, stage_name: &str) {
     let mut in_flight = AbandonedCall {

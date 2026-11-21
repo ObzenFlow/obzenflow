@@ -13,6 +13,9 @@ use std::sync::Arc;
 /// Configuration for a transform stage
 #[derive(Clone)]
 pub struct TransformConfig {
+    #[doc(hidden)]
+    pub sink_batch: Option<(usize, std::time::Duration)>,
+
     /// Stage ID
     pub stage_id: StageId,
 
@@ -48,6 +51,7 @@ impl TransformConfig {
     ) -> Self {
         Self {
             stage_id,
+            sink_batch: None,
             stage_name: stage_name.into(),
             flow_name: flow_name.into(),
             upstream_stages,

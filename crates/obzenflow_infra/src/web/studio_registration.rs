@@ -11,7 +11,7 @@
 //! failures here never crash the runtime.
 
 use crate::application::config::{ResolvedStudioConfig, StartupMode};
-use crate::http_client::default_http_client;
+use crate::clients::http::default_http_client;
 use crate::web::studio_presence::RuntimePresenceProjection;
 use crate::web::RuntimeInstanceId;
 use obzenflow_core::http_client::{HttpClient, HttpMethod, HttpRequest, Url};

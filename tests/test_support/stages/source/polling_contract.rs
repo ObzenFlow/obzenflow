@@ -14,7 +14,6 @@ use obzenflow_adapters::middleware::{
     SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory, ChainPayload};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::journal::Journal;
@@ -24,8 +23,8 @@ use obzenflow_dsl::{
 };
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{
     SourcePollObserver, SourcePollObserverContext, SourcePollObserverOutcome,
@@ -47,21 +46,7 @@ impl TypedPayload for PollingEvent {
     const EVENT_TYPE: &'static str = "flowip_115g.source_polling";
 }
 
-#[derive(Clone, Debug)]
-struct NoopSink;
-
-#[async_trait]
-impl InlineSink for NoopSink {
-    type Input = PollingEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("source-polling-proof".to_string()))
-    }
-
-    async fn write(&mut self, _event: PollingEvent) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type NoopSink = obzenflow::stages::sinks::DiscardSink<PollingEvent>;
 
 // A closed factual control report exercises the source outbox without a
 // retired generic metrics payload.
@@ -474,7 +459,7 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let sync_finite_policy_log = Arc::new(PolicyLog::default());
     let sync_finite_policy_for_flow = sync_finite_policy_log.clone();
     let source = SyncFiniteOnce::new();
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let sync_finite = test_flow! {
         name: "flowip_115g_sync_finite_timing",
         journals: memory_journals(),
@@ -515,7 +500,7 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
         emitted: false,
         raw_delay: async_raw_delay,
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let async_finite = test_flow! {
         name: "flowip_115g_async_finite_timing",
         journals: memory_journals(),
@@ -556,7 +541,7 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let source = SyncInfiniteOnce {
         calls: sync_infinite_calls,
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let sync_infinite = test_flow! {
         name: "flowip_115g_sync_infinite_timing",
         journals: memory_journals(),
@@ -594,7 +579,7 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
         calls: async_infinite_calls,
         raw_delay: async_raw_delay,
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let async_infinite = test_flow! {
         name: "flowip_115g_async_infinite_timing",
         journals: memory_journals(),
@@ -660,7 +645,7 @@ fn test_flow_handler_construction_stays_cold_inside_its_enclosing_async_future()
             calls: Arc::new(AtomicUsize::new(0)),
             timeout: Duration::from_secs(1),
         };
-        let sink = NoopSink;
+        let sink = NoopSink::new();
 
         test_flow! {
             name: "flowip_133a_test_flow_cold_probe",
@@ -697,7 +682,7 @@ async fn timeout_duration_precedes_boundary_settlement_and_error_normalisation()
         calls: calls_for_flow,
         timeout,
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let harness = test_flow! {
         name: "flowip_115g_timeout_normalisation",
         journals: memory_journals(),
@@ -795,7 +780,7 @@ async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()>
         calls: Arc::clone(&calls),
         raw_delay,
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let harness = test_flow! {
         name: "flowip_133a_disabled_poll_timeout",
         journals: memory_journals(),
@@ -939,7 +924,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
         index: 0,
         poll_times: sync_poll_times_for_flow,
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let sync_harness = test_flow! {
         name: "flowip_115g_sync_backoff",
         journals: memory_journals(),
@@ -1003,7 +988,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
         index: 0,
         poll_times: async_poll_times_for_flow,
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let async_harness = test_flow! {
         name: "flowip_115g_async_backoff",
         journals: memory_journals(),
@@ -1126,7 +1111,7 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
         calls: calls_for_flow,
         first_poll: first_poll.clone(),
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let harness = test_flow! {
         name: "flowip_115g_async_idle_interrupt",
         journals: memory_journals(),
@@ -1239,7 +1224,7 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
     let source = ImmediateEof {
         calls: eof_calls_for_flow,
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let eof_harness = test_flow! {
         name: "flowip_115g_eof_no_delay",
         journals: memory_journals(),
@@ -1282,7 +1267,7 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
     let source = ImmediateEof {
         calls: rejected_calls_for_flow,
     };
-    let sink = NoopSink;
+    let sink = NoopSink::new();
     let rejected_harness = test_flow! {
         name: "flowip_115g_rejection_no_delay",
         journals: memory_journals(),

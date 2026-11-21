@@ -4,8 +4,8 @@
 
 use super::mock_server::spawn_mock_hn_server;
 use anyhow::{Context, Result};
+use obzenflow::effects::postgres::PostgresConnection;
 use obzenflow::env::env_var_or;
-use obzenflow::stages::sinks::postgres::PostgresConnection;
 use obzenflow::stages::sources::Url;
 use serde::{Deserialize, Serialize};
 
@@ -27,10 +27,10 @@ pub(crate) struct HnDigestPostgresConfig {
 
 impl HnDigestPostgresConfig {
     pub(crate) fn from_env() -> Result<Self> {
-        let connection = PostgresConnection::deferred_from_env(
+        let connection = PostgresConnection::from_env(
             "OBZENFLOW_POSTGRES_URL",
             postgres_transport::from_environment()?,
-        );
+        )?;
         let schema = env_var_or::<String>(
             "OBZENFLOW_POSTGRES_SCHEMA",
             DEFAULT_HN_DIGEST_POSTGRES_SCHEMA.to_string(),
@@ -48,6 +48,14 @@ pub(crate) enum HnSource {
     Live,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DigestOutput {
+    #[default]
+    Console,
+    Postgres,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HnSettings {
@@ -59,6 +67,8 @@ pub(crate) struct HnSettings {
     poll_timeout_secs: u64,
     #[serde(default)]
     interests: Option<String>,
+    #[serde(default)]
+    output: DigestOutput,
     #[serde(default)]
     digest: DigestSettings,
 }
@@ -107,6 +117,7 @@ impl HnSettings {
             interests: self.interests,
             mode_label: mode_label.to_string(),
             base_url,
+            output: self.output,
         })
     }
 }
@@ -120,4 +131,5 @@ pub struct HnRunInputs {
     pub interests: Option<String>,
     pub mode_label: String,
     pub base_url: Url,
+    pub(crate) output: DigestOutput,
 }

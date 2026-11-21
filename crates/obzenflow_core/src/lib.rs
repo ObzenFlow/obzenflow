@@ -59,6 +59,6 @@ pub use chrono;
 // Re-export core contract types (FLOWIP-090c)
 pub use contracts::{
     Contract, ContractContext, ContractEvidence, ContractReadContext, ContractResult,
-    ContractState, ContractViolation, ContractWriteContext, DeliveryContract, DivergenceContract,
+    ContractState, ContractViolation, ContractWriteContext, DivergenceContract,
     DivergenceThresholds, HashMismatch, TransportContract, ViolationCause,
 };

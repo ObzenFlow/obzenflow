@@ -30,7 +30,7 @@ use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::factory::RunSubstrateState;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::MetricsSnapshotExporter;
-use obzenflow_core::{DeliveryContract, StageId, TransportContract};
+use obzenflow_core::{StageId, TransportContract};
 use obzenflow_topology::Topology;
 use std::{
     collections::{HashMap, HashSet},
@@ -66,23 +66,6 @@ fn derive_contract_attachments(
     feed_plan: &FeedPlan,
     mut attachments: HashMap<(StageId, StageId), Vec<String>>,
 ) -> HashMap<(StageId, StageId), Vec<String>> {
-    let sink_stages: HashSet<StageId> = topology
-        .stages()
-        .filter(|stage| stage.stage_type == obzenflow_topology::StageType::Sink)
-        .map(|stage| StageId::from_topology_id(stage.id))
-        .collect();
-    let delivery_contract_pairs: HashSet<(StageId, StageId)> = topology
-        .edges()
-        .iter()
-        .filter(|edge| edge.kind == obzenflow_topology::EdgeKind::Forward)
-        .map(|edge| {
-            (
-                StageId::from_topology_id(edge.from),
-                StageId::from_topology_id(edge.to),
-            )
-        })
-        .filter(|(_, downstream)| sink_stages.contains(downstream))
-        .collect();
     let stage_pairs: HashSet<(StageId, StageId)> =
         derive_expected_contract_keys(topology, feed_plan)
             .iter()
@@ -93,11 +76,6 @@ fn derive_contract_attachments(
         let entry = attachments.entry((*upstream, *downstream)).or_default();
         if !entry.iter().any(|n| n == TransportContract::NAME) {
             entry.push(TransportContract::NAME.to_string());
-        }
-        if delivery_contract_pairs.contains(&(*upstream, *downstream))
-            && !entry.iter().any(|n| n == DeliveryContract::NAME)
-        {
-            entry.push(DeliveryContract::NAME.to_string());
         }
     }
     attachments
@@ -126,7 +104,6 @@ pub struct PipelineBuilder {
     flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
     runtime_execution: Option<crate::execution::RuntimeExecution>,
     archive_flow_evidence: obzenflow_core::journal::archive_actions::FlowEvidence,
-    resume_notices: Vec<String>,
 }
 
 impl PipelineBuilder {
@@ -190,15 +167,7 @@ impl PipelineBuilder {
             flow_effective_config: None,
             runtime_execution: None,
             archive_flow_evidence: Default::default(),
-            resume_notices: Vec::new(),
         }
-    }
-
-    /// Notices naming each resumed sink edge whose deliveries are scoped by
-    /// generation, printed after the run banner.
-    pub fn with_resume_notices(mut self, notices: Vec<String>) -> Self {
-        self.resume_notices = notices;
-        self
     }
 
     /// Attach the facts the flow builder derived from this flow.
@@ -515,7 +484,6 @@ impl PipelineBuilder {
                     .unwrap_or(RunSubstrateState::Ephemeral),
                 flow_effective_config: self.flow_effective_config.clone(),
                 archive_flow_evidence: self.archive_flow_evidence.clone(),
-                resume_notices: self.resume_notices.clone(),
             },
         ))
     }

@@ -189,7 +189,6 @@
         },
         "progress": {
           "reader_seq": 18446744073709551615,
-          "receipted_seq": 1001,
           "writer_seq": 1000,
           "last_consumed_event_id": "01M2R1P9BW8HY0RX3NQGTKYGMG",
           "last_consumed_writer": "01M2R1P9BW7XQBHPJCNNKZG5B2",
@@ -198,15 +197,6 @@
               {
                 "journal_writer_id": "00000000000000000000000001",
                 "sequence": 18446744073709551615
-              }
-            ]
-          },
-          "last_receipted_event_id": "01M2R1P9BW8HY0RX3NQGTKYGMG",
-          "last_receipted_vector_clock": {
-            "entries": [
-              {
-                "journal_writer_id": "00000000000000000000000001",
-                "sequence": 18446744073709551614
               }
             ]
           },

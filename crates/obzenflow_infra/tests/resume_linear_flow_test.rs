@@ -16,10 +16,9 @@
 use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use obzenflow_adapters::middleware::handler_observer;
+use obzenflow_adapters::sinks::CountingSink;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::vocabulary;
@@ -29,12 +28,10 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedInfiniteSourceHandler,
-    TypedTransformHandler,
+    TypedInfiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::observer::{HandlerObserver, HandlerObserverContext};
 use obzenflow_runtime::stages::SourceError;
@@ -132,30 +129,6 @@ impl TypedTransformHandler for DoubleTransform {
     }
 }
 
-/// Counts consumed `Doubled` events. The sink re-consumes the recorded prefix
-/// during catch-up (F14: only the policy boundary is bypassed under
-/// reconstruction scope, never the delivery), so in a resumed run the counter
-/// counts prefix re-deliveries plus the live tail.
-#[derive(Clone, Debug)]
-struct CountingSink {
-    delivered: Arc<AtomicU64>,
-}
-
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = Doubled;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _input: Doubled) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 fn build_flow_with_observer(
     journal_base: PathBuf,
     first_n: u64,
@@ -166,7 +139,7 @@ fn build_flow_with_observer(
     FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = ReattachingSource(BoundedTicker::new(first_n, count));
         let transform_handler = DoubleTransform::new();
-        let sink_handler = CountingSink { delivered };
+        let sink_handler = CountingSink::<Doubled>::new(delivered);
         let transformed = match observer_calls {
             Some(calls) => transform!(Tick -> Doubled with { handler_observer(
                     "live-transform-occurrences",
@@ -268,7 +241,7 @@ fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> Flo
     FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = ReattachingSource(BoundedTicker::new(first_n, count));
         let transform_handler = DoubleTransform::new();
-        let sink_handler = CountingSink { delivered };
+        let sink_handler = CountingSink::<Doubled>::new(delivered);
 
         Ok(flow! {
             name: "resume_linear",
@@ -319,7 +292,7 @@ async fn run_memory_replay_to_completion(first_n: u64, count: u64, expected: u64
     assert_eq!(
         delivered.load(Ordering::SeqCst),
         expected,
-        "memory replay must deliver exactly the recorded prefix"
+        "memory replay makes exactly the expected sink calls"
     );
     Ok(())
 }
@@ -348,14 +321,11 @@ async fn memory_replay_from_disk_archive_is_ephemeral() -> Result<()> {
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Replay,
             })
             .await,
         );
-        // The sink re-consumes the recorded prefix during deterministic
-        // replay (F14), so the memory run observably reconstructed it.
-        run_memory_replay_to_completion(1, RECORDED, RECORDED).await?;
+        run_memory_replay_to_completion(1, RECORDED, 0).await?;
     }
 
     assert_eq!(
@@ -386,7 +356,6 @@ async fn memory_resume_from_disk_archive_is_refused_at_build() -> Result<()> {
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
@@ -442,12 +411,11 @@ async fn resume_manifest_records_interrupted_appends() -> Result<()> {
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
         );
-        run_until_delivered(&journal_base, RECORDED + 1, 1, RECORDED + 1).await?;
+        run_until_delivered(&journal_base, RECORDED + 1, 1, 1).await?;
     }
 
     let resumed_run = replay_testkit::latest_run_dir(&journal_base);
@@ -596,20 +564,16 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
-                allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
             })
             .await,
         );
-        // The sink re-consumes the recorded prefix during catch-up (F14), so
-        // the wait target is prefix + live; a live-only target is satisfied
-        // mid-catch-up and races the stop into the reconstruction phase.
         let resumed_observer_calls = Arc::new(AtomicU64::new(0));
         run_until_delivered_with_observer(
             &journal_base,
             RECORDED + 1,
             LIVE,
-            RECORDED + LIVE,
+            LIVE,
             Some(resumed_observer_calls.clone()),
         )
         .await?;

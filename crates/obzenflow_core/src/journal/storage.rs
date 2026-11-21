@@ -130,6 +130,7 @@ impl<T: JournalEvent, S: JournalStorage<T> + ?Sized> Journal<T> for S {
         event: T,
         options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        options.frontier.validate(1)?;
         let record = self.storage_append(event, options).await?;
         // Storage already reported commitment. Admission failure must never
         // certify rollback or invite an automatic retry.
@@ -143,6 +144,7 @@ impl<T: JournalEvent, S: JournalStorage<T> + ?Sized> Journal<T> for S {
         events: Vec<T>,
         options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        options.frontier.validate(events.len())?;
         let records = self.storage_append_group(group_id, events, options).await?;
         records
             .into_iter()

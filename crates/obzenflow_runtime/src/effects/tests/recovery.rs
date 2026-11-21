@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 fn scheduled(identity: &EffectIdentity, event: &ChainEvent) -> ChainEvent {
     ChainEventFactory::retry_scheduled(
         WriterId::from(StageId::new()),
-        identity.cursor.clone(),
+        identity.first.cursor.clone(),
         2,
         5_000,
         CausalInput::of(event),
@@ -21,7 +21,7 @@ fn completed(identity: &EffectIdentity, event: &ChainEvent) -> ChainEvent {
     ChainEventFactory::recovery_completed(
         WriterId::from(StageId::new()),
         RecoveryCompletedEventParams {
-            cursor: identity.cursor.clone(),
+            cursor: identity.first.cursor.clone(),
             total_attempts: 1,
             backoff_elapsed_ms: 5_000,
             recovery_elapsed_ms: 5_000,

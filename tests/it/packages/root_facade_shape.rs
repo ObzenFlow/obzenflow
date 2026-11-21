@@ -4,26 +4,12 @@
 
 //! Root-facade source-shape and ownership tripwires.
 
+use super::collect_rust_sources;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[path = "../../fixtures/facade_consumer.rs"]
 mod facade_consumer;
-
-fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
-    if !path.is_dir() {
-        return;
-    }
-
-    for entry in fs::read_dir(path).expect("read root source directory") {
-        let path = entry.expect("read root source entry").path();
-        if path.is_dir() {
-            rust_sources_under(&path, output);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            output.push(path);
-        }
-    }
-}
 
 fn item_kind(item: &syn::Item) -> &'static str {
     match item {
@@ -78,7 +64,7 @@ fn root_library_source_contains_only_facade_items() {
 
     let mut sources = Vec::new();
     let source_root = root.join("src");
-    rust_sources_under(&source_root, &mut sources);
+    collect_rust_sources(&source_root, &mut sources);
     sources.sort();
 
     let mut violations = Vec::new();
@@ -189,7 +175,7 @@ fn the_effects_facade_documents_no_request_machinery() {
 fn every_example_uses_only_the_application_facade() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
-    rust_sources_under(&root.join("examples"), &mut sources);
+    collect_rust_sources(&root.join("examples"), &mut sources);
     assert!(!sources.is_empty());
     for path in sources {
         let source = fs::read_to_string(&path).expect("read example");

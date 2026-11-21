@@ -12,7 +12,7 @@ use obzenflow_core::SystemBindingEvidence;
 #[error("the ledger refused the write")]
 struct LedgerRefused;
 
-#[crate::effects::port(effects = crate::effects)]
+#[crate::effects::port]
 #[async_trait]
 trait LedgerPort: Send + Sync {
     async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError>;
@@ -22,7 +22,7 @@ struct CountingLedger {
     calls: Arc<AtomicUsize>,
 }
 
-#[crate::effects::system("simulated-ledger", effects = crate::effects)]
+#[crate::effects::system("simulated-ledger")]
 #[async_trait]
 impl LedgerPort for CountingLedger {
     async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError> {
@@ -33,7 +33,7 @@ impl LedgerPort for CountingLedger {
 
 struct RefusingLedger;
 
-#[crate::effects::system("ledger-outage", effects = crate::effects)]
+#[crate::effects::system("ledger-outage")]
 #[async_trait]
 impl LedgerPort for RefusingLedger {
     async fn write(&self, _: u64) -> Result<LedgerWritten, EffectError> {
@@ -61,6 +61,7 @@ impl CallRequest for LedgerWrite {
     type Safety = RequiresKey;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
+    type Records = DomainFacts;
 
     async fn call(
         &self,
@@ -94,6 +95,7 @@ impl CallRequest for LedgerCheck {
     type Safety = Idempotent;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
+    type Records = DomainFacts;
 
     async fn call(
         &self,
@@ -115,6 +117,7 @@ impl CallRequest for LedgerCharge {
     type Safety = AtLeastOnce;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
+    type Records = DomainFacts;
 
     async fn call(
         &self,
@@ -187,9 +190,7 @@ where
     E: Effect,
     S: AnswersEffect<E>,
 {
-    system
-        .declaration(None)
-        .expect("the system answers the effect")
+    system.declaration().expect("the system answers the effect")
 }
 
 fn ledger_context(
@@ -430,7 +431,7 @@ struct UnkeyedWrite {
     value: u64,
 }
 
-#[crate::effects::port(system = "keyed-ledger", effects = crate::effects)]
+#[crate::effects::port(system = "keyed-ledger")]
 impl KeyedLedger {
     #[effect(type = "test.keyed_write", exactly_once)]
     fn keyed(
@@ -599,6 +600,7 @@ impl CallRequest for ScoreLike {
     type Safety = RequiresKey;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
+    type Records = DomainFacts;
 
     async fn call(
         &self,
@@ -710,4 +712,262 @@ async fn unavailable_is_a_retryable_dependency_failure_live_and_recorded() {
     ));
     assert_eq!(recorded.failure_cause(), refused.failure_cause());
     assert_eq!(recorded.semantic_reason(), refused.semantic_reason());
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct SinkWrite {
+    value: u64,
+}
+
+struct CountWrites(Arc<AtomicUsize>);
+
+#[crate::effects::port(system = "count-writes")]
+impl CountWrites {
+    #[effect(type = "test.sink_write", at_least_once, records = reply)]
+    fn write(&self, _: &SinkWrite) -> Result<(), EffectError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn grouped_input_settles_after_append() {
+    for fail in [true, false] {
+        let stage = StageId::new();
+        let owner = JournalOwner::stage(stage);
+        let journal = Arc::new(if fail {
+            MemoryJournal::failing_group(owner, super::super::history::SINK_OUTCOME_PREFIX)
+        } else {
+            MemoryJournal::new(owner)
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let port = Port::to(CountWrites(calls.clone()));
+        let declaration = declaration_for::<Call<SinkWrite>, _>(&port);
+        let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+            .unwrap()
+            .into_run_registry();
+        let mut ctx = ledger_context(
+            journal.clone(),
+            stage,
+            registry,
+            vec![declaration.runtime_projection()],
+            None,
+        );
+        let log = Arc::new(EffectObserverLog::default());
+        attach_effect_observer(&mut ctx, SinkWrite::EFFECT_TYPE, log.clone());
+        let role = perform(|row: &LedgerWritten| SinkWrite { value: row.value }).through(port);
+        let mut group = Box::new(super::super::runtime::SinkGroup::new(
+            Arc::new(role),
+            test_allow_all_effect_boundary(),
+        ));
+        admit_ledger_rows(group.as_mut(), &ctx, stage, 2).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let result = group.finish().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.is_err(), fail);
+        let durable = effect_records(&journal).len();
+        assert_eq!(durable, if fail { 0 } else { 2 });
+        assert_eq!(log.outcomes.lock().unwrap().len(), durable);
+    }
+}
+
+async fn admit_ledger_rows(
+    group: &mut dyn OpenSinkBatch,
+    ctx: &EffectInvocationContext,
+    stage: StageId,
+    rows: u64,
+) {
+    for n in 1..=rows {
+        let parent = crate::testing::causal_fixture::committed_input(
+            JournalWriterId::new(),
+            ChainEventFactory::data_event(
+                WriterId::from(stage),
+                LedgerWritten::EVENT_TYPE,
+                std::num::NonZeroU32::MIN,
+                json!({"value":n}),
+            ),
+        );
+        group
+            .admit(EffectInvocationContext {
+                stage: ctx.stage.clone(),
+                input_seq: StageInputPosition(n),
+                parent: parent.into(),
+                backpressure_writer: ctx.backpressure_writer.clone(),
+                emit_enabled: false,
+                effect_boundary: None,
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct RefusedWrite {
+    value: u64,
+}
+
+struct RefuseAfterFirst(Arc<AtomicUsize>);
+
+#[crate::effects::port(system = "refuse-after-first")]
+impl RefuseAfterFirst {
+    #[effect(type = "test.refused_write", at_least_once, records = reply)]
+    fn write(&self, _: &RefusedWrite) -> Result<(), EffectError> {
+        match self.0.fetch_add(1, Ordering::SeqCst) {
+            0 => Ok(()),
+            _ => Err(EffectError::unavailable("ledger", "refused", LedgerRefused)),
+        }
+    }
+}
+
+#[tokio::test]
+async fn two_request_group_refusal_keeps_success() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let port = Port::to(RefuseAfterFirst(calls.clone()));
+    let declaration = declaration_for::<Call<RefusedWrite>, _>(&port);
+    let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+        .unwrap()
+        .into_run_registry();
+    let ctx = ledger_context(
+        journal.clone(),
+        stage,
+        registry,
+        vec![declaration.runtime_projection()],
+        None,
+    );
+    let role = perform(|row: &LedgerWritten| RefusedWrite { value: row.value }).through(port);
+    let mut group = Box::new(super::super::runtime::SinkGroup::new(
+        Arc::new(role),
+        test_allow_all_effect_boundary(),
+    ));
+    admit_ledger_rows(group.as_mut(), &ctx, stage, 2).await;
+    let results = group.finish().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(results[0].is_ok() && results[1].is_err(), "{results:?}");
+    let outcomes: Vec<_> = effect_records(&journal)
+        .into_iter()
+        .map(|record| record.outcome)
+        .collect();
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [
+                EffectOutcomePayload::Succeeded { .. },
+                EffectOutcomePayload::Failed { .. }
+            ]
+        ),
+        "{outcomes:?}"
+    );
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct FailedWrite {
+    value: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct RegisterAppend(u64);
+
+struct ChangedRegister;
+
+#[crate::effects::port(system = "changed-register")]
+impl ChangedRegister {
+    #[effect(type = "test.register_append", exactly_once, records = reply)]
+    fn append(&self, _: &RegisterAppend) -> Result<(), EffectError> {
+        Err(EffectError::DestinationChanged {
+            message: "register prefix changed".into(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn destination_refusal_records_no_outcome() {
+    for boundary in [
+        test_allow_all_effect_boundary(),
+        recording_entry_point_boundary().0,
+    ] {
+        let stage = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+        let port = Port::to(ChangedRegister);
+        let declaration = declaration_for::<Call<RegisterAppend>, _>(&port);
+        let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+            .unwrap()
+            .into_run_registry();
+        let ctx = ledger_context(
+            journal.clone(),
+            stage,
+            registry,
+            vec![declaration.runtime_projection()],
+            None,
+        );
+        let role = perform(|row: &LedgerWritten| RegisterAppend(row.value)).through(port);
+        let mut group = Box::new(super::super::runtime::SinkGroup::new(
+            Arc::new(role),
+            boundary,
+        ));
+        admit_ledger_rows(group.as_mut(), &ctx, stage, 2).await;
+        let (index, error) = group.finish().await.unwrap_err();
+        assert_eq!(index, 0);
+        assert_eq!(
+            error.as_fatal().unwrap().reason,
+            obzenflow_core::event::StageFatalReason::DestinationChanged
+        );
+        assert!(journal.events().is_empty());
+    }
+}
+
+struct FailEveryWrite(Arc<AtomicUsize>);
+
+#[crate::effects::port(system = "fail-every-write")]
+impl FailEveryWrite {
+    #[effect(type = "test.failed_write", exactly_once, records = reply)]
+    fn write(&self, _: &FailedWrite) -> Result<(), EffectError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(EffectError::unavailable("ledger", "refused", LedgerRefused))
+    }
+}
+
+#[tokio::test]
+async fn grouped_late_refusal_records_failure() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let port = Port::to(FailEveryWrite(calls.clone()));
+    let declaration = declaration_for::<Call<FailedWrite>, _>(&port);
+    let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+        .unwrap()
+        .into_run_registry();
+    let ctx = ledger_context(
+        journal.clone(),
+        stage,
+        registry,
+        vec![declaration.runtime_projection()],
+        None,
+    );
+    let role = perform(|row: &LedgerWritten| FailedWrite { value: row.value }).through(port);
+    let mut group = Box::new(super::super::runtime::SinkGroup::new(
+        Arc::new(role),
+        Arc::new(ExecuteThenRefuseBoundary),
+    ));
+    admit_ledger_rows(group.as_mut(), &ctx, stage, 1).await;
+    let results = group.finish().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(results[0].is_err(), "{results:?}");
+    let records = effect_records(&journal);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].observation,
+        EffectObservation::returned_failure()
+    );
+    assert_eq!(journal.events()[0].event_type(), "effect.execution_failed");
+}
+
+#[test]
+fn nested_request_hash_matches_recording() {
+    let request = serde_json::json!({"z": 3, "a": [{"z": 2, "a": 1}, 0]});
+    assert_eq!(
+        super::super::identity::hash_json_value(request).unwrap(),
+        "13674e8b3703710250cfe837b12a4919c0d457d364e07a0c25e7497d8741dfa7"
+    );
 }

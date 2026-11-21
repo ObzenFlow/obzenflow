@@ -6,8 +6,8 @@
 //!
 //! During deterministic replay a stage is reconstructed from recorded events
 //! and performs no live external work. Ordinary observers are suppressed for
-//! the reconstruction variants, while source, effect, and sink policy contexts
-//! are constructed only for the corresponding live boundary variants.
+//! the reconstruction variants, while source and effect policy contexts are
+//! constructed only for the corresponding live boundary variants.
 //!
 //! The placement split makes policy suppression structural: control policy
 //! attaches to live I/O units only, so strict replay bypasses it rather than
@@ -49,11 +49,6 @@ pub enum MiddlewareExecutionScope {
     /// Live source-boundary execution. The source boundary wraps only the live
     /// poll branch; replay bypasses it structurally. Never suppressed.
     LiveSourceBoundary,
-
-    /// Live sink-delivery-boundary execution (FLOWIP-115b). The sink delivery
-    /// boundary wraps only the live data-event `consume_report` attempt; replay
-    /// reconstructs recorded receipts without consulting it. Never suppressed.
-    LiveSinkDeliveryBoundary,
 }
 
 impl MiddlewareExecutionScope {
@@ -89,6 +84,5 @@ mod tests {
         // Live I/O boundaries only run for live execution; never suppress them.
         assert!(!MiddlewareExecutionScope::LiveEffectBoundary.is_deterministic_replay());
         assert!(!MiddlewareExecutionScope::LiveSourceBoundary.is_deterministic_replay());
-        assert!(!MiddlewareExecutionScope::LiveSinkDeliveryBoundary.is_deterministic_replay());
     }
 }

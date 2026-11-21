@@ -11,7 +11,7 @@
 use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
+use obzenflow::testing::RecordingSink;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::WriterId;
@@ -19,8 +19,8 @@ use obzenflow_dsl::{join, sink, source, stateful, test_flow};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure, StatefulEmission,
-    TypedFiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler,
+    JoinReferenceView, StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler,
+    TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -78,7 +78,6 @@ struct JoinedMetricEvent {
 impl TypedPayload for JoinedMetricEvent {
     const EVENT_TYPE: &'static str = "metric.joined";
 }
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 trait IndexedMetric: TypedPayload {
@@ -177,52 +176,6 @@ impl TypedStatefulHandler for SlowAccumulator {
     fn post_emit(&self, _: &mut Self::State) {}
 }
 
-#[derive(Debug)]
-struct CollectingSink<T> {
-    events: Arc<Mutex<Vec<T>>>,
-}
-
-impl<T> Clone for CollectingSink<T> {
-    fn clone(&self) -> Self {
-        Self {
-            events: Arc::clone(&self.events),
-        }
-    }
-}
-
-impl<T> CollectingSink<T> {
-    fn new() -> (Self, Arc<Mutex<Vec<T>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                events: events.clone(),
-            },
-            events,
-        )
-    }
-}
-
-#[async_trait]
-impl<T> InlineSink for CollectingSink<T>
-where
-    T: TypedPayload + Send + Sync + 'static,
-{
-    type Input = T;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                "collect".to_string(),
-            ),
-        )
-    }
-
-    async fn write(&mut self, event: T) -> Result<(), SinkWriteFailure> {
-        self.events.lock().unwrap().push(event);
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 struct NoopJoin;
 
@@ -289,7 +242,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let sleep_per_event = Duration::from_millis(5);
     let expected_processing_time_s = total_events as f64 * sleep_per_event.as_secs_f64();
 
-    let (sink_handler, sink_events) = CollectingSink::<AggregateMetricEvent>::new();
+    let (sink_handler, sink_events) = RecordingSink::<AggregateMetricEvent>::new();
     let journal_dir = unique_journal_dir("stateful_metrics");
     let journal_dir_for_flow = journal_dir.clone();
     let source = BurstSource::<MetricEvent>::new(total_events);
@@ -391,7 +344,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     assert!(sum_s < 10.0, "expected sum < 10s, got {sum_s}");
 
     assert_eq!(
-        sink_events.lock().unwrap().len(),
+        sink_events.len(),
         1,
         "expected sink to receive exactly one aggregate data event"
     );
@@ -482,7 +435,7 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
     let reference_source = BurstSource::<RefMetricEvent>::new(reference_events);
     let stream_source = BurstSource::<StreamMetricEvent>::new(stream_events);
     let joiner = NoopJoin;
-    let (sink, _events) = CollectingSink::<JoinedMetricEvent>::new();
+    let (sink, _events) = RecordingSink::<JoinedMetricEvent>::new();
 
     let test_handle = test_flow! {
         build_context: metrics_context,

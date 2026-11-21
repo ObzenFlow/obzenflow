@@ -11,16 +11,14 @@ use obzenflow_adapters::middleware::{
     MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareMaterializationContext,
     MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, Port, StageCompletion};
+use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{
     EffectObserver, EffectObserverContext, HandlerObserver, HandlerObserverContext,
@@ -141,22 +139,17 @@ impl EffectfulTransformHandler for PerformsBothEffects {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingSink {
+#[derive(Clone, Debug, Serialize)]
+struct Delivered;
+
+struct CountDeliveries {
     deliveries: Arc<AtomicUsize>,
 }
 
-#[async_trait]
-impl InlineSink for CountingSink {
-    type Input = EffectFact;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom(
-            "effect-observer-scope-test".to_string(),
-        ))
-    }
-
-    async fn write(&mut self, _event: Self::Input) -> Result<(), SinkWriteFailure> {
+#[obzenflow_runtime::effects::port(system = "scope-delivery-counter")]
+impl CountDeliveries {
+    #[effect(type = "effect_observer_scope.deliver", at_least_once, records = reply)]
+    fn deliver(&self, _: &Delivered) -> Result<(), EffectError> {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -285,9 +278,10 @@ async fn one_authored_observer_shares_quarantine_across_handler_effect_and_lifec
         let handle = FlowDefinition::materialize(move |_runtime_config| {
             let input_source = OneInputSource { emitted: false };
             let observed_handler = PerformsBothEffects::new(2);
-            let output_sink = CountingSink {
-                deliveries: deliveries_for_flow,
-            };
+            let output_sink =
+                perform(|_: &EffectFact| Delivered).through(Port::to(CountDeliveries {
+                    deliveries: deliveries_for_flow,
+                }));
             Ok(flow! {
                 name: "effect_observer_cross_surface_quarantine",
                 journals: memory_journals(),
@@ -297,7 +291,7 @@ async fn one_authored_observer_shares_quarantine_across_handler_effect_and_lifec
                         Input -> { EffectFact, EffectReply }
                         with { broad, named }
                         => observed_handler);
-                    output = sink!(EffectFact => output_sink.idempotent());
+                    output = sink!(EffectFact => output_sink);
                 },
                 topology: {
                     input |> observed;

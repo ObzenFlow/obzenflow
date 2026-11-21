@@ -5,15 +5,14 @@
 //! Types-first metadata and descriptor wrappers for the DSL layer.
 
 use crate::dsl::stage_descriptor::{
-    AsyncFiniteSourceDescriptor, AsyncInfiniteSourceDescriptor, FiniteSourceDescriptor,
-    InfiniteSourceDescriptor, JoinDescriptor, SinkDescriptor, StageDescriptor, StatefulDescriptor,
-    TransformDescriptor,
+    AsyncFiniteSourceDescriptor, AsyncInfiniteSourceDescriptor, EffectfulTransformDescriptor,
+    FiniteSourceDescriptor, InfiniteSourceDescriptor, JoinDescriptor, StageDescriptor,
+    StatefulDescriptor, TransformDescriptor,
 };
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactOutcome, Outcome, TypedFactType, TypedPayload};
@@ -41,10 +40,15 @@ use obzenflow_runtime::stages::common::handlers::source::{
 const PLACEHOLDER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
     by: RefusedBy::Handler,
 };
+use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
+use obzenflow_runtime::effects::{
+    effectful_transform_effects, Command, DeclareEffects, DeclaredEffectSet, Effects,
+    EveryPortAnswers, PortList, SinkHandler, SinkRole, StageCompletion,
+};
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkConnector, SinkDescription, SinkInputOrder,
-    SinkWriteFailure, StatefulEmission, TransformHandler, TypedJoinHandler, TypedStatefulHandler,
-    TypedStatefulHandlerAdapter, TypedTransformHandler, TypedTransformHandlerAdapter,
+    EffectfulTransformHandler, JoinReferenceView, StatefulEmission, TransformHandler,
+    TypedJoinHandler, TypedStatefulHandler, TypedStatefulHandlerAdapter, TypedTransformHandler,
+    TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
@@ -114,19 +118,6 @@ pub trait StatefulInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput>
 
 #[diagnostic::do_not_recommend]
 impl<Input> StatefulInputMatchesArrow<Input> for Input {}
-
-/// Diagnostic facade for equality between a sink connector's authoritative
-/// input and the `sink!` arrow input.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "this sink connector does not witness its declared input",
-    label = "the connector's `Input` does not match the fact type declared before `=>`",
-    note = "implement SinkConnector or InlineSink with Input matching the sink! arrow (FLOWIP-134h)"
-)]
-pub trait SinkInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput> {}
-
-#[diagnostic::do_not_recommend]
-impl<Input> SinkInputMatchesArrow<Input> for Input {}
 
 /// Diagnostic facade for equality between a typed join handler's authoritative
 /// reference type and the `catalog` position of the stage arrow.
@@ -1206,32 +1197,31 @@ where
     wrap_typed_descriptor(descriptor, metadata)
 }
 
-/// Canonical proof-carrying admission factory for a real typed sink.
-///
-/// The connector description is snapshotted exactly once here, after the macro
-/// has applied any sealed site-level decoration and before the writer is opened,
-/// erased, or wrapped by runtime machinery.
 #[doc(hidden)]
-pub fn typed_sink_descriptor<C, ArrowInput>(
+pub fn typed_sink_descriptor<C, ArrowInput, Index>(
     name: impl Into<String>,
-    connector: C,
-    sink_policies: Vec<Box<dyn MiddlewareFactory>>,
-    observers: Vec<Box<dyn MiddlewareFactory>>,
+    command: C,
+    middleware: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
-    C: SinkConnector + fmt::Debug + Send + Sync + 'static,
-    C::Input: SinkInputMatchesArrow<ArrowInput>,
+    C: SinkRole<ArrowInput> + Clone + fmt::Debug,
     ArrowInput: TypedPayload + Send + Sync + 'static,
+    WithMember<C::Request, EmptySet>:
+        DeclareEffects<C::Ports, <C::Ports as PortList>::Unmarked, Index>,
+    <WithMember<C::Request, EmptySet> as DeclareEffects<
+        C::Ports,
+        <C::Ports as PortList>::Unmarked,
+        Index,
+    >>::Marked: EveryPortAnswers,
 {
     let metadata = StageTypingMetadata::sink(TypeHint::exact_payload::<ArrowInput>(), false, None);
-    let description = SinkConnector::describe(&connector);
-    let descriptor: Box<dyn StageDescriptor> = Box::new(SinkDescriptor {
-        name: name.into(),
-        connector,
-        description,
-        sink_policies,
-        observers,
-    });
+    let defaults = command.batch_defaults();
+    let handler = SinkHandler::<C, ArrowInput>::new(command);
+    let effects = effectful_transform_effects(&handler);
+    let descriptor: Box<dyn StageDescriptor> = Box::new(
+        EffectfulTransformDescriptor::sink(name, handler, effects, middleware)
+            .with_batch_defaults(defaults),
+    );
     wrap_typed_descriptor(descriptor, metadata)
 }
 
@@ -1240,8 +1230,7 @@ where
 pub fn placeholder_sink_descriptor<ArrowInput>(
     name: impl Into<String>,
     message: Option<&'static str>,
-    sink_policies: Vec<Box<dyn MiddlewareFactory>>,
-    observers: Vec<Box<dyn MiddlewareFactory>>,
+    middleware: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
     ArrowInput: TypedPayload + Send + Sync + 'static,
@@ -1251,15 +1240,12 @@ where
         true,
         message.map(str::to_string),
     );
-    let connector = PlaceholderSink::<ArrowInput>::new(message);
-    let description = SinkConnector::describe(&connector);
-    let descriptor: Box<dyn StageDescriptor> = Box::new(SinkDescriptor {
-        name: name.into(),
-        connector,
-        description,
-        sink_policies,
-        observers,
-    });
+    let descriptor: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::sink(
+        name,
+        PlaceholderSink::<ArrowInput>::new(message),
+        Ok(Vec::new()),
+        middleware,
+    ));
     wrap_typed_descriptor(descriptor, metadata)
 }
 
@@ -1565,7 +1551,7 @@ where
 }
 
 pub struct PlaceholderSink<In> {
-    _phantom: PhantomData<In>,
+    _phantom: PhantomData<fn(In)>,
     message: Option<&'static str>,
     warned: Arc<AtomicBool>,
 }
@@ -1598,22 +1584,30 @@ impl<In> fmt::Debug for PlaceholderSink<In> {
     }
 }
 
+impl<In> Command for PlaceholderSink<In> {
+    type Ports = ();
+    type AllowedEffects = DeclaredEffectSet<EmptySet>;
+
+    fn ports(&self) -> Self::Ports {}
+}
+
 #[async_trait]
-impl<In> InlineSink for PlaceholderSink<In>
+impl<In> EffectfulTransformHandler for PlaceholderSink<In>
 where
     In: TypedPayload + Send + Sync + 'static,
 {
     type Input = In;
+    type Output = FactsOf<EmptySet>;
 
-    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-        obzenflow_runtime::stages::sink::SinkDescription::method(DeliveryMethod::Noop)
-    }
-
-    async fn write(&mut self, _input: In) -> Result<(), SinkWriteFailure> {
+    async fn process(
+        &self,
+        _input: In,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("sink", self.message));
         }
-        Ok(())
+        Ok(fx.complete_empty()?)
     }
 }
 
@@ -1829,12 +1823,12 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.ai_config_sections()
     }
 
-    fn max_open_keys(&self) -> Option<u64> {
-        self.inner.max_open_keys()
+    fn sink_batch_defaults(&self) -> Option<obzenflow_runtime::effects::SinkBatchDefaults> {
+        self.inner.sink_batch_defaults()
     }
 
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        self.inner.sink_description()
+    fn max_open_keys(&self) -> Option<u64> {
+        self.inner.max_open_keys()
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
@@ -2101,9 +2095,6 @@ pub fn validate_effect_fact_containment(
     };
 
     for (name, descriptor) in descriptors {
-        // Sinks have no output contract for effect facts to be members of;
-        // an effectful sink is rejected at materialisation by the FLOWIP-120b
-        // retirement path with the message that explains the policy.
         if descriptor.stage_type() == StageType::Sink {
             continue;
         }
@@ -2245,7 +2236,7 @@ pub fn validate_stage_typing_metadata(
 }
 
 /// The facts archive admission reads from the flow itself, namely its cycle
-/// members, each source's declared continuation and each sink's redelivery safety.
+/// members and each source's declared continuation.
 pub fn archive_flow_evidence(
     topology: &obzenflow_topology::Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
@@ -2264,54 +2255,15 @@ pub(crate) fn flow_evidence_with_cycle(
 ) -> obzenflow_core::journal::archive_actions::FlowEvidence {
     cycle_members.sort();
     let mut sources = Vec::new();
-    let mut sinks = Vec::new();
     for descriptor in descriptors.values() {
         if let Some(continuation) = descriptor.source_continuation() {
             sources.push((descriptor.name().to_string(), continuation));
         }
-        if descriptor.stage_type() == StageType::Sink {
-            sinks.push((
-                descriptor.name().to_string(),
-                descriptor
-                    .sink_description()
-                    .and_then(SinkDescription::redelivery_safety),
-            ));
-        }
     }
     sources.sort_by(|(left, _), (right, _)| left.cmp(right));
-    sinks.sort_by(|(left, _), (right, _)| left.cmp(right));
     obzenflow_core::journal::archive_actions::FlowEvidence {
         cycle_members,
         sources,
-        sinks,
-    }
-}
-
-/// Logs a warning naming each sink admitted only under
-/// `allow_duplicate_sink_delivery`.
-pub fn warn_duplicate_sink_delivery(
-    verb: obzenflow_runtime::bootstrap::ReplayVerb,
-    admission: &obzenflow_core::journal::archive_actions::Admission,
-) {
-    use obzenflow_runtime::bootstrap::ReplayVerb;
-    let verb_phrase = match verb {
-        ReplayVerb::Replay => "replay will re-perform",
-        ReplayVerb::Resume => "catch-up will duplicate",
-    };
-    for (stage, safety) in &admission.duplicate_sinks {
-        if safety.is_some() {
-            tracing::warn!(
-                stage = %stage,
-                "allow_duplicate_sink_delivery: proceeding past non-idempotent \
-                 sink; {verb_phrase} its external writes"
-            );
-        } else {
-            tracing::warn!(
-                stage = %stage,
-                "allow_duplicate_sink_delivery: proceeding past sink with \
-                 undeclared delivery safety; {verb_phrase} its deliveries"
-            );
-        }
     }
 }
 
@@ -2586,9 +2538,13 @@ pub fn validate_order_observer_deterministic_input_order(
         stage_id: StageId,
         inbound: &HashMap<StageId, Vec<StageId>>,
         descriptors: &HashMap<StageId, &dyn StageDescriptor>,
+        settled: &HashSet<StageId>,
         memo: &mut HashMap<StageId, bool>,
         visiting: &mut HashSet<StageId>,
     ) -> bool {
+        if settled.contains(&stage_id) {
+            return true;
+        }
         if let Some(value) = memo.get(&stage_id) {
             return *value;
         }
@@ -2611,10 +2567,10 @@ pub fn validate_order_observer_deterministic_input_order(
                 .map(|descriptor| descriptor.is_deterministic_input_orderer())
                 .unwrap_or(false)
                 && upstreams.iter().all(|&upstream| {
-                    deterministic_for_stage(upstream, inbound, descriptors, memo, visiting)
+                    deterministic_for_stage(upstream, inbound, descriptors, settled, memo, visiting)
                 })
         } else {
-            deterministic_for_stage(upstreams[0], inbound, descriptors, memo, visiting)
+            deterministic_for_stage(upstreams[0], inbound, descriptors, settled, memo, visiting)
         };
 
         visiting.remove(&stage_id);
@@ -2624,6 +2580,12 @@ pub fn validate_order_observer_deterministic_input_order(
 
     let mut stage_ids: Vec<StageId> = id_to_descriptor.keys().copied().collect();
     stage_ids.sort();
+    let cycle_members: HashSet<StageId> = stage_ids
+        .iter()
+        .copied()
+        .filter(|stage_id| topology.is_in_cycle(stage_id.to_topology_id()))
+        .collect();
+    let nothing_settled = HashSet::new();
 
     for stage_id in stage_ids {
         let Some(descriptor) = id_to_descriptor.get(&stage_id) else {
@@ -2635,15 +2597,15 @@ pub fn validate_order_observer_deterministic_input_order(
             continue;
         }
 
-        // Cycle members are governed by the runtime's bounded cycle protocol,
-        // so retain their established forward-edge validation. An observer
-        // outside the cycle must additionally see `<|` feedback edges in its
-        // upstream induction; otherwise a cycle-fed order-sensitive sink can
-        // look linear and proceed to resource opening.
         let inbound = if topology.is_in_cycle(stage_id.to_topology_id()) {
             &forward_inbound
         } else {
             &all_inbound
+        };
+        let settled = if descriptor.stage_type() == StageType::Sink {
+            &cycle_members
+        } else {
+            &nothing_settled
         };
         let mut memo = HashMap::new();
         let mut visiting = HashSet::new();
@@ -2651,6 +2613,7 @@ pub fn validate_order_observer_deterministic_input_order(
             stage_id,
             inbound,
             &id_to_descriptor,
+            settled,
             &mut memo,
             &mut visiting,
         ) {
@@ -2674,14 +2637,6 @@ pub fn validate_order_observer_deterministic_input_order(
     Ok(())
 }
 
-/// FLOWIP-095m: does this stage's reconstruction read fan-in delivery order?
-/// Effects (095d), stateful folds, and live/symmetric joins do; a hydrating join
-/// is a structural orderer; sources and transforms are carriers, while sinks
-/// opt in when their connector declares input order observable.
-///
-/// Must be evaluated on the UNWRAPPED descriptor: the join arm reads
-/// `is_deterministic_input_orderer()`, which `wrap_deterministic_orderers` forces
-/// to true on any marked stage, making a marked live join look hydrating.
 fn is_order_observer(descriptor: &dyn StageDescriptor) -> bool {
     if descriptor.is_effectful() {
         return true;
@@ -2689,9 +2644,6 @@ fn is_order_observer(descriptor: &dyn StageDescriptor) -> bool {
     match descriptor.stage_type() {
         StageType::Stateful => true,
         StageType::Join => !descriptor.is_deterministic_input_orderer(),
-        StageType::Sink => descriptor
-            .sink_description()
-            .is_some_and(|description| description.input_order() == SinkInputOrder::OrderSensitive),
         _ => false,
     }
 }
@@ -3076,12 +3028,12 @@ impl StageDescriptor for DeterministicOrdererOverride {
         self.inner.ai_config_sections()
     }
 
-    fn max_open_keys(&self) -> Option<u64> {
-        self.inner.max_open_keys()
+    fn sink_batch_defaults(&self) -> Option<obzenflow_runtime::effects::SinkBatchDefaults> {
+        self.inner.sink_batch_defaults()
     }
 
-    fn sink_description(&self) -> Option<&SinkDescription> {
-        self.inner.sink_description()
+    fn max_open_keys(&self) -> Option<u64> {
+        self.inner.max_open_keys()
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {

@@ -305,7 +305,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 );
                 case_register   = sink!(CaseOpened => case_register);
                 unopened_alerts = sink!(CaseUnavailable => unopened_register);
-                totals_report   = sink!(DayTotals => totals_report.idempotent());
+                totals_report   = sink!(DayTotals => totals_report);
             },
 
             topology: {

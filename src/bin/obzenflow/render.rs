@@ -178,10 +178,10 @@ impl Renderer {
             )?;
             for text in [
                 "Clocks ⟨journal number:counter⟩. Numbers stay fixed in this view, including the final matrix.",
-                "Facts orange · stateful/join outputs green · effects/deliveries pink · runtime gray",
+                "Facts orange · stateful/join outputs green · effects pink · runtime gray",
                 "Output ← stage(recorded inputs). The reporting journal's counter is underlined.",
                 "Counters track journal history, including hidden runtime records (--include-runtime).",
-                "Headings name stage kinds, or EFFECT/DELIVERY evidence. --explain adds context; --full shows complete records.",
+                "Headings name stage kinds, or EFFECT evidence. --explain adds context; --full shows complete records.",
             ] {
                 for line in wrap_fields(&[text.into()], self.width) {
                     writeln!(output, "{}", self.dim(&line))?;
@@ -297,7 +297,7 @@ impl Renderer {
         self.include_runtime
             || record.journal.kind == RunJournalKind::Error
             || Category::of(record) != Category::Runtime
-            || matches!(&record.record, RunRecordData::Chain(row) if matches!(&row.payload, ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(_) | ExecutionPayload::SinkOperationFailed(_))))
+            || matches!(&record.record, RunRecordData::Chain(row) if matches!(&row.payload, ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(_))))
     }
 
     fn dim(&self, text: &str) -> String {

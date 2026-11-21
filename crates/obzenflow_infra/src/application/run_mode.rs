@@ -2,18 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-120i: run-scoped provenance for banners and completion prompts.
-//!
-//! `RunMode` is the run-scoped half of the two-layer provenance surface. It
-//! feeds startup and completion copy only: banners (`Presentation::for_mode`)
-//! and footers (`RunPresentationOutcome`). Per-event labelling never reads it;
-//! a sink delivery's provenance derives from `event.replay_context` through
-//! the runtime's `DeliveryContext`, which is what keeps labels honest when
-//! FLOWIP-120n's resume mixes a replayed prefix with a live tail in one run.
-//!
-//! The enum is non-exhaustive on purpose: FLOWIP-120n adds a `Resume` variant,
-//! and the catch-up-to-live transition is announced on the `ReplayLifecycle`
-//! system-event channel rather than by mutating this value mid-run.
+//! Run-scoped provenance for startup banners and completion prompts.
 
 use obzenflow_core::journal::archive::manifest::RUN_MANIFEST_FILENAME;
 use std::path::{Path, PathBuf};

@@ -10,9 +10,9 @@ clients, configuration, and hosting.
 ## Responsibilities
 
 - **Sources:** CSV input, HTTP pull and polling with pluggable decoders, and hosted ingress sources.
-- **Sinks:** console formatting, CSV output, and optional PostgreSQL delivery.
+- **Sinks:** console formatting, tracing, CSV registers and discard.
 - **Policies:** rate limiting, circuit breaking, and retry within effect resilience.
-- **Observers:** passive callbacks at source, handler, stateful, join, effect, delivery, and lifecycle boundaries.
+- **Observers:** passive callbacks at source, handler, stateful, join, effect and lifecycle boundaries.
 - **Prometheus:** a read model and projection that turn measurement snapshots into metrics.
 - **Studio:** projections that turn journal records into status messages for connected clients.
 

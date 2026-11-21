@@ -8,16 +8,13 @@
 use crate::replay_testkit;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 
-use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
-    TypedJoinHandler, TypedTransformHandler,
+    JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -161,24 +158,7 @@ impl TypedTransformHandler for RefValidator {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DropSink;
-
-#[async_trait]
-impl InlineSink for DropSink {
-    type Input = JoinedItem;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-        )
-        .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _event: JoinedItem) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type DropSink = obzenflow::stages::sinks::DiscardSink<JoinedItem>;
 
 #[derive(Clone, Debug)]
 struct GuardedInnerJoin {
@@ -226,7 +206,7 @@ fn build_flow(journal_base: PathBuf, typed_handler_calls: Arc<AtomicUsize>) -> F
         let joined = GuardedInnerJoin {
             typed_handler_calls,
         };
-        let collector = DropSink;
+        let collector = DropSink::new();
 
         Ok(flow! {
             name: "join_error_passthrough_identity",
@@ -378,7 +358,7 @@ async fn a_join_records_the_stream_row_its_handler_rejects() {
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let reference_source = RefSource::new();
             let stream_source = StreamSource::new();
-            let collector = DropSink;
+            let collector = DropSink::new();
             Ok(flow! {
                 name: "join_rejects_a_stream_row",
                 journals: disk_journals(journals.clone()),

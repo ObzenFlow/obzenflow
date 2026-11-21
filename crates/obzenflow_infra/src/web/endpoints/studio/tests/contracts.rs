@@ -99,13 +99,13 @@ async fn contract_result_envelope(upstream: StageId, reader: StageId) -> ChainJo
                         payload_schema_version: std::num::NonZeroU32::MIN,
                     }),
                     feed_role: Some(SystemFeedRole::Input),
-                    contract_name: ContractName::from("DeliveryContract"),
+                    contract_name: ContractName::from("TransportContract"),
                     status: ContractResultStatusLabel::Pending,
                     phase: obzenflow_core::contracts::ContractPhase::Progress,
                     result: Box::new(obzenflow_core::ContractResult::Pending {
                         reason: obzenflow_core::contracts::PendingReason::ProgressOnly,
                         evidence: obzenflow_core::ContractEvidence {
-                            contract_name: ContractName::from("DeliveryContract"),
+                            contract_name: ContractName::from("TransportContract"),
                             upstream_stage: upstream,
                             downstream_stage: reader,
                             evaluated_at: chrono::Utc::now(),
@@ -205,13 +205,13 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
                         payload_schema_version: std::num::NonZeroU32::MIN,
                     }),
                     feed_role: Some(SystemFeedRole::Input),
-                    contract_name: ContractName::from("DeliveryContract"),
+                    contract_name: ContractName::from("TransportContract"),
                     status: ContractResultStatusLabel::Pending,
                     phase: obzenflow_core::contracts::ContractPhase::Progress,
                     result: Box::new(obzenflow_core::ContractResult::Pending {
                         reason: obzenflow_core::contracts::PendingReason::ProgressOnly,
                         evidence: obzenflow_core::ContractEvidence {
-                            contract_name: ContractName::from("DeliveryContract"),
+                            contract_name: ContractName::from("TransportContract"),
                             upstream_stage: upstream,
                             downstream_stage: reader,
                             evaluated_at: chrono::Utc::now(),

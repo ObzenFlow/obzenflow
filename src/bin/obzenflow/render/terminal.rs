@@ -64,7 +64,7 @@ impl From<&HeaderView<'_>> for Palette {
         let (normal, secondary, primary) = match header.category {
             Category::Fact if header.read_model => (114, 157, 194),
             Category::Fact => (208, 215, 223),
-            Category::Effect | Category::Delivery => (217, 224, 231),
+            Category::Effect => (217, 224, 231),
             Category::Runtime => (245, 250, 255),
         };
         Self {

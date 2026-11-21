@@ -12,7 +12,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::WriterId;
 
@@ -148,12 +147,13 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         handler.install_lineage_policy(self.resources.lineage_policy);
         handler.install_observation_recorder(instrumentation.observation_recorder());
         handler.install_writer_id(WriterId::from(self.config.stage_id));
+        let stage_type = self.resources.flow_context.stage_type;
         let flow_context = Arc::new(make_flow_context(
             &self.config.flow_name,
             &self.resources.flow_id.to_string(),
             &self.config.stage_name,
             self.config.stage_id,
-            StageType::Transform,
+            stage_type,
         ));
         let catch_up = CatchUpHandle::producing(
             FlowContext::clone(&flow_context),
@@ -162,6 +162,11 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             self.resources.runtime_execution.clone(),
         );
         let resources = TransformResources {
+            sink_batch: self
+                .config
+                .sink_batch
+                .filter(|(size, _)| *size > 1)
+                .map(|(size, wait)| super::supervisor::sink_batch::SinkBatch::new(size, wait)),
             handler: Some(handler),
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
@@ -218,6 +223,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             name: self.config.stage_name.clone(),
             data_journal: self.resources.data_journal.clone(),
             stage_id: self.config.stage_id,
+            stage_type,
             subscription: None,
             cycle_guard: cycle_guard_config.as_ref().map(|cfg| {
                 CycleGuard::new(
@@ -234,7 +240,12 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         let state_watcher_for_task = state_watcher.clone();
 
         // Spawn the supervisor task
-        let supervisor_name = format!("transform_{}", self.config.stage_name);
+        let supervisor_name = match stage_type {
+            obzenflow_core::event::context::StageType::Sink => {
+                format!("sink_{}", self.config.stage_name)
+            }
+            _ => format!("transform_{}", self.config.stage_name),
+        };
         let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
             supervisor,
             event_receiver,

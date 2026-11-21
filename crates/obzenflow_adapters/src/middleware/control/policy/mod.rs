@@ -13,16 +13,11 @@
 //! still materialize ingress control middleware through the same carrier model.
 
 pub mod effect;
-pub mod sink;
 pub mod source;
 
 pub use effect::{
     EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy,
     MiddlewareAbortCause, PerEffectPolicyBoundary, PolicyAdmission,
-};
-pub use sink::{
-    PerSinkDeliveryPolicyBoundary, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
-    SinkPolicy, SinkPolicyCtx,
 };
 pub use source::{
     PerSourcePolicyBoundary, SourceAdmission, SourceAdmissionGuard, SourceAfterPoll,

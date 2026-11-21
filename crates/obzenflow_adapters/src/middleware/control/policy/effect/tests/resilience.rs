@@ -207,7 +207,7 @@ async fn cancellation_after_limiter_reservation_refunds_before_any_physical_call
             .expect("cancellable effect plan");
         let (attachment, control, stage_id) = materialized_resilience(factory);
         let target = identity_at(501);
-        let gate = FinalAdmissionTestGate::new(target.cursor.clone(), 0);
+        let gate = FinalAdmissionTestGate::new(target.first.cursor.clone(), 0);
         attachment
             .effect_resilience_policy()
             .expect("one recovery owner")
@@ -1124,7 +1124,7 @@ async fn another_invocation_opening_the_circuit_stops_a_pending_continuation() {
     tokio::task::yield_now().await;
 
     let mut second_identity = identity_for("effect.retry");
-    second_identity.cursor = EffectCursor::new("test_flow", "test_stage", 2, 0);
+    second_identity.first.cursor = EffectCursor::new("test_flow", "test_stage", 2, 0);
     let opening = boundary
         .around_repeatable_effect(
             &second_identity,
@@ -1167,7 +1167,7 @@ async fn stale_initial_reservation_cannot_cross_open_recover_closed_cycle() {
     .expect("ABA resilience aggregate");
     let (attachment, control, stage_id) = materialized_resilience(factory);
     let target_identity = identity_at(2);
-    let gate = FinalAdmissionTestGate::new(target_identity.cursor.clone(), 0);
+    let gate = FinalAdmissionTestGate::new(target_identity.first.cursor.clone(), 0);
     let resilience = attachment
         .effect_resilience_policy()
         .expect("aggregate attachment")
@@ -1280,7 +1280,7 @@ async fn stale_retry_reservation_preserves_last_physical_error_after_recovery_cy
     .expect("retry ABA resilience aggregate");
     let (attachment, control, stage_id) = materialized_resilience(factory);
     let target_identity = identity_at(12);
-    let gate = FinalAdmissionTestGate::new(target_identity.cursor.clone(), 1);
+    let gate = FinalAdmissionTestGate::new(target_identity.first.cursor.clone(), 1);
     let resilience = attachment
         .effect_resilience_policy()
         .expect("aggregate attachment")
@@ -1549,7 +1549,7 @@ async fn probe_busy_rejection_has_no_attempt_or_committed_permit() {
     assert_eq!(completion.1, 0);
     assert_eq!(
         recovery_completion_cursors(&rejected),
-        [identity_at(3).cursor],
+        [identity_at(3).first.cursor],
         "the zero-attempt completion must remain keyed to the rejected invocation"
     );
     assert_eq!(
@@ -1996,4 +1996,174 @@ async fn cancellation_in_flight_records_an_attempt_without_a_health_sample() {
             assert!(breaker.is_empty());
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn grouped_failure_records_one_breaker_attempt() {
+    use obzenflow_runtime::effects::CallIdentity;
+    let factory = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker().consecutive_failures(5),
+    )
+    .build()
+    .unwrap();
+    let (attachment, _, _) = materialized_resilience(factory);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let mut identity = identity_at(1);
+    let cursors: Vec<_> = (1..=10).map(|seq| identity_at(seq).first.cursor).collect();
+    identity.additional = Some(
+        cursors
+            .iter()
+            .skip(1)
+            .map(|cursor| CallIdentity {
+                cursor: cursor.clone(),
+                idempotency_key: None,
+            })
+            .collect(),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let report = boundary
+        .around_repeatable_effect(
+            &identity,
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Err(EffectError::Timeout("group".into()))),
+        )
+        .await;
+    let members: Vec<_> = report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::AttemptSettled { member_cursors, .. },
+            )) => Some(member_cursors.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(members, [cursors]);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sink_admission_wait_reports_limiter_delay() {
+    use obzenflow_runtime::effects::SinkAdmission;
+
+    let factory = EffectPlanFactory::empty()
+        .rate_limit_each_attempt(
+            crate::middleware::control::rate_limit(1.0)
+                .burst_capacity(4.0)
+                .cost(2.0),
+        )
+        .build()
+        .unwrap();
+    let (attachment, control, stage) = materialized_resilience(factory);
+    let boundary = boundary_with_chain(vec![attachment]);
+    for seq in 1..=2 {
+        let identity = identity_at(seq);
+        assert_eq!(
+            boundary.sink_admission_wait(identity.effect_type),
+            Duration::ZERO
+        );
+        let SinkAdmission::Admitted(permit) =
+            boundary.admit_sink_request(&identity, &data_event()).await
+        else {
+            panic!("expected an available burst permit");
+        };
+        permit.started.unwrap()();
+    }
+    let effect_type = identity_at(3).effect_type;
+    assert_eq!(
+        boundary.sink_admission_wait(effect_type),
+        Duration::from_secs(2)
+    );
+    assert_eq!(boundary.sink_admission_wait("other.effect"), Duration::ZERO);
+    tokio::time::advance(Duration::from_millis(500)).await;
+    assert_eq!(
+        boundary.sink_admission_wait(effect_type),
+        Duration::from_millis(1500)
+    );
+    tokio::time::advance(Duration::from_millis(1500)).await;
+    assert_eq!(boundary.sink_admission_wait(effect_type), Duration::ZERO);
+    assert_eq!(effect_limiter_events(&control, stage), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn grouped_limiter_charges_each_request() {
+    use obzenflow_runtime::effects::SinkAdmission;
+    let factory = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker().consecutive_failures(5),
+    )
+    .rate_limit_each_attempt(crate::middleware::control::rate_limit(1000.0).burst_capacity(20.0))
+    .build()
+    .unwrap();
+    let (attachment, control, stage) = materialized_resilience(factory);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let mut identity = identity_at(1);
+    identity.additional = Some(Vec::new());
+    let mut reservations = Vec::new();
+    for seq in 1..=10 {
+        let call = identity_at(seq);
+        let SinkAdmission::Admitted(permit) =
+            boundary.admit_sink_request(&call, &data_event()).await
+        else {
+            panic!("request refused");
+        };
+        reservations.push(permit.started.unwrap());
+        if seq > 1 {
+            identity.additional.as_mut().unwrap().push(call.first);
+        }
+    }
+    assert_eq!(effect_limiter_events(&control, stage), 0);
+    let mut reservations = Some(reservations);
+    let operation = RepeatableEffectOperation::new(move || {
+        for charge in reservations.take().unwrap() {
+            charge();
+        }
+        async { Ok(Vec::new()) }
+    });
+    let report = boundary
+        .around_repeatable_effect(&identity, &data_event(), operation)
+        .await;
+    assert!(matches!(
+        report.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(effect_limiter_events(&control, stage), 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn probe_request_closes_group() {
+    use obzenflow_runtime::effects::SinkAdmission;
+    let factory = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker()
+            .consecutive_failures(1)
+            .open_for(Duration::from_secs(1)),
+    )
+    .build()
+    .unwrap();
+    let (attachment, _, _) = materialized_resilience(factory);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let identity = identity_at(1);
+    let parent = data_event();
+    let admitted = boundary.admit_sink_request(&identity, &parent).await;
+    assert!(matches!(admitted,SinkAdmission::Admitted(permit) if !permit.closes_group));
+    let report = boundary
+        .around_repeatable_effect(
+            &identity,
+            &parent,
+            RepeatableEffectOperation::new(|| async {
+                Err(EffectError::Timeout("dependency".into()))
+            }),
+        )
+        .await;
+    assert!(matches!(
+        report.outcome,
+        EffectBoundaryOutcome::Executed(Err(_))
+    ));
+    assert!(matches!(
+        boundary.admit_sink_request(&identity_at(2), &parent).await,
+        SinkAdmission::Refused(..)
+    ));
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(
+        matches!(boundary.admit_sink_request(&identity_at(3),&parent).await,SinkAdmission::Admitted(permit) if permit.closes_group)
+    );
 }

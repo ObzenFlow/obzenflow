@@ -263,7 +263,6 @@ pub(super) fn replay_note(record: &RunRecord) -> ReplayNote {
 pub(super) enum Category {
     Fact,
     Effect,
-    Delivery,
     Runtime,
 }
 
@@ -272,7 +271,6 @@ impl Category {
         match &record.record {
             RunRecordData::Chain(row) => match &row.payload {
                 ChainPayload::Fact(_) => Self::Fact,
-                ChainPayload::Delivery(_) => Self::Delivery,
                 ChainPayload::Execution(
                     ExecutionPayload::EffectRecord(_)
                     | ExecutionPayload::EffectAttemptStarted(_)
@@ -288,21 +286,24 @@ impl Category {
         match self {
             Self::Fact => "FACT",
             Self::Effect => "EFFECT",
-            Self::Delivery => "DELIVERY",
             Self::Runtime => "RUNTIME",
         }
     }
 
     fn heading(self, record: &RunRecord) -> &'static str {
-        if let (RunJournalKind::Error, Some(stage)) = (record.journal.kind, &record.journal.stage) {
+        let stage = record.journal.stage.as_ref();
+        if let (RunJournalKind::Error, Some(stage)) = (record.journal.kind, stage) {
             return stage_error_heading(stage.stage_type, stage.is_effectful);
         }
-        if self != Self::Fact {
-            return self.label();
+        match stage {
+            Some(stage)
+                if self == Self::Fact
+                    || (self == Self::Effect && stage.stage_type == StageType::Sink) =>
+            {
+                stage_heading(stage.stage_type, stage.is_effectful)
+            }
+            _ => self.label(),
         }
-        record.journal.stage.as_ref().map_or("FACT", |stage| {
-            stage_heading(stage.stage_type, stage.is_effectful)
-        })
     }
 }
 
@@ -343,10 +344,7 @@ fn replayed(record: &RunRecord) -> bool {
 fn uses_inputs(record: &RunRecord) -> bool {
     matches!(
         record.kind,
-        RunRecordKind::Fact
-            | RunRecordKind::CompositeData
-            | RunRecordKind::Effect
-            | RunRecordKind::Delivery
+        RunRecordKind::Fact | RunRecordKind::CompositeData | RunRecordKind::Effect
     ) || matches!(&record.record, RunRecordData::Chain(row) if matches!(row.payload, ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(_))))
 }
 
@@ -412,18 +410,11 @@ fn gloss(record: &RunRecord) -> &'static str {
             ChainPayload::Execution(ExecutionPayload::ContractResult { .. }) => "The evaluator records a scoped verification outcome and the evidence available at this phase.",
             ChainPayload::Execution(ExecutionPayload::ContractStatus { .. }) => "The consuming stage records its effective policy decision; acceptance does not imply verification passed.",
             ChainPayload::Execution(_) => "The runtime recorded execution evidence, such as admission, retry or backpressure.",
-            ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress { .. }) => "The subscriber reports its consumed count and, when tracked, a separate terminal-receipt frontier. Producer advertisements retain their own attribution.",
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress { .. }) => "The subscriber reports its consumed count. Producer advertisements retain their own attribution.",
             ChainPayload::FlowControl(FlowControlPayload::ProductionFinal { .. }) => "The source reports its production frontier and end kind; downstream consumption and delivery are separate observations.",
             ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. }) => "The subscriber finalized its scoped observations and effective policy verdict; verification may still be pending or failed.",
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => "This journal recorded an end-of-input signal; it does not by itself settle the whole run.",
             ChainPayload::FlowControl(_) => "A flow signal coordinates delivery or progress between stages.",
-            ChainPayload::Delivery(delivery) => match &delivery.result {
-                DeliveryResult::Buffered { .. } => "The sink buffered this input; durable delivery is not yet confirmed.",
-                DeliveryResult::Success { .. } => "The sink recorded a successful delivery outcome.",
-                DeliveryResult::Rejected { .. } => "The runtime rejected this delivery before invoking the writer.",
-                DeliveryResult::Failed { .. } => "The sink recorded a failed delivery outcome.",
-                DeliveryResult::Partial { .. } => "The sink recorded a mixture of successful and failed deliveries.",
-            },
             ChainPayload::CompositeData(_) => "A composite stage recorded protocol data; the original envelope and payload remain available in --full.",
         },
         RunRecordData::System(row) if matches!(row.payload, SystemPayload::PipelineLifecycle(_)) && *row.writer_id() != record.run.pipeline_writer_id => "This lifecycle row is from another writer; it does not establish this run's pipeline outcome.",

@@ -16,7 +16,7 @@ use super::warehouse::{
 use obzenflow::flow::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, MiddlewareFactory};
-use obzenflow::stages::sinks::TracingSink;
+use obzenflow::stages::sinks::{TracingOutput, TracingSink};
 use obzenflow::stages::sources;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -134,20 +134,18 @@ fn allocation_flow(
     let allocator = Allocator::new(warehouse, 1).with_reservation_pace(reservation_pace);
     let desk = ReservationDesk;
     let record_confirmation = TracingSink::new(|confirmed: &ReservationConfirmed| {
-        tracing::info!(
-            order_id = %confirmed.order_id,
-            confirmation = confirmed.confirmation,
-            "reservation confirmation delivered"
-        );
+        TracingOutput::info("reservation confirmation delivered")
+            .field("order_id", &confirmed.order_id)
+            .field("confirmation", confirmed.confirmation)
     });
     let record_reservation = TracingSink::new(|reserved: &StockReserved| {
-        tracing::info!(order_id = %reserved.order_id, "stock reservation delivered");
+        TracingOutput::info("stock reservation delivered").field("order_id", &reserved.order_id)
     });
     let record_release = TracingSink::new(|released: &StockReleased| {
-        tracing::info!(order_id = %released.order_id, "stock release delivered");
+        TracingOutput::info("stock release delivered").field("order_id", &released.order_id)
     });
     let record_reservation_failure = TracingSink::new(|failed: &ReservationFailed| {
-        tracing::info!(order_id = %failed.order_id, "reservation failure delivered");
+        TracingOutput::info("reservation failure delivered").field("order_id", &failed.order_id)
     });
 
     flow! {
@@ -169,15 +167,13 @@ fn allocation_flow(
                 => allocator,
             );
 
-            reservations = sink!(StockReserved => record_reservation.idempotent());
-            releases = sink!(StockReleased => record_release.idempotent());
-            reservation_failures = sink!(
-                ReservationFailed => record_reservation_failure.idempotent()
-            );
+            reservations = sink!(StockReserved => record_reservation);
+            releases = sink!(StockReleased => record_release);
+            reservation_failures = sink!(ReservationFailed => record_reservation_failure);
 
             phone_reservations = source!(StockReserved => phone_feed);
             reservation_desk = stateful!(StockReserved -> ReservationConfirmed => desk);
-            confirmations = sink!(ReservationConfirmed => record_confirmation.idempotent());
+            confirmations = sink!(ReservationConfirmed => record_confirmation);
         },
 
         topology: {

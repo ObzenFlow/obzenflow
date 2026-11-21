@@ -374,7 +374,6 @@ impl MergeAction {
                     config: ContractConfig::default(),
                     reader_stage: Some(ctx.stage_id),
                     control_plane: ctx.instrumentation.control_plane().clone(),
-                    include_delivery_contract: false,
                     cycle_guard_config: None,
                 };
                 let first_phase = ctx

@@ -53,10 +53,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn identity_for(effect_type: &'static str) -> EffectIdentity {
     EffectIdentity {
+        additional: None,
         effect_type,
         safety: EffectSafety::Idempotent,
-        cursor: EffectCursor::new("test_flow", "test_stage", 1, 0),
-        idempotency_key: None,
+        first: obzenflow_runtime::effects::CallIdentity {
+            cursor: EffectCursor::new("test_flow", "test_stage", 1, 0),
+            idempotency_key: None,
+        },
     }
 }
 
@@ -239,7 +242,7 @@ pub(super) fn file_effect_snapshot(entries: &[(&str, ConfigValue)]) -> ResolvedR
 
 pub(super) fn identity_at(input_seq: u64) -> EffectIdentity {
     let mut identity = identity_for("effect.retry");
-    identity.cursor = EffectCursor::new("test_flow", "test_stage", input_seq, 0);
+    identity.first.cursor = EffectCursor::new("test_flow", "test_stage", input_seq, 0);
     identity
 }
 

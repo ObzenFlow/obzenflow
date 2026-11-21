@@ -17,9 +17,10 @@ use obzenflow_dsl::{ai, flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
+use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkWriteFailure, SourceError, TypedFiniteSourceHandler, TypedTransformHandler,
+    SourceError, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -255,34 +256,6 @@ fn run_dir(root: &Path) -> PathBuf {
     paths[0].clone()
 }
 
-#[derive(Clone)]
-struct CollectRows {
-    delivered: Arc<Mutex<Vec<Row>>>,
-}
-
-#[async_trait::async_trait]
-impl obzenflow_runtime::stages::sink::InlineSink for CollectRows {
-    type Input = Row;
-    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-        obzenflow_runtime::stages::sink::SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                "collect_rows".into(),
-            ),
-        )
-        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
-    }
-    async fn write(&mut self, input: Row) -> Result<(), SinkWriteFailure> {
-        self.delivered.lock().unwrap().push(input);
-        Ok(())
-    }
-}
-
-impl std::fmt::Debug for CollectRows {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CollectRows")
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct HeldValue {
     seed: u64,
@@ -333,31 +306,39 @@ impl AiRole<SeedValue> for TriageRole {
     }
 }
 
-#[derive(Clone)]
-struct CollectHeld {
-    held: Arc<Mutex<Vec<HeldValue>>>,
+#[obzenflow_runtime::effects::port]
+trait CollectRowsPort: Send + Sync {
+    #[effect(type = "ai_composition.collect_row", at_least_once, records = reply)]
+    fn collect(&self, row: &Row) -> Result<(), EffectError>;
 }
 
-#[async_trait::async_trait]
-impl obzenflow_runtime::stages::sink::InlineSink for CollectHeld {
-    type Input = HeldValue;
-    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-        obzenflow_runtime::stages::sink::SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                "collect_held".into(),
-            ),
-        )
-        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
-    }
-    async fn write(&mut self, input: HeldValue) -> Result<(), SinkWriteFailure> {
-        self.held.lock().unwrap().push(input);
+struct CollectRows {
+    delivered: Arc<Mutex<Vec<Row>>>,
+}
+
+#[obzenflow_runtime::effects::system("row-collector")]
+impl CollectRowsPort for CollectRows {
+    fn collect(&self, row: &Row) -> Result<(), EffectError> {
+        self.delivered.lock().unwrap().push(row.clone());
         Ok(())
     }
 }
 
-impl std::fmt::Debug for CollectHeld {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CollectHeld")
+#[obzenflow_runtime::effects::port]
+trait CollectHeldPort: Send + Sync {
+    #[effect(type = "ai_composition.collect_held", at_least_once, records = reply)]
+    fn collect(&self, held: &HeldValue) -> Result<(), EffectError>;
+}
+
+struct CollectHeld {
+    held: Arc<Mutex<Vec<HeldValue>>>,
+}
+
+#[obzenflow_runtime::effects::system("held-collector")]
+impl CollectHeldPort for CollectHeld {
+    fn collect(&self, held: &HeldValue) -> Result<(), EffectError> {
+        self.held.lock().unwrap().push(held.clone());
+        Ok(())
     }
 }
 
@@ -399,12 +380,12 @@ fn build_triage_flow(root: PathBuf, run: TriageRun) -> FlowDefinition {
             .chunks(1)
             .reduce(SumReduce)
             .on_eof();
-        let held = CollectHeld {
+        let held = perform(|held: &HeldValue| held.clone()).through(Port::to(CollectHeld {
             held: run.held.clone(),
-        };
-        let output = CollectRows {
+        }));
+        let output = perform(|row: &Row| row.clone()).through(Port::to(CollectRows {
             delivered: run.delivered.clone(),
-        };
+        }));
 
         Ok(flow! {
             name: "ai_infer_into_ai_map_reduce",
@@ -501,8 +482,10 @@ async fn a_multi_fact_infer_feeds_the_map_reduce_through_a_selected_feed_and_rep
         .run_async(build_triage_flow(replay_root.clone(), replayed.clone()))
         .await
         .expect("the composition replays");
-    assert_eq!(*replayed.delivered.lock().unwrap(), expected_rows);
-    assert_eq!(*replayed.held.lock().unwrap(), expected_held);
+    assert!(
+        replayed.delivered.lock().unwrap().is_empty() && replayed.held.lock().unwrap().is_empty(),
+        "replay calls no sink system"
+    );
     assert_eq!(replay.connect_count() + replay.call_count(), 0);
 
     let outcome = verify_run_dirs(

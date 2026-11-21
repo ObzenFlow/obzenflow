@@ -44,7 +44,6 @@ pub(crate) struct FlowHandleExtras {
     /// build so the host can serve the per-flow/per-stage read surface.
     pub flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
     pub archive_flow_evidence: obzenflow_core::journal::archive_actions::FlowEvidence,
-    pub resume_notices: Vec<String>,
 }
 
 /// Flow handle for external control - the public API returned by the DSL
@@ -100,8 +99,6 @@ pub struct FlowHandle {
     flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
 
     archive_flow_evidence: obzenflow_core::journal::archive_actions::FlowEvidence,
-
-    resume_notices: Vec<String>,
 }
 
 impl FlowHandle {
@@ -144,7 +141,6 @@ impl FlowHandle {
             run_substrate,
             flow_effective_config,
             archive_flow_evidence,
-            resume_notices,
         } = extras;
 
         Self {
@@ -168,7 +164,6 @@ impl FlowHandle {
             run_substrate,
             flow_effective_config,
             archive_flow_evidence,
-            resume_notices,
         }
     }
 
@@ -243,12 +238,6 @@ impl FlowHandle {
             ExecutionOutcome::Failed(_) => Some(ArchiveStatus::Failed),
             ExecutionOutcome::NotStarted => None,
         }
-    }
-
-    /// Notices naming each resumed sink edge whose deliveries are scoped by
-    /// generation.
-    pub fn resume_notices(&self) -> &[String] {
-        &self.resume_notices
     }
 
     /// The facts the flow builder derived from this flow.

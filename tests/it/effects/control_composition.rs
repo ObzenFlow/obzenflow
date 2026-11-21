@@ -465,7 +465,7 @@ fn malformed_effect_policy_attachment_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let handler = OneEffectHandler::new();
-        let effects = effectful_transform_effects(&handler, &[]);
+        let effects = effectful_transform_effects(&handler);
         let guarded: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
             "guarded",
             handler,
@@ -511,7 +511,7 @@ fn duplicate_effect_policy_attachment_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let handler = OneEffectHandler::new();
-        let effects = effectful_transform_effects(&handler, &[]);
+        let effects = effectful_transform_effects(&handler);
         let guarded: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
             "guarded",
             handler,
@@ -811,61 +811,16 @@ where
 }
 
 #[tokio::test]
-async fn an_acknowledged_paid_effect_builds() {
+async fn command_narrowed_port_builds() {
     build(row_flow(|| {
-        let paid = PaidHandler::new();
-        effectful_transform!(CompositionInput -> CompositionFact => paid.at_least_once::<PaidRequest>())
-    }))
-    .await
-    .expect("an acknowledged paid effect builds");
-}
-
-#[tokio::test]
-async fn a_paid_effect_without_its_acknowledgement_fails_build() {
-    let rendered = row_refusal(|| {
         let paid = PaidHandler::new();
         effectful_transform!(CompositionInput -> CompositionFact => paid)
-    })
-    .await;
-    assert!(
-        rendered.contains(
-            "Effectful stage 'guarded' performs at-least-once effect \
-             'effect_control_composition.paid', which its `#[port]` field `service` allows; \
-             acknowledge it with `.at_least_once::<PaidRequest>()` after the handler, or narrow \
-             the field with `#[port(...)]`"
-        ),
-        "{rendered}"
-    );
-}
-
-#[tokio::test]
-async fn a_whole_port_field_allows_its_paid_effect_until_narrowed() {
-    let rendered = row_refusal(|| {
-        let whole = WholePortHandler {
-            service: composition_service(),
-        };
-        effectful_transform!(CompositionInput -> CompositionFact => whole)
-    })
-    .await;
-    assert!(
-        rendered.contains(
-            "performs at-least-once effect 'effect_control_composition.paid', which its \
-             `#[port]` field `service` allows; acknowledge it with \
-             `.at_least_once::<PaidRequest>()` after the handler, or narrow the field with \
-             `#[port(...)]`"
-        ),
-        "{rendered}"
-    );
-
-    build(row_flow(|| {
-        let narrowed = OneEffectHandler::new();
-        effectful_transform!(CompositionInput -> CompositionFact => narrowed)
     }))
     .await
-    .expect("a field narrowed to the requests it performs needs no acknowledgement");
+    .expect("the port method declares at-least-once safety");
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port]
 trait ResendPort: Send + Sync {
     #[effect(type = "effect_control_composition.resend", at_least_once)]
     fn resend(&self, _: &ResendRequest) -> Result<CompositionFact, EffectError>;
@@ -876,14 +831,14 @@ struct ResendRequest;
 
 struct Resender;
 
-#[obzenflow_runtime::effects::system("resender", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::system("resender")]
 impl ResendPort for Resender {
     fn resend(&self, _: &ResendRequest) -> Result<CompositionFact, EffectError> {
         Ok(CompositionFact)
     }
 }
 
-#[obzenflow_runtime::effects::command(through = ResendPort, effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command(through = ResendPort)]
 #[derive(Clone, Debug)]
 struct ThroughResend;
 
@@ -903,28 +858,13 @@ impl EffectfulTransformHandler for ThroughResend {
 }
 
 #[tokio::test]
-async fn through_unacknowledged_at_least_once_refused() {
-    let rendered = row_refusal(|| {
-        let resend = ThroughResend::through(Port::to(Resender));
-        effectful_transform!(CompositionInput -> CompositionFact => resend)
-    })
-    .await;
-    assert!(
-        rendered.contains(
-            "Effectful stage 'guarded' performs at-least-once effect \
-             'effect_control_composition.resend', which its port `ResendPort` allows; \
-             acknowledge it with `.at_least_once::<ResendRequest>()` after the handler, or write \
-             the port as a `#[port(ResendRequest)]` field"
-        ),
-        "{rendered}"
-    );
-
+async fn command_whole_port_builds() {
     build(row_flow(|| {
         let resend = ThroughResend::through(Port::to(Resender));
-        effectful_transform!(CompositionInput -> CompositionFact => resend.at_least_once::<ResendRequest>())
+        effectful_transform!(CompositionInput -> CompositionFact => resend)
     }))
     .await
-    .expect("an acknowledged whole port builds");
+    .expect("a command can use the whole port");
 }
 
 #[test]
@@ -939,7 +879,7 @@ fn stage_declares_port_field_effects() {
         service: composition_service(),
     };
     assert_eq!(
-        declared(effectful_transform_effects(&whole, &[]).expect("a whole port declares")),
+        declared(effectful_transform_effects(&whole).expect("a whole port declares")),
         [
             "effect_control_composition.a",
             "effect_control_composition.b",
@@ -948,7 +888,7 @@ fn stage_declares_port_field_effects() {
     );
     assert_eq!(
         declared(
-            effectful_transform_effects(&TwoEffectHandler::new(), &[])
+            effectful_transform_effects(&TwoEffectHandler::new())
                 .expect("a narrowed field declares")
         ),
         [
@@ -957,43 +897,9 @@ fn stage_declares_port_field_effects() {
         ]
     );
     assert!(declared(
-        effectful_transform_effects(&NoEffectHandler, &[]).expect("no field declares nothing")
+        effectful_transform_effects(&NoEffectHandler).expect("no field declares nothing")
     )
     .is_empty());
-}
-
-#[tokio::test]
-async fn an_acknowledgement_for_an_effect_the_handler_does_not_perform_fails_build() {
-    let rendered = row_refusal(|| {
-        let guarded_handler = OneEffectHandler::new();
-        effectful_transform!(
-            CompositionInput -> CompositionFact => guarded_handler.at_least_once::<PaidRequest>()
-        )
-    })
-    .await;
-    assert!(
-        rendered.contains("which its handler does not perform")
-            && rendered.contains("`.at_least_once::<PaidRequest>()`"),
-        "{rendered}"
-    );
-}
-
-#[tokio::test]
-async fn an_acknowledgement_of_an_exactly_once_effect_fails_build() {
-    let rendered = row_refusal(|| {
-        let guarded_handler = OneEffectHandler::new();
-        effectful_transform!(
-            CompositionInput -> CompositionFact => guarded_handler.at_least_once::<RequestA>()
-        )
-    })
-    .await;
-    assert!(
-        rendered.contains(
-            "acknowledges `effect_control_composition.a` as at-least-once, but its effect method \
-             is `exactly_once`"
-        ),
-        "{rendered}"
-    );
 }
 
 #[tokio::test]

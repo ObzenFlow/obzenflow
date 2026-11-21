@@ -4,19 +4,13 @@
 
 //! FLOWIP-122a hard archive-epoch gate at the application boundary.
 
-use async_trait::async_trait;
 use obzenflow::stages::sources;
 use obzenflow_adapters::middleware::MiddlewareAttachmentValidationError;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::MiddlewarePlanError;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::sink::{
-    SinkConnector, SinkDescription, SinkOperationResult, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
-};
+use obzenflow_runtime::effects::{perform, EffectError, Perform, Port};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -30,35 +24,33 @@ impl TypedPayload for Input {
     const EVENT_TYPE: &'static str = "flowip_122a.archive_gate.input";
 }
 
-#[derive(Debug)]
-struct CountingConnector(Arc<AtomicUsize>);
-struct CountingWriter;
+#[derive(Clone, Debug, Serialize)]
+struct Record;
 
-#[async_trait]
-impl SinkConnector for CountingConnector {
-    type Input = Input;
-    type Writer = CountingWriter;
+#[obzenflow_runtime::effects::port]
+trait ArchiveGatePort: Send + Sync {
+    #[effect(type = "archive_gate.record", at_least_once, records = reply)]
+    fn record(&self, request: &Record) -> Result<(), EffectError>;
+}
 
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::destination("archive-gate", DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
+struct ArchiveGateDestination;
 
-    async fn open(&self, _context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(CountingWriter)
+#[obzenflow_runtime::effects::system("archive-gate")]
+impl ArchiveGatePort for ArchiveGateDestination {
+    fn record(&self, _: &Record) -> Result<(), EffectError> {
+        Ok(())
     }
 }
 
-#[async_trait]
-impl SinkWriter for CountingWriter {
-    type Input = Input;
+fn counting_destination(opens: Arc<AtomicUsize>) -> Perform<fn(&Input) -> Record, Input, Record> {
+    perform(record_input as fn(&Input) -> Record).through(Port::deferred(move || {
+        opens.fetch_add(1, Ordering::SeqCst);
+        Ok(ArchiveGateDestination)
+    }))
+}
 
-    async fn write(&mut self, _input: Input, _context: SinkWriteContext) -> SinkWriteResult {
-        Ok(SinkWriteReport::terminal(
-            SinkTerminalOutcome::success(None).with_items(1),
-        ))
-    }
+fn record_input(_: &Input) -> Record {
+    Record
 }
 
 fn guarded_flow(
@@ -69,7 +61,7 @@ fn guarded_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         materialisations.fetch_add(1, Ordering::SeqCst);
         let inputs = sources::ValuesSource::new([Input(1)]);
-        let output = CountingConnector(opens);
+        let output = counting_destination(opens);
         Ok(flow! {
             name: "archive_manifest_epoch_gate",
             journals: disk_journals(output_root),
@@ -87,7 +79,7 @@ fn guarded_flow(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn every_non_current_manifest_shape_fails_before_materialisation_or_connector_io() {
+async fn stale_manifest_refused_before_materialization() {
     for verb in ["--replay-from", "--resume-from"] {
         for (name, manifest) in [
             ("missing", r#"{"flow_id":"old"}"#),
@@ -134,7 +126,7 @@ async fn every_non_current_manifest_shape_fails_before_materialisation_or_connec
             assert_eq!(
                 opens.load(Ordering::SeqCst),
                 0,
-                "{name} manifest opened the sink connector"
+                "{name} manifest resolved the sink's port"
             );
             assert!(
                 !output_root.exists(),
@@ -182,7 +174,7 @@ impl obzenflow_adapters::middleware::MiddlewareFactory for CountingObserverFacto
 }
 
 #[tokio::test]
-async fn invalid_later_stage_plan_prevents_all_middleware_and_connector_materialisation() {
+async fn invalid_later_plan_prevents_materialization() {
     use obzenflow_adapters::middleware::circuit_breaker;
 
     let root = tempfile::tempdir().unwrap();
@@ -191,7 +183,7 @@ async fn invalid_later_stage_plan_prevents_all_middleware_and_connector_material
     let materialisations = Arc::new(AtomicUsize::new(0));
     let opens = Arc::new(AtomicUsize::new(0));
     let observer = CountingObserverFactory(materialisations.clone());
-    let output = CountingConnector(opens.clone());
+    let output = counting_destination(opens.clone());
     let definition = FlowDefinition::materialize(move |_| {
         let inputs = sources::ValuesSource::new([Input(1)]);
         Ok(flow! {
@@ -226,7 +218,7 @@ async fn invalid_later_stage_plan_prevents_all_middleware_and_connector_material
 }
 
 #[tokio::test]
-async fn empty_observer_labels_fail_before_any_materialisation_or_connector_io() {
+async fn empty_observer_label_fails_preflight() {
     use obzenflow_adapters::middleware::source_poll_observer;
     for label in ["", "  "] {
         let root = tempfile::tempdir().unwrap();
@@ -235,7 +227,7 @@ async fn empty_observer_labels_fail_before_any_materialisation_or_connector_io()
         let materialisations = Arc::new(AtomicUsize::new(0));
         let opens = Arc::new(AtomicUsize::new(0));
         let observer = CountingObserverFactory(materialisations.clone());
-        let output = CountingConnector(opens.clone());
+        let output = counting_destination(opens.clone());
         let definition = FlowDefinition::materialize(move |_| {
             let inputs = sources::ValuesSource::new([Input(1)]);
             Ok(flow! {
@@ -284,7 +276,7 @@ impl obzenflow_runtime::stages::common::handlers::IngressDecoder for HostedInput
 }
 
 #[tokio::test]
-async fn hosted_slot_ownership_fails_before_materialisation_or_connector_io() {
+async fn claimed_hosted_slot_fails_preflight() {
     use obzenflow_adapters::middleware::rate_limit;
     use obzenflow_core::ingress::{FilledHostedIngress, HostedIngressBindingSlot};
     use obzenflow_dsl::async_infinite_source;
@@ -297,7 +289,7 @@ async fn hosted_slot_ownership_fails_before_materialisation_or_connector_io() {
         let materialisations = Arc::new(AtomicUsize::new(0));
         let opens = Arc::new(AtomicUsize::new(0));
         let observer = CountingObserverFactory(materialisations.clone());
-        let output = CountingConnector(opens.clone());
+        let output = counting_destination(opens.clone());
         let slot = HostedIngressBindingSlot::new("orders");
         let previous_stage = obzenflow_core::StageId::new();
         if prefilled {

@@ -6,9 +6,7 @@ use super::config::{
     CircuitBreakerConfigError, CircuitBreakerFailureMode, EffectCircuitBreakerConfig,
     HalfOpenPolicy, OpenForCurve, OpenForMode, RateThreshold,
 };
-use super::hook_adapters::{
-    CircuitBreakerCompletionGate, CircuitBreakerSinkPolicy, CircuitBreakerSourcePolicy,
-};
+use super::hook_adapters::{CircuitBreakerCompletionGate, CircuitBreakerSourcePolicy};
 use super::state::CircuitBreakerStateViewImpl;
 use super::window::{FailureWindow, FailureWindowState};
 use super::{
@@ -20,8 +18,8 @@ use crate::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints, MiddlewareMaterializationContext,
     MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceAttachmentKind, MiddlewareSurfaceKind, SinkPolicy, SourcePolicy,
-    SourcePollAttachment, TopologyMiddlewareConfigSlot,
+    MiddlewareSurfaceAttachmentKind, MiddlewareSurfaceKind, SourcePolicy, SourcePollAttachment,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_runtime::control_plane::{
     CircuitBreakerMetrics, CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView,
@@ -432,7 +430,6 @@ impl MiddlewareFactory for CircuitBreaker {
             self.override_key().family_label(),
             vec![
                 MiddlewareSurfaceKind::SourcePoll,
-                MiddlewareSurfaceKind::SinkDelivery,
                 MiddlewareSurfaceKind::Effect,
             ],
         )
@@ -520,28 +517,6 @@ impl MiddlewareFactory for CircuitBreaker {
                         policy,
                         completion_gate: Some(completion_gate),
                     }),
-                    MaterializationClaim::CircuitBreaker,
-                    context,
-                )
-                .map_err(|error| {
-                    MiddlewareFactoryError::materialization_failed(
-                        self.label(),
-                        &context.config.name,
-                        error,
-                    )
-                })
-            }
-            MiddlewareSurface::SinkDelivery(_) => {
-                let (breaker, _) = materializer.build_middleware_keyed(
-                    context.config,
-                    context,
-                    MaterializationClaim::CircuitBreaker,
-                    None,
-                )?;
-                let breaker = Arc::new(breaker);
-                let policy: Arc<dyn SinkPolicy> = Arc::new(CircuitBreakerSinkPolicy { breaker });
-                MiddlewareSurfaceAttachment::claimed(
-                    MiddlewareSurfaceAttachmentKind::SinkDelivery(policy),
                     MaterializationClaim::CircuitBreaker,
                     context,
                 )
@@ -796,11 +771,10 @@ mod tests {
     }
 
     #[test]
-    fn standalone_breaker_has_only_structural_source_and_sink_surfaces() {
+    fn standalone_breaker_declares_poll_effect_surfaces() {
         let breaker = crate::middleware::control::circuit_breaker().consecutive_failures(3);
         let declaration = breaker.declaration();
         assert!(declaration.supports(MiddlewareSurfaceKind::SourcePoll));
-        assert!(declaration.supports(MiddlewareSurfaceKind::SinkDelivery));
         assert!(declaration.supports(MiddlewareSurfaceKind::Effect));
     }
 }

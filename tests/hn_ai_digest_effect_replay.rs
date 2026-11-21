@@ -50,7 +50,6 @@ use obzenflow_core::ai::{
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::observability::ObservationRecord;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, ExecutionPayload, RecoveryFact,
 };
@@ -64,12 +63,12 @@ use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, FlowApplicationBuilder};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::effects::{SinkRedeliverySafety, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE};
+use obzenflow_runtime::effects::{
+    perform, EffectError, Port, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::source::{
     FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceInputIdentity,
     SourcePosition, SourceReaderInitContext, SourceRecord,
@@ -232,27 +231,29 @@ impl TypedFiniteSourceHandler for ItemSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[obzenflow_runtime::effects::port]
+trait CollectOutPort: Send + Sync {
+    #[effect(type = "hn_digest_fixture.collect", at_least_once, records = reply)]
+    fn collect(&self, output: &DigestOut) -> Result<(), EffectError>;
+}
+
 struct CollectOut {
     outputs: Arc<Mutex<Vec<DigestOut>>>,
 }
 
-#[async_trait::async_trait]
-impl InlineSink for CollectOut {
-    type Input = DigestOut;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("FLOWIP-128g fixture".to_string()))
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, output: DigestOut) -> Result<(), SinkWriteFailure> {
+#[obzenflow_runtime::effects::system("digest-collector")]
+impl CollectOutPort for CollectOut {
+    fn collect(&self, output: &DigestOut) -> Result<(), EffectError> {
         self.outputs
             .lock()
             .expect("output collector lock")
-            .push(output);
+            .push(output.clone());
         Ok(())
     }
+}
+
+fn collect_into(outputs: Arc<Mutex<Vec<DigestOut>>>) -> Port<dyn CollectOutPort> {
+    Port::to(CollectOut { outputs })
 }
 
 fn run_config(journal_base: &Path, ai: &str) -> PathBuf {
@@ -296,7 +297,7 @@ fn build_flow_with(
     FlowDefinition::materialize(move |_| {
         let items = ItemSource::one_to(items);
         let digest = ai::map(map_role).chunks(1).reduce(ReduceRole).on_eof();
-        let collected = CollectOut { outputs };
+        let collected = perform(|output: &DigestOut| output.clone()).through(collect_into(outputs));
 
         Ok(flow! {
             name: "hn_ai_digest_effect_replay_journal",
@@ -326,7 +327,8 @@ fn build_recovery_flow(
             .chunks(1)
             .reduce(ReduceRole)
             .on_eof();
-        let recovery_collected = CollectOut { outputs };
+        let recovery_collected =
+            perform(|output: &DigestOut| output.clone()).through(collect_into(outputs));
 
         Ok(flow! {
             name: "hn_ai_digest_recovery_composition",
@@ -360,7 +362,8 @@ fn build_credit_flow(
         .reduce(ReduceRole)
         .on_eof();
         let ai_breaker = breaker();
-        let credit_collected = CollectOut { outputs };
+        let credit_collected =
+            perform(|output: &DigestOut| output.clone()).through(collect_into(outputs));
 
         Ok(flow! {
             name: "hn_ai_digest_credit_composition",
@@ -390,7 +393,8 @@ fn build_interruption_flow(
             .reduce(ReduceRole)
             .on_eof();
         let ai_breaker = breaker();
-        let interrupt_collected = CollectOut { outputs };
+        let interrupt_collected =
+            perform(|output: &DigestOut| output.clone()).through(collect_into(outputs));
 
         Ok(flow! {
             name: "hn_ai_digest_chunk_interruption",
@@ -532,57 +536,25 @@ fn assert_grouping_authorship(
 }
 
 #[derive(Debug, PartialEq)]
-struct StableDeliveryReceipt {
-    parent_event_type: String,
-    parent_payload: serde_json::Value,
-    result: serde_json::Value,
-    destination: String,
-    method: serde_json::Value,
-    items: Option<u64>,
+struct StableSinkCall {
+    effect_type: String,
+    request_hash: String,
+    outcome: serde_json::Value,
 }
 
-fn stable_delivery_receipts(
-    parent_events: &[JournalRecord<ChainPayload>],
-    sink_events: &[JournalRecord<ChainPayload>],
-) -> Vec<StableDeliveryReceipt> {
-    let parents = parent_events
-        .iter()
-        .filter_map(|envelope| match &envelope.payload {
-            payload if payload.consumes_data_credit() => Some((
-                envelope.envelope.provenance.event.id,
-                (envelope.event_type().to_string(), envelope.payload()),
-            )),
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
-
+fn stable_sink_calls(sink_events: &[JournalRecord<ChainPayload>]) -> Vec<StableSinkCall> {
     sink_events
         .iter()
         .filter_map(|envelope| {
-            let ChainPayload::Delivery(delivery) = &envelope.payload else {
+            let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &envelope.payload
+            else {
                 return None;
             };
-            let parent_id = envelope
-                .envelope
-                .provenance
-                .event
-                .causality
-                .parent_ids
-                .first()
-                .expect("a sink delivery receipt retains its causal parent");
-            let (parent_event_type, parent_payload) = parents.get(parent_id).unwrap_or_else(|| {
-                panic!("sink delivery parent {parent_id} is journalled upstream")
-            });
-
-            Some(StableDeliveryReceipt {
-                parent_event_type: parent_event_type.clone(),
-                parent_payload: parent_payload.clone(),
-                result: serde_json::to_value(&delivery.result)
-                    .expect("delivery result serialises for stable comparison"),
-                destination: delivery.destination.clone(),
-                method: serde_json::to_value(&delivery.delivery_method)
-                    .expect("delivery method serialises for stable comparison"),
-                items: delivery.items_delivered,
+            Some(StableSinkCall {
+                effect_type: record.descriptor.effect_type.to_string(),
+                request_hash: record.descriptor.canonical_input_hash.to_string(),
+                outcome: serde_json::to_value(&record.outcome)
+                    .expect("a sink call's outcome serializes for stable comparison"),
             })
         })
         .collect()
@@ -876,15 +848,11 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
         "impl AiRole<Chunk<FormattedStory>> for HnDigest {",
         "impl AiRole<Partials<FormattedStory, HnDigestGroupSummary>> for HnDigest {",
         "let hn_source = HttpPullSource::new(decoder, http_source_config);",
-        "let console_sink = sinks::ConsoleSink::new(format_digest_summary_for_console);",
-        "let postgres_sink = HnDigestPostgresConfig::from_env()",
-        ".and_then(build_digest_postgres_sink)",
-        "HnDigestSummary => handler_set!(",
-        "handler_set!(console_sink, postgres_sink)",
-        ".insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)?",
-        ".batch_size(1)?",
-        ".redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)",
-        "digest_summary = sink!(",
+        "#[effect(type = \"hn.digest.publish\", at_least_once, records = reply)]",
+        "PostgresStatement::insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)",
+        "DigestOutput::Console => Port::to(ConsoleDigest),",
+        "DigestOutput::Postgres => Port::deferred(PostgresDigest::from_env),",
+        "digest_summary = sink!(HnDigestSummary => publish);",
     ] {
         assert!(
             flow_source.contains(required),
@@ -924,6 +892,8 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
         "chat_registration",
         "HnSinkSelectionProbe",
         "let digest_summary = sink!(",
+        "handler_set!",
+        "redelivery_safety",
     ] {
         assert!(
             !flow_source.contains(forbidden),
@@ -937,8 +907,8 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
     assert!(checked_config.contains("endpoint = \"ollama\""));
     assert!(checked_config.contains("model = \"llama3.1:8b\""));
     assert!(!checked_config.contains("provider ="));
-    assert!(checked_config.contains("[sinks]"));
-    assert!(checked_config.contains("handler = \"console_sink\""));
+    assert!(!checked_config.contains("[sinks]"));
+    assert!(checked_config.contains("output = \"console\""));
     assert!(checked_config.contains("[app]"));
     assert!(checked_config.contains("source = \"mock\""));
     for retired in [
@@ -1336,9 +1306,9 @@ async fn live_history_replays_without_connecting_or_invoking_chat() {
     let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
     let replay_reduce = stage_envelopes(&replay_archive, "digest__reduce").await;
     assert_grouping_authorship(&replay_archive, &replay_items, &replay_chunk, groups);
-    assert_eq!(
-        *replay_outputs.lock().unwrap(),
-        vec![DigestOut { total: 15 }]
+    assert!(
+        replay_outputs.lock().unwrap().is_empty(),
+        "replay calls no sink system"
     );
 
     assert_eq!(effect_evidence_ids(&replay_map), live_map_ids);
@@ -1858,7 +1828,7 @@ async fn resume_reproduces_a_map_that_passed_grouping_ended_through() {
 
 #[cfg(feature = "e2e")]
 #[tokio::test(flavor = "multi_thread")]
-async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt() {
+async fn postgres_output_inserts_one_hn_digest() {
     let pool = postgres_support::pool().await;
     let schema = postgres_support::required_env("OBZENFLOW_POSTGRES_SCHEMA");
     sqlx::query(&format!(
@@ -1869,16 +1839,17 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     .expect("reset the isolated HN digest destination");
 
     let temp = tempfile::tempdir().expect("temporary PostgreSQL HN-flow journal root");
-    let journal_base = temp.path().join("journals");
+    let journal_base = temp.path().join("target/hn-ai-digest-logs");
     let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let inputs = config::HnRunInputs {
         max_stories: 5,
         poll_timeout_secs: 10,
-        source_rate_limit: 1_000.0,
+        source_rate_limit: config::DEFAULT_HN_SOURCE_RATE_LIMIT,
         max_stories_per_group: 5,
         interests: Some("runtime protocols".to_string()),
         mode_label: "mock".to_string(),
         base_url: server.base_url(),
+        output: config::DigestOutput::Postgres,
     };
     let config_path = witness_config(temp.path(), |_| {});
     let models = recording();
@@ -1901,12 +1872,11 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     assert!(server.request_count() > 0);
     assert_eq!(models.call_count(), 2);
 
-    let row_count = sqlx::query_scalar::<_, i64>(&format!(
-        "SELECT COUNT(*) FROM \"{schema}\".hn_digest_summaries"
-    ))
-    .fetch_one(&pool)
-    .await
-    .expect("count the HN digest destination rows");
+    let count_rows = format!("SELECT COUNT(*) FROM \"{schema}\".hn_digest_summaries");
+    let row_count = sqlx::query_scalar::<_, i64>(&count_rows)
+        .fetch_one(&pool)
+        .await
+        .expect("count the HN digest destination rows");
     assert_eq!(row_count, 1);
 
     let row = sqlx::query_as::<
@@ -1948,27 +1918,59 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     );
 
     let archive = latest_run_dir(&journal_base);
-    let reduce = stage_envelopes(&archive, "digest__reduce").await;
     let sink = stage_envelopes(&archive, "digest_summary").await;
-    let receipts = stable_delivery_receipts(&reduce, &sink);
-    let [receipt] = receipts.as_slice() else {
+    let calls = stable_sink_calls(&sink);
+    let [call] = calls.as_slice() else {
         panic!(
-            "the PostgreSQL HN treatment must emit one receipt, found {}",
-            receipts.len()
+            "the PostgreSQL HN treatment must settle one sink call, found {}",
+            calls.len()
         );
     };
-    assert_eq!(
-        receipt.destination,
-        format!("postgres.{schema}.hn_digest_summaries")
+    assert_eq!(call.effect_type, "hn.digest.publish");
+    assert_eq!(call.outcome["outcome"], "succeeded");
+
+    let mut offline_config = shipped_config("obzenflow.postgres.toml");
+    offline_config["app"]["max_stories"] = 5.into();
+    offline_config["app"]["poll_timeout_secs"] = 10.into();
+    offline_config["app"]
+        .as_table_mut()
+        .expect("app settings")
+        .insert("interests".into(), "runtime protocols".into());
+    offline_config["app"]["digest"]["group_max_stories"] = 5.into();
+    let offline_path = temp.path().join("offline.toml");
+    std::fs::write(&offline_path, toml::to_string(&offline_config).unwrap()).unwrap();
+    let test_binary = std::env::current_exe().unwrap();
+    let example = test_binary
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join("examples")
+        .join(format!("hn_ai_digest_demo{}", std::env::consts::EXE_SUFFIX));
+    let replay = std::process::Command::new(example)
+        .current_dir(temp.path())
+        .env_remove("OBZENFLOW_POSTGRES_URL")
+        .arg("--config")
+        .arg(offline_path)
+        .arg("--replay-from")
+        .arg(&archive)
+        .arg("--verify")
+        .output()
+        .expect("run the HN example built by the PostgreSQL acceptance suite");
+    assert!(
+        replay.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
     );
-    assert_eq!(
-        receipt.method,
-        serde_json::to_value(DeliveryMethod::DatabaseInsert {
-            table: format!("{schema}.hn_digest_summaries"),
-        })
-        .expect("database-insert receipt method serialises")
-    );
-    assert_eq!(receipt.items, Some(1));
+    let replay_archive = latest_run_dir(&journal_base);
+    assert_ne!(replay_archive, archive);
+    let replayed = stage_envelopes(&replay_archive, "digest_summary").await;
+    assert_eq!(stable_sink_calls(&replayed), calls);
+    let rows_after_replay = sqlx::query_scalar::<_, i64>(&count_rows)
+        .fetch_one(&pool)
+        .await
+        .expect("count the rows after offline replay");
+    assert_eq!(rows_after_replay, row_count);
 }
 
 fn shipped_config(file: &str) -> toml::Table {
@@ -2068,6 +2070,7 @@ async fn digest_rate_limit_delivers_summary() {
         interests: None,
         mode_label: "mock".to_string(),
         base_url: server.base_url(),
+        output: config::DigestOutput::Console,
     };
     let config_path = witness_config(temp.path(), |_| {});
     let calls = Arc::new(AtomicUsize::new(0));
@@ -2138,6 +2141,7 @@ async fn hn_group_size_zero_fails_the_build_naming_the_stage() {
         interests: None,
         mode_label: "mock".to_string(),
         base_url: server.base_url(),
+        output: config::DigestOutput::Console,
     };
     let config_path = witness_config(temp.path(), |_| {});
     let models = recording();
@@ -2176,6 +2180,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         interests: Some("runtime protocols".to_string()),
         mode_label: "mock".to_string(),
         base_url: server.base_url(),
+        output: config::DigestOutput::Console,
     };
     let periodic_observability = |config: &mut toml::Table| {
         config
@@ -2221,10 +2226,10 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let live_map = stage_envelopes(&live_archive, "digest__map").await;
     let live_reduce = stage_envelopes(&live_archive, "digest__reduce").await;
     let live_digest_summary = stage_envelopes(&live_archive, "digest_summary").await;
-    let live_delivery_receipts = stable_delivery_receipts(&live_reduce, &live_digest_summary);
+    let live_sink_calls = stable_sink_calls(&live_digest_summary);
     assert!(
-        !live_delivery_receipts.is_empty(),
-        "the production digest summary must journal at least one stable delivery receipt"
+        !live_sink_calls.is_empty(),
+        "the production digest summary must settle at least one sink call"
     );
     let map_calls = live_chunk
         .iter()
@@ -2308,10 +2313,9 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
     let replay_reduce = stage_envelopes(&replay_archive, "digest__reduce").await;
     let replay_digest_summary = stage_envelopes(&replay_archive, "digest_summary").await;
-    let replay_delivery_receipts = stable_delivery_receipts(&replay_reduce, &replay_digest_summary);
     assert_eq!(effect_evidence_ids(&replay_map), live_map_ids);
     assert_eq!(effect_evidence_ids(&replay_reduce), live_reduce_ids);
-    assert_eq!(replay_delivery_receipts, live_delivery_receipts);
+    assert_eq!(stable_sink_calls(&replay_digest_summary), live_sink_calls);
 
     let verification = verify_run_dirs(
         &live_archive,
@@ -2606,7 +2610,10 @@ async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_names_anot
         ))
         .await
         .expect("strict replay binds the recorded endpoint and reads no endpoint table");
-    assert_eq!(*outputs.lock().unwrap(), vec![DigestOut { total: 15 }]);
+    assert!(
+        outputs.lock().unwrap().is_empty(),
+        "replay calls no sink system"
+    );
     assert_eq!(replay.connect_count() + replay.call_count(), 0);
 }
 
@@ -2703,7 +2710,8 @@ fn build_keyed_flow(
             .reduce(ReduceRole)
             .on_eof();
         let ai_breaker = breaker();
-        let keyed_collected = CollectOut { outputs };
+        let keyed_collected =
+            perform(|output: &DigestOut| output.clone()).through(collect_into(outputs));
 
         Ok(flow! {
             name: "hn_ai_digest_keyed",
@@ -3052,9 +3060,8 @@ fn build_one_role_flow(journal_base: PathBuf, reduce_version: &'static str) -> F
         let items = ItemSource::one_to(3);
         let role = OneRole { reduce_version };
         let digest = ai::map(role).chunks(1).reduce(role).on_eof();
-        let collected = CollectOut {
-            outputs: Arc::new(Mutex::new(Vec::new())),
-        };
+        let collected = perform(|output: &DigestOut| output.clone())
+            .through(collect_into(Arc::new(Mutex::new(Vec::new()))));
 
         Ok(flow! {
             name: "hn_ai_digest_one_role",
@@ -3352,9 +3359,9 @@ async fn resume_keeps_the_recorded_model_for_an_in_doubt_call_and_configures_new
         .await
         .expect("strict replay of the resumed lineage reads both recorded models");
     assert_eq!(replay.connect_count() + replay.call_count(), 0);
-    assert_eq!(
-        *replay_outputs.lock().unwrap(),
-        vec![DigestOut { total: 15 }]
+    assert!(
+        replay_outputs.lock().unwrap().is_empty(),
+        "replay calls no sink system"
     );
 }
 

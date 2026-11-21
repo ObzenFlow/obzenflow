@@ -1,5 +1,5 @@
 {
-  "journal_schema_version": "23.0",
+  "journal_schema_version": "24.0",
 
   "obzenflow_version": "0.1.0",
   "flow_id": "flow_01J00000000000000000000000",
@@ -34,7 +34,7 @@
     "output": {
       "dsl_var": "output",
       "stage_type": "Sink",
-      "is_effectful": false,
+      "is_effectful": true,
       "stage_id": "stage_01J00000000000000000000003",
       "stage_logic_version": "1",
       "data_journal_file": "Sink_output.log",

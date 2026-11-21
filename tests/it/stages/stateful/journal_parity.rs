@@ -344,7 +344,12 @@ fn facts<T: TypedPayload>(events: &[JournalRecord<ChainPayload>]) -> Vec<T> {
 fn delivery_count(events: &[JournalRecord<ChainPayload>]) -> usize {
     events
         .iter()
-        .filter(|envelope| matches!(envelope.payload, ChainPayload::Delivery(_)))
+        .filter(|envelope| {
+            matches!(
+                envelope.payload,
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+            )
+        })
         .count()
 }
 

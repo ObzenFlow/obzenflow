@@ -2,19 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
-use obzenflow_core::{
-    event::chain_event::ChainEvent, event::payloads::delivery_payload::DeliveryMethod,
-};
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_adapters::sinks::RecordingSink;
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::stateful::emit;
 use obzenflow_runtime::stages::stateful::strategies::accumulators::{
     ConflateTyped, GroupByTyped, ReduceTyped,
@@ -96,54 +90,9 @@ impl TypedFiniteSourceHandler for TransactionSource {
     }
 }
 
-#[derive(Debug)]
-struct CollectingSink<T> {
-    events: Arc<Mutex<Vec<ChainEvent>>>,
-    _input: std::marker::PhantomData<fn() -> T>,
-}
-
-impl<T> Clone for CollectingSink<T> {
-    fn clone(&self) -> Self {
-        Self {
-            events: Arc::clone(&self.events),
-            _input: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T> CollectingSink<T> {
-    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
-        Self {
-            events,
-            _input: std::marker::PhantomData,
-        }
-    }
-}
-
-#[async_trait]
-impl<T> InlineSink for CollectingSink<T>
-where
-    T: TypedPayload + Send + Sync + 'static,
-{
-    type Input = T;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("collect".to_string()))
-    }
-
-    async fn write(&mut self, input: T) -> Result<(), SinkWriteFailure> {
-        self.events
-            .lock()
-            .unwrap()
-            .push(input.to_event(WriterId::from(StageId::new())));
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_for_flow = events.clone();
+    let (collecting_sink, aggregates) = RecordingSink::<ProductStatsUpdate>::new();
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let transaction_source = TransactionSource::new(10);
         let sales_by_product = GroupByTyped::new(
@@ -160,7 +109,6 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
         )
         .emit(emit::on_eof)
         .all_groups();
-        let collecting_sink = CollectingSink::<ProductStatsUpdate>::new(events_for_flow);
 
         Ok(flow! {
             name: "stateful_primitives_groupby_test",
@@ -185,11 +133,6 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
         .await
         .expect("flow should complete");
 
-    let results = events.lock().unwrap();
-    let aggregates: Vec<_> = results
-        .iter()
-        .filter(|e| e.event_type() == ProductStatsUpdate::event_type_name())
-        .collect();
     // Two product ids -> one aggregate per key.
     assert_eq!(aggregates.len(), 2);
 }
@@ -207,8 +150,7 @@ impl TypedPayload for TotalStats {
 
 #[tokio::test]
 async fn reduce_with_on_eof_emits_single_total() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_for_flow = events.clone();
+    let (collecting_sink, reduced) = RecordingSink::<TotalStats>::new();
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let transaction_source = TransactionSource::new(5);
         let totals = ReduceTyped::new(
@@ -224,7 +166,6 @@ async fn reduce_with_on_eof_emits_single_total() {
             },
         )
         .emit(emit::on_eof);
-        let collecting_sink = CollectingSink::<TotalStats>::new(events_for_flow);
 
         Ok(flow! {
             name: "stateful_primitives_reduce_test",
@@ -249,25 +190,18 @@ async fn reduce_with_on_eof_emits_single_total() {
         .await
         .expect("flow should complete");
 
-    let results = events.lock().unwrap();
-    let reduced: Vec<_> = results
-        .iter()
-        .filter(|e| e.event_type() == TotalStats::event_type_name())
-        .collect();
     assert_eq!(reduced.len(), 1);
 }
 
 #[tokio::test]
 async fn conflate_emits_latest_value_per_key() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_for_flow = events.clone();
+    let (collecting_sink, latest) = RecordingSink::<TransactionEvent>::new();
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let transaction_source = TransactionSource::new(8);
         let latest_by_product =
             ConflateTyped::new(|event: &TransactionEvent| event.product_id.clone())
                 .emit(emit::per_window(Duration::from_millis(1)))
                 .updated_keys();
-        let collecting_sink = CollectingSink::<TransactionEvent>::new(events_for_flow);
 
         Ok(flow! {
             name: "stateful_primitives_conflate_test",
@@ -292,6 +226,5 @@ async fn conflate_emits_latest_value_per_key() {
         .await
         .expect("flow should complete");
 
-    let results = events.lock().unwrap();
-    assert!(!results.is_empty());
+    assert!(!latest.is_empty());
 }

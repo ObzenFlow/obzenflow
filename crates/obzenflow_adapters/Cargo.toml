@@ -31,19 +31,16 @@ tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 csv = { workspace = true }
 http = { workspace = true }
 ring = { workspace = true }
 saphyr-parser = { workspace = true }
-sqlx = { workspace = true, optional = true }
-url = { workspace = true, optional = true }
 
 [features]
 default = []
-postgres = ["dep:sqlx", "dep:url"]
 test-support = ["obzenflow_runtime/test-support"]
 
 [dev-dependencies]
@@ -56,11 +53,6 @@ tempfile = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it.rs"
-
-[[test]]
-name = "it_postgres_test_support"
-path = "tests/it_postgres_test_support.rs"
-required-features = ["postgres", "test-support"]
 
 [lints]
 workspace = true

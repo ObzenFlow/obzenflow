@@ -3,17 +3,16 @@
 // https://obzenflow.dev
 
 use anyhow::Result;
-use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::Outcomes;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -231,27 +230,25 @@ impl TypedTransformHandler for IterationTransform {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DoneCounterSink {
+#[derive(Clone, Debug, Serialize)]
+struct SeedKind {
+    kind: String,
+}
+
+#[obzenflow_runtime::effects::port]
+trait DoneCounterPort: Send + Sync {
+    #[effect(type = "cycle_guard_fan_out.count_done", at_least_once, records = reply)]
+    fn count(&self, seed: &SeedKind) -> Result<(), EffectError>;
+}
+
+struct DoneCounter {
     done_count: Arc<AtomicU64>,
 }
 
-impl DoneCounterSink {
-    fn new(done_count: Arc<AtomicU64>) -> Self {
-        Self { done_count }
-    }
-}
-
-#[async_trait]
-impl InlineSink for DoneCounterSink {
-    type Input = SeedEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
-    }
-
-    async fn write(&mut self, event: SeedEvent) -> Result<(), SinkWriteFailure> {
-        if event.kind == "done" {
+#[obzenflow_runtime::effects::system("done-counter")]
+impl DoneCounterPort for DoneCounter {
+    fn count(&self, seed: &SeedKind) -> Result<(), EffectError> {
+        if seed.kind == "done" {
             self.done_count.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
@@ -290,7 +287,12 @@ async fn cycle_guard_fan_out_siblings_converge_without_spurious_abort() -> Resul
         let entry_handler = FanOutEntryTransform::new(entry_processed_for_flow);
         let pass_handler = PassThroughTransform;
         let iter_handler = IterationTransform::new(iter_processed_for_flow);
-        let sink_handler = DoneCounterSink::new(done_count_for_flow);
+        let sink_handler = perform(|event: &SeedEvent| SeedKind {
+            kind: event.kind.clone(),
+        })
+        .through(Port::to(DoneCounter {
+            done_count: done_count_for_flow,
+        }));
 
         Ok(flow! {
             name: "cycle_guard_fan_out_siblings_converge_without_spurious_abort",

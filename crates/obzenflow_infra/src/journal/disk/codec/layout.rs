@@ -135,7 +135,6 @@ pub(super) enum Layout {
 const EVENT_KINDS: &[&str] = &[
     "fact",
     "flow_signal",
-    "delivery",
     "execution",
     "composite_data",
     "system",
@@ -339,13 +338,10 @@ impl Layout {
                 const {
                     &[
                         field("reader_seq", K::Unsigned),
-                        field("receipted_seq", K::Unsigned),
                         field("writer_seq", K::Unsigned),
                         field("last_consumed_event_id", K::Id),
                         field("last_consumed_writer", K::Definition(D::JournalWriter)),
                         field("last_consumed_vector_clock", K::Clock),
-                        field("last_receipted_event_id", K::Id),
-                        field("last_receipted_vector_clock", K::Clock),
                         field("last_emitted_event_id", K::Id),
                         field("last_emitted_writer", K::Definition(D::Writer)),
                     ]

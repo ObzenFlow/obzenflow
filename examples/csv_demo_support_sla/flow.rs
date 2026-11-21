@@ -180,7 +180,6 @@ fn build_flow() -> FlowDefinition {
                 "Effective SLA (h)",
                 "Due Bucket",
             ])
-            .auto_flush(true)
             .build()
             .map_err(resources_failed)?;
 

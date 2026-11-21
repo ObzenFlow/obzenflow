@@ -52,9 +52,8 @@ const FORBIDDEN_DURABLE_DETAILS: &[&str] = &[
 
 #[test]
 fn payments_application_defers_managed_connection_resolution() {
-    let source = include_str!("payments/application.rs");
-    assert!(source.contains("PostgresConnection::deferred_from_env("));
-    assert!(!source.contains("PostgresConnection::from_env("));
+    assert!(include_str!("payments/flow.rs").contains("let store = Port::deferred(move || {"));
+    assert!(!include_str!("payments/application.rs").contains("PostgresConnection::from_env("));
 }
 
 #[tokio::test(flavor = "multi_thread")]

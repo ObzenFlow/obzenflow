@@ -49,6 +49,15 @@ pub(crate) fn commit<T: JournalEvent>(
     options: &AppendOptions<T>,
     records: &[JournalRecord<T::Payload>],
 ) -> Result<JournalRecord<T::Payload>, JournalError> {
+    commit_member(id, event, options.frontier.member(0)?, records)
+}
+
+pub(crate) fn commit_member<T: JournalEvent>(
+    id: JournalId,
+    event: T,
+    frontier: &obzenflow_core::event::CausalFrontier,
+    records: &[JournalRecord<T::Payload>],
+) -> Result<JournalRecord<T::Payload>, JournalError> {
     let run_id = records.first().map_or_else(
         || FlowId::from(*id.as_ulid()),
         |record| record.envelope.provenance.journal.run_id,
@@ -59,7 +68,7 @@ pub(crate) fn commit<T: JournalEvent>(
         CausalCoordinate::new(id.into()),
         *event.id(),
         previous.as_ref(),
-        &options.frontier,
+        frontier,
     )?;
     JournalRecord::commit_event(
         event,
@@ -87,20 +96,4 @@ pub(crate) fn fact_descriptor(name: &str, version: u32) -> obzenflow_core::Event
         payload_schema_version: std::num::NonZeroU32::new(version)
             .expect("positive fixture version"),
     }
-}
-
-#[cfg(test)]
-pub(crate) fn delivery_subject(
-    event_id: obzenflow_core::EventId,
-) -> obzenflow_core::event::payloads::delivery_payload::DeliverySubject {
-    let mut event = obzenflow_core::event::ChainEventFactory::data_event(
-        obzenflow_core::StageId::new().into(),
-        "test.event",
-        std::num::NonZeroU32::MIN,
-        serde_json::json!({}),
-    );
-    event.id = event_id;
-    obzenflow_core::event::payloads::delivery_payload::DeliverySubject::from_record(
-        &committed_input(obzenflow_core::JournalWriterId::new(), event),
-    )
 }

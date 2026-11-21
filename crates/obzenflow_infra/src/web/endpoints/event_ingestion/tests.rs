@@ -8,7 +8,6 @@
 use super::*;
 use crate::journal::{disk_journals, memory_journals, MemoryJournal};
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{JournalEvent, SourceDiagnosticReason, SystemEvent, SystemPayload};
 use obzenflow_core::id::{JournalId, SystemId};
 use obzenflow_core::ingress::{
@@ -22,9 +21,9 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{HttpMethod, ManagedResponse, Request, Response};
 use obzenflow_core::{ChainEvent, EventId, JournalRecord, StageId};
 use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
+use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::pipeline::ingress::IngressEvidenceWriter;
 use obzenflow_runtime::pipeline::PipelineState;
-use obzenflow_runtime::stages::common::handlers::{InlineSink, SinkDescription, SinkWriteFailure};
 use obzenflow_runtime::stages::HostedSubmission;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -848,33 +847,44 @@ async fn a_valid_webhook_signature_passes_authentication() {
 
 /// Acknowledgement follows the source commit, never delivery, so tests read
 /// admissions from the source journal and the sink only completes the graph.
-/// A held sink keeps its run from completing until released.
-#[derive(Debug, Clone, Default)]
-struct DiscardSink {
-    hold: Option<Hold>,
-}
+#[derive(Debug, Clone)]
+struct DiscardSink;
 
-/// Signals each arriving row, then waits for the release.
 #[derive(Debug, Clone, Default)]
 struct Hold {
     arrived: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Notify>,
+    released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
-#[async_trait]
-impl InlineSink for DiscardSink {
-    type Input = Order;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Discard".to_string()))
-            .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+impl Hold {
+    fn arrive_and_wait(&self) {
+        self.arrived.notify_one();
+        let (released, condvar) = &*self.released;
+        let released = released.lock().unwrap();
+        drop(condvar.wait_while(released, |released| !*released).unwrap());
     }
 
-    async fn write(&mut self, _event: Order) -> Result<(), SinkWriteFailure> {
-        if let Some(hold) = &self.hold {
-            hold.arrived.notify_one();
-            hold.release.notified().await;
-        }
+    fn release(&self) {
+        let (released, condvar) = &*self.released;
+        *released.lock().unwrap() = true;
+        condvar.notify_all();
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct Discard;
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait DiscardOrderPort {
+    #[effect(type = "test.ingress_discard", at_least_once, records = reply)]
+    async fn discard(&self, request: &Discard) -> Result<(), EffectError>;
+}
+
+#[obzenflow_runtime::effects::system("ingress-discard")]
+#[async_trait]
+impl DiscardOrderPort for DiscardSink {
+    async fn discard(&self, _: &Discard) -> Result<(), EffectError> {
         Ok(())
     }
 }
@@ -938,8 +948,15 @@ async fn wait_until_ready(health: &dyn HttpEndpoint) {
 async fn ingress_flow(
     source: HostedIngressSource<TestIngress<Order>>,
     journals_root: Option<PathBuf>,
-    sink: DiscardSink,
+    hold: Option<Hold>,
 ) -> FlowHandle {
+    let sink = perform(move |_: &Order| {
+        if let Some(hold) = &hold {
+            hold.arrive_and_wait();
+        }
+        Discard
+    })
+    .through(Port::to(DiscardSink));
     FlowDefinition::materialize(move |_runtime_config| {
         Ok(match journals_root {
             Some(root) => flow! {
@@ -1002,7 +1019,7 @@ impl RunningIngress {
         let batch = take_endpoint(&mut endpoints, "/batch");
         let health = take_endpoint(&mut endpoints, "/health");
 
-        let handle = ingress_flow(source, journals_root, DiscardSink::default()).await;
+        let handle = ingress_flow(source, journals_root, None).await;
         let wired = wiring.expect("ingress surface wiring")(WebSurfaceWiringContext {
             pipeline_state: handle.state_receiver(),
             ingress_evidence: handle.ingress_evidence(),
@@ -1231,7 +1248,6 @@ async fn a_strict_replay_refuses_ingress_throughout() {
         replay: Some(ReplayBootstrap {
             archive_path: archive,
             allow_incomplete_archive: true,
-            allow_duplicate_sink_delivery: false,
             verb: ReplayVerb::Replay,
         }),
         ..BootstrapConfig::default()
@@ -1251,10 +1267,7 @@ async fn a_strict_replay_refuses_ingress_throughout() {
         .find(|endpoint| endpoint.path().ends_with("/events"))
         .expect("events endpoint");
     let hold = Hold::default();
-    let sink = DiscardSink {
-        hold: Some(hold.clone()),
-    };
-    let handle = ingress_flow(source, Some(root), sink).await;
+    let handle = ingress_flow(source, Some(root), Some(hold.clone())).await;
     let wired = wiring.expect("ingress surface wiring")(WebSurfaceWiringContext {
         pipeline_state: handle.state_receiver(),
         ingress_evidence: handle.ingress_evidence(),
@@ -1270,14 +1283,12 @@ async fn a_strict_replay_refuses_ingress_throughout() {
         }
     };
 
-    // The replay starts itself and its sink holds the replayed row, so the
-    // request lands mid-replay.
     tokio::time::timeout(Duration::from_secs(5), hold.arrived.notified())
         .await
-        .expect("the replay delivers its row");
+        .expect("the replay builds its row's request");
     refuse("during", "not_ready").await;
     let system = handle.system_journal().expect("system journal");
-    hold.release.notify_one();
+    hold.release();
     tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
         .await
         .expect("timed out waiting for the replay")
@@ -1401,7 +1412,7 @@ async fn a_hosted_rate_limiter_refuses_through_a_running_flow() {
     let (_, mut endpoints, wiring, _) = http.into_surface().into_parts();
     let events = take_endpoint(&mut endpoints, "/events");
     let health = take_endpoint(&mut endpoints, "/health");
-    let sink = DiscardSink::default();
+    let sink = perform(|_: &Order| Discard).through(Port::to(DiscardSink));
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         Ok(flow! {
             name: "flowip_084l_limited_ingress",

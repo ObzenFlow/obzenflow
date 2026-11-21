@@ -52,7 +52,7 @@ fn ordinary_reader_lock_wait_leaves_blocking_worker_available_for_append() {
             // the private commit unit permits safe cleanup of the old bug
             // before any append job has been submitted.
             let preparation_gate = journal.last_commit.write().await;
-            let frontier = CausalFrontier::default();
+            let frontier = obzenflow_core::journal::AppendFrontiers::Shared(Default::default());
             let mut append = Box::pin(async {
                 if grouped {
                     journal

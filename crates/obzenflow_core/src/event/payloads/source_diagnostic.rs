@@ -8,7 +8,6 @@
 //! connector code. Field names are compile-time strings, so input-controlled
 //! keys, rejected values and parser text cannot be authored into one.
 
-use super::sink_operation_payload::{is_error_code_namespace, is_error_code_value};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt;
@@ -222,8 +221,8 @@ impl SourceLocation {
     }
 }
 
-/// A bounded, connector-namespaced code such as `http.status` / `401`. Evidence
-/// only, never a metric label. Shares the sink destination code grammar.
+/// A bounded, connector-namespaced diagnostic code such as `http.status` / `401`.
+/// Codes are recorded as evidence and excluded from metric labels.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "RawSourceErrorCode")]
 pub struct SourceErrorCode {
@@ -246,38 +245,43 @@ impl TryFrom<RawSourceErrorCode> for SourceErrorCode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SourceErrorCodeError {
+    #[error(
+        "source error code namespace must be 1..={} bytes of [a-z0-9._-]",
+        SourceErrorCode::MAX_NAMESPACE_BYTES
+    )]
     InvalidNamespace,
+    #[error(
+        "source error code value must be 1..={} bytes of [A-Za-z0-9._:-]",
+        SourceErrorCode::MAX_VALUE_BYTES
+    )]
     InvalidValue,
 }
 
-impl fmt::Display for SourceErrorCodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidNamespace => {
-                f.write_str("source error code namespace must be 1..=48 bytes of [a-z0-9._-]")
-            }
-            Self::InvalidValue => {
-                f.write_str("source error code value must be 1..=64 bytes of [A-Za-z0-9._:-]")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SourceErrorCodeError {}
-
 impl SourceErrorCode {
+    const MAX_NAMESPACE_BYTES: usize = 48;
+    const MAX_VALUE_BYTES: usize = 64;
+
     pub fn try_new(
         namespace: impl Into<String>,
         value: impl Into<String>,
     ) -> Result<Self, SourceErrorCodeError> {
         let namespace = namespace.into();
-        let value = value.into();
-        if !is_error_code_namespace(&namespace) {
+        let valid_namespace = (1..=Self::MAX_NAMESPACE_BYTES).contains(&namespace.len())
+            && namespace
+                .bytes()
+                .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'));
+        if !valid_namespace {
             return Err(SourceErrorCodeError::InvalidNamespace);
         }
-        if !is_error_code_value(&value) {
+
+        let value = value.into();
+        let valid_value = (1..=Self::MAX_VALUE_BYTES).contains(&value.len())
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            });
+        if !valid_value {
             return Err(SourceErrorCodeError::InvalidValue);
         }
         Ok(Self { namespace, value })
@@ -470,21 +474,45 @@ mod tests {
     }
 
     #[test]
-    fn codes_share_the_sink_grammar_on_construction_and_decoding() {
-        let code = SourceErrorCode::try_new("http.status", "401").unwrap();
-        assert_eq!((code.namespace(), code.value()), ("http.status", "401"));
-        assert_eq!(
-            SourceErrorCode::try_new("HTTP", "401"),
-            Err(SourceErrorCodeError::InvalidNamespace)
-        );
-        assert_eq!(
-            SourceErrorCode::try_new("http.status", "not allowed"),
-            Err(SourceErrorCodeError::InvalidValue)
-        );
-        assert!(serde_json::from_value::<SourceErrorCode>(
-            json!({ "namespace": "http.status", "value": "a b" })
-        )
-        .is_err());
+    fn source_code_valid_bounds_round_trip() {
+        for (namespace, value) in [
+            ("-", ":"),
+            ("http.v1_test-2", "Pg:42_A.b-c"),
+            (&"a".repeat(48), &"Z".repeat(64)),
+        ] {
+            let code = SourceErrorCode::try_new(namespace, value).unwrap();
+            assert_eq!((code.namespace(), code.value()), (namespace, value));
+            let wire = json!({ "namespace": namespace, "value": value });
+            assert_eq!(serde_json::to_value(&code).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<SourceErrorCode>(wire).unwrap(),
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn source_code_invalid_namespace_refused() {
+        for namespace in ["", "HTTP", "http:status", "é", &"a".repeat(49)] {
+            assert_eq!(
+                SourceErrorCode::try_new(namespace, "401"),
+                Err(SourceErrorCodeError::InvalidNamespace)
+            );
+            let wire = json!({ "namespace": namespace, "value": "401" });
+            assert!(serde_json::from_value::<SourceErrorCode>(wire).is_err());
+        }
+    }
+
+    #[test]
+    fn source_code_invalid_value_refused() {
+        for value in ["", "not allowed", "a/b", "é", &"A".repeat(65)] {
+            assert_eq!(
+                SourceErrorCode::try_new("http.status", value),
+                Err(SourceErrorCodeError::InvalidValue)
+            );
+            let wire = json!({ "namespace": "http.status", "value": value });
+            assert!(serde_json::from_value::<SourceErrorCode>(wire).is_err());
+        }
     }
 
     #[test]

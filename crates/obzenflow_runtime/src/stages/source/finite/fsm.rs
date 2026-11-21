@@ -841,12 +841,6 @@ pub(crate) mod tests {
     }
 
     impl<T: JournalEvent> TestJournal<T> {
-        pub(crate) fn block_next_append(
-            &self,
-        ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-            self.block_matching_append(|_| true)
-        }
-
         pub(crate) fn block_matching_append(
             &self,
             matches: impl Fn(&T) -> bool + Send + Sync + 'static,

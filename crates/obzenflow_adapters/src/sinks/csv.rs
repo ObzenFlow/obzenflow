@@ -4,309 +4,406 @@
 
 //! CSV file sink.
 //!
-//! A user-owned [`CsvProjection`] value declares both its domain input and
-//! serializable row as associated types. Passing that value to
-//! [`CsvSink::builder`] keeps connector construction aligned with typed
-//! handlers and effects while leaving file I/O cold until materialisation.
+//! A [`CsvProjection`] maps each input to one serializable row, and the sink
+//! appends it to a CSV file that one run history writes. A new history starts
+//! the file empty. Each append records the file's length and SHA-256 after the
+//! row, so a resumed run checks the file against its history before its first
+//! write, and moves a tail that no record holds into an inert file beside it,
+//! named `<file>.<length>.damage`.
 
 use super::blocking::blocking_io;
+use super::hex;
 use async_trait::async_trait;
-use csv::{Writer, WriterBuilder};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use csv::{ReaderBuilder, WriterBuilder};
+use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome, SinkCommitReceipt, SinkConnector,
-    SinkDescription, SinkInputOrder, SinkOperationError, SinkOperationResult, SinkTerminalOutcome,
-    SinkWriteContext, SinkWriteFailure, SinkWritePhase, SinkWriteReport, SinkWriteResult,
-    SinkWriter, SinkWriterInitContext, SinkWriterLifecycleReport,
+use obzenflow_runtime::effects::{
+    port, system, Command, DeclaredEffectSet, EffectContext, EffectError,
+    EffectPortResolutionError, Port, SinkRole,
 };
-use serde::Serialize;
-use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use obzenflow_runtime::effects::{SinkBatchDefaults, SinkGroupSystem};
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use ring::digest::{Context, SHA256};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
-#[derive(Clone)]
-struct CsvIoGate(Arc<AtomicBool>);
-
-impl CsvIoGate {
-    fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(true)))
-    }
-
-    fn disable(&self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-
-    fn enabled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-struct GatedCsvFile {
-    file: File,
-    gate: CsvIoGate,
-}
-
-impl Write for GatedCsvFile {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if self.gate.enabled() {
-            self.file.write(buffer)
-        } else {
-            Ok(buffer.len())
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        if self.gate.enabled() {
-            self.file.flush()
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[cfg(feature = "test-support")]
-pub mod testing {
-    use obzenflow_runtime::testing::sink::{
-        SinkExternalCall, SinkExternalCallKind, SinkExternalCallSnapshot, SinkFault,
-    };
-    use std::sync::{Arc, Mutex, MutexGuard};
-
-    #[derive(Default)]
-    struct ProbeState {
-        armed: Option<SinkFault>,
-        next_writer: u64,
-        next_sequence: u64,
-        calls: Vec<SinkExternalCall>,
-    }
-
-    /// Test-only one-shot fault and physical-call probe for CSV conformance.
-    #[derive(Clone, Default)]
-    pub struct CsvTestProbe {
-        state: Arc<Mutex<ProbeState>>,
-    }
-
-    impl std::fmt::Debug for CsvTestProbe {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("CsvTestProbe")
-                .field("configured", &true)
-                .finish()
-        }
-    }
-
-    impl CsvTestProbe {
-        fn state(&self) -> MutexGuard<'_, ProbeState> {
-            match self.state.lock() {
-                Ok(state) => state,
-                Err(poisoned) => poisoned.into_inner(),
-            }
-        }
-
-        pub fn arm(&self, fault: SinkFault) {
-            self.state().armed = Some(fault);
-        }
-
-        pub fn clear(&self) {
-            let mut state = self.state();
-            state.armed = None;
-            state.calls.clear();
-            state.next_sequence = 0;
-        }
-
-        pub fn snapshot(&self) -> SinkExternalCallSnapshot {
-            SinkExternalCallSnapshot::new(self.state().calls.clone())
-        }
-
-        pub(super) fn new_writer(&self) -> u64 {
-            let mut state = self.state();
-            let writer = state.next_writer;
-            state.next_writer += 1;
-            writer
-        }
-
-        pub(super) fn record(&self, writer: u64, kind: SinkExternalCallKind) {
-            let mut state = self.state();
-            let sequence = state.next_sequence;
-            state.next_sequence += 1;
-            state
-                .calls
-                .push(SinkExternalCall::new(writer, sequence, kind));
-        }
-
-        pub(super) fn take(&self, fault: SinkFault) -> bool {
-            let mut state = self.state();
-            if state.armed == Some(fault) {
-                state.armed = None;
-                true
-            } else {
-                false
-            }
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct CsvWriterProbe {
-    #[cfg(feature = "test-support")]
-    probe: Option<testing::CsvTestProbe>,
-    #[cfg(feature = "test-support")]
-    writer: u64,
-}
-
-impl CsvWriterProbe {
-    #[cfg(feature = "test-support")]
-    fn new(probe: Option<testing::CsvTestProbe>) -> Self {
-        let writer = probe
-            .as_ref()
-            .map(testing::CsvTestProbe::new_writer)
-            .unwrap_or_default();
-        Self { probe, writer }
-    }
-
-    #[cfg(not(feature = "test-support"))]
-    fn new() -> Self {
-        Self {}
-    }
-
-    #[cfg(feature = "test-support")]
-    fn record(&self, kind: obzenflow_runtime::testing::sink::SinkExternalCallKind) {
-        if let Some(probe) = &self.probe {
-            probe.record(self.writer, kind);
-        }
-    }
-
-    #[cfg(feature = "test-support")]
-    fn take(&self, fault: obzenflow_runtime::testing::sink::SinkFault) -> bool {
-        self.probe.as_ref().is_some_and(|probe| probe.take(fault))
-    }
-
-    fn record_open(&self) {
-        #[cfg(feature = "test-support")]
-        self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Open);
-    }
-
-    fn record_write(&self) {
-        #[cfg(feature = "test-support")]
-        self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Write);
-    }
-
-    fn record_flush(&self) {
-        #[cfg(feature = "test-support")]
-        self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Flush);
-    }
-
-    fn record_drain(&self) {
-        #[cfg(feature = "test-support")]
-        self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Drain);
-    }
-
-    fn record_execute(&self) {
-        #[cfg(feature = "test-support")]
-        self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Execute);
-    }
-
-    fn record_commit(&self) {
-        #[cfg(feature = "test-support")]
-        self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Commit);
-    }
-
-    fn record_drop(&self) {
-        #[cfg(feature = "test-support")]
-        self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Drop);
-    }
-
-    fn fault_open(&self) -> bool {
-        #[cfg(feature = "test-support")]
-        {
-            self.take(obzenflow_runtime::testing::sink::SinkFault::Open)
-        }
-        #[cfg(not(feature = "test-support"))]
-        false
-    }
-
-    fn fault_encode(&self) -> bool {
-        #[cfg(feature = "test-support")]
-        {
-            self.take(obzenflow_runtime::testing::sink::SinkFault::Encode)
-        }
-        #[cfg(not(feature = "test-support"))]
-        false
-    }
-
-    fn fault_mid_batch_mutation(&self) -> bool {
-        #[cfg(feature = "test-support")]
-        {
-            self.take(obzenflow_runtime::testing::sink::SinkFault::MidBatchMutation)
-        }
-        #[cfg(not(feature = "test-support"))]
-        false
-    }
-
-    fn fault_pre_commit(&self) -> bool {
-        #[cfg(feature = "test-support")]
-        {
-            self.take(obzenflow_runtime::testing::sink::SinkFault::PreCommit)
-        }
-        #[cfg(not(feature = "test-support"))]
-        false
-    }
-
-    fn fault_flush(&self) -> bool {
-        #[cfg(feature = "test-support")]
-        {
-            self.take(obzenflow_runtime::testing::sink::SinkFault::Flush)
-        }
-        #[cfg(not(feature = "test-support"))]
-        false
-    }
-
-    fn fault_drain(&self) -> bool {
-        #[cfg(feature = "test-support")]
-        {
-            self.take(obzenflow_runtime::testing::sink::SinkFault::Drain)
-        }
-        #[cfg(not(feature = "test-support"))]
-        false
-    }
-}
 
 /// User-owned mapping from one domain input to one serializable CSV row.
 ///
-/// Like the framework's typed handlers, the projection value owns its input
-/// contract through an associated type. Applications pass that value to
-/// [`CsvSink::builder`] instead of repeating the event type on the sink.
+/// The projection value owns its input contract through an associated type,
+/// so applications pass it to [`CsvSink::builder`] without repeating the event
+/// type.
 pub trait CsvProjection: Clone + Send + Sync + 'static {
     /// Domain input accepted by this projection.
     type Input: TypedPayload + Send + Sync + 'static;
     /// Serializable object used for column selection and row encoding.
     type Row: Serialize;
 
-    /// Project one domain input into its CSV-facing row.
+    /// Consume one domain input to build its CSV row.
     fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError>;
+}
+
+/// One row a CSV sink appends: the projected row's fields, by name.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CsvRow {
+    fields: Arc<Map<String, Value>>,
+}
+
+/// What one append records: the file's length and SHA-256 after the row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Appended {
+    pub length: u64,
+    pub sha256: String,
+}
+
+/// The port a CSV sink appends through. A resume truncates what no record
+/// holds before its first write, so each row lands once and the method is
+/// `exactly_once`.
+#[port]
+#[async_trait]
+pub trait CsvRegisterPort {
+    #[effect(type = "obzenflow.csv.row", exactly_once, records = reply)]
+    async fn append(&self, row: &CsvRow, ctx: &EffectContext) -> Result<Appended, EffectError>;
+}
+
+#[derive(Clone, Debug)]
+struct CsvLayout {
+    path: PathBuf,
+    columns: Option<Vec<String>>,
+    headers: Option<Vec<String>>,
+    delimiter: u8,
+}
+
+enum RegisterState {
+    Closed,
+    Open(Box<OpenRegister>),
+    Poisoned(String),
+}
+
+struct OpenRegister {
+    file: File,
+    length: u64,
+    digest: Context,
+    columns: Option<Vec<String>>,
+    header_written: Written,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Written {
+    Nothing,
+    Header,
+}
+
+struct CsvRegister {
+    layout: Arc<CsvLayout>,
+    state: Arc<Mutex<RegisterState>>,
+}
+
+#[system("csv-register")]
+#[async_trait]
+impl CsvRegisterPort for CsvRegister {
+    async fn append(&self, row: &CsvRow, ctx: &EffectContext) -> Result<Appended, EffectError> {
+        self.write_group(Arc::from([row.clone()]), ctx)
+            .await
+            .map(|mut replies| replies.remove(0))
+    }
+}
+
+#[async_trait]
+impl SinkGroupSystem<CsvRow> for CsvRegister {
+    async fn write_group(
+        &self,
+        rows: Arc<[CsvRow]>,
+        ctx: &EffectContext,
+    ) -> Result<Vec<Appended>, EffectError> {
+        let closed = matches!(
+            *self.state.lock().map_err(|_| poisoned_lock())?,
+            RegisterState::Closed
+        );
+        let recorded = if closed {
+            ctx.last_answer::<Appended>()?
+        } else {
+            None
+        };
+        let continues_history = ctx.continues_history();
+        let layout = self.layout.clone();
+        let state = Arc::clone(&self.state);
+        blocking_io(move || {
+            let mut state = state.lock().map_err(|_| poisoned_lock())?;
+            if matches!(*state, RegisterState::Closed) {
+                *state = RegisterState::Open(Box::new(OpenRegister::open(
+                    &layout,
+                    recorded.as_ref(),
+                    continues_history,
+                )?));
+            }
+            let register = match &mut *state {
+                RegisterState::Open(register) => register,
+                RegisterState::Poisoned(reason) => {
+                    return Err(EffectError::DestinationChanged {
+                        message: reason.clone(),
+                    });
+                }
+                RegisterState::Closed => unreachable!("a closed register is opened above"),
+            };
+            match register.append_group(&layout, &rows) {
+                Ok(appended) => Ok(appended),
+                Err(error) => {
+                    let reason = format!(
+                        "{} is in an unknown state after a failed write: {error}",
+                        layout.path.display()
+                    );
+                    *state = RegisterState::Poisoned(reason.clone());
+                    Err(EffectError::DestinationChanged { message: reason })
+                }
+            }
+        })
+        .await?
+    }
+}
+
+impl OpenRegister {
+    fn open(
+        layout: &CsvLayout,
+        recorded: Option<&Appended>,
+        continues_history: bool,
+    ) -> Result<Self, EffectError> {
+        let Some(recorded) = recorded else {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(!continues_history)
+                .open(&layout.path)
+                .map_err(|error| io_failure(&layout.path, error))?;
+            if continues_history
+                && file
+                    .metadata()
+                    .map_err(|error| io_failure(&layout.path, error))?
+                    .len()
+                    > 0
+            {
+                set_aside_tail(&mut file, &layout.path, 0)?;
+                file.rewind()
+                    .map_err(|error| io_failure(&layout.path, error))?;
+            }
+            return Ok(Self {
+                file,
+                length: 0,
+                digest: Context::new(&SHA256),
+                columns: layout.columns.clone(),
+                header_written: Written::Nothing,
+            });
+        };
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&layout.path)
+            .map_err(|_| no_longer_matches(&layout.path, recorded))?;
+        let actual = file
+            .metadata()
+            .map_err(|error| io_failure(&layout.path, error))?
+            .len();
+        if actual < recorded.length {
+            return Err(no_longer_matches(&layout.path, recorded));
+        }
+        let mut digest = Context::new(&SHA256);
+        let mut prefix = BufReader::new(Read::by_ref(&mut file).take(recorded.length));
+        loop {
+            let chunk = prefix
+                .fill_buf()
+                .map_err(|error| io_failure(&layout.path, error))?;
+            if chunk.is_empty() {
+                break;
+            }
+            digest.update(chunk);
+            let consumed = chunk.len();
+            prefix.consume(consumed);
+        }
+        if hex(digest.clone().finish().as_ref()) != recorded.sha256 {
+            return Err(no_longer_matches(&layout.path, recorded));
+        }
+        if actual > recorded.length {
+            set_aside_tail(&mut file, &layout.path, recorded.length)?;
+        }
+        let columns = match &layout.columns {
+            Some(columns) => Some(columns.clone()),
+            None => {
+                file.rewind()
+                    .map_err(|error| io_failure(&layout.path, error))?;
+                header_columns(
+                    Read::by_ref(&mut file).take(recorded.length),
+                    layout.delimiter,
+                )
+                .map_err(|error| io_failure(&layout.path, error.into()))?
+            }
+        };
+        file.seek(SeekFrom::Start(recorded.length))
+            .map_err(|error| io_failure(&layout.path, error))?;
+        Ok(Self {
+            file,
+            length: recorded.length,
+            digest,
+            columns,
+            header_written: if recorded.length > 0 {
+                Written::Header
+            } else {
+                Written::Nothing
+            },
+        })
+    }
+
+    fn append_group(&mut self, layout: &CsvLayout, rows: &[CsvRow]) -> io::Result<Vec<Appended>> {
+        let mut writer = WriterBuilder::new()
+            .delimiter(layout.delimiter)
+            .from_writer(Vec::new());
+        let mut replies = Vec::with_capacity(rows.len());
+        for row in rows {
+            let columns = self.columns.get_or_insert_with(|| {
+                let mut names: Vec<_> = row.fields.keys().cloned().collect();
+                names.sort();
+                names
+            });
+            let start = writer.get_ref().len();
+            if self.header_written == Written::Nothing {
+                writer.write_record(layout.headers.as_ref().unwrap_or(columns))?;
+            }
+            writer.write_record(columns.iter().map(|name| cell(row.fields.get(name))))?;
+            writer.flush()?;
+            let bytes = &writer.get_ref()[start..];
+            self.header_written = Written::Header;
+            self.length += bytes.len() as u64;
+            self.digest.update(bytes);
+            replies.push(Appended {
+                length: self.length,
+                sha256: hex(self.digest.clone().finish().as_ref()),
+            });
+        }
+        self.file.write_all(writer.get_ref())?;
+        self.file.sync_data()?;
+        Ok(replies)
+    }
+}
+
+fn set_aside_tail(file: &mut File, path: &Path, length: u64) -> Result<(), EffectError> {
+    file.seek(SeekFrom::Start(length))
+        .map_err(|error| io_failure(path, error))?;
+    let damage = damage_path(path, length);
+    let mut out = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&damage)
+        .map_err(|error| io_failure(&damage, error))?;
+    io::copy(file, &mut out)
+        .and_then(|_| out.sync_all())
+        .map_err(|error| io_failure(&damage, error))?;
+    file.set_len(length)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| io_failure(path, error))?;
+    tracing::warn!(
+        "moved the bytes after offset {length} of {}, which this run's history never recorded, into {}",
+        path.display(),
+        damage.display()
+    );
+    Ok(())
+}
+
+fn damage_path(path: &Path, length: u64) -> PathBuf {
+    let mut candidate = PathBuf::from(format!("{}.{length}.damage", path.display()));
+    let mut attempt = 1u32;
+    while candidate.exists() {
+        candidate = PathBuf::from(format!("{}.{length}.{attempt}.damage", path.display()));
+        attempt += 1;
+    }
+    candidate
+}
+
+fn header_columns(prefix: impl Read, delimiter: u8) -> csv::Result<Option<Vec<String>>> {
+    ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(delimiter)
+        .from_reader(prefix)
+        .records()
+        .next()
+        .map(|result| result.map(|record| record.iter().map(str::to_string).collect()))
+        .transpose()
+}
+
+fn cell(value: Option<&Value>) -> std::borrow::Cow<'_, [u8]> {
+    match value {
+        None | Some(Value::Null) => b"".as_slice().into(),
+        Some(Value::String(text)) => text.as_bytes().into(),
+        Some(Value::Number(number)) => number.to_string().into_bytes().into(),
+        Some(Value::Bool(flag)) => if *flag {
+            b"true".as_slice()
+        } else {
+            b"false".as_slice()
+        }
+        .into(),
+        Some(other @ (Value::Array(_) | Value::Object(_))) => other.to_string().into_bytes().into(),
+    }
+}
+
+fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
+    let path = layout.path.canonicalize().unwrap_or_else(|_| {
+        let parent = layout
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        parent
+            .canonicalize()
+            .or_else(|_| std::path::absolute(parent))
+            .unwrap_or_else(|_| parent.to_path_buf())
+            .join(layout.path.file_name().unwrap_or_default())
+    });
+    let digest = ring::digest::digest(&SHA256, path.as_os_str().as_encoded_bytes());
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let instance = format!("{}.{name}", hex(&digest.as_ref()[..16]));
+    let layout = Arc::new(layout);
+    Port::deferred_grouped::<CsvRow, _, _>(move || {
+        Ok::<_, EffectPortResolutionError>(CsvRegister {
+            layout: Arc::clone(&layout),
+            state: Arc::new(Mutex::new(RegisterState::Closed)),
+        })
+    })
+    .instance(&instance)
+}
+
+fn poisoned_lock() -> EffectError {
+    EffectError::DestinationChanged {
+        message: "CSV register lock poisoned".to_string(),
+    }
+}
+
+fn io_failure(path: &Path, error: io::Error) -> EffectError {
+    EffectError::Execution(format!("CSV register {} failed: {error}", path.display()))
+}
+
+fn no_longer_matches(path: &Path, recorded: &Appended) -> EffectError {
+    let short = recorded.sha256.get(..4).unwrap_or(&recorded.sha256);
+    EffectError::DestinationChanged {
+        message: format!(
+            "{} no longer holds what this run's history recorded (length {}, SHA-256 {short}…); \
+         restore it as the history recorded it, then resume again",
+            path.display(),
+            recorded.length
+        ),
+    }
 }
 
 /// Builder for a CSV projection whose input contract is owned by `P`.
 #[derive(Clone)]
 pub struct CsvSinkBuilder<P> {
     projection: P,
+    batch: SinkBatchDefaults,
     path: Option<PathBuf>,
     columns: Option<Vec<String>>,
     headers: Option<Vec<String>>,
     delimiter: u8,
-    buffer_size: usize,
-    flush_every: Option<usize>,
-    auto_flush: bool,
-    append: bool,
-    #[cfg(feature = "test-support")]
-    test_redelivery_unspecified: bool,
-    #[cfg(feature = "test-support")]
-    test_probe: Option<testing::CsvTestProbe>,
 }
 
 impl<P> std::fmt::Debug for CsvSinkBuilder<P> {
@@ -317,11 +414,7 @@ impl<P> std::fmt::Debug for CsvSinkBuilder<P> {
             .field("columns", &self.columns)
             .field("headers", &self.headers)
             .field("delimiter", &self.delimiter)
-            .field("buffer_size", &self.buffer_size)
-            .field("flush_every", &self.flush_every)
-            .field("auto_flush", &self.auto_flush)
-            .field("append", &self.append)
-            .finish_non_exhaustive()
+            .finish()
     }
 }
 
@@ -329,19 +422,27 @@ impl<P> CsvSinkBuilder<P> {
     fn new(projection: P) -> Self {
         Self {
             projection,
+            batch: SinkBatchDefaults::default(),
             path: None,
             columns: None,
             headers: None,
             delimiter: b',',
-            buffer_size: 100,
-            flush_every: None,
-            auto_flush: false,
-            append: false,
-            #[cfg(feature = "test-support")]
-            test_redelivery_unspecified: false,
-            #[cfg(feature = "test-support")]
-            test_probe: None,
         }
+    }
+
+    /// Set how many rows the register writes and syncs together by default.
+    pub fn batch_size(mut self, size: usize) -> Result<Self, anyhow::Error> {
+        self.batch.size = Some(
+            std::num::NonZeroUsize::new(size)
+                .ok_or_else(|| anyhow::anyhow!("CSV batch size must be positive"))?,
+        );
+        Ok(self)
+    }
+
+    /// Set how long an open group may wait for more rows. Zero takes only queued rows.
+    pub fn batch_max_wait(mut self, wait: std::time::Duration) -> Self {
+        self.batch.max_wait = Some(wait);
+        self
     }
 
     pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
@@ -377,59 +478,16 @@ impl<P> CsvSinkBuilder<P> {
         self
     }
 
-    pub fn buffer_size(mut self, buffer_size: usize) -> Self {
-        self.buffer_size = buffer_size;
-        self
-    }
-
-    pub fn flush_every(mut self, flush_every: usize) -> Self {
-        self.flush_every = Some(flush_every);
-        self
-    }
-
-    pub fn auto_flush(mut self, auto_flush: bool) -> Self {
-        self.auto_flush = auto_flush;
-        self
-    }
-
-    pub fn append(mut self, append: bool) -> Self {
-        self.append = append;
-        self
-    }
-
-    /// Conformance-only seam for exercising the generic undeclared-safety
-    /// archive gate. Production CSV configurations are always classified from
-    /// their append mode.
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn test_redelivery_unspecified(mut self) -> Self {
-        self.test_redelivery_unspecified = true;
-        self
-    }
-
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn test_probe(mut self, probe: testing::CsvTestProbe) -> Self {
-        self.test_probe = Some(probe);
-        self
-    }
-
     pub fn build(self) -> Result<CsvSink<P>, anyhow::Error>
     where
         P: CsvProjection,
     {
         let path = self.path.ok_or_else(|| anyhow::anyhow!("path required"))?;
-
-        if self.buffer_size == 0 {
-            anyhow::bail!("buffer_size must be > 0");
-        }
-
         if let Some(columns) = self.columns.as_ref() {
             if columns.is_empty() {
                 anyhow::bail!("columns must be non-empty when provided");
             }
         }
-
         if let Some(headers) = self.headers.as_ref() {
             let Some(columns) = self.columns.as_ref() else {
                 anyhow::bail!("headers requires columns (header names must map to columns)");
@@ -438,51 +496,48 @@ impl<P> CsvSinkBuilder<P> {
                 anyhow::bail!("headers length must match columns length");
             }
         }
-
-        Ok(CsvSink {
-            projection: self.projection,
+        let layout = CsvLayout {
             path,
             columns: self.columns,
             headers: self.headers,
             delimiter: self.delimiter,
-            buffer_size: self.buffer_size,
-            flush_every: self.flush_every,
-            auto_flush: self.auto_flush,
-            append: self.append,
-            #[cfg(feature = "test-support")]
-            test_redelivery_unspecified: self.test_redelivery_unspecified,
-            #[cfg(feature = "test-support")]
-            test_probe: self.test_probe,
+        };
+        Ok(CsvSink {
+            projection: self.projection,
+            batch: self.batch,
+            destination: CsvDestination::File(layout),
         })
     }
 }
 
-/// Reusable, I/O-free CSV sink configuration for projection `P`.
+/// A sink that appends each input, projected by `P`, as one CSV row.
+/// The built-in file register writes and syncs up to 64 queued rows together
+/// by default, with zero maximum wait.
+#[derive(Clone)]
 pub struct CsvSink<P> {
     projection: P,
-    path: PathBuf,
-    columns: Option<Vec<String>>,
-    headers: Option<Vec<String>>,
-    delimiter: u8,
-    buffer_size: usize,
-    flush_every: Option<usize>,
-    auto_flush: bool,
-    append: bool,
-    #[cfg(feature = "test-support")]
-    test_redelivery_unspecified: bool,
-    #[cfg(feature = "test-support")]
-    test_probe: Option<testing::CsvTestProbe>,
+    batch: SinkBatchDefaults,
+    destination: CsvDestination,
+}
+
+#[derive(Clone)]
+enum CsvDestination {
+    File(CsvLayout),
+    Port(Port<dyn CsvRegisterPort>),
 }
 
 impl<P> std::fmt::Debug for CsvSink<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CsvSink")
-            .field("path", &self.path)
             .field("projection", &std::any::type_name::<P>())
-            .field("buffer_size", &self.buffer_size)
-            .field("auto_flush", &self.auto_flush)
-            .field("append", &self.append)
-            .finish_non_exhaustive()
+            .field(
+                "port",
+                &match &self.destination {
+                    CsvDestination::File(_) => "csv-register",
+                    CsvDestination::Port(port) => port.system_name(),
+                },
+            )
+            .finish()
     }
 }
 
@@ -495,1357 +550,338 @@ where
     }
 }
 
-#[async_trait]
-impl<P> SinkConnector for CsvSink<P>
-where
-    P: CsvProjection,
-{
-    type Input = P::Input;
-    type Writer = CsvWriter<P>;
+impl<P> CsvSink<P> {
+    /// Append through another system that answers `CsvRegisterPort`. A replacement
+    /// uses the framework's one-request default unless the builder sets a size.
+    pub fn through(mut self, port: Port<dyn CsvRegisterPort>) -> Self {
+        self.destination = CsvDestination::Port(port);
+        self
+    }
+}
 
-    fn describe(&self) -> SinkDescription {
-        let description = SinkDescription::method(DeliveryMethod::FileWrite {
-            path: self.path.clone(),
-        })
-        .with_input_order(SinkInputOrder::OrderSensitive);
-        #[cfg(feature = "test-support")]
-        if self.test_redelivery_unspecified {
-            return description;
-        }
-        let safety = if self.append {
-            SinkRedeliverySafety::DuplicateSensitive
-        } else {
-            SinkRedeliverySafety::SafeToRepeat
+impl<P> Command for CsvSink<P> {
+    type Ports = (Port<dyn CsvRegisterPort>, ());
+    type AllowedEffects = DeclaredEffectSet<WithMember<CsvRow, EmptySet>>;
+
+    fn ports(&self) -> Self::Ports {
+        let port = match &self.destination {
+            CsvDestination::File(layout) => register_port(layout.clone()),
+            CsvDestination::Port(port) => port.clone(),
         };
-        description.with_redelivery_safety(safety)
+        (port, ())
     }
+}
 
-    async fn open(&self, _context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {
-        #[cfg(feature = "test-support")]
-        let probe = CsvWriterProbe::new(self.test_probe.clone());
-        #[cfg(not(feature = "test-support"))]
-        let probe = CsvWriterProbe::new();
-        probe.record_open();
-        if probe.fault_open() {
-            return Err(SinkOperationError::other("injected CSV open failure"));
+impl<P: CsvProjection> SinkRole<P::Input> for CsvSink<P> {
+    type Request = CsvRow;
+
+    fn batch_defaults(&self) -> SinkBatchDefaults {
+        let mut batch = self.batch;
+        if batch.size.is_none() && matches!(self.destination, CsvDestination::File(_)) {
+            batch.size = super::queued_batch_defaults().size;
         }
-        let path = self.path.clone();
-        let append = self.append;
-        let explicit_columns = self.columns.is_some();
-        let (file, file_non_empty) =
-            blocking_io(move || open_destination(&path, append, explicit_columns))
-                .await?
-                .map_err(|error| *error)?;
-
-        let io_gate = CsvIoGate::new();
-        let writer = WriterBuilder::new()
-            .delimiter(self.delimiter)
-            .from_writer(GatedCsvFile {
-                file,
-                gate: io_gate.clone(),
-            });
-        Ok(CsvWriter {
-            projection: self.projection.clone(),
-            inner: Arc::new(Mutex::new(CsvSinkInner {
-                writer,
-                path: self.path.clone(),
-                columns: self.columns.clone(),
-                headers: self.headers.clone(),
-                buffer: Vec::new(),
-                buffer_size: self.buffer_size,
-                flush_every: self.flush_every,
-                auto_flush: self.auto_flush,
-                headers_written: file_non_empty,
-                row_count: 0,
-                warned_column_drift: false,
-                io_gate,
-                #[cfg(test)]
-                fail_next_buffer_flush: false,
-            })),
-            probe,
-        })
-    }
-}
-
-/// Opens the destination file, reporting whether an appended file already
-/// holds rows. Runs on the blocking pool (FLOWIP-134i B21).
-fn open_destination(
-    path: &Path,
-    append: bool,
-    explicit_columns: bool,
-) -> Result<(File, bool), Box<SinkOperationError>> {
-    let file_non_empty = append
-        && std::fs::metadata(path)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false);
-    if file_non_empty && !explicit_columns {
-        return Err(Box::new(SinkOperationError::validation(
-            "CsvSink append=true requires explicit columns when appending to a non-empty file"
-                .to_string(),
-        )));
-    }
-    let file = if append {
-        OpenOptions::new().create(true).append(true).open(path)
-    } else {
-        File::create(path)
-    }
-    .map_err(|error| {
-        Box::new(SinkOperationError::other(format!(
-            "CsvSink failed to open {}: {error}",
-            path.display()
-        )))
-    })?;
-    Ok((file, file_non_empty))
-}
-
-/// Stage-local CSV writer opened from [`CsvSink`]. Its file state is shared
-/// with the blocking-pool call that writes it.
-pub struct CsvWriter<P> {
-    projection: P,
-    inner: Arc<Mutex<CsvSinkInner>>,
-    probe: CsvWriterProbe,
-}
-
-impl<P> Drop for CsvWriter<P> {
-    fn drop(&mut self) {
-        self.probe.record_drop();
-    }
-}
-
-impl<P> std::fmt::Debug for CsvWriter<P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CsvWriter")
-            .field("projection", &std::any::type_name::<P>())
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl<P> SinkWriter for CsvWriter<P>
-where
-    P: CsvProjection,
-{
-    type Input = P::Input;
-
-    async fn write(&mut self, input: P::Input, context: SinkWriteContext) -> SinkWriteResult {
-        self.probe.record_write();
-        if self.probe.fault_encode() {
-            return Err(SinkWriteFailure::current_only(
-                SinkWritePhase::Encode,
-                SinkOperationError::other("injected CSV encode failure"),
-            ));
-        }
-        let row = self.projection.project(input).map_err(|error| {
-            SinkWriteFailure::current_only(
-                SinkWritePhase::Encode,
-                SinkOperationError::try_from(error)
-                    .unwrap_or_else(|_| SinkOperationError::other("CSV projection failed")),
-            )
-        })?;
-        let object = encode_row(row).map_err(CsvWriteError::into_failure)?;
-        let inner = Arc::clone(&self.inner);
-        let probe = self.probe.clone();
-        blocking_io(move || {
-            let mut inner = inner.lock().map_err(|_| {
-                SinkWriteFailure::poisoned(
-                    SinkWritePhase::Execute,
-                    SinkOperationError::other("CsvWriter mutex poisoned"),
-                )
-            })?;
-            inner
-                .consume_report(object, context, &probe)
-                .map_err(CsvWriteError::into_failure)
-        })
-        .await
-        .map_err(|error| SinkWriteFailure::current_only(SinkWritePhase::Execute, error))?
+        batch
     }
 
-    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        self.probe.record_flush();
-        if self.probe.fault_flush() {
-            return Err(SinkOperationError::other("injected CSV flush failure"));
-        }
-        self.flush_on_blocking_pool().await
-    }
-
-    async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        self.probe.record_drain();
-        if self.probe.fault_drain() {
-            return Err(SinkOperationError::other("injected CSV drain failure"));
-        }
-        self.flush_on_blocking_pool().await
-    }
-}
-
-impl<P> CsvWriter<P> {
-    async fn flush_on_blocking_pool(&self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        let inner = Arc::clone(&self.inner);
-        let probe = self.probe.clone();
-        blocking_io(move || {
-            let mut inner = inner
-                .lock()
-                .map_err(|_| SinkOperationError::other("CsvWriter mutex poisoned"))?;
-            inner.flush_report(&probe)
-        })
-        .await?
-    }
-}
-
-/// Encodes a projected row as the JSON object the writer lays out, on the
-/// async worker: encoding is pure, and only destination I/O moves off it.
-fn encode_row<R: Serialize>(row: R) -> Result<Map<String, Value>, CsvWriteError> {
-    let payload = serde_json::to_value(row).map_err(|error| {
-        CsvWriteError::current(
-            SinkWritePhase::Encode,
-            SinkOperationError::other(format!(
+    fn prepare(&self, input: P::Input) -> Result<CsvRow, HandlerError> {
+        let row = self.projection.project(input)?;
+        match serde_json::to_value(row) {
+            Ok(Value::Object(fields)) => Ok(CsvRow {
+                fields: Arc::new(fields),
+            }),
+            Ok(other) => Err(HandlerError::Validation(format!(
+                "CsvSink requires object rows, got {other}"
+            ))),
+            Err(error) => Err(HandlerError::Validation(format!(
                 "CsvSink failed to serialize projected row: {error}"
-            )),
-        )
-    })?;
-    let Value::Object(object) = payload else {
-        return Err(CsvWriteError::current(
-            SinkWritePhase::Encode,
-            SinkOperationError::validation(format!(
-                "CsvSink requires object payloads, got {payload}"
-            )),
-        ));
-    };
-    Ok(object)
-}
-
-struct CsvWriteError {
-    phase: SinkWritePhase,
-    error: Box<SinkOperationError>,
-    poisoned: bool,
-}
-
-impl CsvWriteError {
-    fn current(phase: SinkWritePhase, error: SinkOperationError) -> Self {
-        Self {
-            phase,
-            error: Box::new(error),
-            poisoned: false,
+            ))),
         }
-    }
-
-    fn poisoned(phase: SinkWritePhase, error: SinkOperationError) -> Self {
-        Self {
-            phase,
-            error: Box::new(error),
-            poisoned: true,
-        }
-    }
-
-    fn into_failure(self) -> SinkWriteFailure {
-        if self.poisoned {
-            SinkWriteFailure::poisoned(self.phase, *self.error)
-        } else {
-            SinkWriteFailure::current_only(self.phase, *self.error)
-        }
-    }
-
-    fn into_operation_error(self) -> SinkOperationError {
-        *self.error
-    }
-}
-
-#[derive(Debug)]
-struct BufferedCsvRow {
-    pending: PendingSinkInput,
-    row: Vec<String>,
-}
-
-struct CsvSinkInner {
-    writer: Writer<GatedCsvFile>,
-    path: PathBuf,
-    columns: Option<Vec<String>>,
-    headers: Option<Vec<String>>,
-    buffer: Vec<BufferedCsvRow>,
-    buffer_size: usize,
-    flush_every: Option<usize>,
-    auto_flush: bool,
-    headers_written: bool,
-    row_count: usize,
-    warned_column_drift: bool,
-    io_gate: CsvIoGate,
-    #[cfg(test)]
-    fail_next_buffer_flush: bool,
-}
-
-impl Drop for CsvSinkInner {
-    fn drop(&mut self) {
-        // `csv::Writer::drop` flushes by default. Disable its underlying
-        // write gate first so failed teardown and ordinary destruction cannot
-        // create destination evidence outside an invoked lifecycle method.
-        self.io_gate.disable();
-    }
-}
-
-impl CsvSinkInner {
-    fn ensure_columns_locked(&mut self, payload: &serde_json::Map<String, Value>) {
-        if self.columns.is_some() {
-            return;
-        }
-
-        let mut columns: Vec<String> = payload.keys().cloned().collect();
-        columns.sort();
-        self.columns = Some(columns);
-    }
-
-    fn write_headers_if_needed(&mut self) -> Result<(), HandlerError> {
-        if self.headers_written {
-            return Ok(());
-        }
-
-        let Some(columns) = self.columns.as_ref() else {
-            // Will be called again after the first event locks columns.
-            return Ok(());
-        };
-
-        let headers = self.headers.as_ref().unwrap_or(columns);
-        self.writer
-            .write_record(headers)
-            .map_err(|e| HandlerError::Other(format!("Failed to write CSV headers: {e}")))?;
-        self.headers_written = true;
-        Ok(())
-    }
-
-    fn payload_to_row(
-        &mut self,
-        payload: &serde_json::Map<String, Value>,
-    ) -> Result<Vec<String>, HandlerError> {
-        self.ensure_columns_locked(payload);
-        let Some(columns) = self.columns.as_ref() else {
-            return Err(HandlerError::Other(
-                "CsvSink failed to lock columns".to_string(),
-            ));
-        };
-
-        if !self.warned_column_drift {
-            let column_set: HashSet<&str> = columns.iter().map(|c| c.as_str()).collect();
-            let extra: Vec<&str> = payload
-                .keys()
-                .map(String::as_str)
-                .filter(|k| !column_set.contains(k))
-                .collect();
-            let missing: Vec<&str> = columns
-                .iter()
-                .map(String::as_str)
-                .filter(|k| !payload.contains_key(*k))
-                .collect();
-
-            if !extra.is_empty() || !missing.is_empty() {
-                self.warned_column_drift = true;
-                tracing::warn!(
-                    file = %self.path.display(),
-                    extra_keys = ?extra,
-                    missing_keys = ?missing,
-                    "CsvSink column drift detected; extra keys will be ignored and missing keys will be empty"
-                );
-            }
-        }
-
-        let row = columns
-            .iter()
-            .map(|col| match payload.get(col) {
-                None | Some(Value::Null) => String::new(),
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Number(n)) => n.to_string(),
-                Some(Value::Bool(b)) => b.to_string(),
-                Some(v @ (Value::Array(_) | Value::Object(_))) => v.to_string(),
-            })
-            .collect();
-
-        Ok(row)
-    }
-
-    fn terminal_outcome(&self) -> SinkTerminalOutcome {
-        SinkTerminalOutcome::success(None)
-    }
-
-    fn buffered_outcome(&self) -> SinkBufferedOutcome {
-        SinkBufferedOutcome::accepted(None)
-    }
-
-    fn flush_buffer(
-        &mut self,
-        probe: &CsvWriterProbe,
-        current_index: Option<usize>,
-    ) -> Result<Vec<SinkCommitReceipt>, CsvWriteError> {
-        if self.buffer.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        #[cfg(test)]
-        if std::mem::take(&mut self.fail_next_buffer_flush) {
-            return Err(CsvWriteError::poisoned(
-                SinkWritePhase::Commit,
-                SinkOperationError::other("intentional buffered CSV flush failure"),
-            ));
-        }
-
-        for (index, row) in self.buffer.iter().enumerate() {
-            probe.record_execute();
-            self.writer.write_record(&row.row).map_err(|error| {
-                let operation =
-                    SinkOperationError::other(format!("Failed to write CSV row: {error}"));
-                let operation = if current_index == Some(index) {
-                    operation
-                } else {
-                    operation.with_deferred_operation_subject(&row.pending)
-                };
-                CsvWriteError::poisoned(SinkWritePhase::Execute, operation)
-            })?;
-            if index == 0 && probe.fault_mid_batch_mutation() {
-                let operation =
-                    SinkOperationError::other("injected CSV mid-batch mutation failure");
-                let operation = if current_index == Some(index) {
-                    operation
-                } else {
-                    operation.with_deferred_operation_subject(&row.pending)
-                };
-                return Err(CsvWriteError::poisoned(SinkWritePhase::Execute, operation));
-            }
-        }
-
-        if probe.fault_pre_commit() {
-            return Err(CsvWriteError::poisoned(
-                SinkWritePhase::Commit,
-                SinkOperationError::other("injected CSV pre-commit failure"),
-            ));
-        }
-        probe.record_commit();
-        self.writer.flush().map_err(|error| {
-            CsvWriteError::poisoned(
-                SinkWritePhase::Commit,
-                SinkOperationError::other(format!("Failed to flush CSV: {error}")),
-            )
-        })?;
-
-        let committed = self
-            .buffer
-            .drain(..)
-            .map(|row| SinkCommitReceipt::new(row.pending, SinkTerminalOutcome::success(None)))
-            .collect();
-
-        Ok(committed)
-    }
-
-    /// Flush triggered while accepting the current input.
-    ///
-    /// `flush_buffer` does not drain on failure, so the current row is still
-    /// last. Remove that row before returning the handler error: the adapter
-    /// will revoke the same input's settlement capability before the
-    /// supervisor authors the failed delivery receipt, and the sink must not
-    /// retain stale authority that a later flush could submit.
-    fn flush_buffer_for_current_input(
-        &mut self,
-        probe: &CsvWriterProbe,
-    ) -> Result<Vec<SinkCommitReceipt>, CsvWriteError> {
-        let current_index = self.buffer.len().checked_sub(1);
-        match self.flush_buffer(probe, current_index) {
-            Ok(receipts) => Ok(receipts),
-            Err(error) => {
-                let removed = self.buffer.pop();
-                debug_assert!(removed.is_some());
-                Err(error)
-            }
-        }
-    }
-
-    fn consume_report(
-        &mut self,
-        obj: Map<String, Value>,
-        context: SinkWriteContext,
-        probe: &CsvWriterProbe,
-    ) -> Result<SinkWriteReport, CsvWriteError> {
-        let row = self.payload_to_row(&obj).map_err(|error| {
-            CsvWriteError::current(
-                SinkWritePhase::Encode,
-                SinkOperationError::try_from(error)
-                    .unwrap_or_else(|_| SinkOperationError::other("CSV row encoding failed")),
-            )
-        })?;
-
-        // Ensure headers exist before writing any rows (unless append+non-empty).
-        self.write_headers_if_needed().map_err(|error| {
-            CsvWriteError::poisoned(
-                SinkWritePhase::Execute,
-                SinkOperationError::try_from(error)
-                    .unwrap_or_else(|_| SinkOperationError::other("CSV header write failed")),
-            )
-        })?;
-
-        let mut commit_receipts = Vec::new();
-        if self.auto_flush {
-            probe.record_execute();
-            self.writer.write_record(&row).map_err(|error| {
-                CsvWriteError::current(
-                    SinkWritePhase::Execute,
-                    SinkOperationError::other(format!("Failed to write CSV row: {error}")),
-                )
-            })?;
-            if probe.fault_mid_batch_mutation() || probe.fault_pre_commit() {
-                return Err(CsvWriteError::poisoned(
-                    SinkWritePhase::Commit,
-                    SinkOperationError::other("injected CSV commit ambiguity"),
-                ));
-            }
-            probe.record_commit();
-            self.writer.flush().map_err(|error| {
-                CsvWriteError::poisoned(
-                    SinkWritePhase::Commit,
-                    SinkOperationError::other(format!("Failed to flush CSV: {error}")),
-                )
-            })?;
-        } else {
-            self.buffer.push(BufferedCsvRow {
-                pending: context.defer(),
-                row,
-            });
-            if self.buffer.len() >= self.buffer_size {
-                commit_receipts.extend(self.flush_buffer_for_current_input(probe)?);
-            }
-        }
-
-        self.row_count = self.row_count.saturating_add(1);
-
-        if let Some(flush_every) = self.flush_every {
-            if flush_every > 0 && self.row_count.is_multiple_of(flush_every) {
-                commit_receipts.extend(self.flush_buffer_for_current_input(probe)?);
-            }
-        }
-
-        let report = if self.auto_flush {
-            SinkWriteReport::terminal(self.terminal_outcome())
-        } else {
-            let middleware_context = json!({
-                "csv_sink": {
-                    "buffered_rows": self.buffer.len(),
-                }
-            });
-            SinkWriteReport::buffered(
-                self.buffered_outcome()
-                    .with_middleware_context(middleware_context),
-            )
-        };
-
-        Ok(report.with_commit_receipts(commit_receipts))
-    }
-
-    fn flush_report(
-        &mut self,
-        probe: &CsvWriterProbe,
-    ) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        self.write_headers_if_needed().map_err(|error| {
-            SinkOperationError::try_from(error)
-                .unwrap_or_else(|_| SinkOperationError::other("CSV header write failed"))
-        })?;
-        let commit_receipts = self
-            .flush_buffer(probe, None)
-            .map_err(CsvWriteError::into_operation_error)?;
-
-        let audit = if commit_receipts.is_empty() {
-            SinkAuditOutcome::success(None)
-        } else {
-            SinkAuditOutcome::success(None).with_middleware_context(json!({
-                "csv_sink": {
-                    "flush": true,
-                    "committed_rows": commit_receipts.len(),
-                }
-            }))
-        };
-
-        Ok(SinkWriterLifecycleReport::audit(audit).with_commit_receipts(commit_receipts))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #[async_trait::async_trait]
-    trait TestDispatch {
-        async fn report_test(
-            &mut self,
-            event: obzenflow_core::ChainEvent,
-        ) -> Result<
-            obzenflow_runtime::stages::common::handlers::SinkConsumeReport,
-            obzenflow_runtime::stages::common::HandlerError,
-        >;
-        async fn consume_test(
-            &mut self,
-            event: obzenflow_core::ChainEvent,
-        ) -> Result<
-            obzenflow_core::event::payloads::delivery_payload::DeliveryOutcome,
-            obzenflow_runtime::stages::common::HandlerError,
-        > {
-            Ok(self.report_test(event).await?.primary)
-        }
-    }
-    #[async_trait::async_trait]
-    impl<W: obzenflow_runtime::stages::common::handlers::SinkWriter> TestDispatch
-        for obzenflow_runtime::stages::common::handlers::SinkWriterAdapter<W>
-    {
-        async fn report_test(
-            &mut self,
-            event: obzenflow_core::ChainEvent,
-        ) -> Result<
-            obzenflow_runtime::stages::common::handlers::SinkConsumeReport,
-            obzenflow_runtime::stages::common::HandlerError,
-        > {
-            let input = obzenflow_core::event::JournalRecord::new(
-                obzenflow_core::JournalWriterId::new(),
-                event,
-            );
-            obzenflow_runtime::stages::common::handlers::SinkHandler::consume_committed_report(
-                self,
-                input.into(),
-                Default::default(),
-            )
-            .await
-        }
-    }
-
     use super::*;
-    use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{StageId, WriterId};
-    use obzenflow_runtime::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
-    use serde::{Deserialize, Serialize};
-    use std::io::Read;
-    use std::io::Write;
-    use std::marker::PhantomData;
-    use tempfile::NamedTempFile;
+    use obzenflow_core::FlowId;
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    struct TestRow {
-        a: i32,
-        b: i32,
-    }
-
-    impl TypedPayload for TestRow {
-        const EVENT_TYPE: &'static str = "test.csv.row";
-    }
-
-    #[derive(Clone, Debug, Deserialize)]
-    struct SerializationFails {
-        value: u64,
-    }
-
-    impl Serialize for SerializationFails {
-        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            Err(serde::ser::Error::custom(format!(
-                "intentional serialization failure for {}",
-                self.value
-            )))
+    fn layout(path: &Path) -> CsvLayout {
+        CsvLayout {
+            path: path.to_path_buf(),
+            columns: None,
+            headers: None,
+            delimiter: b',',
         }
     }
 
-    impl TypedPayload for SerializationFails {
-        const EVENT_TYPE: &'static str = "test.csv.serialization_fails";
+    fn fields(id: u64) -> Map<String, Value> {
+        let mut fields = Map::new();
+        fields.insert("id".into(), Value::from(id));
+        fields.insert("name".into(), Value::from(format!("row-{id}")));
+        fields
+    }
+
+    fn row(id: u64) -> CsvRow {
+        CsvRow {
+            fields: fields(id).into(),
+        }
+    }
+
+    #[test]
+    fn register_directories_distinguish_bindings() {
+        let east = register_port(layout(Path::new("east/register.csv")));
+        let west = register_port(layout(Path::new("west/register.csv")));
+        assert_ne!(east.system_name(), west.system_name());
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
-    struct ScalarRow(u64);
-
-    impl TypedPayload for ScalarRow {
-        const EVENT_TYPE: &'static str = "test.csv.scalar";
+    struct Entry {
+        id: u64,
     }
 
-    #[derive(Clone, Debug)]
-    struct SerializeInput<T>(PhantomData<fn() -> T>);
+    impl TypedPayload for Entry {
+        const EVENT_TYPE: &'static str = "csv_test.entry";
+    }
 
-    impl<T> Default for SerializeInput<T> {
-        fn default() -> Self {
-            Self(PhantomData)
+    #[derive(Clone)]
+    struct EntryRow;
+
+    impl CsvProjection for EntryRow {
+        type Input = Entry;
+        type Row = Entry;
+
+        fn project(&self, entry: Entry) -> Result<Entry, HandlerError> {
+            Ok(entry)
         }
     }
 
-    impl<T> CsvProjection for SerializeInput<T>
-    where
-        T: TypedPayload + Clone + Send + Sync + 'static,
-    {
-        type Input = T;
-        type Row = T;
+    #[test]
+    fn register_defaults_follow_destination() {
+        let builder = CsvSink::builder(EntryRow).path("register.csv");
+        let make_port = || register_port(layout(Path::new("replacement.csv")));
+        let sink = builder.clone().build().unwrap();
+        assert_eq!(sink.batch_defaults().size.unwrap().get(), 64);
+        assert!(sink.through(make_port()).batch_defaults().size.is_none());
+        let configured = builder
+            .batch_size(8)
+            .unwrap()
+            .build()
+            .unwrap()
+            .through(make_port());
+        assert_eq!(configured.batch_defaults().size.unwrap().get(), 8);
+    }
 
-        fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
-            Ok(input)
+    #[test]
+    fn grouped_replies_match_csv_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let layout = CsvLayout {
+            columns: Some(vec!["id".into(), "name".into()]),
+            headers: Some(vec!["ID".into(), "Name".into()]),
+            delimiter: b';',
+            ..layout(&path)
+        };
+        let mut first = fields(1);
+        first.insert("name".into(), Value::String("a;\"b\"\nc".into()));
+        let first = CsvRow {
+            fields: first.into(),
+        };
+        let mut register = OpenRegister::open(&layout, None, false).unwrap();
+        let replies = register.append_group(&layout, &[first, row(2)]).unwrap();
+        let expected = b"ID;Name\n1;\"a;\"\"b\"\"\nc\"\n2;row-2\n";
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+        for (reply, length) in replies.iter().zip([expected.len() - 8, expected.len()]) {
+            assert_eq!(reply.length, length as u64);
+            assert_eq!(
+                reply.sha256,
+                hex(ring::digest::digest(&SHA256, &expected[..length]).as_ref())
+            );
         }
     }
 
-    #[derive(Debug, Serialize)]
-    struct SumRow {
-        total: i32,
+    #[test]
+    fn csv_sinks_sharing_path_refused() {
+        assert_registers_conflict(
+            Path::new("shared/register.csv"),
+            Path::new("shared/register.csv"),
+        );
     }
 
-    #[derive(Clone, Debug)]
-    struct SumProjection;
+    #[test]
+    fn csv_sinks_sharing_resolved_path_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("reports");
+        std::fs::create_dir(&subdir).unwrap();
+        let file = dir.path().join("register.csv");
+        assert_registers_conflict(&file, &subdir.join("../register.csv"));
+        assert!(!file.exists());
+    }
 
-    impl CsvProjection for SumProjection {
-        type Input = TestRow;
-        type Row = SumRow;
+    fn assert_registers_conflict(first: &Path, second: &Path) {
+        use obzenflow_runtime::effects::{
+            effectful_transform_effects, EffectPortRegistry, EffectRegistrationCollectionError,
+            SinkHandler,
+        };
+        let declarations = |path: &Path| {
+            let sink = CsvSink::builder(EntryRow).path(path).build().unwrap();
+            effectful_transform_effects(&SinkHandler::<_, Entry>::new(sink)).unwrap()
+        };
+        let (first, second) = (declarations(first), declarations(second));
+        let refused = EffectPortRegistry::collect_from_declarations(first.iter().chain(&second));
+        assert!(matches!(
+            refused,
+            Err(EffectRegistrationCollectionError::DistinctBindings { .. })
+        ));
+    }
 
-        fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
-            Ok(SumRow {
-                total: input.a + input.b,
+    #[test]
+    fn cloned_register_stages_refused() {
+        use obzenflow_runtime::effects::{
+            effectful_transform_effects, EffectPortRegistry, EffectRegistrationCollectionError,
+            SinkHandler,
+        };
+        let sink = CsvSink::builder(EntryRow)
+            .path("register.csv")
+            .build()
+            .unwrap();
+        let declarations: Vec<_> = [sink.clone(), sink]
+            .into_iter()
+            .flat_map(|sink| {
+                effectful_transform_effects(&SinkHandler::<_, Entry>::new(sink)).unwrap()
             })
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct RejectProjection;
-
-    impl CsvProjection for RejectProjection {
-        type Input = TestRow;
-        type Row = TestRow;
-
-        fn project(&self, _input: Self::Input) -> Result<Self::Row, HandlerError> {
-            Err(HandlerError::Validation(
-                "intentional CSV projection rejection".to_string(),
-            ))
-        }
-    }
-
-    fn event(a: i32, b: i32) -> obzenflow_core::ChainEvent {
-        ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            TestRow::event_type_name(),
-            TestRow::payload_schema_version(),
-            json!({ "a": a, "b": b }),
-        )
-    }
-
-    async fn adapted<P>(connector: CsvSink<P>) -> SinkWriterAdapter<CsvWriter<P>>
-    where
-        P: CsvProjection,
-    {
-        let stage_id = StageId::new();
-        let description = connector.describe();
-        let writer = connector
-            .open(SinkWriterInitContext::new(
-                stage_id,
-                "csv".to_string(),
-                "test".to_string(),
-            ))
-            .await
-            .expect("CSV connector opens");
-        SinkWriterAdapter::new(writer, stage_id, description.default_method().clone())
+            .collect();
+        assert!(matches!(
+            EffectPortRegistry::collect_from_declarations(&declarations),
+            Err(EffectRegistrationCollectionError::DistinctBindings { .. })
+        ));
     }
 
     #[test]
-    fn csv_sink_describes_repeatable_redelivery() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(tmp.path())
-            .build()
-            .unwrap();
+    fn new_history_starts_file_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        std::fs::write(&path, "stale\n").unwrap();
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
+        let appended = register
+            .append_group(&layout(&path), &[row(1)])
+            .unwrap()
+            .remove(0);
         assert_eq!(
-            sink.describe().redelivery_safety(),
-            Some(SinkRedeliverySafety::SafeToRepeat)
+            std::fs::read_to_string(&path).unwrap(),
+            "id,name\n1,row-1\n"
         );
+        assert_eq!(appended.length, 16);
     }
 
     #[test]
-    fn append_mode_describes_duplicate_sensitive_redelivery() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(tmp.path())
-            .columns(["a", "b"])
-            .append(true)
-            .build()
-            .expect("append connector");
+    fn uncommitted_tail_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
+        let recorded = register
+            .append_group(&layout(&path), &[row(1)])
+            .unwrap()
+            .remove(0);
+        register.append_group(&layout(&path), &[row(2)]).unwrap();
+        drop(register);
+
+        let mut resumed = OpenRegister::open(&layout(&path), Some(&recorded), true).unwrap();
+        resumed.append_group(&layout(&path), &[row(2)]).unwrap();
         assert_eq!(
-            sink.describe().redelivery_safety(),
-            Some(SinkRedeliverySafety::DuplicateSensitive)
+            std::fs::read_to_string(&path).unwrap(),
+            "id,name\n1,row-1\n2,row-2\n"
         );
+        let damage = dir.path().join("register.csv.16.damage");
+        assert_eq!(std::fs::read_to_string(damage).unwrap(), "2,row-2\n");
     }
 
-    #[tokio::test]
-    async fn csv_sink_auto_detects_headers_and_writes_rows() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let path = tmp.path().to_path_buf();
-
-        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(&path)
-            .auto_flush(true)
-            .build()
-            .unwrap();
-        let mut sink = adapted(sink).await;
-        sink.consume_test(event(1, 2)).await.unwrap();
-        sink.flush().await.unwrap();
-
-        let mut out = String::new();
-        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
-        assert!(out.contains("a,b"));
-        assert!(out.contains("1,2"));
-    }
-
-    #[tokio::test]
-    async fn projection_value_owns_input_and_row_shape() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let path = tmp.path().to_path_buf();
-        let sink = CsvSink::builder(SumProjection)
-            .path(&path)
-            .auto_flush(true)
-            .build()
-            .expect("projected connector");
-        let mut sink = adapted(sink).await;
-
-        sink.consume_test(event(4, 5)).await.expect("project input");
-        sink.flush().await.expect("flush projection");
-
-        let mut out = String::new();
-        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
-        assert_eq!(out, "total\n9\n");
-    }
-
-    #[tokio::test]
-    async fn projection_failure_is_current_only_and_precedes_deferral() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::builder(RejectProjection)
-            .path(tmp.path())
-            .build()
-            .expect("projection connector");
-        let mut sink = adapted(sink).await;
-
-        let error = sink
-            .report_test(event(1, 2))
-            .await
-            .expect_err("projection rejection follows the sink error path");
-
-        assert!(matches!(
-            error,
-            HandlerError::SinkWrite(ref failure)
-                if failure.phase() == SinkWritePhase::Encode
-                    && failure.error().detail().contains("intentional CSV projection rejection")
-        ));
-    }
-
-    #[tokio::test]
-    async fn csv_sink_buffered_mode_emits_commit_receipts_on_flush() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let path = tmp.path().to_path_buf();
-
-        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(&path)
-            .buffer_size(10)
-            .auto_flush(false)
-            .build()
-            .unwrap();
-        let mut sink = adapted(sink).await;
-        let first = event(1, 2);
-        let second = event(3, 4);
-
-        let report = sink.report_test(first.clone()).await.unwrap();
-        assert!(matches!(
-            report.primary.result,
-            DeliveryResult::Buffered { .. }
-        ));
-        assert!(report.commit_receipts.is_empty());
-
-        let report = sink.report_test(second.clone()).await.unwrap();
-        assert!(matches!(
-            report.primary.result,
-            DeliveryResult::Buffered { .. }
-        ));
-        assert!(report.commit_receipts.is_empty());
-
-        let lifecycle = sink.flush_report().await.unwrap();
-        assert_eq!(lifecycle.commit_receipts.len(), 2);
-        assert_eq!(
-            lifecycle.commit_receipts[0].subject.input.event_id,
-            first.id
-        );
-        assert_eq!(
-            lifecycle.commit_receipts[1].subject.input.event_id,
-            second.id
-        );
-        assert!(matches!(
-            lifecycle.audit_payload.expect("audit payload").result,
-            DeliveryResult::Success { .. }
-        ));
-
-        let mut out = String::new();
-        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
-        assert!(out.contains("a,b"));
-        assert!(out.contains("1,2"));
-        assert!(out.contains("3,4"));
-    }
-
-    #[tokio::test]
-    async fn csv_sink_drain_flushes_pending_rows_with_exact_parent_receipts() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let path = tmp.path().to_path_buf();
-
-        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(&path)
-            .buffer_size(10)
-            .auto_flush(false)
-            .build()
-            .unwrap();
-        let mut sink = adapted(sink).await;
-        let input = event(5, 6);
-
-        let consume = sink.report_test(input.clone()).await.unwrap();
-        assert!(matches!(
-            consume.primary.result,
-            DeliveryResult::Buffered { .. }
-        ));
-
-        let lifecycle = sink.drain_report().await.unwrap();
-        assert_eq!(lifecycle.commit_receipts.len(), 1);
-        assert_eq!(
-            lifecycle.commit_receipts[0].subject.input.event_id,
-            input.id
-        );
-        assert!(matches!(
-            lifecycle.commit_receipts[0].payload.result,
-            DeliveryResult::Success { .. }
-        ));
-
-        let mut out = String::new();
-        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
-        assert_eq!(out.lines().collect::<Vec<_>>(), vec!["a,b", "5,6"]);
-    }
-
-    #[tokio::test]
-    async fn csv_sink_buffer_threshold_emits_per_event_commit_receipts() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let path = tmp.path().to_path_buf();
-
-        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(&path)
-            .buffer_size(2)
-            .auto_flush(false)
-            .build()
-            .unwrap();
-        let mut sink = adapted(sink).await;
-        let first = event(1, 2);
-        let second = event(3, 4);
-
-        let first_report = sink.report_test(first.clone()).await.unwrap();
-        assert!(matches!(
-            first_report.primary.result,
-            DeliveryResult::Buffered { .. }
-        ));
-        assert!(first_report.commit_receipts.is_empty());
-
-        let second_report = sink.report_test(second.clone()).await.unwrap();
-        assert!(matches!(
-            second_report.primary.result,
-            DeliveryResult::Buffered { .. }
-        ));
-        assert_eq!(second_report.commit_receipts.len(), 2);
-        assert_eq!(
-            second_report.commit_receipts[0].subject.input.event_id,
-            first.id
-        );
-        assert_eq!(
-            second_report.commit_receipts[1].subject.input.event_id,
-            second.id
-        );
-
-        let mut out = String::new();
-        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
-        assert!(out.contains("a,b"));
-        assert!(out.contains("1,2"));
-        assert!(out.contains("3,4"));
-    }
-
-    #[tokio::test]
-    async fn failed_consume_flush_discards_only_the_current_settlement_capability() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(tmp.path())
-            .buffer_size(2)
-            .auto_flush(false)
-            .build()
-            .unwrap();
-        let stage_id = StageId::new();
-        let description = connector.describe();
-        let writer = connector
-            .open(SinkWriterInitContext::new(
-                stage_id,
-                "csv".to_string(),
-                "test".to_string(),
-            ))
-            .await
-            .expect("CSV connector opens");
-        writer
-            .inner
-            .lock()
-            .expect("CSV writer lock")
-            .fail_next_buffer_flush = true;
-        let mut sink =
-            SinkWriterAdapter::new(writer, stage_id, description.default_method().clone());
-        let first = event(1, 2);
-        let failed = event(3, 4);
-
-        sink.report_test(first.clone())
-            .await
-            .expect("first row buffers");
-        let error = sink
-            .report_test(failed)
-            .await
-            .expect_err("threshold flush is forced to fail");
-        assert!(matches!(
-            error,
-            HandlerError::SinkWrite(ref failure)
-                if failure.phase() == SinkWritePhase::Commit
-                    && failure.error().detail().contains("intentional buffered CSV flush failure")
-        ));
-
-        let lifecycle = sink
-            .flush_report()
-            .await
-            .expect("the earlier buffered row remains settleable");
-        assert_eq!(lifecycle.commit_receipts.len(), 1);
-        assert_eq!(
-            lifecycle.commit_receipts[0].subject.input.event_id,
-            first.id
-        );
-    }
-
-    #[cfg(feature = "test-support")]
-    #[tokio::test]
-    async fn csv_threshold_failure_attributes_the_exact_deferred_row() {
-        use obzenflow_runtime::stages::sink::SinkWriteFailureDisposition;
-        use obzenflow_runtime::testing::sink::SinkFault;
-
-        let tmp = NamedTempFile::new().expect("temp file");
-        let probe = testing::CsvTestProbe::default();
-        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(tmp.path())
-            .buffer_size(2)
-            .auto_flush(false)
-            .test_probe(probe.clone())
-            .build()
-            .expect("CSV connector builds");
-        let mut sink = adapted(connector).await;
-        let deferred = event(1, 2);
-        let current = event(3, 4);
-
-        sink.report_test(deferred.clone())
-            .await
-            .expect("first row buffers");
-        probe.arm(SinkFault::MidBatchMutation);
-        let error = sink
-            .report_test(current.clone())
-            .await
-            .expect_err("deferred CSV row fails during threshold flush");
-        match error {
-            HandlerError::SinkWrite(failure) => {
-                assert_eq!(failure.phase(), SinkWritePhase::Execute);
-                assert_eq!(failure.disposition(), SinkWriteFailureDisposition::Poisoned);
-                assert_eq!(
-                    failure.error().operation_subject_event_id(),
-                    Some(deferred.id)
-                );
-                assert_ne!(
-                    failure.error().operation_subject_event_id(),
-                    Some(current.id)
-                );
-            }
-            other => panic!("expected typed CSV write failure, got {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "test-support")]
-    #[tokio::test]
-    async fn csv_lifecycle_failure_attributes_the_exact_deferred_row() {
-        use obzenflow_runtime::testing::sink::SinkFault;
-
-        let tmp = NamedTempFile::new().expect("temp file");
-        let probe = testing::CsvTestProbe::default();
-        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(tmp.path())
-            .buffer_size(10)
-            .auto_flush(false)
-            .test_probe(probe.clone())
-            .build()
-            .expect("CSV connector builds");
-        let mut sink = adapted(connector).await;
-        let deferred = event(5, 6);
-
-        sink.report_test(deferred.clone())
-            .await
-            .expect("row buffers before lifecycle flush");
-        probe.arm(SinkFault::MidBatchMutation);
-        let error = sink
-            .flush_report()
-            .await
-            .expect_err("deferred CSV row fails during lifecycle flush");
-        match error {
-            HandlerError::SinkOperation(operation) => {
-                assert_eq!(operation.operation_subject_event_id(), Some(deferred.id));
-            }
-            other => panic!("expected typed CSV lifecycle failure, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn csv_sink_append_writes_headers_once() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let path = tmp.path().to_path_buf();
-
-        let first = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(&path)
-            .append(true)
-            .columns(["a", "b"])
-            .auto_flush(true)
-            .build()
-            .unwrap();
-        let mut first = adapted(first).await;
-        first.consume_test(event(1, 2)).await.unwrap();
-        first.flush().await.unwrap();
-        drop(first);
-
-        let second = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(&path)
-            .append(true)
-            .columns(["a", "b"])
-            .auto_flush(true)
-            .build()
-            .unwrap();
-        let mut second = adapted(second).await;
-        second.consume_test(event(3, 4)).await.unwrap();
-        second.flush().await.unwrap();
-
-        let mut out = String::new();
-        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
-
-        assert_eq!(out.lines().filter(|l| *l == "a,b").count(), 1);
-        assert!(out.contains("1,2"));
-        assert!(out.contains("3,4"));
-        assert_eq!(out.lines().count(), 3);
-    }
-
-    #[tokio::test]
-    async fn csv_sink_append_non_empty_requires_explicit_columns() {
-        let mut tmp = NamedTempFile::new().expect("temp file");
-        writeln!(tmp, "a,b").unwrap();
-        writeln!(tmp, "1,2").unwrap();
-
-        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(tmp.path())
-            .append(true)
-            .build()
-            .expect("configuration builds without opening the file");
-        let err = connector
-            .open(SinkWriterInitContext::new(
-                StageId::new(),
-                "csv".to_string(),
-                "test".to_string(),
-            ))
-            .await
-            .expect_err("non-empty append without columns must fail when opening");
-
-        assert!(
-            err.to_string()
-                .contains("append=true requires explicit columns"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn csv_connector_build_is_io_free_and_open_creates_the_file() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let path = temp.path().join("opened-at-materialisation.csv");
-
-        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(&path)
-            .build()
-            .expect("local configuration is valid");
-        assert!(!path.exists(), "build must not touch the destination");
-
-        connector
-            .open(SinkWriterInitContext::new(
-                StageId::new(),
-                "csv".to_string(),
-                "test".to_string(),
-            ))
-            .await
-            .expect("open creates the CSV writer");
-
-        assert!(path.exists(), "open owns destination creation");
-    }
-
-    #[tokio::test]
-    async fn repeated_csv_opens_have_isolated_writer_buffers() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(temp.path().join("isolated-writers.csv"))
-            .columns(["a", "b"])
-            .buffer_size(10)
-            .auto_flush(false)
-            .build()
-            .expect("local configuration is valid");
-        let method = connector.describe().default_method().clone();
-        let first_stage = StageId::new();
-        let second_stage = StageId::new();
-        let first_writer = connector
-            .open(SinkWriterInitContext::new(
-                first_stage,
-                "first_csv".to_string(),
-                "test".to_string(),
-            ))
-            .await
-            .expect("first writer opens");
-        let second_writer = connector
-            .open(SinkWriterInitContext::new(
-                second_stage,
-                "second_csv".to_string(),
-                "test".to_string(),
-            ))
-            .await
-            .expect("second writer opens");
-        let mut first = SinkWriterAdapter::new(first_writer, first_stage, method.clone());
-        let mut second = SinkWriterAdapter::new(second_writer, second_stage, method);
-
-        first
-            .report_test(event(1, 2))
-            .await
-            .expect("first writer buffers one input");
-        let second_flush = second.flush_report().await.expect("second writer flushes");
-        assert!(
-            second_flush.commit_receipts.is_empty(),
-            "the second writer cannot see the first writer's buffer"
-        );
-        let first_flush = first.flush_report().await.expect("first writer flushes");
-        assert_eq!(first_flush.commit_receipts.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn csv_sink_tsv_writes_tab_delimited() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let path = tmp.path().to_path_buf();
-
-        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(&path)
-            .tab_delimited()
-            .auto_flush(true)
-            .build()
-            .unwrap();
-        let mut sink = adapted(sink).await;
-        sink.consume_test(event(1, 2)).await.unwrap();
-        sink.flush().await.unwrap();
-
-        let mut out = String::new();
-        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
-        assert!(out.contains("a\tb"));
-        assert!(out.contains("1\t2"));
-    }
-
-    #[tokio::test]
-    async fn csv_sink_routes_typed_serialization_failures_before_deferral() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::builder(SerializeInput::<SerializationFails>::default())
-            .path(tmp.path())
-            .build()
-            .unwrap();
-        let mut sink = adapted(sink).await;
-        let input = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            SerializationFails::event_type_name(),
-            SerializationFails::payload_schema_version(),
-            json!({ "value": 7 }),
-        );
-
-        let error = sink
-            .report_test(input)
-            .await
-            .expect_err("serialization failure must use the handler error path");
-        assert!(matches!(
-            error,
-            HandlerError::SinkWrite(ref failure)
-                if failure.phase() == SinkWritePhase::Encode
-                    && failure.error().detail().contains("intentional serialization failure for 7")
-        ));
-    }
-
-    #[tokio::test]
-    async fn csv_sink_rejects_non_object_typed_payloads_before_deferral() {
-        let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::builder(SerializeInput::<ScalarRow>::default())
-            .path(tmp.path())
-            .build()
-            .unwrap();
-        let mut sink = adapted(sink).await;
-        let input = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            ScalarRow::event_type_name(),
-            ScalarRow::payload_schema_version(),
-            json!(7),
-        );
-
-        let error = sink
-            .report_test(input)
-            .await
-            .expect_err("CSV requires an object-shaped typed payload");
-        assert!(matches!(
-            error,
-            HandlerError::SinkWrite(ref failure)
-                if failure.phase() == SinkWritePhase::Encode
-                    && failure.error().detail().contains("CsvSink requires object payloads, got 7")
-        ));
-    }
-
-    /// FLOWIP-134i B21: an open that blocks, here on a FIFO with no reader,
-    /// leaves the runtime's only thread free while it waits.
-    #[cfg(unix)]
     #[test]
-    fn a_blocked_open_leaves_a_single_threaded_runtime_responsive() {
-        use std::sync::mpsc;
-        use std::time::Duration;
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("rows.csv");
-        assert!(std::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .expect("mkfifo runs")
-            .success());
-        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
-            .path(&path)
-            .build()
-            .unwrap();
-        let (ticked, tick) = mpsc::channel();
-        let (opened, open_result) = mpsc::channel();
-        let runtime_thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(async move {
-                let open = tokio::spawn(async move {
-                    connector
-                        .open(SinkWriterInitContext::new(
-                            StageId::new(),
-                            "csv".to_string(),
-                            "test".to_string(),
-                        ))
-                        .await
-                        .map(drop)
-                });
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                ticked.send(()).unwrap();
-                opened.send(open.await.unwrap()).unwrap();
-            });
-        });
-        tick.recv_timeout(Duration::from_secs(10))
-            .expect("the runtime keeps running while the open waits");
-        // A reader arrives, so the open completes.
-        let reader = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .expect("the FIFO opens for reading");
-        open_result
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the open completes")
-            .expect("the open succeeds");
-        drop(reader);
-        runtime_thread.join().unwrap();
+    fn file_changed_since_history_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
+        let recorded = register
+            .append_group(&layout(&path), &[row(1)])
+            .unwrap()
+            .remove(0);
+        drop(register);
+        std::fs::write(&path, "id,name\n9,row-9\n").unwrap();
+        let error = OpenRegister::open(&layout(&path), Some(&recorded), true)
+            .err()
+            .expect("a changed file is refused");
+        assert!(error.to_string().contains("no longer holds"), "{error}");
+    }
+
+    #[test]
+    fn large_prefix_resume_preserves_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let layout = layout(&path);
+        let mut first = fields(1);
+        first.insert("name".into(), Value::from("x".repeat(128 * 1024)));
+        let recorded = OpenRegister::open(&layout, None, false)
+            .unwrap()
+            .append_group(
+                &layout,
+                &[CsvRow {
+                    fields: first.into(),
+                }],
+            )
+            .unwrap()
+            .remove(0);
+        let mut next = fields(2);
+        next.insert("extra".into(), Value::from("ignored"));
+        let resumed = OpenRegister::open(&layout, Some(&recorded), true)
+            .unwrap()
+            .append_group(
+                &layout,
+                &[CsvRow {
+                    fields: next.into(),
+                }],
+            )
+            .unwrap()
+            .remove(0);
+        let file = std::fs::read(path).unwrap();
+        assert!(file.ends_with(b"2,row-2\n"));
+        assert_eq!(
+            resumed.sha256,
+            hex(ring::digest::digest(&SHA256, &file).as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_register_refuses_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let layout = layout(&path);
+        let mut register = OpenRegister::open(&layout, None, false).unwrap();
+        register.file = File::open(&path).unwrap();
+        let register = CsvRegister {
+            layout: layout.into(),
+            state: Arc::new(Mutex::new(RegisterState::Open(Box::new(register)))),
+        };
+        let ctx = EffectContext::for_test(FlowId::new(), "register", 1);
+        for id in 1..=2 {
+            let error = register.append(&row(id), &ctx).await.unwrap_err();
+            assert!(matches!(error, EffectError::DestinationChanged { .. }));
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn live_register_appends_without_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let register = CsvRegister {
+            layout: layout(&path).into(),
+            state: Arc::new(Mutex::new(RegisterState::Closed)),
+        };
+        let ctx = EffectContext::for_test(FlowId::new(), "register", 0);
+        let first = register.append(&row(1), &ctx).await.unwrap();
+        let second = register.append(&row(2), &ctx).await.unwrap();
+        assert!(second.length > first.length);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "id,name\n1,row-1\n2,row-2\n"
+        );
     }
 }

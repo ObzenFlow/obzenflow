@@ -2,23 +2,30 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Checked materialisation proofs for the application's summary policy.
-
-use super::example::summary_delivery::SingleSummaryDelivery;
-use obzenflow::middleware::{SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx};
+use super::example::summary_delivery::{SingleSummaryDelivery, SingleSummaryDeliveryPolicy};
+use obzenflow::effects::EffectError;
+use obzenflow::middleware::{
+    EffectAttemptOutcome, EffectPolicy, MiddlewareContext, PolicyAdmission,
+};
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    materialize_factory_checked, MiddlewareAttachmentRequest, MiddlewareAttachmentSite,
-    MiddlewareSurface, ProtectedUnit, ProtectedUnitId, ProtectedUnitOwner, SinkDeliverySurface,
-    SinkDeliveryTarget, SinkDeliveryUnitId,
+    materialize_factory_checked, EffectSurface, EffectTypeKey, EffectUnitId,
+    MiddlewareAttachmentRequest, MiddlewareAttachmentSite, MiddlewareSurface, ProtectedUnit,
+    ProtectedUnitId, ProtectedUnitOwner,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::StageId;
+use obzenflow_core::{MiddlewareExecutionScope, StageId};
+use obzenflow_runtime::effects::EffectSafety;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::runtime_config::FlowEffectiveConfig;
 use std::sync::Arc;
 
-fn materialise(factory: &SingleSummaryDelivery) -> Arc<dyn SinkPolicy> {
+fn context() -> MiddlewareContext {
+    MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary)
+}
+
+#[test]
+fn summary_control_attaches_effect_surface() {
     let stage_id = StageId::new();
     let config = StageConfig {
         stage_id,
@@ -28,19 +35,19 @@ fn materialise(factory: &SingleSummaryDelivery) -> Arc<dyn SinkPolicy> {
         lineage: Default::default(),
         effective_config: Arc::new(FlowEffectiveConfig::default()),
     };
-    let surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
+    let effect_type = EffectTypeKey::from("obzenflow.console.output");
+    let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id,
-        configured_target: None,
+        effect_type: effect_type.clone(),
+        safety: EffectSafety::NonIdempotentAtLeastOnce,
     });
     let protected_unit = ProtectedUnitId {
         stage_id,
         owner: ProtectedUnitOwner::Stage,
-        unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
-            target: SinkDeliveryTarget::Stage,
-        }),
+        unit: ProtectedUnit::Effect(EffectUnitId { effect_type }),
     };
-    materialize_factory_checked(
-        factory,
+    let attachment = materialize_factory_checked(
+        &SingleSummaryDelivery,
         MiddlewareAttachmentRequest {
             stage_key: &config.name,
             surface: &surface,
@@ -51,50 +58,33 @@ fn materialise(factory: &SingleSummaryDelivery) -> Arc<dyn SinkPolicy> {
         StageType::Sink,
         &Arc::new(ControlMiddlewareAggregator::new()),
     )
-    .expect("summary control should pass checked sink materialisation")
-    .into_sink_delivery()
-    .expect("summary control must materialise a sink-delivery policy")
+    .expect("summary control should pass checked sink materialization");
+    assert!(
+        attachment.into_effect().is_some(),
+        "summary control must materialize an effect policy"
+    );
 }
 
 #[tokio::test]
-async fn a_failed_attempt_does_not_replenish_the_summary_budget() {
-    let policy = materialise(&SingleSummaryDelivery);
-    let mut context = SinkPolicyCtx::new();
+async fn failed_attempt_keeps_summary_budget_spent() {
+    let policy = SingleSummaryDeliveryPolicy::new();
     assert!(matches!(
-        policy.admit(&mut context).await,
-        SinkAdmission::Admit(_)
+        policy.admit(&mut context()).await,
+        PolicyAdmission::Admit
     ));
-    policy.observe(&SinkDeliveryPolicyOutcome::Failed, &mut context);
-    match policy.admit(&mut context).await {
-        SinkAdmission::Reject { reason } => {
-            assert!(reason.contains("only one live delivery attempt"));
+    let failed = Err(EffectError::Execution("console unavailable".to_string()));
+    policy.observe(&EffectAttemptOutcome::Executed(&failed), &mut context());
+    match policy.admit(&mut context()).await {
+        PolicyAdmission::Reject(cause) => {
+            assert!(cause.message.contains("only one live delivery attempt"));
         }
-        SinkAdmission::Admit(_) => panic!("a second summary attempt must be rejected"),
+        PolicyAdmission::Admit => panic!("a second summary attempt must be rejected"),
     }
-}
-
-#[tokio::test]
-async fn reused_factory_materialises_independent_summary_budgets() {
-    let factory = SingleSummaryDelivery;
-    let first = materialise(&factory);
-    let second = materialise(&factory);
-    assert!(matches!(
-        first.admit(&mut SinkPolicyCtx::new()).await,
-        SinkAdmission::Admit(_)
-    ));
-    assert!(matches!(
-        first.admit(&mut SinkPolicyCtx::new()).await,
-        SinkAdmission::Reject { .. }
-    ));
-    assert!(matches!(
-        second.admit(&mut SinkPolicyCtx::new()).await,
-        SinkAdmission::Admit(_)
-    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_summary_admissions_share_one_attempt() {
-    let policy = materialise(&SingleSummaryDelivery);
+    let policy = Arc::new(SingleSummaryDeliveryPolicy::new());
     let start = Arc::new(tokio::sync::Barrier::new(3));
     let mut attempts = Vec::new();
     for _ in 0..2 {
@@ -102,10 +92,7 @@ async fn concurrent_summary_admissions_share_one_attempt() {
         let start = start.clone();
         attempts.push(tokio::spawn(async move {
             start.wait().await;
-            matches!(
-                policy.admit(&mut SinkPolicyCtx::new()).await,
-                SinkAdmission::Admit(_)
-            )
+            matches!(policy.admit(&mut context()).await, PolicyAdmission::Admit)
         }));
     }
     start.wait().await;

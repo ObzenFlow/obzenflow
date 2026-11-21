@@ -7,7 +7,6 @@
 //! Public only for downstream macro reachability. This is not a supported
 //! authoring surface (FLOWIP-115r).
 
-use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::topology::LoweredFlow;
 use obzenflow_core::journal::factory::FlowJournalFactory;
 #[cfg(feature = "test-support")]
@@ -20,63 +19,8 @@ use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_runtime::effects::{EffectPortRegistry, EffectRegistrationCollectionError};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
-use std::collections::{HashMap, HashSet};
 #[cfg(feature = "test-support")]
 use std::sync::Arc;
-
-type ConfiguredSinkResolution = (HashMap<String, Box<dyn StageDescriptor>>, HashSet<String>);
-
-fn describe_handler_keys(keys: &[&str]) -> String {
-    match keys {
-        [] => "<none>".to_string(),
-        [only] => format!("\"{only}\""),
-        [first, second] => format!("\"{first}\" or \"{second}\""),
-        [first, rest @ ..] => {
-            let mut rendered = format!("one of \"{first}\"");
-            for key in rest {
-                rendered.push_str(&format!(", \"{key}\""));
-            }
-            rendered
-        }
-    }
-}
-
-fn resolve_configured_sink_descriptors(
-    stages: HashMap<String, Box<dyn StageDescriptor>>,
-    runtime_config: &obzenflow_runtime::runtime_config::ResolvedRuntimeConfig,
-) -> Result<ConfiguredSinkResolution, crate::dsl::FlowBuildError> {
-    use crate::dsl::FlowBuildError;
-
-    let mut configured_sink_stages = HashSet::new();
-    let mut selected_stages = HashMap::with_capacity(stages.len());
-    for (binding, descriptor) in stages {
-        let Some(keys) = descriptor.configured_sink_handler_keys() else {
-            selected_stages.insert(binding, descriptor);
-            continue;
-        };
-        let stage_name = descriptor.name().to_string();
-        let expected = describe_handler_keys(keys);
-        let selected = runtime_config
-            .resolve_stage_value(
-                obzenflow_runtime::runtime_config::SINK_HANDLER_KEY,
-                obzenflow_core::StageKey::from(stage_name.as_str()),
-            )
-            .map_err(|error| FlowBuildError::ConfigResolution(Box::new(error)))?
-            .ok_or_else(|| FlowBuildError::MissingSinkSelection {
-                stage_name: stage_name.clone(),
-                expected,
-            })?;
-        let selected = selected.value.as_text().ok_or_else(|| {
-            FlowBuildError::StageResourcesFailed(format!(
-                "sinks.handler resolved a non-text value for sink stage '{stage_name}'"
-            ))
-        })?;
-        let selected_descriptor = descriptor.select_configured_sink_handler(selected)?;
-        configured_sink_stages.insert(stage_name);
-        selected_stages.insert(binding, selected_descriptor);
-    }
-    Ok((selected_stages, configured_sink_stages))
-}
 
 /// Validate shared hosted ownership before any factory, connector, or journal
 /// can materialize. The final write-once fill remains the race-safety guard.
@@ -220,11 +164,7 @@ where
             .ensure_app_settings_extracted()
             .map_err(FlowBuildError::ApplicationSettings)?;
 
-        // FLOWIP-010o: handler sets are build-only. Resolve the framework's
-        // non-secret stage selection and replace each carrier with exactly one
-        // ordinary typed sink descriptor before topology or lifecycle work.
-        let (mut stages, __configured_sink_stages) =
-            resolve_configured_sink_descriptors(stages, &__runtime_config)?;
+        let mut stages = stages;
 
         validate_hosted_ingress_bindings(stages.values().filter_map(|descriptor| {
             descriptor.hosted_ingress_binding_slot().map(|slot| (descriptor.name(), slot))
@@ -508,18 +448,16 @@ where
                     replay.verb
                 ))
             })?;
-            let admission = obzenflow_core::journal::archive_actions::decide(
+            obzenflow_core::journal::archive_actions::decide(
                 replay.verb,
                 &replay.archive_path,
                 &evidence,
                 &__archive_flow_evidence,
                 obzenflow_core::journal::archive_actions::ArchiveOverrides {
                     allow_incomplete_archive: replay.allow_incomplete_archive,
-                    allow_duplicate_sink_delivery: replay.allow_duplicate_sink_delivery,
                 },
             )
             .map_err(FlowBuildError::ArchiveVerbRefused)?;
-            crate::dsl::typing::warn_duplicate_sink_delivery(replay.verb, &admission);
         }
 
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.
@@ -621,15 +559,32 @@ where
                         );
                     }
                 }
+                if let Some(batch) = descriptor.sink_batch_defaults() {
+                    use obzenflow_runtime::runtime_config::{
+                        ConfigValue, SINK_BATCH_MAX_WAIT_MS, SINK_BATCH_SIZE,
+                    };
+                    let wait_ms = batch.max_wait
+                        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+                    for (key, value) in [
+                        (SINK_BATCH_SIZE, batch.size.map(|size| size.get() as u64)),
+                        (SINK_BATCH_MAX_WAIT_MS, wait_ms),
+                    ] {
+                        __dsl_candidates.declare_stage_consumption(
+                            key,
+                            obzenflow_core::StageKey::from(descriptor.name()),
+                        );
+                        if let Some(value) = value {
+                            __dsl_candidates.declare(
+                                key,
+                                ConfigScope::stage(config_stage),
+                                ConfigValue::U64(value),
+                            );
+                        }
+                    }
+                }
                 if descriptor.max_open_keys().is_some() {
                     __dsl_candidates.declare_stage_consumption(
                         obzenflow_runtime::runtime_config::MAX_OPEN_KEYS_KEY,
-                        obzenflow_core::StageKey::from(descriptor.name()),
-                    );
-                }
-                if __configured_sink_stages.contains(descriptor.name()) {
-                    __dsl_candidates.declare_stage_consumption(
-                        obzenflow_runtime::runtime_config::SINK_HANDLER_KEY,
                         obzenflow_core::StageKey::from(descriptor.name()),
                     );
                 }
@@ -1465,37 +1420,6 @@ where
             }
         }
 
-        let __sink_resume_plan = match (
-            obzenflow_runtime::bootstrap::replay_bootstrap(),
-            replay_archive.as_ref(),
-        ) {
-            (Some(replay), Some(archive))
-                if replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume =>
-            {
-                let current =
-                    obzenflow_core::journal::archive::certification::StageOrders::from(&run_manifest);
-                let stage_ids: HashMap<String, StageId> = name_to_id
-                    .iter()
-                    .map(|(var, id)| (descriptors[var].name().to_string(), *id))
-                    .collect();
-                let sinks: Vec<(String, StageId)> = descriptors
-                    .iter()
-                    .filter(|(_, descriptor)| {
-                        descriptor.stage_type() == obzenflow_core::event::context::StageType::Sink
-                    })
-                    .map(|(var, descriptor)| (descriptor.name().to_string(), name_to_id[var]))
-                    .collect();
-                crate::dsl::resume_edges::sink_resume_plan(
-                    &current,
-                    &sinks,
-                    &stage_ids,
-                    archive.as_ref(),
-                    &replay.archive_path,
-                )
-            }
-            _ => Default::default(),
-        };
-
         // Use StageResourcesBuilder to handle all the complex wiring
         use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
 
@@ -1539,7 +1463,6 @@ where
         .with_lineage_policies(lineage_policies)
         .with_heartbeat_intervals(heartbeat_intervals)
         .with_effect_ports(effect_ports)
-        .with_sink_resume_edges(__sink_resume_plan.edges)
         .with_replay_archive(replay_archive);
 
         let stage_resources_set = resources_builder
@@ -1776,8 +1699,7 @@ where
             .with_runtime_execution(stage_resources_set.runtime_execution.clone())
             .with_run_substrate(__substrate.clone())
             .with_flow_effective_config(__flow_effective.clone())
-            .with_archive_flow_evidence(__archive_flow_evidence.clone())
-            .with_resume_notices(__sink_resume_plan.notices);
+            .with_archive_flow_evidence(__archive_flow_evidence.clone());
 
         let builder = if let Some(journals) = metrics_journals {
             builder.with_metrics_journals(journals)
@@ -1806,132 +1728,6 @@ where
         error,
         run: __run_state,
     })
-}
-
-#[cfg(test)]
-mod configured_sink_tests {
-    use super::*;
-    use obzenflow_core::config::{ConfigScope, ConfigSource};
-    use obzenflow_core::TypedPayload;
-    use obzenflow_runtime::runtime_config::{
-        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate, SINK_HANDLER_KEY,
-    };
-    use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Clone, Debug, Deserialize, Serialize)]
-    struct Output;
-
-    impl TypedPayload for Output {
-        const EVENT_TYPE: &'static str = "flow-builder.configured-sink.output";
-    }
-
-    fn pending_stage() -> Box<dyn StageDescriptor> {
-        #[derive(Clone, Debug)]
-        struct DiscardConsoleSink {}
-        #[async_trait::async_trait]
-        impl InlineSink for DiscardConsoleSink {
-            type Input = Output;
-            fn describe(&self) -> SinkDescription {
-                SinkDescription::method(
-                    obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-                )
-            }
-            async fn write(&mut self, _input: Output) -> Result<(), SinkWriteFailure> {
-                Ok(())
-            }
-        }
-        let console_sink = DiscardConsoleSink {};
-        #[derive(Clone, Debug)]
-        struct DiscardPostgresSink {}
-        #[async_trait::async_trait]
-        impl InlineSink for DiscardPostgresSink {
-            type Input = Output;
-            fn describe(&self) -> SinkDescription {
-                SinkDescription::method(
-                    obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-                )
-            }
-            async fn write(&mut self, _input: Output) -> Result<(), SinkWriteFailure> {
-                Ok(())
-            }
-        }
-        let postgres_sink = DiscardPostgresSink {};
-        let mut pending = crate::sink!(
-            Output => handler_set!(console_sink, postgres_sink)
-        )
-        .expect("the closed handler set is valid");
-        pending.set_name("digest_summary".to_string());
-        pending
-    }
-
-    fn snapshot(selected: Option<&str>) -> ResolvedRuntimeConfig {
-        let mut candidates = CandidateSet::default();
-        if let Some(selected) = selected {
-            candidates
-                .admit(ScopedCandidate::unqualified(
-                    SINK_HANDLER_KEY,
-                    ConfigScope::stage("digest_summary"),
-                    ConfigSource::File,
-                    ConfigValue::Text(selected.to_string()),
-                ))
-                .unwrap();
-        }
-        ResolvedRuntimeConfig::new(candidates)
-    }
-
-    #[test]
-    fn configured_sink_is_an_ordinary_typed_descriptor_before_topology() {
-        let (stages, configured) = resolve_configured_sink_descriptors(
-            HashMap::from([("digest_summary".to_string(), pending_stage())]),
-            &snapshot(Some("postgres_sink")),
-        )
-        .unwrap();
-
-        assert_eq!(
-            configured,
-            std::collections::HashSet::from(["digest_summary".to_string()])
-        );
-        let selected = &stages["digest_summary"];
-        assert!(selected.configured_sink_handler_keys().is_none());
-        assert_eq!(selected.name(), "digest_summary");
-        assert_eq!(
-            selected.typing_metadata().unwrap().input_type,
-            crate::dsl::typing::TypeHint::exact_payload::<Output>()
-        );
-    }
-
-    #[test]
-    fn configured_sink_reports_missing_and_unknown_stage_values() {
-        let missing = match resolve_configured_sink_descriptors(
-            HashMap::from([("digest_summary".to_string(), pending_stage())]),
-            &snapshot(None),
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("a handler set without selection must fail"),
-        };
-        assert!(matches!(
-            missing,
-            crate::dsl::FlowBuildError::MissingSinkSelection { ref stage_name, .. }
-                if stage_name == "digest_summary"
-        ));
-
-        let unknown = match resolve_configured_sink_descriptors(
-            HashMap::from([("digest_summary".to_string(), pending_stage())]),
-            &snapshot(Some("warehouse_sink")),
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("a key outside the closed handler set must fail"),
-        };
-        assert!(matches!(
-            unknown,
-            crate::dsl::FlowBuildError::InvalidSinkSelection {
-                ref stage_name,
-                ref selected,
-                ..
-            } if stage_name == "digest_summary" && selected == "warehouse_sink"
-        ));
-    }
 }
 
 #[cfg(test)]

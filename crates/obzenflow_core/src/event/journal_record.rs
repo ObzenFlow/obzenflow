@@ -252,9 +252,6 @@ impl JournalRecord<ChainPayload> {
     pub fn is_control(&self) -> bool {
         matches!(self.payload, ChainPayload::FlowControl(_))
     }
-    pub fn is_delivery(&self) -> bool {
-        matches!(self.payload, ChainPayload::Delivery(_))
-    }
     pub fn is_system(&self) -> bool {
         false
     }

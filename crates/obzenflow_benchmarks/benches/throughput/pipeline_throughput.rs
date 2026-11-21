@@ -10,12 +10,11 @@ use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_core::config::{ConfigScope, ConfigSource};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
 use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
-use obzenflow_runtime::effects::{EffectError, Effects, Port, StageCompletion};
+use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
@@ -23,8 +22,7 @@ use obzenflow_runtime::runtime_config::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedAsyncFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedAsyncFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -80,19 +78,15 @@ impl TypedTransformHandler for Identity {
     }
 }
 type Delivered = Arc<Mutex<Vec<(u64, Duration)>>>;
-#[derive(Clone, Debug)]
-struct Sink {
+struct Recorder {
     origin: Instant,
     delivered: Delivered,
     constrained: bool,
 }
-#[async_trait]
-impl InlineSink for Sink {
-    type Input = Input;
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-    }
-    async fn write(&mut self, event: Input) -> Result<(), SinkWriteFailure> {
+#[obzenflow_runtime::effects::port(system = "throughput-recorder")]
+impl Recorder {
+    #[effect(type = "bench.throughput.record", at_least_once, records = reply)]
+    async fn record(&self, event: &Input) -> Result<(), EffectError> {
         if self.constrained {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -156,11 +150,11 @@ where
             origin,
             sparse,
         };
-        let sink = Sink {
+        let sink = perform(Input::clone as fn(&Input) -> Input).through(Port::to(Recorder {
             origin,
             delivered,
             constrained,
-        };
+        }));
         Ok(if deep {
             flow! {
                 journals: journals,
@@ -259,7 +253,7 @@ struct Ledger;
 struct Settle {
     index: u64,
 }
-#[obzenflow_runtime::effects::port(system = "ledger", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "ledger")]
 impl Ledger {
     #[effect(type = "bench.settle", exactly_once)]
     fn settle(&self, request: &Settle) -> Result<Settled, EffectError> {
@@ -268,7 +262,7 @@ impl Ledger {
         })
     }
 }
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct SettleEach {
     #[port]
@@ -289,17 +283,13 @@ impl EffectfulTransformHandler for SettleEach {
         Ok(fx.complete()?)
     }
 }
-#[derive(Clone, Debug)]
-struct SettledSink {
+struct SettledLog {
     settled: Arc<Mutex<Vec<u64>>>,
 }
-#[async_trait]
-impl InlineSink for SettledSink {
-    type Input = Settled;
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-    }
-    async fn write(&mut self, event: Settled) -> Result<(), SinkWriteFailure> {
+#[obzenflow_runtime::effects::port(system = "settled-log")]
+impl SettledLog {
+    #[effect(type = "bench.throughput.settled", at_least_once, records = reply)]
+    fn record(&self, event: &Settled) -> Result<(), EffectError> {
         self.settled.lock().unwrap().push(event.index);
         Ok(())
     }
@@ -317,7 +307,8 @@ async fn build_effectful(
             origin: Instant::now(),
             sparse: false,
         };
-        let sink = SettledSink { settled };
+        let sink = perform(Settled::clone as fn(&Settled) -> Settled)
+            .through(Port::to(SettledLog { settled }));
         let settle_each = SettleEach {
             ledger: Port::to(Ledger),
         };

@@ -2,5 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod postgres_sink_conformance_test;
-mod postgres_sink_driver_test;
+//! Clients that sources and systems hold to reach outside services.
+
+pub mod http;
+#[cfg(feature = "postgres")]
+pub mod postgres;

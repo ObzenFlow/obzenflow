@@ -9,12 +9,9 @@ use obzenflow_adapters::middleware::{
     MiddlewareContext, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
     MiddlewareFactoryResult, MiddlewareMaterializationContext, MiddlewareOverrideKey,
     MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-    MiddlewareSurfaceKind::Effect, MiddlewareSurfaceKind::SinkDelivery,
-    MiddlewareSurfaceKind::SourcePoll, PolicyAdmission, ProtectedUnit, ProtectedUnitId,
-    ProtectedUnitOwner, SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface,
-    SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission,
-    SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
-    SourcePollUnitId,
+    MiddlewareSurfaceKind::Effect, MiddlewareSurfaceKind::SourcePoll, PolicyAdmission,
+    ProtectedUnit, ProtectedUnitId, ProtectedUnitOwner, SourceAdmission, SourcePolicy,
+    SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface, SourcePollUnitId,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
@@ -28,15 +25,12 @@ use std::sync::Arc;
 struct HookCounters {
     source_materialized: AtomicUsize,
     effect_materialized: AtomicUsize,
-    sink_materialized: AtomicUsize,
     source_admits: AtomicUsize,
     source_observes: AtomicUsize,
     effect_attempts: AtomicUsize,
     effect_admits: AtomicUsize,
     effect_rejections: AtomicUsize,
     effect_observes: AtomicUsize,
-    sink_admits: AtomicUsize,
-    sink_observes: AtomicUsize,
 }
 
 impl HookCounters {}
@@ -73,7 +67,7 @@ impl MiddlewareFactory for HookProofFactory {
     }
 
     fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::control(self.label(), vec![SourcePoll, Effect, SinkDelivery])
+        MiddlewareDeclaration::control(self.label(), vec![SourcePoll, Effect])
             .with_control_intent(self.intent)
     }
 
@@ -109,16 +103,6 @@ impl MiddlewareFactory for HookProofFactory {
                     HookProofEffectPolicy {
                         counters: self.counters.clone(),
                         reject_value: self.reject_effect_value,
-                    },
-                )))
-            }
-            MiddlewareSurface::SinkDelivery(_) => {
-                self.counters
-                    .sink_materialized
-                    .fetch_add(1, Ordering::SeqCst);
-                Ok(MiddlewareSurfaceAttachment::sink_delivery(Arc::new(
-                    HookProofSinkPolicy {
-                        counters: self.counters.clone(),
                     },
                 )))
             }
@@ -195,26 +179,6 @@ impl EventAwareEffectPolicy for HookProofEffectPolicy {
     }
 }
 
-struct HookProofSinkPolicy {
-    counters: Arc<HookCounters>,
-}
-
-#[async_trait]
-impl SinkPolicy for HookProofSinkPolicy {
-    fn label(&self) -> &'static str {
-        "hook_proof_sink"
-    }
-
-    async fn admit(&self, _ctx: &mut SinkPolicyCtx) -> SinkAdmission {
-        self.counters.sink_admits.fetch_add(1, Ordering::SeqCst);
-        SinkAdmission::Admit(None)
-    }
-
-    fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, _ctx: &mut SinkPolicyCtx) {
-        self.counters.sink_observes.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HookInput {
     value: u64,
@@ -258,26 +222,6 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     };
 
     assert!(validate_attachment_request(&factory.declaration(), &request).is_err());
-
-    let sink_surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
-        stage_id: config.stage_id,
-        configured_target: None,
-    });
-    let sink_unit = ProtectedUnitId {
-        stage_id: config.stage_id,
-        owner: ProtectedUnitOwner::Stage,
-        unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
-            target: SinkDeliveryTarget::Stage,
-        }),
-    };
-    let sink_request = MiddlewareAttachmentRequest {
-        stage_key: "test_stage",
-        surface: &sink_surface,
-        protected_unit: &sink_unit,
-        authored_site: MiddlewareAttachmentSite::Implementation,
-    };
-    let sink_factory = HookProofFactory::new(counters.clone(), 1, SinkDelivery);
-    assert!(validate_attachment_request(&sink_factory.declaration(), &sink_request).is_ok());
 
     let source_surface = MiddlewareSurface::SourcePoll(SourcePollSurface {
         stage_id: config.stage_id,

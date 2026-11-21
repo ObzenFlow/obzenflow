@@ -623,30 +623,10 @@ where
         envelope: &DeliveredRecord<T::Payload>,
     ) -> SeqNo {
         if let Some(chain_event) = contract_chain_event {
-            if chain_event.consumes_data_credit() && self.uses_receipt_watermark() {
-                // Retain the admitted record itself. Reconstructing identical
-                // data cannot recreate the reader's admission capability.
-                let record = (envelope as &dyn Any)
-                    .downcast_ref::<DeliveredRecord<ChainPayload>>()
-                    .expect("chain input has a chain journal record");
-                progress.track_pending_delivery_input(record.clone());
-            }
-
             if chain_event.consumes_data_credit()
                 && self.event_authored_by_upstream(chain_event, stage_id)
             {
                 progress.reader_seq.0 += 1;
-                if self.uses_receipt_watermark() {
-                    progress.track_pending_receipt(
-                        envelope.commitment(),
-                        envelope.envelope.provenance.journal.vector_clock.clone(),
-                    );
-                } else {
-                    progress.receipted_seq = progress.reader_seq;
-                    progress.last_receipted_event_id = Some(*envelope.id());
-                    progress.last_receipted_vector_clock =
-                        Some(envelope.envelope.provenance.journal.vector_clock.clone());
-                }
             }
 
             // Capture advertised positions from an EOF authored by this

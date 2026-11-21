@@ -2,27 +2,30 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::config::{HnDigestPostgresConfig, HnRunInputs};
+use super::config::{DigestOutput, HnDigestPostgresConfig, HnRunInputs};
 use super::decoder::hn_story_decoder;
 use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
-use anyhow::Result;
+use async_trait::async_trait;
 use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk,
     EstimateSource, Partials, Prompt, SystemPrompt, UserPrompt,
 };
+use obzenflow::effects::postgres::{
+    self, default_postgres_client, PostgresClient, PostgresStatement,
+};
+use obzenflow::effects::{perform, EffectError, EffectPortResolutionError, Port};
 use obzenflow::error::HandlerError;
 use obzenflow::flow::FlowBuildError;
 use obzenflow::flow::{ai, async_source, flow, sink, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry};
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};
-use obzenflow::stages::sinks::SinkRedeliverySafety;
 use obzenflow::stages::sources::{http_pull_config, HttpPullSource};
-use obzenflow::stages::{sinks, transforms};
+use obzenflow::stages::transforms;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) const HN_SOURCE_BREAKER_FAILURES: u32 = 3;
@@ -64,44 +67,82 @@ impl TypedPayload for HnDigestSummary {
     const EVENT_TYPE: &'static str = "hn.digest_summary";
 }
 
-#[derive(Clone, Debug)]
-struct HnDigestPostgresBinder;
+#[obzenflow::port]
+#[async_trait]
+trait DigestOutputPort {
+    #[effect(type = "hn.digest.publish", at_least_once, records = reply)]
+    async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError>;
+}
 
-impl PostgresBind for HnDigestPostgresBinder {
-    type Input = HnDigestSummary;
+struct ConsoleDigest;
 
-    fn bind(&self, bindings: &mut PostgresBindings, digest: &Self::Input) {
-        let token_estimator = match digest.token_estimator {
-            EstimateSource::Heuristic => "heuristic",
-            EstimateSource::Tokenizer => "tokenizer",
-        };
-        let story_ids = digest
-            .stories
-            .iter()
-            .map(|story| story.id.to_string())
-            .collect::<Vec<_>>();
-
-        bindings
-            .bind(&digest.mode)
-            .bind(&digest.base_url)
-            .bind(&digest.ai_provider)
-            .bind(&digest.ai_model)
-            .bind(token_estimator)
-            .bind(digest.interests.as_deref())
-            .bind(story_ids)
-            .bind(&digest.output_markdown);
+#[obzenflow::system("hn-digest-console")]
+#[async_trait]
+impl DigestOutputPort for ConsoleDigest {
+    async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError> {
+        println!("{}", format_digest_summary_for_console(digest));
+        Ok(())
     }
 }
 
-fn build_digest_postgres_sink(
-    config: HnDigestPostgresConfig,
-) -> Result<PostgresSink<HnDigestPostgresBinder>> {
-    Ok(PostgresSink::builder(HnDigestPostgresBinder)
-        .connection(config.connection)
-        .insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)?
-        .batch_size(1)?
-        .redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)
-        .build()?)
+struct PostgresDigest {
+    postgres: Arc<dyn PostgresClient>,
+    insert: PostgresStatement,
+}
+
+impl PostgresDigest {
+    fn from_env() -> Result<Self, EffectPortResolutionError> {
+        let config = HnDigestPostgresConfig::from_env().map_err(postgres_unavailable)?;
+        let postgres = default_postgres_client(config.connection).map_err(postgres_unavailable)?;
+        let insert =
+            PostgresStatement::insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)
+                .map_err(postgres_unavailable)?;
+        Ok(Self { postgres, insert })
+    }
+}
+
+fn postgres_unavailable(error: impl std::fmt::Display) -> EffectPortResolutionError {
+    tracing::error!(%error, "the HN digest's PostgreSQL output could not be configured");
+    EffectPortResolutionError::ClientConstructionFailed
+}
+
+#[obzenflow::system("hn-digest-postgres")]
+#[async_trait]
+impl DigestOutputPort for PostgresDigest {
+    async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError> {
+        self.postgres
+            .execute(&self.insert, |bindings| {
+                let token_estimator = match digest.token_estimator {
+                    EstimateSource::Heuristic => "heuristic",
+                    EstimateSource::Tokenizer => "tokenizer",
+                };
+                let story_ids = digest
+                    .stories
+                    .iter()
+                    .map(|story| story.id.to_string())
+                    .collect::<Vec<_>>();
+
+                bindings
+                    .bind(&digest.mode)
+                    .bind(&digest.base_url)
+                    .bind(&digest.ai_provider)
+                    .bind(&digest.ai_model)
+                    .bind(token_estimator)
+                    .bind(digest.interests.as_deref())
+                    .bind(story_ids)
+                    .bind(&digest.output_markdown);
+            })
+            .await
+            .map_err(postgres::unsent::<Self>)?;
+        Ok(())
+    }
+}
+
+fn digest_output(output: DigestOutput) -> Port<dyn DigestOutputPort> {
+    match output {
+        DigestOutput::Console => Port::to(ConsoleDigest),
+        DigestOutput::Postgres => Port::deferred(PostgresDigest::from_env),
+    }
 }
 
 #[derive(Clone)]
@@ -276,6 +317,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             interests,
             mode_label,
             base_url,
+            output,
         } = inputs;
         let HnFlowOptions { journal_base } = options;
 
@@ -320,14 +362,8 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             .consecutive_failures(HN_SOURCE_BREAKER_FAILURES)
             .open_for(Duration::from_secs(HN_SOURCE_BREAKER_COOLDOWN_SECS));
         let source_limiter = rate_limit(source_rate_limit);
-        let console_sink = sinks::ConsoleSink::new(format_digest_summary_for_console);
-        let postgres_sink = HnDigestPostgresConfig::from_env()
-            .and_then(build_digest_postgres_sink)
-            .map_err(|error| {
-                FlowBuildError::StageResourcesFailed(format!(
-                    "HN digest PostgreSQL sink configuration failed: {error}"
-                ))
-            })?;
+        let publish =
+            perform(|summary: &HnDigestSummary| summary.clone()).through(digest_output(output));
 
         Ok(flow! {
             name: "hn_ai_digest_demo",
@@ -343,9 +379,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 } => hn_source);
                 formatter = transform!(HnStory -> FormattedStory => formatter);
                 digest = ai!(FormattedStory -> HnDigestSummary with { ai_breaker, ai_retry } => digest);
-                digest_summary = sink!(
-                    HnDigestSummary => handler_set!(console_sink, postgres_sink)
-                )?;
+                digest_summary = sink!(HnDigestSummary => publish);
             },
 
             topology: {
@@ -582,35 +616,6 @@ mod tests {
              ### Links\n\n\
              [^1]: [First](<https://news.ycombinator.com/item?id=100>)\n\
              [^2]: [Second \\[story\\]](<https://example.com/second%20story>) · [HN discussion](<https://news.ycombinator.com/item?id=101>)"
-        );
-    }
-
-    #[test]
-    fn postgres_sink_description_is_truthful_without_selection_instrumentation() {
-        let connection = obzenflow::stages::sinks::postgres::PostgresConnection::from_url(
-            "postgres://obzenflow:sentinel@localhost/obzenflow?sslmode=verify-full",
-            obzenflow::stages::sinks::postgres::PostgresTransport::VerifiedTls,
-        )
-        .expect("cold verified-TLS fixture URL is valid without I/O");
-        let sink = build_digest_postgres_sink(HnDigestPostgresConfig {
-            connection,
-            schema: "hn_digest_fixture".to_string(),
-        })
-        .expect("the locked PostgreSQL sink operation builds");
-        let description = obzenflow::stages::sinks::SinkConnector::describe(&sink);
-        assert_eq!(
-            description.destination_name(),
-            Some("postgres.hn_digest_fixture.hn_digest_summaries")
-        );
-        assert_eq!(
-            description.default_method(),
-            &obzenflow::stages::sinks::DeliveryMethod::DatabaseInsert {
-                table: "hn_digest_fixture.hn_digest_summaries".to_string(),
-            }
-        );
-        assert_eq!(
-            description.redelivery_safety(),
-            Some(SinkRedeliverySafety::DuplicateSensitive)
         );
     }
 

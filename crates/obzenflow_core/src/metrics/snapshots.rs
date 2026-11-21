@@ -17,7 +17,6 @@ use crate::event::payloads::system_payload::{
 };
 use crate::event::provenance::RetryAccounting;
 use crate::event::status::processing_status::ErrorKind;
-use crate::event::SinkOperationPhase;
 use crate::id::{FlowId, StageId, StageKey};
 use crate::metrics::composite::{
     CompositeContract, CompositeDurationHistogram, CompositeDurationInvalid, CompositeMemberHealth,
@@ -56,10 +55,6 @@ pub struct AppMetricsSnapshot {
 
     /// Error counts by stage and ErrorKind
     pub error_counts_by_kind: HashMap<StageId, HashMap<ErrorKind, u64>>,
-
-    /// Failure counts projected exclusively from durable
-    /// `SinkOperationFailed` facts.
-    pub sink_operation_failures: Vec<SinkOperationFailureMetric>,
 
     /// Processing time histograms by stage (in seconds)
     pub processing_times: HashMap<StageId, HistogramSnapshot>,
@@ -260,14 +255,6 @@ pub struct AppMetricsSnapshot {
     /// these as `obzenflow_composite_contract_*{composite,peer,direction}`
     /// families.
     pub composite_contracts: Vec<CompositeContract>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SinkOperationFailureMetric {
-    pub stage_id: StageId,
-    pub phase: SinkOperationPhase,
-    pub error_kind: ErrorKind,
-    pub count: u64,
 }
 
 /// Contract verification metrics per edge.
@@ -569,7 +556,6 @@ impl Default for AppMetricsSnapshot {
             join_reference_since_last_stream: HashMap::new(),
             error_counts: HashMap::new(),
             error_counts_by_kind: HashMap::new(),
-            sink_operation_failures: Vec::new(),
             processing_times: HashMap::new(),
             in_flight: HashMap::new(),
             cpu_usage_ratio: HashMap::new(),

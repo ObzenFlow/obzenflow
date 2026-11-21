@@ -34,17 +34,6 @@ impl ReplayVerb {
     }
 }
 
-/// Replay and resume safety of a configured sink. Only archive admission reads
-/// it; live delivery never does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SinkRedeliverySafety {
-    /// Repeating a recorded write is acceptable for this configured sink.
-    SafeToRepeat,
-    /// Repeating a recorded write can create externally visible duplicates.
-    /// Archive execution refuses without `allow_duplicate_sink_delivery`.
-    DuplicateSensitive,
-}
-
 /// What one source journal of the archive recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEvidence {
@@ -142,25 +131,15 @@ pub struct FlowEvidence {
     pub cycle_members: Vec<String>,
     /// Each source's declared continuation, by stage key.
     pub sources: Vec<(String, SourceContinuation)>,
-    /// Each sink's declared redelivery safety, by stage key.
-    pub sinks: Vec<(String, Option<SinkRedeliverySafety>)>,
 }
 
 /// The operator's overrides for one command.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ArchiveOverrides {
     pub allow_incomplete_archive: bool,
-    pub allow_duplicate_sink_delivery: bool,
 }
 
-/// An admitted verb, listing the sinks admitted only under
-/// `allow_duplicate_sink_delivery`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Admission {
-    pub duplicate_sinks: Vec<(String, Option<SinkRedeliverySafety>)>,
-}
-
-/// Why a verb is refused. Each prints verbatim as the verb's refusal.
+/// Why an archive verb was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveRefusal {
     StillRunning {
@@ -177,20 +156,17 @@ pub enum ArchiveRefusal {
     Interrupted {
         run: PathBuf,
     },
-    /// A resume of a flow with a cycle; `members` names the stages on it.
+    /// A replay or resume of a flow with a cycle; `members` names the stages
+    /// on it.
     Cycle {
+        verb: ReplayVerb,
+        run: PathBuf,
         members: Vec<String>,
     },
     /// Sources whose recorded input a resume cannot continue.
     Sources {
         run: PathBuf,
         refusals: Vec<(String, ResumeRefusal)>,
-    },
-    /// A sink without safe redelivery; `undeclared` when it declares no safety.
-    Sink {
-        verb: ReplayVerb,
-        stage: String,
-        undeclared: bool,
     },
 }
 
@@ -199,10 +175,8 @@ impl ArchiveRefusal {
         match self {
             Self::StillRunning { verb, .. }
             | Self::Failed { verb, .. }
-            | Self::Sink { verb, .. } => *verb,
-            Self::NoWorkLeft { .. } | Self::Cycle { .. } | Self::Sources { .. } => {
-                ReplayVerb::Resume
-            }
+            | Self::Cycle { verb, .. } => *verb,
+            Self::NoWorkLeft { .. } | Self::Sources { .. } => ReplayVerb::Resume,
             Self::Interrupted { .. } => ReplayVerb::Replay,
         }
     }
@@ -237,18 +211,14 @@ impl fmt::Display for ArchiveRefusal {
                  recorded prefix.",
                 run = run.display()
             ),
-            Self::Cycle { members } => write!(
+            Self::Cycle { verb, run, members } => write!(
                 f,
-                "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle \
-                 members: {}",
+                "cannot {} {}: cyclic topology includes {}",
+                verb.word(),
+                run.display(),
                 members.join(", ")
             ),
             Self::Sources { run, refusals } => f.write_str(&sources_refusal(run, refusals)),
-            Self::Sink {
-                verb,
-                stage,
-                undeclared,
-            } => f.write_str(&sink_refusal(*verb, stage, *undeclared)),
         }
     }
 }
@@ -262,7 +232,7 @@ pub fn decide(
     archive: &ArchiveEvidence,
     flow: &FlowEvidence,
     overrides: ArchiveOverrides,
-) -> Result<Admission, ArchiveRefusal> {
+) -> Result<(), ArchiveRefusal> {
     let run = run.to_path_buf();
     if archive.live_writer {
         return Err(ArchiveRefusal::StillRunning { verb, run });
@@ -284,12 +254,14 @@ pub fn decide(
         (ArchiveStatus::Unknown | ArchiveStatus::Failed, _) => {}
     }
 
+    if !flow.cycle_members.is_empty() {
+        return Err(ArchiveRefusal::Cycle {
+            verb,
+            run,
+            members: flow.cycle_members.clone(),
+        });
+    }
     if verb == ReplayVerb::Resume {
-        if !flow.cycle_members.is_empty() {
-            return Err(ArchiveRefusal::Cycle {
-                members: flow.cycle_members.clone(),
-            });
-        }
         let mut refusals: Vec<(String, ResumeRefusal)> = flow
             .sources
             .iter()
@@ -309,24 +281,7 @@ pub fn decide(
             return Err(ArchiveRefusal::Sources { run, refusals });
         }
     }
-
-    let mut sinks = flow.sinks.clone();
-    sinks.sort_by(|(left, _), (right, _)| left.cmp(right));
-    let mut admission = Admission::default();
-    for (stage, safety) in sinks {
-        if safety == Some(SinkRedeliverySafety::SafeToRepeat) {
-            continue;
-        }
-        if !overrides.allow_duplicate_sink_delivery {
-            return Err(ArchiveRefusal::Sink {
-                verb,
-                stage,
-                undeclared: safety.is_none(),
-            });
-        }
-        admission.duplicate_sinks.push((stage, safety));
-    }
-    Ok(admission)
+    Ok(())
 }
 
 fn unfinished_sources_refusal(archive: &Path, sources: &[String], by: RefusedBy) -> String {
@@ -384,42 +339,6 @@ fn sources_refusal(archive: &Path, refusals: &[(String, ResumeRefusal)]) -> Stri
     paragraphs.join("\n")
 }
 
-fn sink_refusal(verb: ReplayVerb, stage: &str, undeclared: bool) -> String {
-    let (flag, re_execution) = match verb {
-        ReplayVerb::Replay => (
-            "--replay-from",
-            "deterministic replay re-consumes the recorded stream, so this sink would \
-             re-perform its external writes",
-        ),
-        ReplayVerb::Resume => (
-            "--resume-from",
-            "resume re-delivers the recorded prefix during catch-up, which would \
-             duplicate those writes",
-        ),
-    };
-    if undeclared {
-        format!(
-            "{flag} refused: sink '{stage}' has no redelivery-safety classification; \
-             {re_execution}, and the gate fails closed on undeclared sinks \
-             (FLOWIP-120n F16, FLOWIP-120v). Bind the sink before `flow!`, then use \
-             `delivery: idempotent` or `delivery: non_idempotent` on its `sink!` row, \
-             or return a \
-             classified `SinkDescription` from a custom `SinkConnector` or \
-             `InlineSink`. A duplicate-sensitive external write belongs behind \
-             the effect boundary (effectful transform plus plain sink). Or pass \
-             `allow_duplicate_sink_delivery`."
-        )
-    } else {
-        format!(
-            "{flag} refused: sink '{stage}' declares a duplicate-sensitive external \
-             delivery path; {re_execution} (FLOWIP-120n F16, FLOWIP-120v). Declare \
-             `delivery: idempotent` if the destination absorbs duplicates, route the \
-             write through the effect boundary (effectful transform plus plain sink), \
-             or pass `allow_duplicate_sink_delivery` to accept the duplication."
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,10 +388,6 @@ mod tests {
                     },
                 ),
             ],
-            sinks: vec![(
-                "console".to_string(),
-                Some(SinkRedeliverySafety::SafeToRepeat),
-            )],
         }
     }
 
@@ -481,7 +396,7 @@ mod tests {
         archive: &ArchiveEvidence,
         flow: &FlowEvidence,
         overrides: ArchiveOverrides,
-    ) -> Result<Admission, ArchiveRefusal> {
+    ) -> Result<(), ArchiveRefusal> {
         decide(verb, Path::new(RUN), archive, flow, overrides)
     }
 
@@ -492,7 +407,6 @@ mod tests {
     fn incomplete() -> ArchiveOverrides {
         ArchiveOverrides {
             allow_incomplete_archive: true,
-            allow_duplicate_sink_delivery: false,
         }
     }
 
@@ -696,20 +610,22 @@ mod tests {
     }
 
     #[test]
-    fn a_cycle_refuses_resume_only() {
+    fn cyclic_flow_replay_refused() {
         let stopped = archive(ArchiveStatus::Cancelled, finished());
         let cyclic = FlowEvidence {
             cycle_members: vec!["review".to_string(), "triage".to_string()],
             ..safe_flow()
         };
-        assert!(decided(ReplayVerb::Replay, &stopped, &cyclic, plain()).is_ok());
-        assert_eq!(
-            decided(ReplayVerb::Resume, &stopped, &cyclic, plain())
-                .unwrap_err()
-                .to_string(),
-            "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle \
-             members: review, triage"
-        );
+        for verb in [ReplayVerb::Replay, ReplayVerb::Resume] {
+            assert_eq!(
+                decided(verb, &stopped, &cyclic, plain()),
+                Err(ArchiveRefusal::Cycle {
+                    verb,
+                    run: PathBuf::from(RUN),
+                    members: cyclic.cycle_members.clone(),
+                })
+            );
+        }
     }
 
     #[test]
@@ -772,44 +688,6 @@ mod tests {
             vec![source("orders", true, Some(EofKind::Natural))],
         );
         assert!(decided(ReplayVerb::Resume, &natural, &seek(2), plain()).is_ok());
-    }
-
-    #[test]
-    fn each_sink_safety_with_and_without_the_override() {
-        let stopped = archive(ArchiveStatus::Cancelled, finished());
-        for (safety, undeclared) in [
-            (Some(SinkRedeliverySafety::DuplicateSensitive), false),
-            (None, true),
-        ] {
-            let flow = FlowEvidence {
-                sinks: vec![("ledger".to_string(), safety)],
-                ..safe_flow()
-            };
-            for verb in [ReplayVerb::Replay, ReplayVerb::Resume] {
-                assert_eq!(
-                    decided(verb, &stopped, &flow, plain()).unwrap_err(),
-                    ArchiveRefusal::Sink {
-                        verb,
-                        stage: "ledger".to_string(),
-                        undeclared,
-                    }
-                );
-                let admitted = decided(
-                    verb,
-                    &stopped,
-                    &flow,
-                    ArchiveOverrides {
-                        allow_incomplete_archive: false,
-                        allow_duplicate_sink_delivery: true,
-                    },
-                )
-                .unwrap();
-                assert_eq!(
-                    admitted.duplicate_sinks,
-                    vec![("ledger".to_string(), safety)]
-                );
-            }
-        }
     }
 
     #[test]
@@ -914,7 +792,6 @@ mod tests {
         let everything_wrong = FlowEvidence {
             cycle_members: vec!["triage".to_string()],
             sources: safe_flow().sources,
-            sinks: vec![("ledger".to_string(), None)],
         };
         assert!(matches!(
             decided(ReplayVerb::Resume, &failed, &everything_wrong, plain()),

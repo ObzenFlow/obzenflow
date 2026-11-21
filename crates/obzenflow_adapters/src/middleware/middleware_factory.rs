@@ -197,10 +197,8 @@ pub trait MiddlewareFactory: Send + Sync {
         Ok(())
     }
 
-    /// Input witness retained by typed sink observer factories through erasure.
-    /// The sink descriptor checks this before opening its connector.
     #[doc(hidden)]
-    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+    fn observer_input_type(&self) -> Option<(TypeId, &'static str)> {
         None
     }
 
@@ -338,8 +336,8 @@ impl<F: MiddlewareFactory> MiddlewareFactory for EffectScoped<F> {
             .validate_configuration(request, config, stage_type)
     }
 
-    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
-        self.inner.sink_observer_input_type()
+    fn observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        self.inner.observer_input_type()
     }
 
     fn materialize(
@@ -406,8 +404,8 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         (**self).validate_configuration(request, config, stage_type)
     }
 
-    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
-        (**self).sink_observer_input_type()
+    fn observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        (**self).observer_input_type()
     }
 
     fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
@@ -477,8 +475,8 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for std::sync::Arc<F> {
         (**self).validate_configuration(request, config, stage_type)
     }
 
-    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
-        (**self).sink_observer_input_type()
+    fn observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        (**self).observer_input_type()
     }
 
     fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
@@ -536,7 +534,7 @@ pub struct CapturedMiddlewareFactory {
     override_key: MiddlewareOverrideKey,
     defaults: Vec<DslConfigDefault>,
     consumed_keys: Vec<&'static str>,
-    sink_input: Option<(TypeId, &'static str)>,
+    observer_input: Option<(TypeId, &'static str)>,
     builtin: Option<BuiltinControlContribution>,
     topology_slot: Option<TopologyMiddlewareConfigSlot>,
     snapshot: Option<serde_json::Value>,
@@ -559,7 +557,7 @@ impl CapturedMiddlewareFactory {
             override_key: factory.override_key(),
             defaults,
             consumed_keys,
-            sink_input: factory.sink_observer_input_type(),
+            observer_input: factory.observer_input_type(),
             builtin: factory.builtin_control(),
             topology_slot: factory.topology_config_slot(),
             snapshot: factory.config_snapshot(),
@@ -592,8 +590,8 @@ impl MiddlewareFactory for CapturedMiddlewareFactory {
     fn builtin_control(&self) -> Option<BuiltinControlContribution> {
         self.builtin.clone()
     }
-    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
-        self.sink_input
+    fn observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        self.observer_input
     }
     fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
         self.defaults.clone()
@@ -712,7 +710,7 @@ mod tests {
             self.reads[2].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             vec!["test.optional"]
         }
-        fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        fn observer_input_type(&self) -> Option<(TypeId, &'static str)> {
             self.reads[3].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Some((TypeId::of::<u64>(), "u64"))
         }
@@ -743,7 +741,7 @@ mod tests {
                 vec!["test.authored", "test.optional"]
             );
             assert_eq!(
-                captured.sink_observer_input_type(),
+                captured.observer_input_type(),
                 Some((TypeId::of::<u64>(), "u64"))
             );
         }

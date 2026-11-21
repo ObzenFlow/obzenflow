@@ -2,6 +2,4 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod config_selected_application;
-mod delivery_parity;
-mod witness_guard;
+mod replay_parity;

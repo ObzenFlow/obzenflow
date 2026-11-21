@@ -6,21 +6,19 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
-    effect_observer, sink_delivery_observer, stage_lifecycle_observer, SinkDeliveryObserver,
+    effect_observer, stage_lifecycle_observer, typed_effect_observer, TypedEffectObserver,
 };
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, Port, StageCompletion};
+use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{
-    EffectObserver, EffectObserverContext, ObserverResult, SinkDeliveryObserverContext,
-    StageLifecycleObserver, StageLifecycleObserverContext,
+    EffectObserver, EffectObserverContext, ObserverResult, StageLifecycleObserver,
+    StageLifecycleObserverContext,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -146,7 +144,7 @@ struct AuthoriseShippingRequest {
     order_id: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "shipping-desk", effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::port(system = "shipping-desk")]
 impl ShippingDesk {
     #[effect(type = "shipping.authorise", exactly_once)]
     fn authorise(
@@ -161,7 +159,7 @@ impl ShippingDesk {
     }
 }
 
-#[obzenflow_runtime::effects::command(effects = obzenflow_runtime::effects)]
+#[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct AuthoriseShipping {
     #[port]
@@ -195,22 +193,21 @@ impl EffectfulTransformHandler for AuthoriseShipping {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+struct HandOffRequest {
+    order_id: u64,
+}
+
 struct ShippingHandoff {
     writes: Arc<AtomicUsize>,
 }
 
-#[async_trait]
-impl InlineSink for ShippingHandoff {
-    type Input = ShippingReady;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("shipping-handoff".to_string()))
-    }
-
-    async fn write(&mut self, order: ShippingReady) -> Result<(), SinkWriteFailure> {
+#[obzenflow_runtime::effects::port(system = "shipping-handoff")]
+impl ShippingHandoff {
+    #[effect(type = "shipping.hand_off", at_least_once, records = reply)]
+    fn hand_off(&self, request: &HandOffRequest) -> Result<(), EffectError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
-        tracing::info!(order_id = order.order_id, "shipping accepted order");
+        tracing::info!(order_id = request.order_id, "shipping accepted order");
         Ok(())
     }
 }
@@ -228,27 +225,31 @@ impl EffectObserver for EffectProbeObserver {
 
 struct DeliveryProbeObserver {
     calls: Arc<AtomicUsize>,
+}
+
+impl EffectObserver for DeliveryProbeObserver {
+    fn after_effect(&self, ctx: &EffectObserverContext<'_>) {
+        assert_eq!(ctx.effect_type(), "shipping.hand_off");
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tracing::info!(
+            flow_id = %ctx.flow_id(),
+            stage = ctx.stage_name(),
+            outcome = ?ctx.outcome(),
+            "sink delivery classified"
+        );
+    }
+}
+
+struct DeliveredProbeObserver {
     delivered: Arc<AtomicUsize>,
 }
 
-impl SinkDeliveryObserver for DeliveryProbeObserver {
+impl TypedEffectObserver for DeliveredProbeObserver {
     type Input = ShippingReady;
 
     fn on_delivered(&self, order: &ShippingReady) -> ObserverResult {
         self.delivered.fetch_add(1, Ordering::SeqCst);
         tracing::info!(order_id = order.order_id, "shipping delivery committed");
-        Ok(())
-    }
-
-    fn on_attempt(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        tracing::info!(
-            flow_id = %ctx.flow_id(),
-            stage = ctx.stage_name(),
-            stage_input_position = ?ctx.stage_input_position(),
-            outcome = ?ctx.outcome(),
-            "sink delivery classified"
-        );
         Ok(())
     }
 }
@@ -273,10 +274,8 @@ struct PanickingDeliveryObserver {
     calls: Arc<AtomicUsize>,
 }
 
-impl SinkDeliveryObserver for PanickingDeliveryObserver {
-    type Input = ShippingReady;
-
-    fn on_attempt(&self, _ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
+impl EffectObserver for PanickingDeliveryObserver {
+    fn after_effect(&self, _ctx: &EffectObserverContext<'_>) {
         self.calls.fetch_add(1, Ordering::SeqCst);
         panic!("intentional observer panic; the runtime will quarantine this attachment");
     }
@@ -292,9 +291,12 @@ pub(crate) fn build_flow(
             next: 0,
             polls: probe.source_polls.clone(),
         };
-        let shipping_handoff = ShippingHandoff {
+        let shipping_handoff = perform(|order: &ShippingReady| HandOffRequest {
+            order_id: order.order_id,
+        })
+        .through(Port::to(ShippingHandoff {
             writes: probe.sink_writes.clone(),
-        };
+        }));
         let desk = ShippingDesk {
             calls: probe.effect_calls.clone(),
         };
@@ -315,9 +317,7 @@ pub(crate) fn build_flow(
             }
         };
         let delivered = match treatment {
-            ObserverTreatment::WithoutObservers => sink!(
-                ShippingReady => shipping_handoff.idempotent()
-            ),
+            ObserverTreatment::WithoutObservers => sink!(ShippingReady => shipping_handoff),
             ObserverTreatment::Observers => sink!(
                 ShippingReady with { stage_lifecycle_observer(
                         "lifecycle-probe",
@@ -325,13 +325,18 @@ pub(crate) fn build_flow(
                             calls: probe.lifecycle_callbacks.clone(),
                         }
                     ),
-                    sink_delivery_observer(
+                    effect_observer(
                         "delivery-probe",
                         DeliveryProbeObserver {
                             calls: probe.delivery_callbacks.clone(),
+                        }
+                    ),
+                    typed_effect_observer(
+                        "delivered-probe",
+                        DeliveredProbeObserver {
                             delivered: probe.delivered_callbacks.clone(),
                         }
-                    ) } => shipping_handoff.idempotent()),
+                    ) } => shipping_handoff),
             ObserverTreatment::PanickingObserver => sink!(
                 ShippingReady with { stage_lifecycle_observer(
                         "lifecycle-probe",
@@ -339,19 +344,24 @@ pub(crate) fn build_flow(
                             calls: probe.lifecycle_callbacks.clone(),
                         }
                     ),
-                    sink_delivery_observer(
+                    effect_observer(
                         "panicking-delivery-probe",
                         PanickingDeliveryObserver {
                             calls: probe.panicking_callbacks.clone(),
                         }
                     ),
-                    sink_delivery_observer(
+                    effect_observer(
                         "delivery-probe",
                         DeliveryProbeObserver {
                             calls: probe.delivery_callbacks.clone(),
+                        }
+                    ),
+                    typed_effect_observer(
+                        "delivered-probe",
+                        DeliveredProbeObserver {
                             delivered: probe.delivered_callbacks.clone(),
                         }
-                    ) } => shipping_handoff.idempotent()),
+                    ) } => shipping_handoff),
         };
 
         Ok(flow! {

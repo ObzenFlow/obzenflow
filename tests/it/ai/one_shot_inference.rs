@@ -9,17 +9,13 @@ use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
 };
 use obzenflow_adapters::middleware::{circuit_breaker, MiddlewareFactory};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
+use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -171,44 +167,29 @@ impl AiRole<DecisionBrief> for ReviewRole {
     }
 }
 
-#[derive(Debug, Clone)]
+#[obzenflow_runtime::effects::port]
+trait CollectBriefPort: Send + Sync {
+    #[effect(type = "one_shot_fixture.collect", at_least_once, records = reply)]
+    fn collect(&self, brief: &DecisionBrief) -> Result<(), EffectError>;
+}
+
 struct CollectBrief {
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
 }
 
-#[async_trait::async_trait]
-impl obzenflow_runtime::stages::sink::SinkConnector for CollectBrief {
-    type Input = DecisionBrief;
-    type Writer = Self;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("CollectBrief".to_string()))
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn open(
-        &self,
-        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
-    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
-        Ok(self.clone())
+#[obzenflow_runtime::effects::system("brief-collector")]
+impl CollectBriefPort for CollectBrief {
+    fn collect(&self, brief: &DecisionBrief) -> Result<(), EffectError> {
+        self.outputs
+            .lock()
+            .expect("brief output lock")
+            .push(brief.clone());
+        Ok(())
     }
 }
 
-#[async_trait::async_trait]
-impl obzenflow_runtime::stages::sink::SinkWriter for CollectBrief {
-    type Input = DecisionBrief;
-
-    async fn write(
-        &mut self,
-        output: DecisionBrief,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        self.outputs.lock().expect("brief output lock").push(output);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("CollectBrief".to_string()),
-            Some(1),
-        )))
-    }
+fn collect_into(outputs: Arc<Mutex<Vec<DecisionBrief>>>) -> Port<dyn CollectBriefPort> {
+    Port::to(CollectBrief { outputs })
 }
 
 fn answering() -> FakeChatModels {
@@ -275,7 +256,8 @@ where
     FlowDefinition::materialize(move |_runtime_config| {
         let evidence_handler = obzenflow::stages::sources::ValuesSource::new(evidence_inputs);
         let generate_brief = ai::infer(role);
-        let collected_handler = CollectBrief { outputs };
+        let collected_handler =
+            perform(|brief: &DecisionBrief| brief.clone()).through(collect_into(outputs));
 
         Ok(flow! {
             name: "one_shot_inference_effect_journal",
@@ -303,7 +285,8 @@ fn build_two_stage_flow(
             obzenflow::stages::sources::ValuesSource::new([ReducedEvidence { value: 7 }]);
         let generate_brief = ai::infer(BriefRole::uncounted());
         let review = ai::infer(ReviewRole);
-        let collected = CollectBrief { outputs };
+        let collected =
+            perform(|brief: &DecisionBrief| brief.clone()).through(collect_into(outputs));
 
         Ok(flow! {
             name: "two_ai_stages",

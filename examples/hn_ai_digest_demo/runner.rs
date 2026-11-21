@@ -65,11 +65,11 @@ pub(crate) fn build_presentation(reads_mock: Arc<AtomicBool>) -> Presentation {
             footer
         } else if reads_mock.load(Ordering::SeqCst) {
             footer.paragraph(
-                "The generated digest was delivered by the configured sink handler.\n\
+                "Digest output uses the destination selected by [app] output.\n\
                  Set source = \"live\" under [app] to fetch from the real Hacker News API.",
             )
         } else {
-            footer.paragraph("The generated digest was delivered by the configured sink handler.")
+            footer.paragraph("Digest output uses the destination selected by [app] output.")
         }
     })
 }

@@ -15,6 +15,7 @@ mod outcome_list;
 mod port;
 mod system;
 
+use effects_path::EffectsPath;
 use proc_macro::TokenStream;
 
 /// Expand `$crate; A | (B, C)` to the nested outcome list type with its
@@ -41,12 +42,19 @@ pub fn sorted_outcomes(input: TokenStream) -> TokenStream {
 /// marks each with a `#[port]` field, and a command that works through no
 /// port has no such field.
 ///
-/// Generated code resolves `::obzenflow::effects`; code that depends on the
-/// runtime crate directly names its effects module with
-/// `#[command(effects = <path>)]`.
+/// The facade export resolves contracts through the facade's effects module.
+/// A renamed dependency can supply its module with `effects = <path>`.
 #[proc_macro_attribute]
 pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
-    command::expand(attr.into(), item.into()).into()
+    command::expand(attr.into(), item.into(), EffectsPath::Facade).into()
+}
+
+/// Declares the ports a command works through, using Runtime's effects module.
+/// See [`#[command]`](macro@command) for the supported forms.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn runtime_command(attr: TokenStream, item: TokenStream) -> TokenStream {
+    command::expand(attr.into(), item.into(), EffectsPath::Runtime).into()
 }
 
 /// Name a system on its `impl` of a port, as in
@@ -58,26 +66,37 @@ pub fn command(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// itself once, on either `impl`. A struct that serves as its own port names
 /// itself with `#[port(system = "name")]` instead.
 ///
-/// Generated code resolves `::obzenflow::effects`; code that depends on the
-/// runtime crate directly writes `#[system("name", effects = <path>)]`.
+/// The facade export resolves contracts through the facade's effects module.
+/// A renamed dependency can supply its module with `effects = <path>`.
 #[proc_macro_attribute]
 pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
-    system::expand(attr.into(), item.into()).into()
+    system::expand(attr.into(), item.into(), EffectsPath::Facade).into()
+}
+
+/// Names the system implementing a port, using Runtime's effects module.
+/// See [`#[system]`](macro@system) for the supported forms.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn runtime_system(attr: TokenStream, item: TokenStream) -> TokenStream {
+    system::expand(attr.into(), item.into(), EffectsPath::Runtime).into()
 }
 
 /// Mark a port trait, or the inherent `impl` block of a struct that serves as
 /// its own port, so a `Port` takes its port type from the system it is built
-/// from. Port methods answer with `Result<Outcome, EffectError>`, where the
+/// from. Port methods return `Result<Outcome, EffectError>`. By default the
 /// outcome is one fact or an `outcome![...]` list. A port trait is `Send` and
 /// `Sync`, which the attribute adds when the trait doesn't write them.
 ///
-/// Each method marked `#[effect(type = "...", exactly_once)]` or
-/// `#[effect(type = "...", at_least_once)]` declares one effect. It takes its
+/// Each method marked `#[effect(type = "...", exactly_once)]`,
+/// `#[effect(type = "...", at_least_once)]` or
+/// `#[effect(type = "...", at_most_once)]` declares one effect. It takes its
 /// request by reference after `&self`, and the request type then names the
 /// effect: a command performs it with `fx.call(request)`. `type` is the effect
-/// type the journal records the call under, and an optional
-/// `schema_version = N` versions the request's shape.
+/// type the journal records the call under, an optional `schema_version = N`
+/// versions the request's shape, and `records = reply` makes the method's
+/// answer a reply the runtime records and returns, which writes no fact.
 ///
+/// Every sink or effectful row using the method inherits its guarantee.
 /// The guarantee describes the call at the other end:
 ///
 /// - `exactly_once`: the call takes effect once even if it runs again. Either
@@ -87,8 +106,10 @@ pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   it. A keyed request implements `Keyed`, and its key is journalled with the
 ///   call.
 /// - `at_least_once`: the call may take effect more than once after a crash.
-///   The stage row accepts that with `.at_least_once::<Request>()` after its
-///   handler, and retry middleware does not repeat it.
+///   Retry middleware may repeat a call after a definite refusal.
+/// - `at_most_once`: the call takes effect at most once. The runtime records
+///   each attempt's start before making it, and records an attempt a crash
+///   left in doubt abandoned instead of making it again.
 ///
 /// After its request, an effect method takes nothing, `&EffectContext`,
 /// `key: &IdempotencyKey` optionally followed by `&EffectContext`, or a
@@ -98,9 +119,17 @@ pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// A struct that serves as its own port is also its own system, and names itself
 /// here with `#[port(system = "name")]`.
 ///
-/// Generated code resolves `::obzenflow::effects`; code that depends on the
-/// runtime crate directly writes `#[port(effects = <path>)]`.
+/// The facade export resolves contracts through the facade's effects module.
+/// A renamed dependency can supply its module with `effects = <path>`.
 #[proc_macro_attribute]
 pub fn port(attr: TokenStream, item: TokenStream) -> TokenStream {
-    port::expand(attr.into(), item.into()).into()
+    port::expand(attr.into(), item.into(), EffectsPath::Facade).into()
+}
+
+/// Declares a port and its effects, using Runtime's effects module.
+/// See [`#[port]`](macro@port) for the supported forms.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn runtime_port(attr: TokenStream, item: TokenStream) -> TokenStream {
+    port::expand(attr.into(), item.into(), EffectsPath::Runtime).into()
 }

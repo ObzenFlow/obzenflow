@@ -90,7 +90,6 @@ impl Fixture {
             progress: ExecutionProgress {
                 reader_seq: seq,
                 writer_seq: seq,
-                receipted_seq: 0,
                 last_consumed_event_id: Some(*row.id()),
                 last_consumed_vector_clock: Some(
                     row.envelope.provenance.journal.vector_clock.clone(),

@@ -221,26 +221,6 @@ pub enum FlowBuildError {
     )]
     JournalSyncUnused { sync: JournalSync },
 
-    /// A `handler_set!` sink has no resolved framework configuration value.
-    #[error(
-        "config error at sinks.stages.{stage_name}.handler: a handler_set! sink requires one of {expected}"
-    )]
-    MissingSinkSelection {
-        stage_name: String,
-        expected: String,
-    },
-
-    /// A config-selected `sink!` declaration received a non-secret string
-    /// outside its compile-time-closed alternative set.
-    #[error(
-        "config error at sinks.stages.{stage_name}.handler: expected {expected}; got {selected:?}"
-    )]
-    InvalidSinkSelection {
-        stage_name: String,
-        selected: String,
-        expected: String,
-    },
-
     #[error("flow binding '{binding}' configuration failed: {detail}")]
     BindingConfiguration { binding: String, detail: String },
 
@@ -316,9 +296,7 @@ pub enum FlowBuildError {
 
     #[error(
         "Stage '{stage_name}' declares policy middleware '{middleware}' on a pure sync surface. \
-         Policy middleware attaches to live I/O units only: sources, the effect boundary of an \
-         effectful stage, or sink delivery (FLOWIP-120c H1). A deterministic handler shell has \
-         no unreliable call to protect; move the policy to the stage that performs the I/O."
+         Attach the policy to a source poll or an effect call, including a sink call."
     )]
     PolicyMiddlewareOnPureStage {
         stage_name: String,

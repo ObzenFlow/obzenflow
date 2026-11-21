@@ -121,9 +121,6 @@ impl ContractPolicy for TransportStrictPolicy {
                     ViolationCause::ContentMismatch { .. } => {
                         EventViolationCause::Other("content_mismatch".into())
                     }
-                    ViolationCause::DeliveryMismatch { .. } => {
-                        EventViolationCause::Other("delivery_mismatch".into())
-                    }
                     ViolationCause::AccountingMismatch { .. } => {
                         EventViolationCause::Other("accounting_mismatch".into())
                     }

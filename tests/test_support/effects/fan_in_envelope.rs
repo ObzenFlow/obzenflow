@@ -18,11 +18,10 @@ use async_trait::async_trait;
 use obzenflow_core::{event::ChainPayload, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, Port, SinkRedeliverySafety};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -165,31 +164,14 @@ impl EffectfulTransformHandler for EffectfulMerge {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DropSink;
-
-#[async_trait]
-impl InlineSink for DropSink {
-    type Input = EnvelopeOutput;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-        )
-        .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, _event: EnvelopeOutput) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+type DropSink = obzenflow::stages::sinks::DiscardSink<EnvelopeOutput>;
 
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let source_a = ChannelSource::new("a", 4);
         let source_b = ChannelSource::new("b", 3);
         let effectful_merge = EffectfulMerge::new(calls);
-        let collector = DropSink;
+        let collector = DropSink::new();
 
         Ok(flow! {
             name: "effectful_fan_in_envelope",

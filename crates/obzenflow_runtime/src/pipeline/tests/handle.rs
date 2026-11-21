@@ -33,7 +33,6 @@ fn empty_extras() -> FlowHandleExtras {
         pipeline_writer_id: WriterId::from(obzenflow_core::id::SystemId::new()),
         flow_effective_config: None,
         archive_flow_evidence: Default::default(),
-        resume_notices: Vec::new(),
         liveness_snapshots: None,
         run_substrate: RunSubstrateState::Ephemeral,
     }

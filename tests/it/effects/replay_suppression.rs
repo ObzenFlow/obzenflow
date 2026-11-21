@@ -6,16 +6,13 @@ use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow::stages::stateful::fold;
-use obzenflow_core::{event::payloads::delivery_payload::DeliveryMethod, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_stateful, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    EffectError, Effects, IdempotencyKey, Keyed, Port, SinkRedeliverySafety,
-};
+use obzenflow_runtime::effects::{perform, EffectError, Effects, IdempotencyKey, Keyed, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulStatefulHandler, InlineSink, SinkDescription, SinkWriteFailure,
-    TypedFiniteSourceHandler,
+    EffectfulStatefulHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -292,25 +289,23 @@ struct Product {
     value: u64,
 }
 
-#[derive(Clone, Debug)]
+#[obzenflow_runtime::effects::port]
+trait CollectOutputPort: Send + Sync {
+    #[effect(type = "effect_replay.collect", at_least_once, records = reply)]
+    fn collect(&self, output: &ReplayOutput) -> Result<(), EffectError>;
+}
+
 struct CollectSink {
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 }
 
-#[async_trait]
-impl InlineSink for CollectSink {
-    type Input = ReplayOutput;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Memory".to_string()))
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(&mut self, output: ReplayOutput) -> Result<(), SinkWriteFailure> {
+#[obzenflow_runtime::effects::system("replay-output-collector")]
+impl CollectOutputPort for CollectSink {
+    fn collect(&self, output: &ReplayOutput) -> Result<(), EffectError> {
         self.outputs
             .lock()
             .expect("outputs lock poisoned")
-            .push(output);
+            .push(output.clone());
         Ok(())
     }
 }
@@ -325,7 +320,8 @@ fn build_stateful_flow(
         let effectful_handler = ReplayStateful {
             counter: call_counter(calls),
         };
-        let collector_handler = CollectSink { outputs };
+        let collector_handler = perform(|output: &ReplayOutput| output.clone())
+            .through(Port::to(CollectSink { outputs }));
 
         Ok(flow! {
             name: "effect_replay_stateful",
@@ -378,9 +374,8 @@ async fn strict_effectful_stateful_replay_suppresses_effect_execution() {
         .expect("live stateful flow should complete");
 
     assert_eq!(live_calls.load(Ordering::SeqCst), 3);
-    let live_domain_outputs = live_outputs.lock().expect("outputs lock poisoned").clone();
     assert_eq!(
-        live_domain_outputs,
+        *live_outputs.lock().expect("outputs lock poisoned"),
         vec![
             ReplayOutput {
                 value: 1,
@@ -419,12 +414,12 @@ async fn strict_effectful_stateful_replay_suppresses_effect_execution() {
         0,
         "stateful replay must use recorded effects"
     );
-    assert_eq!(
+    assert!(
         replay_outputs
             .lock()
             .expect("outputs lock poisoned")
-            .clone(),
-        live_domain_outputs
+            .is_empty(),
+        "replay calls no sink system"
     );
 }
 

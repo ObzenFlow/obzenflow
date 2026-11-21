@@ -5,7 +5,7 @@
 use super::{ContractStatus, ContractTracker, ReaderProgress, UpstreamSubscription};
 use crate::messaging::upstream_subscription_policy::{EdgeContext, EdgeContractDecision};
 use obzenflow_core::contracts::{
-    ContractPhase, SubscriptionFeed, SubscriptionReceipts, SubscriptionScope, SubscriptionSelection,
+    ContractPhase, SubscriptionFeed, SubscriptionScope, SubscriptionSelection,
 };
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::system_payload::{
@@ -19,12 +19,6 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::{ContractResult, EventDescriptor, TransportContract, ViolationCause};
 use tokio::time::Instant;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ContractCheckMode {
-    Authoritative,
-    DiagnosticsOnly,
-}
 
 fn contract_result_labels_for_emission(
     result: &ContractResult,
@@ -153,14 +147,6 @@ where
         }
     }
 
-    fn report_receipts(&self, progress: &ReaderProgress) -> Option<SubscriptionReceipts> {
-        self.uses_receipt_watermark()
-            .then_some(SubscriptionReceipts {
-                terminal_frontier: progress.receipted_seq,
-                last_event_id: progress.last_receipted_event_id,
-            })
-    }
-
     pub(crate) fn with_advisory_contract_upstreams(
         mut self,
         upstreams: std::collections::HashSet<obzenflow_core::StageId>,
@@ -205,9 +191,6 @@ where
                     }
                     ViolationCause::ContentMismatch { .. } => {
                         EventViolationCause::Other("content_mismatch".into())
-                    }
-                    ViolationCause::DeliveryMismatch { .. } => {
-                        EventViolationCause::Other("delivery_mismatch".into())
                     }
                     ViolationCause::AccountingMismatch { .. } => {
                         EventViolationCause::Other("accounting_mismatch".into())
@@ -490,23 +473,6 @@ where
         &mut self,
         reader_progress: &mut [ReaderProgress],
     ) -> ContractStatus {
-        self.check_contracts_with_mode(reader_progress, ContractCheckMode::Authoritative)
-            .await
-    }
-
-    pub async fn check_contracts_diagnostics_only(
-        &mut self,
-        reader_progress: &mut [ReaderProgress],
-    ) -> ContractStatus {
-        self.check_contracts_with_mode(reader_progress, ContractCheckMode::DiagnosticsOnly)
-            .await
-    }
-
-    async fn check_contracts_with_mode(
-        &mut self,
-        reader_progress: &mut [ReaderProgress],
-        mode: ContractCheckMode,
-    ) -> ContractStatus {
         if self.contract_tracker.is_none() {
             return ContractStatus::Healthy;
         };
@@ -515,13 +481,6 @@ where
 
         for (index, progress) in reader_progress.iter_mut().enumerate() {
             if progress.final_emitted {
-                continue;
-            }
-
-            // Diagnostics-only checks are used by stages that intentionally defer
-            // authoritative EOF verification (e.g. sinks that flush receipts before
-            // running final contract checks).
-            if mode == ContractCheckMode::DiagnosticsOnly && self.state.is_reader_eof(index) {
                 continue;
             }
 
@@ -540,10 +499,7 @@ where
                     .await;
 
                 // Check for EOF contract validation
-                if mode == ContractCheckMode::Authoritative
-                    && self.state.is_reader_eof(index)
-                    && !progress.final_emitted
-                {
+                if self.state.is_reader_eof(index) && !progress.final_emitted {
                     self.verify_eof_contracts_for_reader(progress, index, &mut edge_status)
                         .await;
                 }
@@ -621,7 +577,7 @@ where
         // Only emitting heartbeats once `reader_seq` has advanced avoids noisy and
         // misleading UI output ("all contracts healthy") when a flow is idle or
         // awaiting manual start.
-        let progress_seq = self.progress_seq(progress);
+        let progress_seq = progress.reader_seq;
 
         if progress_seq.0 == 0 {
             return;
@@ -772,7 +728,7 @@ where
         let Some(tracker) = &self.contract_tracker else {
             return;
         };
-        let progress_seq = self.progress_seq(progress);
+        let progress_seq = progress.reader_seq;
         let progress_last_event_id = progress.last_event_id;
         let progress_vector_clock = progress.last_vector_clock.clone();
 
@@ -783,7 +739,6 @@ where
                 ConsumptionProgressEventParams {
                     scope: self.report_scope(progress, tracker),
                     consumed_count: Count(progress.reader_seq.0),
-                    receipts: self.report_receipts(progress),
                     reader_seq: progress.reader_seq,
                     last_event_id: progress_last_event_id,
                     vector_clock: progress_vector_clock.clone(),
@@ -1143,7 +1098,6 @@ where
             tracker.writer_id,
             ConsumptionFinalEventParams {
                 scope: self.report_scope(progress, tracker),
-                receipts: self.report_receipts(progress),
                 pass,
                 consumed_count: Count(progress.reader_seq.0),
                 expected_count: None,
@@ -1187,8 +1141,8 @@ where
             return false;
         };
 
-        let delta_events = self
-            .progress_seq(progress)
+        let delta_events = progress
+            .reader_seq
             .0
             .saturating_sub(progress.last_progress_seq.0);
 
@@ -1237,30 +1191,5 @@ where
 
         *last_contract_check = Some(now);
         Some(self.check_contracts(reader_progress).await)
-    }
-
-    pub async fn maybe_check_contracts_tick_diagnostics_only(
-        &mut self,
-        reader_progress: &mut [ReaderProgress],
-        last_contract_check: &mut Option<Instant>,
-    ) -> Option<ContractStatus> {
-        let Some(tracker) = &self.contract_tracker else {
-            return None;
-        };
-
-        let now = Instant::now();
-        let tick_ms = tracker.config.check_interval.0.max(1);
-
-        let due = match last_contract_check {
-            Some(last) => now.duration_since(*last).as_millis() as u64 >= tick_ms,
-            None => true,
-        };
-
-        if !due {
-            return None;
-        }
-
-        *last_contract_check = Some(now);
-        Some(self.check_contracts_diagnostics_only(reader_progress).await)
     }
 }

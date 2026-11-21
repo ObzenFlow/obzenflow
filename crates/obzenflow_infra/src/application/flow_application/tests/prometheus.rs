@@ -125,7 +125,7 @@ enabled = true
     let application = tokio::spawn(FlowApplication::launch(
         FlowDefinition::materialize(move |_| {
             let source = source.clone();
-            let sink = NoopSink;
+            let sink = noop_sink();
             Ok(flow! {
                 name: "hosted_metrics", journals: crate::journal::memory_journals(),
                 stages: { src = async_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },

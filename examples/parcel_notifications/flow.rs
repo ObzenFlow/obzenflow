@@ -65,8 +65,8 @@ pub fn build_flow() -> FlowDefinition {
                     with { email_limiter, email_breaker, email_retry, sms_limiter }
                     => notify
                 );
-                sent_emails = sink!(EmailSent => emails.idempotent());
-                sent_texts = sink!(SmsSent => texts.idempotent());
+                sent_emails = sink!(EmailSent => emails);
+                sent_texts = sink!(SmsSent => texts);
             },
 
             topology: {

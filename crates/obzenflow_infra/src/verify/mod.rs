@@ -46,6 +46,48 @@ use report::{delta_side, CountsByType, DivergenceReport, RunSummary, StageReport
 use source::SourceOpenError;
 use walker::{tally_journal, walk_journal, StageWalkOptions};
 
+fn sink_calls<'a>(
+    mut rows: Box<dyn Iterator<Item = Result<obzenflow_core::ChainEvent, VerifyError>> + 'a>,
+) -> Box<dyn Iterator<Item = Result<obzenflow_core::ChainEvent, VerifyError>> + 'a> {
+    use obzenflow_core::event::payloads::effect_payload::{
+        EffectCursor, EFFECT_ATTEMPT_STARTED_EVENT_TYPE,
+    };
+    use std::collections::{HashMap, VecDeque};
+    let mut starts = HashMap::<EffectCursor, Vec<(u64, obzenflow_core::ChainEvent)>>::new();
+    let mut ready = VecDeque::new();
+    let mut position = 0;
+    Box::new(std::iter::from_fn(move || loop {
+        if let Some(row) = ready.pop_front() {
+            return Some(Ok(row));
+        }
+        let event = match rows.next() {
+            Some(Ok(event)) => event,
+            Some(Err(error)) => return Some(Err(error)),
+            None if starts.is_empty() => return None,
+            None => {
+                let mut remaining: Vec<_> = starts.drain().flat_map(|(_, rows)| rows).collect();
+                remaining.sort_by_key(|(index, _)| *index);
+                ready.extend(remaining.into_iter().map(|(_, event)| event));
+                continue;
+            }
+        };
+        position += 1;
+        if let Some(provenance) = &event.effect_provenance {
+            if event.event_type() == EFFECT_ATTEMPT_STARTED_EVENT_TYPE {
+                starts
+                    .entry(provenance.cursor.clone())
+                    .or_default()
+                    .push((position, event));
+                continue;
+            }
+            if let Some(attempts) = starts.remove(&provenance.cursor) {
+                ready.extend(attempts.into_iter().map(|(_, start)| start));
+            }
+        }
+        ready.push_back(event);
+    }))
+}
+
 #[derive(Debug, Clone)]
 pub struct VerifyOptions {
     /// Cap on recorded divergences per journal; counting continues past it.
@@ -124,11 +166,19 @@ pub fn verify_sources(
                         journal_label,
                         classification,
                     };
-                    walk_journal(
-                        baseline.stage_rows(b_file)?,
-                        candidate.stage_rows(c_file)?,
-                        &opts,
-                    )
+                    let baseline_rows = baseline.stage_rows(b_file)?;
+                    let candidate_rows = candidate.stage_rows(c_file)?;
+                    if journal_label == "data"
+                        && b_stage.stage_type == obzenflow_core::event::context::StageType::Sink
+                        && c_stage.stage_type == obzenflow_core::event::context::StageType::Sink
+                    {
+                        return walk_journal(
+                            sink_calls(baseline_rows),
+                            sink_calls(candidate_rows),
+                            &opts,
+                        );
+                    }
+                    walk_journal(baseline_rows, candidate_rows, &opts)
                 };
 
                 let data = walk(
@@ -233,12 +283,28 @@ pub fn verify_sources(
                 merge_counts(&mut baseline_counts, b_err.counts_by_type);
                 let mut candidate_counts = c_data.counts_by_type;
                 merge_counts(&mut candidate_counts, c_err.counts_by_type);
+                let replay_rejections = c_data.replay_rejections + c_err.replay_rejections;
+                let mut informational = match (vacuous, recorded) {
+                    (true, _) => Vec::new(),
+                    (false, true) => vec![
+                        "delivery order at or above this stage was recorded at run time; compare each run with its own replay".to_string(),
+                    ],
+                    (false, false) => vec![
+                        "delivery order is unconstrained at or above this stage; per-type row counts are an order-insensitive advisory, never a certificate".to_string(),
+                    ],
+                };
+                if replay_rejections > 0 {
+                    informational.push(format!(
+                        "replay refused {replay_rejections} calls whose request differs from the recording or that the recording doesn't hold"
+                    ));
+                }
 
                 StageReport {
-                    status: match (vacuous, recorded) {
-                        (true, _) => "matched",
-                        (false, true) => "order_recorded",
-                        (false, false) => "not_order_certified",
+                    status: match (replay_rejections > 0, vacuous, recorded) {
+                        (true, _, _) => "diverged",
+                        (false, true, _) => "matched",
+                        (false, false, true) => "order_recorded",
+                        (false, false, false) => "not_order_certified",
                     }
                     .to_string(),
                     vacuous,
@@ -247,17 +313,9 @@ pub fn verify_sources(
                     logic_version_changed,
                     positional_rows_baseline: positional_baseline,
                     positional_rows_candidate: positional_candidate,
-                    divergence_count: 0,
+                    divergence_count: replay_rejections,
                     divergences: Vec::new(),
-                    informational: match (vacuous, recorded) {
-                        (true, _) => Vec::new(),
-                        (false, true) => vec![
-                            "delivery order at or above this stage was recorded at run time; compare each run with its own replay".to_string(),
-                        ],
-                        (false, false) => vec![
-                            "delivery order is unconstrained at or above this stage; per-type row counts are an order-insensitive advisory, never a certificate".to_string(),
-                        ],
-                    },
+                    informational,
                     counts_by_type: if vacuous {
                         None
                     } else {
@@ -641,6 +699,67 @@ mod tests {
         assert_eq!(report.stages["merge"].status, "not_order_certified");
         assert!(report.stages["merge"].counts_by_type.is_some());
         assert!(!render_verdict(&outcome).contains(MATCHED_LINE));
+    }
+
+    #[test]
+    fn replay_rejection_counts_as_difference() {
+        use obzenflow_core::event::payloads::effect_payload::{
+            EffectFailureCause, EffectFailureCode, EffectFailureSource, EffectObservation,
+            EffectOutcomePayload, EffectRecord, RetryDisposition,
+        };
+        use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+        let sink_call = |outcome| {
+            ChainEventFactory::execution_event(
+                writer(),
+                ExecutionPayload::EffectRecord(Box::new(EffectRecord {
+                    observation: EffectObservation::returned_success(),
+                    cursor: EffectCursor::new("flow_b", "merge", 1, 0),
+                    descriptor_hash: "hash".into(),
+                    descriptor: EffectDescriptor::new("sink.record", "record", 1, "1", "input"),
+                    outcome,
+                    origin: None,
+                })),
+            )
+        };
+        let rejected = EffectOutcomePayload::Failed {
+            error_type: "boundary_rejected".into(),
+            error_message: "this build's request differs from the recorded call".to_string(),
+            retry: RetryDisposition::NotRetryable,
+            cause: Some(EffectFailureCause {
+                source: EffectFailureSource::new("replay"),
+                code: EffectFailureCode::new("request_differs"),
+            }),
+            detail: None,
+        };
+        let stages: Vec<(&str, &[&str], DeliveryOrder)> = vec![
+            ("x", &[], SingleInput),
+            ("y", &[], SingleInput),
+            ("merge", &["x", "y"], Unordered),
+        ];
+        let baseline = source(
+            manifest(&stages, None, "flow_b"),
+            ArchiveStatus::Completed,
+            &[(
+                "merge.log",
+                vec![sink_call(EffectOutcomePayload::Succeeded {
+                    output: json!(null),
+                })],
+            )],
+            "/runs/b",
+        );
+        let candidate = source(
+            manifest(&stages, replay_block(), "flow_c"),
+            ArchiveStatus::Completed,
+            &[("merge.log", vec![sink_call(rejected)])],
+            "/runs/c",
+        );
+        let outcome = verify_sources(&baseline, &candidate, &no_write()).unwrap();
+        assert_eq!(outcome.exit_code(), 1);
+        let VerifyOutcome::Completed { report, .. } = &outcome else {
+            panic!()
+        };
+        assert_eq!(report.stages["merge"].status, "diverged");
+        assert_eq!(report.stages["merge"].divergence_count, 1);
     }
 
     #[test]

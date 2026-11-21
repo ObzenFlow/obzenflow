@@ -53,7 +53,6 @@ pub(in crate::render) struct ProgressView<'a> {
     input: InputView<'a>,
     scope: &'a obzenflow_core::contracts::SubscriptionScope,
     consumed_count: obzenflow_core::event::types::Count,
-    receipts: &'a Option<obzenflow_core::contracts::SubscriptionReceipts>,
     reader_seq: SeqNo,
     eof_seen: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,7 +170,6 @@ impl<'a> BodyView<'a> {
                 ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
                     scope,
                     consumed_count,
-                    receipts,
                     reader_seq,
                     last_event_id: _,
                     vector_clock: _,
@@ -184,13 +182,12 @@ impl<'a> BodyView<'a> {
                     input: InputView::from_reader(reader_path, *reader_index, context),
                     scope,
                     consumed_count: *consumed_count,
-                    receipts,
                     reader_seq: *reader_seq,
                     eof_seen: *eof_seen,
                     advertised_writer_seq: *advertised_writer_seq,
                 }),
                 ChainPayload::Execution(ExecutionPayload::EffectRecord(effect)) => {
-                    Self::EffectOutcome(effect.into())
+                    Self::EffectOutcome(effect.as_ref().into())
                 }
                 ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(effect)) => {
                     Self::EffectAttempt(effect.into())

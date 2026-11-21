@@ -2,44 +2,150 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Terminal structured diagnostics through the application's tracing subscriber.
+//! A sink that emits each input as a structured event through the
+//! application's tracing subscriber.
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
+use obzenflow_runtime::effects::{
+    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkBatchDefaults, SinkRole,
+};
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use serde::Serialize;
+use serde_json::{Map, Value};
 use std::marker::PhantomData;
+use std::sync::OnceLock;
 
-/// Emit one input's structured tracing diagnostic.
-///
-/// The synchronous callback emits the application's `tracing` event. Subscriber
-/// filtering and routing remain unchanged; success means the callback completed,
-/// not that a subscriber persisted the diagnostic. This convenience does not own
-/// resources, retry, buffering or asynchronous delivery. Implement [`InlineSink`]
-/// or the connector/writer traits for custom sink execution.
+/// The level a tracing sink emits its event at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TracingLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+/// The event a tracing sink emits for one input: a level, a message and
+/// named fields.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TracingOutput {
+    level: TracingLevel,
+    message: String,
+    fields: Map<String, Value>,
+}
+
+impl TracingOutput {
+    pub fn new(level: TracingLevel, message: impl Into<String>) -> Self {
+        Self {
+            level,
+            message: message.into(),
+            fields: Map::new(),
+        }
+    }
+
+    pub fn trace(message: impl Into<String>) -> Self {
+        Self::new(TracingLevel::Trace, message)
+    }
+
+    pub fn debug(message: impl Into<String>) -> Self {
+        Self::new(TracingLevel::Debug, message)
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::new(TracingLevel::Info, message)
+    }
+
+    pub fn warn(message: impl Into<String>) -> Self {
+        Self::new(TracingLevel::Warn, message)
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(TracingLevel::Error, message)
+    }
+
+    /// Add one named field. A value that can't be serialized records its
+    /// serialization error as text.
+    pub fn field(mut self, name: impl Into<String>, value: impl Serialize) -> Self {
+        let value = serde_json::to_value(value)
+            .unwrap_or_else(|error| Value::String(format!("unserializable: {error}")));
+        self.fields.insert(name.into(), value);
+        self
+    }
+}
+
+/// The port a tracing sink emits through. An event a crash left in doubt may
+/// be emitted again after a resume, so the method is `at_least_once`.
+#[port]
+#[async_trait]
+pub trait TracingPort {
+    #[effect(type = "obzenflow.tracing.event", at_least_once, records = reply)]
+    async fn emit(&self, output: &TracingOutput) -> Result<(), EffectError>;
+}
+
+struct Tracing;
+
+#[system("tracing")]
+#[async_trait]
+impl TracingPort for Tracing {
+    async fn emit(&self, output: &TracingOutput) -> Result<(), EffectError> {
+        let fields = Value::Object(output.fields.clone());
+        let message = output.message.as_str();
+        match output.level {
+            TracingLevel::Trace => tracing::trace!(fields = %fields, "{message}"),
+            TracingLevel::Debug => tracing::debug!(fields = %fields, "{message}"),
+            TracingLevel::Info => tracing::info!(fields = %fields, "{message}"),
+            TracingLevel::Warn => tracing::warn!(fields = %fields, "{message}"),
+            TracingLevel::Error => tracing::error!(fields = %fields, "{message}"),
+        }
+        Ok(())
+    }
+}
+
+fn tracing_port() -> Port<dyn TracingPort> {
+    static PORT: OnceLock<Port<dyn TracingPort>> = OnceLock::new();
+    PORT.get_or_init(|| Port::to(Tracing)).clone()
+}
+
+/// A sink that emits one tracing event per live input. With the built-in
+/// system the runtime journals up to 64 queued outcomes together by default,
+/// with zero maximum wait. Replay emits no tracing events.
 pub struct TracingSink<T, F> {
-    emit: F,
+    event: F,
+    replacement: Option<Port<dyn TracingPort>>,
     _input: PhantomData<fn() -> T>,
 }
 
 impl<T, F> TracingSink<T, F>
 where
     T: TypedPayload + Send + Sync + 'static,
-    F: Fn(&T) + Clone + Send + Sync + 'static,
+    F: Fn(&T) -> TracingOutput + Clone + Send + Sync + 'static,
 {
-    pub fn new(emit: F) -> Self {
+    pub fn new(event: F) -> Self {
         Self {
-            emit,
+            event,
+            replacement: None,
             _input: PhantomData,
         }
+    }
+}
+
+impl<T, F> TracingSink<T, F> {
+    /// Emit through another system that answers `TracingPort`. A replacement
+    /// uses the framework's one-request default.
+    pub fn through(mut self, port: Port<dyn TracingPort>) -> Self {
+        self.replacement = Some(port);
+        self
     }
 }
 
 impl<T, F: Clone> Clone for TracingSink<T, F> {
     fn clone(&self) -> Self {
         Self {
-            emit: self.emit.clone(),
+            event: self.event.clone(),
+            replacement: self.replacement.clone(),
             _input: PhantomData,
         }
     }
@@ -49,39 +155,44 @@ impl<T, F> std::fmt::Debug for TracingSink<T, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TracingSink")
             .field("input", &std::any::type_name::<T>())
+            .field("port", &self.ports().0)
             .finish_non_exhaustive()
     }
 }
 
-#[async_trait]
-impl<T, F> InlineSink for TracingSink<T, F>
+impl<T, F> Command for TracingSink<T, F> {
+    type Ports = (Port<dyn TracingPort>, ());
+    type AllowedEffects = DeclaredEffectSet<WithMember<TracingOutput, EmptySet>>;
+
+    fn ports(&self) -> Self::Ports {
+        (self.replacement.clone().unwrap_or_else(tracing_port), ())
+    }
+}
+
+impl<T, F> SinkRole<T> for TracingSink<T, F>
 where
     T: TypedPayload + Send + Sync + 'static,
-    F: Fn(&T) + Clone + Send + Sync + 'static,
+    F: Fn(&T) -> TracingOutput + Clone + Send + Sync + 'static,
 {
-    type Input = T;
+    type Request = TracingOutput;
 
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("tracing".into()))
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+    fn batch_defaults(&self) -> SinkBatchDefaults {
+        if self.replacement.is_none() {
+            super::queued_batch_defaults()
+        } else {
+            SinkBatchDefaults::default()
+        }
     }
 
-    async fn write(&mut self, input: T) -> Result<(), SinkWriteFailure> {
-        (self.emit)(&input);
-        Ok(())
+    fn prepare(&self, input: T) -> Result<TracingOutput, HandlerError> {
+        Ok((self.event)(&input))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
-    use obzenflow_core::event::JournalRecord;
-    use obzenflow_core::{JournalWriterId, StageId};
-    use obzenflow_runtime::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
-    use obzenflow_runtime::stages::sink::{SinkConnector, SinkWriterInitContext};
-    use serde::{Deserialize, Serialize};
-    use std::sync::{Arc, Mutex};
+    use serde::Deserialize;
 
     #[derive(Deserialize, Serialize)]
     struct Item(u64);
@@ -89,56 +200,49 @@ mod tests {
         const EVENT_TYPE: &'static str = "tracing.test.item";
     }
 
-    #[tokio::test]
-    async fn tracing_callback_runs_once_and_inherits_honest_completion_metadata() {
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        let capture = observed.clone();
-        let connector = TracingSink::new(move |item: &Item| {
-            ::tracing::info!(value = item.0, "terminal item observed");
-            capture.lock().unwrap().push(item.0);
+    #[test]
+    fn tracing_defaults_follow_destination() {
+        let sink = TracingSink::new(|_: &Item| TracingOutput::info("ready"));
+        assert_eq!(sink.batch_defaults().size.unwrap().get(), 64);
+        assert!(sink.through(tracing_port()).batch_defaults().size.is_none());
+    }
+
+    #[test]
+    fn tracing_request_carries_named_fields() {
+        let sink = TracingSink::new(|item: &Item| {
+            TracingOutput::info("terminal item observed").field("value", item.0)
         });
-        let description = SinkConnector::describe(&connector);
+        let request = sink.prepare(Item(7)).unwrap();
+        assert_eq!(request.message, "terminal item observed");
+        assert_eq!(request.fields.get("value"), Some(&Value::from(7)));
+        assert_eq!(sink.ports().0.system_name(), "tracing");
+    }
+
+    struct CountEvents(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountEvents {
+        fn on_event(&self, _: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn tracing_request_replay_emits_nothing() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let events = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(CountEvents(events.clone())),
+        );
+        let sink = TracingSink::new(|item: &Item| {
+            TracingOutput::info("terminal item observed").field("value", item.0)
+        });
+        let request = sink.prepare(Item(7)).unwrap();
         assert_eq!(
-            description.default_method(),
-            &DeliveryMethod::Custom("tracing".into())
+            events.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a replay builds the request and emits nothing"
         );
-        assert_eq!(
-            description.redelivery_safety(),
-            Some(SinkRedeliverySafety::SafeToRepeat)
-        );
-        let stage = StageId::new();
-        let writer = connector
-            .open(SinkWriterInitContext::new(
-                stage,
-                "tracing".into(),
-                "test".into(),
-            ))
-            .await
-            .unwrap();
-        let mut adapter =
-            SinkWriterAdapter::new(writer, stage, description.default_method().clone());
-        let input = JournalRecord::new(
-            JournalWriterId::new(),
-            Item(7).to_event(StageId::new().into()),
-        );
-        let report = adapter
-            .consume_committed_report(input.into(), Default::default())
-            .await
-            .unwrap();
-        assert_eq!(*observed.lock().unwrap(), vec![7]);
-        assert!(matches!(
-            report.primary.result,
-            DeliveryResult::Success { .. }
-        ));
-        assert_eq!(
-            report.primary.delivery_method,
-            DeliveryMethod::Custom("tracing".into())
-        );
-        assert_eq!(report.primary.items_delivered, Some(1));
-        assert_eq!(report.primary.bytes_processed, None);
-        assert!(report.commit_receipts.is_empty());
-        adapter.flush_report().await.unwrap();
-        adapter.drain_report().await.unwrap();
-        assert_eq!(*observed.lock().unwrap(), vec![7]);
+        Tracing.emit(&request).await.unwrap();
+        assert_eq!(events.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

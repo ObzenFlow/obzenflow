@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use anyhow::{anyhow, Result};
-use obzenflow::stages::sinks::postgres::PostgresTransport;
+use obzenflow::effects::postgres::PostgresTransport;
 
 const POSTGRES_TRANSPORT_ENV: &str = "OBZENFLOW_POSTGRES_TRANSPORT";
 const VERIFIED_TLS: &str = "verified-tls";

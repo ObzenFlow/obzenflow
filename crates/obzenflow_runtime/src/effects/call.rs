@@ -3,11 +3,10 @@
 // https://obzenflow.dev
 
 use super::{
-    BoundEffect, DomainFacts, Effect, EffectBindingUse, EffectContext, EffectError, EffectPortSlot,
-    EffectPortSlotSet, EffectSafety, IdempotencyKey, Named,
+    BoundEffect, Effect, EffectBindingUse, EffectContext, EffectError, EffectOutcomeSemantics,
+    EffectPortSlot, EffectPortSlotSet, EffectSafety, IdempotencyKey, Named,
 };
 use async_trait::async_trait;
-use obzenflow_core::event::schema::EffectOutcome;
 use obzenflow_core::SystemBindingEvidence;
 use serde::Serialize;
 
@@ -22,7 +21,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve")]
 ///     fn reserve(&self, request: &Reserve) -> Result<Reserved, EffectError>;
@@ -38,7 +37,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(exactly_once)]
 ///     fn reserve(&self, request: &Reserve) -> Result<Reserved, EffectError>;
@@ -54,7 +53,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, request: Reserve) -> Result<Reserved, EffectError>;
@@ -71,7 +70,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, request: &Reserve, count: u32) -> Result<Reserved, EffectError>;
@@ -88,7 +87,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Authorized;
 /// # impl obzenflow_core::TypedPayload for Authorized { const EVENT_TYPE: &'static str = "docs.authorized"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait GatewayPort: Send + Sync {
 ///     #[effect(type = "docs.authorize", at_least_once)]
 ///     fn authorize(&self, request: &Authorize, key: &IdempotencyKey) -> Result<Authorized, EffectError>;
@@ -104,7 +103,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Posted;
 /// # impl obzenflow_core::TypedPayload for Posted { const EVENT_TYPE: &'static str = "docs.posted"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait LedgerPort: Send + Sync {
 ///     #[effect(type = "docs.post", at_least_once)]
 ///     fn post(&self, request: &Post, tx: EffectCommitHandle<Posted>) -> Result<Posted, EffectError>;
@@ -120,7 +119,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Posted;
 /// # impl obzenflow_core::TypedPayload for Posted { const EVENT_TYPE: &'static str = "docs.posted"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait LedgerPort: Send + Sync {
 ///     #[effect(type = "docs.post", exactly_once)]
 ///     fn post(
@@ -141,7 +140,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, request: &Reserve) -> Result<Reserved, EffectError>;
@@ -161,7 +160,7 @@ use serde::Serialize;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Reserved;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// trait WarehousePort: Send + Sync {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, request: &Reserve) -> Result<Reserved, EffectError>;
@@ -188,7 +187,7 @@ use serde::Serialize;
 /// A struct port is marked on its inherent `impl` block, not on the struct:
 ///
 /// ```compile_fail
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// struct CallCounter;
 /// ```
 ///
@@ -202,7 +201,7 @@ use serde::Serialize;
 /// # trait WarehousePort: Send + Sync { fn reserve(&self) -> Result<Reserved, EffectError>; }
 /// struct Warehouse;
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// impl WarehousePort for Warehouse {
 ///     fn reserve(&self) -> Result<Reserved, EffectError> {
 ///         Ok(Reserved)
@@ -221,7 +220,7 @@ use serde::Serialize;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
 /// struct Counter<T>(T);
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// impl<T> Counter<T> {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, _: &Reserve) -> Result<Reserved, EffectError> {
@@ -243,7 +242,7 @@ use serde::Serialize;
 /// # impl obzenflow_core::TypedPayload for Reserved { const EVENT_TYPE: &'static str = "docs.reserved"; }
 /// struct CallCounter;
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// impl CallCounter {
 ///     #[effect(type = "docs.reserve", exactly_once)]
 ///     fn reserve(&self, _: &Reserve) -> Result<Reserved, EffectError> {
@@ -251,7 +250,7 @@ use serde::Serialize;
 ///     }
 /// }
 ///
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// impl CallCounter {
 ///     #[effect(type = "docs.release", exactly_once)]
 ///     fn release(&self, _: &Release) -> Result<Reserved, EffectError> {
@@ -264,21 +263,25 @@ use serde::Serialize;
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a declared request",
     label = "no `#[effect]` port method takes `{Self}`",
-    note = "declare it with `#[effect(type = \"...\", exactly_once)]` or `at_least_once` on the port method that takes it"
+    note = "declare it with `#[effect(type = \"...\", exactly_once)]`, `at_least_once` or `at_most_once` on the port method that takes it"
 )]
 pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'static {
     const EFFECT_TYPE: &'static str;
     const SCHEMA_VERSION: u32 = 1;
 
-    /// How a repeated call behaves: `Idempotent`, `RequiresKey`, `AtLeastOnce` or
-    /// `Transactional`.
+    /// How a repeated call behaves: `Idempotent`, `RequiresKey`, `AtLeastOnce`,
+    /// `AtMostOnce` or `Transactional`.
     type Safety: CallSafety + KeyRule<Self>;
 
     /// The port a system implements to answer this request.
     type Port: ?Sized + Send + Sync + 'static;
 
-    /// The facts a successful call records.
-    type Outcome: EffectOutcome + Clone + Send + Sync + 'static;
+    /// What a successful call answers: facts, or a reply under `records = reply`.
+    type Outcome: Clone + Send + Sync + 'static;
+
+    /// `DomainFacts` when the answer is facts the stage writes, `RecordedReply`
+    /// when it is a reply the runtime records and returns.
+    type Records: EffectOutcomeSemantics<Self::Outcome>;
 
     async fn call(
         &self,
@@ -296,7 +299,7 @@ pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'stat
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Scored;
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.keyed.scored"; }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// #[async_trait]
 /// trait RiskEnginePort: Send + Sync {
 ///     #[effect(type = "docs.keyed.score", exactly_once)]
@@ -329,7 +332,7 @@ pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'stat
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.keyed.scored"; }
 /// # #[derive(Clone, Debug, serde::Serialize)]
 /// # struct ScoreRequest { txn_id: u64 }
-/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// #[obzenflow_runtime::effects::port]
 /// #[async_trait]
 /// trait RiskEnginePort: Send + Sync {
 ///     #[effect(type = "docs.keyed.score", exactly_once)]
@@ -352,7 +355,7 @@ pub trait Keyed {
 mod sealed {
     #[diagnostic::on_unimplemented(
         message = "`{Self}` is not a request safety class",
-        note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce` or `Transactional`"
+        note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce`, `AtMostOnce` or `Transactional`"
     )]
     pub trait CallSafety {}
 }
@@ -371,7 +374,7 @@ mod sealed {
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a request safety class",
-    note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce` or `Transactional`"
+    note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce`, `AtMostOnce` or `Transactional`"
 )]
 pub trait CallSafety: sealed::CallSafety {
     #[doc(hidden)]
@@ -387,10 +390,14 @@ pub struct Idempotent;
 #[doc(hidden)]
 pub struct RequiresKey;
 
-/// An `at_least_once` request, acknowledged after its stage's handler with
-/// `.at_least_once::<R>()`.
+/// An `at_least_once` request whose destination may act again on resume.
 #[doc(hidden)]
 pub struct AtLeastOnce;
+
+/// An `at_most_once` request, whose call a crash left in doubt is recorded
+/// abandoned and never made again.
+#[doc(hidden)]
+pub struct AtMostOnce;
 
 /// An `exactly_once` request whose port commits its outcome through its
 /// `EffectCommitHandle`. The committed record is the outcome.
@@ -400,6 +407,7 @@ pub struct Transactional;
 impl sealed::CallSafety for Idempotent {}
 impl sealed::CallSafety for RequiresKey {}
 impl sealed::CallSafety for AtLeastOnce {}
+impl sealed::CallSafety for AtMostOnce {}
 impl sealed::CallSafety for Transactional {}
 
 impl CallSafety for Idempotent {
@@ -412,6 +420,10 @@ impl CallSafety for RequiresKey {
 
 impl CallSafety for AtLeastOnce {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+}
+
+impl CallSafety for AtMostOnce {
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtMostOnce;
 }
 
 impl CallSafety for Transactional {
@@ -438,6 +450,12 @@ impl<R> KeyRule<R> for AtLeastOnce {
     }
 }
 
+impl<R> KeyRule<R> for AtMostOnce {
+    fn key(_: &R) -> Option<IdempotencyKey> {
+        None
+    }
+}
+
 impl<R> KeyRule<R> for Transactional {
     fn key(_: &R) -> Option<IdempotencyKey> {
         None
@@ -448,7 +466,7 @@ impl<R> KeyRule<R> for Transactional {
 /// holds for the request's port.
 #[doc(hidden)]
 pub struct Call<R: CallRequest> {
-    request: R,
+    pub(super) request: R,
     projection: EffectBindingUse<Call<R>>,
 }
 
@@ -491,7 +509,7 @@ impl<R: CallRequest> Effect for Call<R> {
     const SAFETY: EffectSafety = <R::Safety as CallSafety>::SAFETY;
     type BindingMode = Named<SystemBindingEvidence>;
     type Outcome = R::Outcome;
-    type OutcomeSemantics = DomainFacts;
+    type OutcomeSemantics = R::Records;
 
     fn label(&self) -> &str {
         R::EFFECT_TYPE

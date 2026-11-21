@@ -6,8 +6,9 @@
 //! command works through, and the systems the flow builder chooses for them.
 
 pub use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
+pub use obzenflow_runtime::effects::__facade::{command, port, system};
 pub use obzenflow_runtime::effects::{
-    command, perform, port, system, Command, Keyed, Perform, PerformRequest, Port, StagePort,
+    perform, Command, Keyed, Perform, PerformRequest, Port, SinkRequest, SinkRole, StagePort,
     SystemName,
 };
 pub use obzenflow_runtime::effects::{
@@ -24,10 +25,10 @@ pub use obzenflow_runtime::effects::{
 
 #[doc(hidden)]
 pub use obzenflow_runtime::effects::{
-    __async_trait, assert_port_answer, AtLeastOnce, Call, CallRequest, CallSafety,
-    DeclaredEffectSet, EffectList, FieldsEffects, Idempotent, KeyRule, NarrowedPort, PortAnswer,
-    PortEffects, PortField, PortImpl, PortServesRequest, RequestList, RequiresKey, ServesPort,
-    Transactional, WholePort,
+    __async_trait, assert_port_answer, AtLeastOnce, AtMostOnce, Call, CallRequest, CallSafety,
+    DeclaredEffectSet, DomainFacts, EffectList, FieldsEffects, Idempotent, KeyRule, NarrowedPort,
+    PortAnswer, PortEffects, PortImpl, PortReply, PortServesRequest, RecordedReply, RequestList,
+    RequiresKey, ServesPort, Transactional, WholePort,
 };
 
 /// Building blocks for simulated outside systems: a call log that answers a
@@ -48,5 +49,18 @@ pub mod http {
         Body, Bytes, HeaderMap, HeaderName, HeaderValue, HttpClient, HttpClientError, HttpMethod,
         HttpRequest, HttpResponse, MockHttpClient, Url,
     };
-    pub use obzenflow_infra::http_client::{default_http_client, HttpClientFactoryError};
+    pub use obzenflow_infra::clients::http::{default_http_client, HttpClientFactoryError};
+}
+
+/// PostgreSQL output for an application's system. The system supplies the SQL
+/// and binds its request fields through [`PostgresClient`](postgres::PostgresClient).
+/// The default client executes each statement in autocommit. [`unsent`](postgres::unsent)
+/// maps a client failure to an effect error. Requires the `postgres` feature.
+#[cfg(feature = "postgres")]
+pub mod postgres {
+    pub use obzenflow_infra::clients::postgres::{
+        default_postgres_client, unsent, PostgresBindings, PostgresClient, PostgresClientError,
+        PostgresConfigError, PostgresConnection, PostgresStatement, PostgresStatementError,
+        PostgresTransport,
+    };
 }

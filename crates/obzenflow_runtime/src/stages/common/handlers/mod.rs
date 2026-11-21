@@ -7,7 +7,6 @@
 pub(crate) mod join;
 pub mod observer;
 pub mod resource_managed;
-pub mod sink;
 pub mod source;
 pub mod stateful;
 pub mod transform;
@@ -19,20 +18,6 @@ pub use join::{
 };
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
-#[doc(hidden)]
-pub use sink::{
-    CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport, SinkWriterAdapter,
-    UnifiedSinkHandler,
-};
-pub use sink::{
-    DeliveryContext, DeliveryProvenance, InlineSink, PendingSinkInput, SinkAuditOutcome,
-    SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription,
-    SinkDestinationErrorCode, SinkInputOrder, SinkOperationError,
-    SinkOperationErrorConversionError, SinkOperationResult, SinkPrimaryOutcome,
-    SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteFailureDisposition,
-    SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
-    SinkWriterLifecycleReport, WithRedeliverySafety,
-};
 pub use source::{
     prove_journal_form, HostedIngressSource, HostedSubmission, IngressDecodeError, IngressDecoder,
     IngressReceiptSender, IngressRecord, SourceError, SourceObservationSink,

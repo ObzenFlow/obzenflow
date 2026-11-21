@@ -5,7 +5,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::stages::stateful::{self, emit};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow::testing::CountingSink;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
@@ -16,8 +16,8 @@ use obzenflow_dsl::{
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission, TypedAsyncFiniteSourceHandler,
-    TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
+    StatefulEmission, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::{JournalProbe, TestClock};
@@ -96,49 +96,9 @@ impl TypedAsyncFiniteSourceHandler for DelayedEofEventSource {
     }
 }
 
-#[derive(Debug)]
-struct EventCounterSink<T> {
-    count: Arc<AtomicU64>,
-    _input: std::marker::PhantomData<fn() -> T>,
-}
-
-impl<T> Clone for EventCounterSink<T> {
-    fn clone(&self) -> Self {
-        Self {
-            count: Arc::clone(&self.count),
-            _input: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T> EventCounterSink<T> {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let count = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                count: count.clone(),
-                _input: std::marker::PhantomData,
-            },
-            count,
-        )
-    }
-}
-
-#[async_trait]
-impl<T> InlineSink for EventCounterSink<T>
-where
-    T: TypedPayload + Send + Sync + 'static,
-{
-    type Input = T;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
-    }
-
-    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
-        self.count.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
+fn event_counter_sink<T>() -> (CountingSink<T>, Arc<AtomicU64>) {
+    let count = Arc::new(AtomicU64::new(0));
+    (CountingSink::new(count.clone()), count)
 }
 
 #[derive(Clone, Debug)]
@@ -246,7 +206,7 @@ async fn cycle_guard_rejects_cycles_with_non_transform_members() {
         let source = TestEventSource::new(1);
         let stateful = NoopStateful;
         let transform = IdentityTransform::<SeedEvent>::new();
-        let (sink, _count) = EventCounterSink::<SeedEvent>::new();
+        let (sink, _count) = event_counter_sink::<SeedEvent>();
 
         Ok(flow! {
             name: "cycle_guard_reject_stateful_cycle",
@@ -298,7 +258,7 @@ async fn cycle_guard_rejects_stateful_emit_per_window_cycle() {
         )
         .emit(emit::per_window(Duration::from_millis(10)));
         let transform = IdentityTransform::<WindowCount>::new();
-        let (sink, _count) = EventCounterSink::<WindowCount>::new();
+        let (sink, _count) = event_counter_sink::<WindowCount>();
 
         Ok(flow! {
             name: "cycle_guard_reject_emit_per_window",
@@ -339,7 +299,7 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
     }
     let base_for_flow = base.clone();
 
-    let (counter_sink, counter) = EventCounterSink::<SeedEvent>::new();
+    let (counter_sink, counter) = event_counter_sink::<SeedEvent>();
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
         let source = TestEventSource::new(5);
@@ -402,7 +362,7 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     }
     let base_for_flow = base.clone();
 
-    let (counter_sink, counter) = EventCounterSink::<SeedEvent>::new();
+    let (counter_sink, counter) = event_counter_sink::<SeedEvent>();
     let source = DelayedEofEventSource::new(Duration::from_millis(500));
     let transform_a = IdentityTransform::<SeedEvent>::new();
     let transform_b = IdentityTransform::<SeedEvent>::new();

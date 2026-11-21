@@ -5,13 +5,10 @@
 use super::*;
 use crate::journal::disk_journals;
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-
 use obzenflow_dsl::{flow, infinite_source, sink, source};
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
-    TypedInfiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use std::net::TcpListener;
@@ -67,18 +64,6 @@ impl TypedFiniteSourceHandler for OneShotSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NoopSink;
-
-#[async_trait]
-impl InlineSink for NoopSink {
-    type Input = IdlePayload;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("test".to_string()))
-    }
-
-    async fn write(&mut self, _input: IdlePayload) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
+fn noop_sink() -> obzenflow_adapters::sinks::DiscardSink<IdlePayload> {
+    obzenflow_adapters::sinks::DiscardSink::new()
 }

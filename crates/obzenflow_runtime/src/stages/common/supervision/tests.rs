@@ -945,7 +945,7 @@ async fn the_data_journal_refuses_an_error_marked_row_under_any_commit_options()
     .expect("effect record");
     let marked_call = ChainEventFactory::execution_event(
         stage.into(),
-        ExecutionPayload::EffectRecord(failed_call),
+        ExecutionPayload::EffectRecord(Box::new(failed_call)),
     )
     .mark_as_error("risk engine unavailable", ErrorKind::Remote);
 

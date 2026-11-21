@@ -5,7 +5,7 @@
 //! Pipeline and stage configuration types
 
 use crate::stages::common::handlers::source::traits::{FiniteSourceHandler, InfiniteSourceHandler};
-use crate::stages::common::handlers::{SinkHandler, TransformHandler};
+use crate::stages::common::handlers::TransformHandler;
 use obzenflow_core::{SccId, StageId};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -50,7 +50,6 @@ pub enum StageHandlerType {
     FiniteSource(Box<dyn FiniteSourceHandler>),
     InfiniteSource(Box<dyn InfiniteSourceHandler>),
     Transform(Box<dyn TransformHandler>),
-    Sink(Box<dyn SinkHandler>),
     // TODO: FLOWIP-080 will fix Stateful with proper type erasure for associated types
 }
 

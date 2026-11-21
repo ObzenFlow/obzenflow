@@ -34,10 +34,21 @@ impl CurrentRunHistory {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn cursor_history(
         &self,
         journal: &Arc<dyn Journal<ChainEvent>>,
         cursor: &EffectCursor,
+    ) -> Result<EffectCursorHistory, CurrentRunFailure> {
+        self.group_cursor_history(journal, cursor, cursor.input_seq.get())
+            .await
+    }
+
+    pub(crate) async fn group_cursor_history(
+        &self,
+        journal: &Arc<dyn Journal<ChainEvent>>,
+        cursor: &EffectCursor,
+        first_input: u64,
     ) -> Result<EffectCursorHistory, CurrentRunFailure> {
         if !Arc::ptr_eq(journal, &self.journal) {
             return Err(CurrentRunFailure::History(
@@ -47,7 +58,11 @@ impl CurrentRunHistory {
                 )),
             ));
         }
-        self.fold.lock().await.lookup(&self.journal, cursor).await
+        self.fold
+            .lock()
+            .await
+            .lookup(&self.journal, cursor, first_input)
+            .await
     }
 
     #[cfg(test)]
@@ -82,11 +97,12 @@ impl Fold {
         &mut self,
         journal: &Arc<dyn Journal<ChainEvent>>,
         cursor: &EffectCursor,
+        first_input: u64,
     ) -> Result<EffectCursorHistory, CurrentRunFailure> {
         self.folded.refuse_after_failure()?;
         self.folded.pin(cursor)?;
         self.read_to_end(journal).await?;
-        self.folded.settle_before(cursor)?;
+        self.folded.settle_before(cursor, first_input)?;
         self.folded.cursor_history(cursor)
     }
 
@@ -195,8 +211,11 @@ impl Folded {
         Err(self.fail(history_failure(refusal)))
     }
 
-    fn settle_before(&mut self, cursor: &EffectCursor) -> Result<(), CurrentRunFailure> {
-        let input = cursor.input_seq.get();
+    fn settle_before(
+        &mut self,
+        cursor: &EffectCursor,
+        input: u64,
+    ) -> Result<(), CurrentRunFailure> {
         if let Some(settled) = self.settled.filter(|settled| input <= *settled) {
             let refusal = format!(
                 "stage '{}' looked up input {input} after settling every input through {settled}",
@@ -382,6 +401,19 @@ impl Folded {
         group_id: &str,
         group: PendingGroup,
     ) -> Result<(), CurrentRunFailure> {
+        if group_id.starts_with(super::history::SINK_OUTCOME_PREFIX) {
+            for (cursor, members) in super::history::sink_outcome_groups(group_id, group.members)
+                .map_err(CurrentRunFailure::History)?
+            {
+                let folded = FoldedGroup {
+                    position: members[0].0,
+                    events: members.into_iter().map(|(_, _, event)| event).collect(),
+                    causal: CausalFrontier::default(),
+                };
+                self.fold_outcome_group(group_id, cursor, folded)?;
+            }
+            return Ok(());
+        }
         let effect_group = group_id.starts_with(OUTCOME_GROUP_PREFIX)
             || group_id.starts_with(ESCAPE_CONTROLS_GROUP_PREFIX)
             || group_id.starts_with(EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX);

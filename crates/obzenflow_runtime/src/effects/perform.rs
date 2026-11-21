@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::command::{Command, Port, PortField};
+use super::command::{Command, Port};
 use super::{CallRequest, DeclaredEffectSet, Effects, StageCompletion};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
 use async_trait::async_trait;
-use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
+use obzenflow_core::event::schema::{EffectOutcome, EmptySet, FactsOf, WithMember};
 use obzenflow_core::TypedPayload;
 use std::marker::PhantomData;
 
@@ -30,13 +30,13 @@ use std::marker::PhantomData;
 /// # impl ChargeRequest {
 /// #     fn for_invoice(_: &Invoice) -> Self { Self }
 /// # }
-/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::port]
 /// # trait PaymentGatewayPort: Send + Sync {
 /// #     #[effect(type = "docs.perform.charge", exactly_once)]
 /// #     fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError>;
 /// # }
 /// # struct Scripted;
-/// # #[obzenflow_runtime::effects::system("scripted", effects = obzenflow_runtime::effects)]
+/// # #[obzenflow_runtime::effects::system("scripted")]
 /// # impl PaymentGatewayPort for Scripted {
 /// #     fn charge(&self, _: &ChargeRequest) -> Result<Paid, EffectError> { Ok(Paid) }
 /// # }
@@ -130,8 +130,6 @@ impl<F, In, R: CallRequest> Command for Perform<F, In, R> {
     type Ports = (Port<R::Port>, ());
     type AllowedEffects = DeclaredEffectSet<WithMember<R, EmptySet>>;
 
-    const PORT_FIELDS: &'static [PortField] = &[PortField::Performed];
-
     fn ports(&self) -> Self::Ports {
         (self.port.clone(), ())
     }
@@ -143,6 +141,7 @@ where
     F: for<'input> Fn(&'input In) -> R + Send + Sync,
     In: TypedPayload + Send + Sync + 'static,
     R: CallRequest,
+    R::Outcome: EffectOutcome,
 {
     type Input = In;
     type Output = FactsOf<R::Outcome>;
@@ -157,11 +156,22 @@ where
     }
 }
 
+impl<F, In, R> super::sink::SinkRole<In> for Perform<F, In, R>
+where
+    F: for<'input> Fn(&'input In) -> R + Send + Sync + 'static,
+    In: 'static,
+    R: super::sink::SinkRequest,
+{
+    type Request = R;
+
+    fn prepare(&self, input: In) -> Result<R, HandlerError> {
+        Ok((self.request)(&input))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        effectful_transform_effects, EffectAcknowledgement, EffectError, EffectSafety, EffectSet,
-    };
+    use super::super::{effectful_transform_effects, EffectError, EffectSafety, EffectSet};
     use super::*;
     use obzenflow_core::Outcome;
     use serde::{Deserialize, Serialize};
@@ -203,7 +213,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct ResendRequest;
 
-    #[crate::effects::port(effects = crate::effects)]
+    #[crate::effects::port]
     trait GatewayPort: Send + Sync {
         #[effect(type = "perform_test.charge", exactly_once)]
         fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError>;
@@ -217,7 +227,7 @@ mod tests {
 
     struct Scripted;
 
-    #[crate::effects::system("scripted", effects = crate::effects)]
+    #[crate::effects::system("scripted")]
     impl GatewayPort for Scripted {
         fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError> {
             Ok(Paid {
@@ -263,7 +273,7 @@ mod tests {
     #[test]
     fn allowed_effects_limited_to_request() {
         let charge = perform(ChargeRequest::for_invoice).through(Port::to(Scripted));
-        let declarations = effectful_transform_effects(&charge, &[]).expect("one declaration");
+        let declarations = effectful_transform_effects(&charge).expect("one declaration");
         let effects: Vec<_> = declarations
             .iter()
             .map(|declaration| declaration.effect_type())
@@ -277,25 +287,13 @@ mod tests {
     }
 
     #[test]
-    fn at_least_once_requires_acknowledgement() {
+    fn perform_at_least_once_preserves_safety() {
         let resend = perform(|_: &Invoice| ResendRequest).through(Port::to(Scripted));
-        let declarations = effectful_transform_effects(&resend, &[]).expect("one declaration");
-        let refusal = declarations[0]
-            .validate_safety_syntax()
-            .expect_err("an at-least-once request needs its acknowledgement");
+        let declarations = effectful_transform_effects(&resend).expect("one declaration");
         assert_eq!(
-            refusal,
-            "performs at-least-once effect 'perform_test.resend' without acknowledging it; add `.at_least_once::<ResendRequest>()` after the handler"
+            declarations[0].safety(),
+            EffectSafety::NonIdempotentAtLeastOnce
         );
-
-        let acknowledged = effectful_transform_effects(
-            &resend,
-            &[EffectAcknowledgement::at_least_once::<ResendRequest>(
-                "ResendRequest",
-            )],
-        )
-        .expect("one declaration");
-        assert_eq!(acknowledged[0].validate_safety_syntax(), Ok(()));
     }
 
     #[test]

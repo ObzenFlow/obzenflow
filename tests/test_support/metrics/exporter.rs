@@ -11,9 +11,9 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use obzenflow::stages::sinks::DiscardSink;
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
 use obzenflow_adapters::monitoring::MetricsReadModel;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{Outcomes, StageId};
@@ -21,10 +21,11 @@ use obzenflow_dsl::{sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 #[cfg(feature = "test-support")]
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -41,7 +42,7 @@ struct MetricEvent {
 impl TypedPayload for MetricEvent {
     const EVENT_TYPE: &'static str = "metric.sample";
 }
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::time::{sleep, Duration};
 
@@ -130,59 +131,24 @@ impl TypedTransformHandler for DropTransform {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingSink {
-    count: Arc<Mutex<u64>>,
-}
+#[derive(Clone, Debug, Serialize)]
+struct Settle;
 
-impl CountingSink {
-    fn new() -> (Self, Arc<Mutex<u64>>) {
-        let count = Arc::new(Mutex::new(0));
-        (
-            Self {
-                count: count.clone(),
-            },
-            count,
-        )
-    }
-}
-
+#[obzenflow_runtime::effects::port]
 #[async_trait]
-impl InlineSink for CountingSink {
-    type Input = MetricEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("count".to_string()))
-    }
-
-    async fn write(&mut self, _event: MetricEvent) -> Result<(), SinkWriteFailure> {
-        if let Ok(mut count) = self.count.lock() {
-            *count += 1;
-        }
-        Ok(())
-    }
+trait SleepingPort {
+    #[effect(type = "metrics_exporter.settle", at_least_once, records = reply)]
+    async fn settle(&self, request: &Settle) -> Result<(), EffectError>;
 }
 
-#[derive(Clone, Debug)]
-struct SleepingSink {
+struct Sleeper {
     sleep_per_event: Duration,
 }
 
-impl SleepingSink {
-    fn new(sleep_per_event: Duration) -> Self {
-        Self { sleep_per_event }
-    }
-}
-
+#[obzenflow_runtime::effects::system("sleeper")]
 #[async_trait]
-impl InlineSink for SleepingSink {
-    type Input = MetricEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("sleep".to_string()))
-    }
-
-    async fn write(&mut self, _event: MetricEvent) -> Result<(), SinkWriteFailure> {
+impl SleepingPort for Sleeper {
+    async fn settle(&self, _: &Settle) -> Result<(), EffectError> {
         sleep(self.sleep_per_event).await;
         Ok(())
     }
@@ -311,7 +277,7 @@ async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
         .with_metrics_exporter(metrics_model.clone());
     let source = BurstSource::new(10);
     let transform = PassthroughTransform;
-    let (sink, _count) = CountingSink::new();
+    let sink = DiscardSink::<MetricEvent>::new();
     let test_handle = test_flow! {
         build_context: metrics_context,
         name: "metrics_barrier_paused_time_smoke",
@@ -368,7 +334,7 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
     let source = BurstSource::new(50);
     let transform = DropTransform;
-    let (sink, _count) = CountingSink::new();
+    let sink = DiscardSink::<MetricEvent>::new();
 
     let test_handle = test_flow! {
         build_context: metrics_context,
@@ -437,7 +403,9 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
     let total_events: usize = 100;
     let source = BurstSource::new(total_events);
     let transform = PassthroughTransform;
-    let sink = SleepingSink::new(per_event);
+    let sink = perform(|_: &MetricEvent| Settle).through(Port::to(Sleeper {
+        sleep_per_event: per_event,
+    }));
 
     let test_handle = test_flow! {
         build_context: metrics_context,
@@ -533,7 +501,7 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
     let timeout_flow = Duration::from_secs(30);
     let source = BurstSource::new(1001);
     let transform = DropTransform;
-    let (sink, _count) = CountingSink::new();
+    let sink = DiscardSink::<MetricEvent>::new();
 
     let test_handle = test_flow! {
         build_context: metrics_context,
@@ -616,7 +584,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
     let timeout_flow = Duration::from_secs(30);
     let source = ErrorAfterFirstSource::new();
     let transform = DropTransform;
-    let (sink, _count) = CountingSink::new();
+    let sink = DiscardSink::<MetricEvent>::new();
 
     let test_handle = test_flow! {
         build_context: metrics_context,
@@ -749,7 +717,7 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
     let timeout_flow = Duration::from_secs(30);
     let source = ErrorAfterFirstSource::new();
     let transform = DropTransform;
-    let (sink, _count) = CountingSink::new();
+    let sink = DiscardSink::<MetricEvent>::new();
 
     let test_handle = test_flow! {
         build_context: metrics_context,
@@ -830,7 +798,7 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
     let total_events: usize = 250;
     let source = BurstSource::new(total_events);
     let transform = DropTransform;
-    let (sink, _count) = CountingSink::new();
+    let sink = DiscardSink::<MetricEvent>::new();
 
     // Configure the limiter to produce at least one delayed event while keeping
     // the end-to-end run comfortably inside CI timing variance.
@@ -997,7 +965,7 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
     let total_events: usize = 500;
     let source = BurstSource::new(total_events);
     let transform = DropTransform;
-    let (sink, _count) = CountingSink::new();
+    let sink = DiscardSink::<MetricEvent>::new();
 
     let test_handle = test_flow! {
         build_context: metrics_context,
@@ -1073,7 +1041,7 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
     let total_events: usize = 200;
     let source = BurstSource::new(total_events);
     let transform = DropTransform;
-    let (sink, _count) = CountingSink::new();
+    let sink = DiscardSink::<MetricEvent>::new();
 
     let test_handle = test_flow! {
         build_context: metrics_context,
@@ -1182,7 +1150,7 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let source = BurstSource::new(10);
-    let (sink, _count) = CountingSink::new();
+    let sink = DiscardSink::<MetricEvent>::new();
 
     let test_handle = test_flow! {
         build_context: metrics_context,

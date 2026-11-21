@@ -128,7 +128,6 @@ impl ChainEventFactory {
         let ConsumptionProgressEventParams {
             scope,
             consumed_count,
-            receipts,
             reader_seq,
             last_event_id,
             vector_clock,
@@ -143,7 +142,6 @@ impl ChainEventFactory {
             ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
                 scope,
                 consumed_count,
-                receipts,
                 reader_seq,
                 last_event_id,
                 vector_clock,
@@ -180,7 +178,6 @@ impl ChainEventFactory {
     ) -> ChainEvent {
         let ConsumptionFinalEventParams {
             scope,
-            receipts,
             pass,
             consumed_count,
             expected_count,
@@ -195,7 +192,6 @@ impl ChainEventFactory {
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
                 scope,
-                receipts,
                 pass,
                 consumed_count,
                 expected_count,

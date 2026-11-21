@@ -664,7 +664,7 @@ pub(super) fn build_effect_record_event(
     let mut event = ChainEventFactory::derived_execution_event(
         writer_id,
         parent.view(),
-        ExecutionPayload::EffectRecord(record.clone()),
+        ExecutionPayload::EffectRecord(Box::new(record.clone())),
         lineage,
     )
     .with_effect_provenance(provenance);

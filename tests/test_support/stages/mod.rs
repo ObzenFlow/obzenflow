@@ -3,6 +3,5 @@
 // https://obzenflow.dev
 
 mod join;
-mod sink;
 mod source;
 mod stateful;
