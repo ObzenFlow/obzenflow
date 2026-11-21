@@ -40,7 +40,13 @@ struct PostgresPayments {
 impl PaymentStorePort for PostgresPayments {
     async fn store(&self, payment: &PaymentAuthorized) -> Result<(), EffectError> {
         self.postgres
-            .execute(&self.insert, |bindings| payment.bind(bindings))
+            .execute(&self.insert, |bindings| {
+                bindings
+                    .bind(payment.payment_id)
+                    .bind(&payment.order_id)
+                    .bind(&payment.customer_id)
+                    .bind(payment.amount_cents);
+            })
             .await
             .map_err(postgres::unsent::<Self>)?;
         Ok(())

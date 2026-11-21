@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::collect_rust_sources;
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 const CORE: &str = "obzenflow_core";
@@ -166,20 +167,6 @@ fn assert_codegen_names_only_permitted_roots() {
                     source_path.display()
                 );
             }
-        }
-    }
-}
-
-fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("read source directory {}: {error}", directory.display()));
-    for entry in entries {
-        let entry = entry.expect("read source directory entry");
-        let path = entry.path();
-        if path.is_dir() {
-            collect_rust_sources(&path, sources);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            sources.push(path);
         }
     }
 }

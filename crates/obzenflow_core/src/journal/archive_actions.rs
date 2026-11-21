@@ -139,7 +139,7 @@ pub struct ArchiveOverrides {
     pub allow_incomplete_archive: bool,
 }
 
-/// Why a verb is refused. Each prints verbatim as the verb's refusal.
+/// Why an archive verb was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveRefusal {
     StillRunning {
@@ -211,26 +211,12 @@ impl fmt::Display for ArchiveRefusal {
                  recorded prefix.",
                 run = run.display()
             ),
-            Self::Cycle {
-                verb: ReplayVerb::Resume,
-                members,
-                ..
-            } => write!(
+            Self::Cycle { verb, run, members } => write!(
                 f,
-                "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle \
-                 members: {}",
+                "cannot {} {}: cyclic topology includes {}",
+                verb.word(),
+                run.display(),
                 members.join(", ")
-            ),
-            Self::Cycle {
-                verb: ReplayVerb::Replay,
-                run,
-                members,
-            } => write!(
-                f,
-                "--replay-from does not support cyclic topologies; cycle members: {}\nTo read \
-                 this run without replaying it, run: obzenflow show {}",
-                members.join(", "),
-                run.display()
             ),
             Self::Sources { run, refusals } => f.write_str(&sources_refusal(run, refusals)),
         }
@@ -630,20 +616,16 @@ mod tests {
             cycle_members: vec!["review".to_string(), "triage".to_string()],
             ..safe_flow()
         };
-        assert_eq!(
-            decided(ReplayVerb::Replay, &stopped, &cyclic, plain())
-                .unwrap_err()
-                .to_string(),
-            "--replay-from does not support cyclic topologies; cycle members: review, triage\n\
-             To read this run without replaying it, run: obzenflow show /runs/r1"
-        );
-        assert_eq!(
-            decided(ReplayVerb::Resume, &stopped, &cyclic, plain())
-                .unwrap_err()
-                .to_string(),
-            "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle \
-             members: review, triage"
-        );
+        for verb in [ReplayVerb::Replay, ReplayVerb::Resume] {
+            assert_eq!(
+                decided(verb, &stopped, &cyclic, plain()),
+                Err(ArchiveRefusal::Cycle {
+                    verb,
+                    run: PathBuf::from(RUN),
+                    members: cyclic.cycle_members.clone(),
+                })
+            );
+        }
     }
 
     #[test]

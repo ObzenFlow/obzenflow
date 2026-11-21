@@ -4,8 +4,6 @@
 
 use std::fmt;
 
-const PORTABLE_IDENTIFIER_LIMIT: usize = 63;
-
 /// A fixed statement a system runs, built and checked without a connection.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PostgresStatement {
@@ -27,17 +25,14 @@ pub enum PostgresStatementError {
 impl PostgresStatement {
     /// `INSERT INTO "schema"."table"` followed by `body`, which names the
     /// columns and values, such as `(id, amount) VALUES ($1, $2)`. The schema
-    /// and table are checked and quoted, so `body` can't name another target.
+    /// and table are checked and quoted. The caller supplies trusted SQL for `body`.
     pub fn insert_into(
         schema: impl Into<String>,
         table: impl Into<String>,
         body: impl AsRef<str>,
     ) -> Result<Self, PostgresStatementError> {
-        let schema = schema.into();
-        let table = table.into();
-        if !valid_identifier(&schema) || !valid_identifier(&table) {
-            return Err(PostgresStatementError::InvalidIdentifier);
-        }
+        let schema = Self::checked_identifier(schema.into())?;
+        let table = Self::checked_identifier(table.into())?;
         let body = body.as_ref().trim();
         if body.is_empty() {
             return Err(PostgresStatementError::MissingInsertBody);
@@ -46,13 +41,24 @@ impl PostgresStatement {
             return Err(PostgresStatementError::InvalidInsertBody);
         }
         Ok(Self {
-            sql: format!(
-                "INSERT INTO {}.{} {body}",
-                quote_identifier(&schema),
-                quote_identifier(&table)
-            ),
+            sql: format!(r#"INSERT INTO "{schema}"."{table}" {body}"#),
             destination: format!("{schema}.{table}"),
         })
+    }
+
+    fn checked_identifier(name: String) -> Result<String, PostgresStatementError> {
+        const MAX_BYTES: usize = 63;
+        let mut bytes = name.bytes();
+        if name.len() <= MAX_BYTES
+            && bytes
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'))
+        {
+            Ok(name)
+        } else {
+            Err(PostgresStatementError::InvalidIdentifier)
+        }
     }
 
     pub fn sql(&self) -> &str {
@@ -73,20 +79,6 @@ impl fmt::Debug for PostgresStatement {
     }
 }
 
-fn valid_identifier(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= PORTABLE_IDENTIFIER_LIMIT
-        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-        && bytes[1..]
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
-}
-
-fn quote_identifier(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,7 +96,12 @@ mod tests {
 
     #[test]
     fn malformed_identifier_refused() {
-        for (schema, table) in [("", "entries"), ("ledger", "1entries"), ("led ger", "t")] {
+        for (schema, table) in [
+            ("", "entries"),
+            ("ledger", "1entries"),
+            ("led ger", "t"),
+            ("ledger", "bad\"name"),
+        ] {
             assert_eq!(
                 PostgresStatement::insert_into(schema, table, "(id) VALUES ($1)"),
                 Err(PostgresStatementError::InvalidIdentifier)

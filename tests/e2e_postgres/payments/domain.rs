@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow::effects::postgres::PostgresBindings;
 use obzenflow::schema::TypedPayload;
 use serde::{Deserialize, Serialize};
 
@@ -17,16 +16,6 @@ pub(crate) struct PaymentAuthorized {
 
 impl TypedPayload for PaymentAuthorized {
     const EVENT_TYPE: &'static str = "payments.payment_authorized";
-}
-
-impl PaymentAuthorized {
-    pub(crate) fn bind(&self, bindings: &mut PostgresBindings) {
-        bindings
-            .bind(self.payment_id)
-            .bind(&self.order_id)
-            .bind(&self.customer_id)
-            .bind(self.amount_cents);
-    }
 }
 
 pub(crate) fn sample_payments() -> [PaymentAuthorized; 2] {

@@ -12,7 +12,7 @@ use obzenflow::ai::{
     EstimateSource, Partials, Prompt, SystemPrompt, UserPrompt,
 };
 use obzenflow::effects::postgres::{
-    self, default_postgres_client, PostgresBindings, PostgresClient, PostgresStatement,
+    self, default_postgres_client, PostgresClient, PostgresStatement,
 };
 use obzenflow::effects::{perform, EffectError, EffectPortResolutionError, Port};
 use obzenflow::error::HandlerError;
@@ -67,30 +67,6 @@ impl TypedPayload for HnDigestSummary {
     const EVENT_TYPE: &'static str = "hn.digest_summary";
 }
 
-impl HnDigestSummary {
-    fn bind(&self, bindings: &mut PostgresBindings) {
-        let token_estimator = match self.token_estimator {
-            EstimateSource::Heuristic => "heuristic",
-            EstimateSource::Tokenizer => "tokenizer",
-        };
-        let story_ids = self
-            .stories
-            .iter()
-            .map(|story| story.id.to_string())
-            .collect::<Vec<_>>();
-
-        bindings
-            .bind(&self.mode)
-            .bind(&self.base_url)
-            .bind(&self.ai_provider)
-            .bind(&self.ai_model)
-            .bind(token_estimator)
-            .bind(self.interests.as_deref())
-            .bind(story_ids)
-            .bind(&self.output_markdown);
-    }
-}
-
 #[obzenflow::port]
 #[async_trait]
 trait DigestOutputPort {
@@ -135,7 +111,27 @@ fn postgres_unavailable(error: impl std::fmt::Display) -> EffectPortResolutionEr
 impl DigestOutputPort for PostgresDigest {
     async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError> {
         self.postgres
-            .execute(&self.insert, |bindings| digest.bind(bindings))
+            .execute(&self.insert, |bindings| {
+                let token_estimator = match digest.token_estimator {
+                    EstimateSource::Heuristic => "heuristic",
+                    EstimateSource::Tokenizer => "tokenizer",
+                };
+                let story_ids = digest
+                    .stories
+                    .iter()
+                    .map(|story| story.id.to_string())
+                    .collect::<Vec<_>>();
+
+                bindings
+                    .bind(&digest.mode)
+                    .bind(&digest.base_url)
+                    .bind(&digest.ai_provider)
+                    .bind(&digest.ai_model)
+                    .bind(token_estimator)
+                    .bind(digest.interests.as_deref())
+                    .bind(story_ids)
+                    .bind(&digest.output_markdown);
+            })
             .await
             .map_err(postgres::unsent::<Self>)?;
         Ok(())

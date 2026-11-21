@@ -829,14 +829,7 @@ impl FlowApplication {
                     // directory exists to point at.
                     let error = match &failure.error {
                         obzenflow_dsl::FlowBuildError::ArchiveVerbRefused(refusal) => {
-                            match refusal.verb() {
-                                obzenflow_runtime::bootstrap::ReplayVerb::Resume => {
-                                    ApplicationError::ResumeRefused(refusal.to_string())
-                                }
-                                obzenflow_runtime::bootstrap::ReplayVerb::Replay => {
-                                    ApplicationError::ReplayRefused(refusal.to_string())
-                                }
-                            }
+                            ApplicationError::from(refusal)
                         }
                         obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
                             ApplicationError::ResumeRefused(failure.error.to_string())

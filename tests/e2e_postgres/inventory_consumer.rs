@@ -26,7 +26,7 @@ use std::sync::Arc;
 struct InventoryLevelChanged {
     warehouse: String,
     sku: String,
-    available_units: i64,
+    available_units: Option<i32>,
     replenishment_due: bool,
 }
 
@@ -74,7 +74,7 @@ async fn independent_consumer_upserts_inventory_rows() {
     let insert = PostgresStatement::insert_into(
         &schema,
         "inventory_levels",
-        "(warehouse, sku, available_units, replenishment_due) VALUES ($1, $2, $3, $4) \
+        "(warehouse, sku, available_units, replenishment_due) VALUES ($1, $2, COALESCE($3::integer, 0), $4) \
          ON CONFLICT (warehouse, sku) DO UPDATE SET \
          available_units = EXCLUDED.available_units, \
          replenishment_due = EXCLUDED.replenishment_due",
@@ -92,13 +92,13 @@ async fn independent_consumer_upserts_inventory_rows() {
             InventoryLevelChanged {
                 warehouse: "toronto".to_string(),
                 sku: "sku-100".to_string(),
-                available_units: 18,
+                available_units: Some(18),
                 replenishment_due: false,
             },
             InventoryLevelChanged {
                 warehouse: "vancouver".to_string(),
                 sku: "sku-200".to_string(),
-                available_units: 3,
+                available_units: None,
                 replenishment_due: true,
             },
         ]);
@@ -134,7 +134,7 @@ async fn independent_consumer_upserts_inventory_rows() {
         rows,
         vec![
             ("toronto".to_string(), "sku-100".to_string(), 18, false),
-            ("vancouver".to_string(), "sku-200".to_string(), 3, true),
+            ("vancouver".to_string(), "sku-200".to_string(), 0, true),
         ]
     );
 }

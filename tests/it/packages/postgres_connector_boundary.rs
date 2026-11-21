@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::collect_rust_sources;
 use serde_json::Value;
+use std::path::Path;
 use std::process::Command;
+use syn::visit::Visit;
 
 #[test]
 fn postgres_client_confined_to_infra_feature() {
@@ -42,7 +45,7 @@ fn postgres_client_confined_to_infra_feature() {
         ["obzenflow_core", "obzenflow_runtime"],
         "adapters must keep only core and runtime as production workspace dependencies"
     );
-    for name in ["obzenflow_core", "obzenflow_adapters"] {
+    for name in ["obzenflow_core", "obzenflow_runtime", "obzenflow_adapters"] {
         let package = packages
             .iter()
             .find(|package| package["name"] == name)
@@ -164,4 +167,47 @@ fn postgres_client_confined_to_infra_feature() {
         serde_json::json!(["obzenflow_infra/postgres"]),
         "the root facade must forward its PostgreSQL feature to infra"
     );
+}
+
+#[test]
+fn inner_crates_exclude_postgres_client_types() {
+    struct ClientNames<'a>(&'a Path);
+
+    impl Visit<'_> for ClientNames<'_> {
+        fn visit_item_mod(&mut self, module: &syn::ItemMod) {
+            assert_ne!(
+                module.ident,
+                "postgres",
+                "{} declares a PostgreSQL module",
+                self.0.display()
+            );
+            syn::visit::visit_item_mod(self, module);
+        }
+
+        fn visit_ident(&mut self, ident: &syn::Ident) {
+            let name = ident.to_string();
+            assert!(
+                !name.starts_with("Postgres") && name != "postgres_client",
+                "{} names PostgreSQL integration type or module {name}",
+                self.0.display()
+            );
+        }
+    }
+
+    for name in ["obzenflow_core", "obzenflow_runtime"] {
+        let mut sources = Vec::new();
+        collect_rust_sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("crates")
+                .join(name)
+                .join("src"),
+            &mut sources,
+        );
+        for path in sources {
+            let source = std::fs::read_to_string(&path).unwrap();
+            if source.contains("Postgres") || source.contains("postgres") {
+                ClientNames(&path).visit_file(&syn::parse_file(&source).unwrap());
+            }
+        }
+    }
 }

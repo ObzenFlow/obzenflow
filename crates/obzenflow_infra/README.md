@@ -29,6 +29,7 @@ configured service.
 | --- | --- |
 | `warp-server` | Managed HTTP host. |
 | `reqwest-client` | Default outbound HTTP client. |
+| `postgres` | Injectable PostgreSQL client, SQLx parameter binding and autocommit execution. |
 | `prometheus` | Prometheus reporting integration. |
 | `studio-registration` | Studio registration, with HTTP and Prometheus support. |
 | `ai-rig` | AI provider bindings. |
@@ -37,7 +38,7 @@ configured service.
 | `test-support` | Framework integration-test support. |
 
 Applications select the corresponding public features on `obzenflow`, such as
-`web-host`, `http`, `ai`, `prometheus`, and `studio`.
+`web-host`, `http`, `postgres`, `ai`, `prometheus`, and `studio`.
 
 ## References
 

@@ -4,17 +4,21 @@
 
 //! The PostgreSQL client systems speak through.
 //!
-//! The core `PostgresClient` trait lives in `obzenflow_core::postgres_client`.
-//! This client runs each statement once, on its own connection from a pool of
-//! one, in PostgreSQL's autocommit.
+//! Each call executes one statement in PostgreSQL's autocommit.
+
+mod bindings;
+mod client;
+mod error;
+mod statement;
+
+pub use bindings::PostgresBindings;
+pub use client::PostgresClient;
+pub use error::{unsent, PostgresClientError};
+pub use statement::{PostgresStatement, PostgresStatementError};
 
 use async_trait::async_trait;
-use obzenflow_core::postgres_client::{
-    PostgresBindings, PostgresClient, PostgresClientError, PostgresKind, PostgresStatement,
-    PostgresValue,
-};
-use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgSslMode};
-use sqlx::{Arguments as _, ConnectOptions as _, PgPool};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+use sqlx::{ConnectOptions as _, PgPool};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -199,7 +203,7 @@ impl PostgresClient for SqlxPostgresClient {
         statement: &PostgresStatement,
         bindings: PostgresBindings,
     ) -> Result<u64, PostgresClientError> {
-        let arguments = arguments(bindings)?;
+        let arguments = bindings.into_arguments()?;
         let mut connection = self
             .pool
             .acquire()
@@ -216,26 +220,6 @@ impl PostgresClient for SqlxPostgresClient {
             ))),
         }
     }
-}
-
-fn arguments(bindings: PostgresBindings) -> Result<PgArguments, PostgresClientError> {
-    let mut arguments = PgArguments::default();
-    for (index, value) in bindings.into_values().into_iter().enumerate() {
-        let added = match value {
-            PostgresValue::Null(PostgresKind::Bool) => arguments.add(None::<bool>),
-            PostgresValue::Null(PostgresKind::Int8) => arguments.add(None::<i64>),
-            PostgresValue::Null(PostgresKind::Text) => arguments.add(None::<String>),
-            PostgresValue::Null(PostgresKind::TextArray) => arguments.add(None::<Vec<String>>),
-            PostgresValue::Bool(value) => arguments.add(value),
-            PostgresValue::Int8(value) => arguments.add(value),
-            PostgresValue::Text(value) => arguments.add(value),
-            PostgresValue::TextArray(value) => arguments.add(value),
-        };
-        added.map_err(|error| {
-            PostgresClientError::Unencodable(format!("argument ${}: {error}", index + 1))
-        })?;
-    }
-    Ok(arguments)
 }
 
 fn statement_error(error: sqlx::Error) -> PostgresClientError {

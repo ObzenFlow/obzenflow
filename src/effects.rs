@@ -52,17 +52,15 @@ pub mod http {
     pub use obzenflow_infra::http_client::{default_http_client, HttpClientFactoryError};
 }
 
-/// The client a system speaks PostgreSQL through, and the framework's one rule
-/// for a statement that failed, [`unsent`](postgres::unsent). It needs the
-/// `postgres` feature.
+/// PostgreSQL output for an application's system. The system supplies the SQL
+/// and binds its request fields through [`PostgresClient`](postgres::PostgresClient).
+/// The default client executes each statement in autocommit. [`unsent`](postgres::unsent)
+/// maps a client failure to an effect error. Requires the `postgres` feature.
 #[cfg(feature = "postgres")]
 pub mod postgres {
-    pub use obzenflow_adapters::effects::postgres::unsent;
-    pub use obzenflow_core::postgres_client::{
-        PostgresBindings, PostgresClient, PostgresClientError, PostgresKind, PostgresParameter,
-        PostgresStatement, PostgresStatementError, PostgresValue,
-    };
     pub use obzenflow_infra::postgres_client::{
-        default_postgres_client, PostgresConfigError, PostgresConnection, PostgresTransport,
+        default_postgres_client, unsent, PostgresBindings, PostgresClient, PostgresClientError,
+        PostgresConfigError, PostgresConnection, PostgresStatement, PostgresStatementError,
+        PostgresTransport,
     };
 }
