@@ -46,6 +46,7 @@ pub struct Source {
     origin: Instant,
 }
 
+#[obzenflow_runtime::effects::system("bench-events")]
 impl TypedFiniteSourceHandler for Source {
     type Output = Event;
 

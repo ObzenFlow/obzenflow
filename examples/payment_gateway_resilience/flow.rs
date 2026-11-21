@@ -98,8 +98,8 @@ pub fn assemble_flow(
             .max_attempts(3)
             .attempt_start_window(Duration::from_secs(30));
 
-        let web_orders_feed = sources::ValuesSource::new(scripted_web_orders);
-        let store_orders_feed = sources::ValuesSource::new(scripted_store_orders);
+        let web_orders_feed = Port::owned(sources::ValuesSource::new(scripted_web_orders));
+        let store_orders_feed = Port::owned(sources::ValuesSource::new(scripted_store_orders));
         let validate_order = validation::ValidateOrder;
         let shipping_handoff = ConsoleSink::new(console::format_shipping);
         let record_declined = ConsoleSink::new(console::format_declined);

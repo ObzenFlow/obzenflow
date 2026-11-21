@@ -87,6 +87,7 @@ struct OneInputSource {
     emitted: bool,
 }
 
+#[obzenflow::system("one-input")]
 impl TypedFiniteSourceHandler for OneInputSource {
     type Output = Input;
 
@@ -276,7 +277,7 @@ async fn one_authored_observer_shares_quarantine_across_handler_effect_and_lifec
         .for_effect::<RequestA>();
         let deliveries_for_flow = deliveries.clone();
         let handle = FlowDefinition::materialize(move |_runtime_config| {
-            let input_source = OneInputSource { emitted: false };
+            let input_source = Port::owned(OneInputSource { emitted: false });
             let observed_handler = PerformsBothEffects::new(2);
             let output_sink =
                 perform(|_: &EffectFact| Delivered).through(Port::to(CountDeliveries {

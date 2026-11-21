@@ -59,6 +59,7 @@ impl TimestampedSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("timestamped")]
 impl TypedFiniteSourceHandler for TimestampedSource {
     type Output = BenchEvent;
 
@@ -153,6 +154,7 @@ async fn build_pipeline(
         return Err(anyhow::anyhow!("Unsupported stage count: {stage_count}"));
     }
 
+    let source = Port::owned(source);
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let passthrough = PassthroughStage {};
         let definition = match stage_count {

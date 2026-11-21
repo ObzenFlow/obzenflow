@@ -77,7 +77,7 @@ pub(crate) struct InfiniteSourceSupervisor<H: UnifiedInfiniteSourceHandler + Sen
     /// The continuation admitted with the source (FLOWIP-134i B8).
     pub(crate) continuation: SourceContinuation,
 
-    pub(crate) system: Option<Arc<str>>,
+    pub(crate) system: Arc<str>,
 
     /// Adaptive backoff for synchronous idle polls (FLOWIP-086i).
     pub(crate) idle_backoff: IdleBackoff,
@@ -615,7 +615,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                     &stage_flow_context,
                     SourcePollKind::Infinite,
                     resuming,
-                    self.system.as_deref(),
+                    &self.system,
                 )
                 .await?;
                 Ok(EventLoopDirective::Transition(

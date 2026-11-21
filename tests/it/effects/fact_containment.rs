@@ -80,6 +80,7 @@ impl OneShotSource {
     }
 }
 
+#[obzenflow::system("one-shot")]
 impl TypedFiniteSourceHandler for OneShotSource {
     type Output = ContainmentInput;
 
@@ -178,7 +179,7 @@ fn missing_effect_fact_descriptor() -> Box<dyn StageDescriptor> {
 /// arrow.
 fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = OneShotSource::new();
+        let inputs_handler = Port::owned(OneShotSource::new());
         let drops_handler = DropSink::<ContainmentOutput>::new();
 
         Ok(flow! {
@@ -355,7 +356,7 @@ fn colliding_effect_descriptor() -> Box<dyn StageDescriptor> {
 
 fn colliding_event_type_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = OneShotSource::new();
+        let inputs_handler = Port::owned(OneShotSource::new());
         let drops_handler = DropSink::<ColliderA>::new();
 
         Ok(flow! {

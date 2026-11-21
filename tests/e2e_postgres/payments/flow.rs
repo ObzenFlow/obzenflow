@@ -75,7 +75,7 @@ pub(crate) fn build(
     let postgres = perform(|payment: &PaymentAuthorized| payment.clone()).through(store);
 
     Ok(FlowDefinition::materialize(move |_runtime_config| {
-        let payments = sources::ValuesSource::new(sample_payments());
+        let payments = Port::owned(sources::ValuesSource::new(sample_payments()));
 
         Ok(flow! {
             name: "postgres_sink_payments",

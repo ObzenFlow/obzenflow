@@ -14,45 +14,31 @@ use crate::stages::source::SourceReaderInitContext;
 use obzenflow_core::OneFactOutcome;
 
 pub(super) mod sealed {
-    pub trait Admitted<Family: ?Sized, Kind> {}
+    pub trait Admitted<Family: ?Sized> {}
 }
 
-/// Select the existing runtime adapter for a direct handler, cold connector or
-/// Runtime-owned hosted ingress.
-///
-/// `Family` is the requested erased source contract. `Kind` distinguishes the
-/// three without requiring either authoring trait to change.
+/// A source row's port after admission: its cold handler, the continuation
+/// registered before any open, and the system the port names.
 #[doc(hidden)]
-pub trait AdmitSource<Family: ?Sized, Kind>:
-    sealed::Admitted<Family, Kind> + Send + Sync + 'static
-{
+pub struct AdmittedSource<H> {
+    pub handler: H,
+    pub continuation: SourceContinuation,
+    pub system: SourceSystem,
+}
+
+/// Admit the port a source row takes into the existing runtime adapter for
+/// `Family`, the row's erased source contract.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a port this source row takes",
+    note = "`source!` takes `Port<dyn FiniteSource<_, _>>`, `async_source!` takes `Port<dyn AsyncFiniteSource<_, _>>`, `infinite_source!` takes `Port<dyn InfiniteSource<_, _>>`, and `async_infinite_source!` takes `Port<dyn AsyncInfiniteSource<_, _>>` or the `Port<dyn HostedIngress<_>>` ingress registration returns"
+)]
+pub trait AdmitSource<Family: ?Sized>: sealed::Admitted<Family> + Send + Sync + 'static {
     type Output: OneFactOutcome + Send + Sync + 'static;
     type Handler: Send + Sync + 'static;
-    /// The continuation captured with the source, before any open (FLOWIP-134i B8).
-    const CONTINUATION: SourceContinuation;
 
-    fn prepare(self) -> Self::Handler;
-
-    /// The handler, with the system its row's port names when the row takes one.
-    fn prepare_with_system(self) -> (Self::Handler, Option<SourceSystem>)
-    where
-        Self: Sized,
-    {
-        (self.prepare(), None)
-    }
+    fn admit(self) -> AdmittedSource<Self::Handler>;
 }
-
-#[doc(hidden)]
-pub enum DirectSource {}
-#[doc(hidden)]
-pub enum ConnectorSource {}
-/// A `Port` whose system is a connector of the row's family.
-#[doc(hidden)]
-pub enum PortSource {}
-/// Hosted ingress, admitted by Runtime because only its single writer
-/// acknowledges after commit (FLOWIP-122i B3).
-#[doc(hidden)]
-pub enum HostedSource {}
 
 pub(super) type SyncSourceReader<H> = SourceReader<H, SyncReaderOpener<H>>;
 pub(super) type AsyncSourceReader<H> = SourceReader<H, AsyncReaderOpener<H>>;

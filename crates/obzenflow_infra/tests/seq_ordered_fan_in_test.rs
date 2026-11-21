@@ -14,6 +14,7 @@ use obzenflow_dsl::{
 };
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -177,6 +178,7 @@ struct BatchAccounts {
     rows: Vec<AccountRow>,
 }
 
+#[obzenflow_runtime::effects::system("batch-accounts")]
 impl TypedFiniteSourceHandler for BatchAccounts {
     type Output = AccountRow;
 
@@ -207,8 +209,8 @@ fn live_join_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let accounts_source = ChannelSource::new(accounts_rx);
-        let tx_source = ChannelSource::new(tx_rx);
+        let accounts_source = Port::to(ChannelSource::new(accounts_rx));
+        let tx_source = Port::to(ChannelSource::new(tx_rx));
         let post_live = PostEntries {
             mode: JoinReferenceMode::Live,
         };
@@ -267,9 +269,9 @@ fn mixed_fold_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let accounts_source = ChannelSource::new(accounts_rx);
-        let tx_source = ChannelSource::new(tx_rx);
-        let adjustments_source = ChannelSource::new(adjustments_rx);
+        let accounts_source = Port::to(ChannelSource::new(accounts_rx));
+        let tx_source = Port::to(ChannelSource::new(tx_rx));
+        let adjustments_source = Port::to(ChannelSource::new(adjustments_rx));
         let post_live = PostEntries {
             mode: JoinReferenceMode::Live,
         };
@@ -308,11 +310,11 @@ fn hydrating_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let accounts_source = BatchAccounts {
+        let accounts_source = Port::owned(BatchAccounts {
             rows: vec![account("acct-1"), account("acct-2")],
-        };
-        let quiet_source = ChannelSource::new(quiet_rx);
-        let active_source = ChannelSource::new(active_rx);
+        });
+        let quiet_source = Port::to(ChannelSource::new(quiet_rx));
+        let active_source = Port::to(ChannelSource::new(active_rx));
         let post_batch = PostEntries {
             mode: JoinReferenceMode::FiniteEof,
         };
@@ -347,6 +349,7 @@ struct PausingBatch {
     release: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[obzenflow_runtime::effects::system("pausing-batch")]
 impl TypedFiniteSourceHandler for PausingBatch {
     type Output = TxRow;
 
@@ -436,11 +439,11 @@ fn end_of_input_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let batch_source = PausingBatch {
+        let batch_source = Port::owned(PausingBatch {
             rows: vec![tx("acct-1", 5), tx("acct-1", 7)],
             release,
-        };
-        let live_source = ChannelSource::new(live_rx);
+        });
+        let live_source = Port::to(ChannelSource::new(live_rx));
         let total = StatefulWithEmission::new(BatchTotal, OnEOF);
         let forward = Forward;
         let tally = Tally;

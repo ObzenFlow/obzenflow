@@ -14,6 +14,7 @@
 //! 4. The three inbound edges into the aggregator all carry the same
 //!    `IngestedEvent` `TypeId` (homogeneous fan-in).
 //!
+use obzenflow::effects::Port;
 use std::collections::HashMap;
 
 use obzenflow_core::id::StageId;
@@ -77,6 +78,7 @@ impl<P> OneShotSource<P> {
         Self(std::marker::PhantomData)
     }
 }
+#[obzenflow::system("kafka-raw")]
 impl TypedFiniteSourceHandler for OneShotSource<KafkaRawEvent> {
     type Output = KafkaRawEvent;
 
@@ -84,6 +86,7 @@ impl TypedFiniteSourceHandler for OneShotSource<KafkaRawEvent> {
         Ok(None)
     }
 }
+#[obzenflow::system("webhooks")]
 impl TypedFiniteSourceHandler for OneShotSource<WebhookEnvelope> {
     type Output = WebhookEnvelope;
 
@@ -91,6 +94,7 @@ impl TypedFiniteSourceHandler for OneShotSource<WebhookEnvelope> {
         Ok(None)
     }
 }
+#[obzenflow::system("file-lines")]
 impl TypedFiniteSourceHandler for OneShotSource<FileLine> {
     type Output = FileLine;
 
@@ -143,9 +147,9 @@ fn aligned_inputs_satisfy_typed_fan_in_invariants() {
     let align_file_id = StageId::new();
     let aggregator_id = StageId::new();
     let sink_id = StageId::new();
-    let kafka_source_handler = OneShotSource::<KafkaRawEvent>::new();
-    let webhook_source_handler = OneShotSource::<WebhookEnvelope>::new();
-    let file_source_handler = OneShotSource::<FileLine>::new();
+    let kafka_source_handler = Port::owned(OneShotSource::<KafkaRawEvent>::new());
+    let webhook_source_handler = Port::owned(OneShotSource::<WebhookEnvelope>::new());
+    let file_source_handler = Port::owned(OneShotSource::<FileLine>::new());
     let align_kafka_handler = align_to_ingested::<KafkaRawEvent>();
     let align_webhook_handler = align_to_ingested::<WebhookEnvelope>();
     let align_file_handler = align_to_ingested::<FileLine>();

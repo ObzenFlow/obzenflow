@@ -206,13 +206,15 @@ fn data_signature(events: &[JournalRecord<ChainPayload>]) -> Vec<(String, serde_
 async fn lazy_iterator_replay_never_consumes_live_input() {
     fn definition(base: PathBuf, polls: Arc<AtomicUsize>) -> FlowDefinition {
         let counter = polls.clone();
-        let input = obzenflow::stages::sources::ValuesSource::new(std::iter::from_fn(move || {
-            let index = counter.fetch_add(1, Ordering::SeqCst);
-            (index < 2).then(|| Alpha {
-                source: "iterator".into(),
-                value: index as u64,
-            })
-        }));
+        let input = obzenflow::effects::Port::owned(obzenflow::stages::sources::ValuesSource::new(
+            std::iter::from_fn(move || {
+                let index = counter.fetch_add(1, Ordering::SeqCst);
+                (index < 2).then(|| Alpha {
+                    source: "iterator".into(),
+                    value: index as u64,
+                })
+            }),
+        ));
         assert_eq!(
             polls.load(Ordering::SeqCst),
             0,

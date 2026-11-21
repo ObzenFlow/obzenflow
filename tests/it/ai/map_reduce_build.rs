@@ -115,6 +115,7 @@ struct NoEventSource;
 impl SourceTyping for NoEventSource {
     type Output = BuildOnlyItem;
 }
+#[obzenflow::system("no-events")]
 impl TypedFiniteSourceHandler for NoEventSource {
     type Output = BuildOnlyItem;
 
@@ -139,6 +140,7 @@ impl SourceTyping for ItemSource {
     type Output = BuildOnlyItem;
 }
 
+#[obzenflow::system("items")]
 impl TypedFiniteSourceHandler for ItemSource {
     type Output = BuildOnlyItem;
 
@@ -173,7 +175,7 @@ impl CollectOutPort for Collect {
 #[tokio::test]
 async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
     let result = FlowDefinition::materialize(|_| {
-        let items = NoEventSource;
+        let items = Port::owned(NoEventSource);
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
@@ -210,7 +212,7 @@ async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of
     let out =
         perform(|out: &BuildOnlyOut| out.clone()).through(Port::to(Collect { rows: rows.clone() }));
     let handle = FlowDefinition::materialize(move |_| {
-        let items = ItemSource::one_to(5);
+        let items = Port::owned(ItemSource::one_to(5));
         let digest = ai::map(SumMap)
             .chunks(1)
             .reduce(SumReduce)
@@ -253,7 +255,7 @@ async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of
 #[tokio::test]
 async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
     let result = FlowDefinition::materialize(|_| {
-        let items = NoEventSource;
+        let items = Port::owned(NoEventSource);
         let wrong = DiscardSink::<BuildOnlyItem>::new();
         let digest = digest();
 
@@ -337,6 +339,7 @@ struct NoStreamSource;
 impl SourceTyping for NoStreamSource {
     type Output = JoinStreamP;
 }
+#[obzenflow::system("no-streams")]
 impl TypedFiniteSourceHandler for NoStreamSource {
     type Output = JoinStreamP;
 
@@ -348,8 +351,8 @@ impl TypedFiniteSourceHandler for NoStreamSource {
 #[tokio::test]
 async fn join_reference_resolves_through_composite_boundary_port() {
     let result = FlowDefinition::materialize(|_| {
-        let items = NoEventSource;
-        let stream_handler = NoStreamSource;
+        let items = Port::owned(NoEventSource);
+        let stream_handler = Port::owned(NoStreamSource);
         let join_handler = LocalNoopJoin;
         let joined = DiscardSink::<JoinedP>::new();
         let digest = digest();
@@ -387,7 +390,7 @@ async fn join_reference_resolves_through_composite_boundary_port() {
 async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
     let fake = models();
     let result = async {
-        let items = NoEventSource;
+        let items = Port::owned(NoEventSource);
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
@@ -416,7 +419,7 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
 #[tokio::test]
 async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
     let handle = FlowDefinition::materialize(|_| {
-        let items = NoEventSource;
+        let items = Port::owned(NoEventSource);
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
@@ -501,7 +504,7 @@ impl AiRole<BuildOnlyItem> for TagOne {
 #[tokio::test]
 async fn infer_map_and_map_reduce_lower_to_one_two_and_four_members() {
     let handle = FlowDefinition::materialize(|_| {
-        let items = NoEventSource;
+        let items = Port::owned(NoEventSource);
         let brief = ai::infer(TagOne);
         let tag = ai::map(SumMap).chunks(2);
         let digest = digest();
@@ -580,7 +583,7 @@ async fn infer_map_and_map_reduce_lower_to_one_two_and_four_members() {
 #[tokio::test]
 async fn a_zero_reduce_trigger_fails_the_build_naming_the_stage() {
     let result = FlowDefinition::materialize(|_| {
-        let items = NoEventSource;
+        let items = Port::owned(NoEventSource);
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = ai::map(SumMap)
             .chunks(1)
@@ -618,7 +621,7 @@ async fn a_zero_reduce_trigger_fails_the_build_naming_the_stage() {
 #[tokio::test]
 async fn a_build_without_a_chat_provider_fails_naming_the_stage() {
     let result = FlowDefinition::materialize(|_| {
-        let items = NoEventSource;
+        let items = Port::owned(NoEventSource);
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 

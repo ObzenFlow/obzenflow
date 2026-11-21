@@ -32,7 +32,7 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
     for required in [
         "FlowDefinition::materialize(move |_| {",
         "use obzenflow::stages::sources;",
-        "let evidence = sources::ValuesSource::new([input]);",
+        "let evidence = Port::owned(sources::ValuesSource::new([input]));",
         "impl AiRole<ReducedEvidence> for GenerateBrief {",
         "let generate_brief = ai::infer(GenerateBrief);",
         "brief = ai!(ReducedEvidence -> DecisionBrief with ai_breaker => generate_brief);",
@@ -254,7 +254,9 @@ where
     R: AiRole<ReducedEvidence, Effect = ChatCompletion, Out = DecisionBrief>,
 {
     FlowDefinition::materialize(move |_runtime_config| {
-        let evidence_handler = obzenflow::stages::sources::ValuesSource::new(evidence_inputs);
+        let evidence_handler = Port::owned(obzenflow::stages::sources::ValuesSource::new(
+            evidence_inputs,
+        ));
         let generate_brief = ai::infer(role);
         let collected_handler =
             perform(|brief: &DecisionBrief| brief.clone()).through(collect_into(outputs));
@@ -282,7 +284,9 @@ fn build_two_stage_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let evidence =
-            obzenflow::stages::sources::ValuesSource::new([ReducedEvidence { value: 7 }]);
+            obzenflow::effects::Port::owned(obzenflow::stages::sources::ValuesSource::new([
+                ReducedEvidence { value: 7 },
+            ]));
         let generate_brief = ai::infer(BriefRole::uncounted());
         let review = ai::infer(ReviewRole);
         let collected =

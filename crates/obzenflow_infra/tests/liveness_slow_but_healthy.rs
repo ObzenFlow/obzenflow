@@ -11,7 +11,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{Effects, StageCompletion};
+use obzenflow_runtime::effects::{Effects, Port, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -59,6 +59,7 @@ impl TwoEventSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("two-event")]
 impl TypedFiniteSourceHandler for TwoEventSource {
     type Output = ProbeEvent;
 
@@ -139,7 +140,7 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let numbers_handler = TwoEventSource::new();
+        let numbers_handler = Port::owned(TwoEventSource::new());
         let slow_ai_handler = SlowAiTransform::new();
         let sink_handler = NoopSink::new();
 

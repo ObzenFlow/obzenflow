@@ -115,10 +115,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
             flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
             continuation: self.config.continuation,
-            system: bind_source_system(
-                self.config.source_system.as_ref(),
-                &self.resources.effect_ports,
-            ),
+            system: bind_source_system(&self.config.source_system, &self.resources.effect_ports),
             idle_backoff: IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
                 Duration::from_millis(50),

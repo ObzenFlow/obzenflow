@@ -172,7 +172,7 @@ fn build_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reader = ReattachingSource(BoundedReader::new(first_value, count));
+        let reader = Port::to(ReattachingSource(BoundedReader::new(first_value, count)));
         let enrich_transform = EnrichTransform {
             counter: Port::to(CallCounter { calls }),
         };

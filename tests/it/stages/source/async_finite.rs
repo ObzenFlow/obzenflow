@@ -69,6 +69,7 @@ impl TestAsyncEventSource {
     }
 }
 
+#[obzenflow::system("test-async-events")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for TestAsyncEventSource {
     type Output = AsyncTestEvent;
@@ -122,7 +123,7 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
     let observer_calls_for_flow = Arc::clone(&observer_calls);
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestAsyncEventSource::new(drain_calls_for_flow);
+        let source = Port::owned(TestAsyncEventSource::new(drain_calls_for_flow));
 
         Ok(flow! {
             name: "async_finite_source_middleware_test",

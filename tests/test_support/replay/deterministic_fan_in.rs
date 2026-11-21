@@ -110,6 +110,7 @@ impl ChannelSource {
     }
 }
 
+#[obzenflow::system("channel-fixture")]
 impl TypedFiniteSourceHandler for ChannelSource {
     type Output = FanInInput;
 
@@ -311,8 +312,8 @@ fn build_two_channel_flow_with_jitter(
     jitter_ms: u64,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = ChannelSource::with_jitter("a", 4, jitter_ms);
-        let source_b = ChannelSource::with_jitter("b", 3, jitter_ms);
+        let source_a = Port::owned(ChannelSource::with_jitter("a", 4, jitter_ms));
+        let source_b = Port::owned(ChannelSource::with_jitter("b", 3, jitter_ms));
         let merge = MergeTransform::new();
         let effectful = EffectfulTail::new(calls);
         let collector = DropSink::<FanInOutput>::new();
@@ -353,7 +354,7 @@ fn build_skip_level_flow_with_delay(
     delay_ms: u64,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = ChannelSource::with_delay("a", 4, delay_ms);
+        let source_a = Port::owned(ChannelSource::with_delay("a", 4, delay_ms));
         let tap = TapTransform::new();
         let merge = MergeTransform::new();
         let effectful = EffectfulTail::new(calls);
@@ -389,8 +390,8 @@ fn build_skip_level_flow_with_delay(
 /// order, so `merge` runs the canonical deterministic merge.
 fn build_two_channel_stateful_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = ChannelSource::with_jitter("a", 4, 0);
-        let source_b = ChannelSource::with_jitter("b", 3, 0);
+        let source_a = Port::owned(ChannelSource::with_jitter("a", 4, 0));
+        let source_b = Port::owned(ChannelSource::with_jitter("b", 3, 0));
         let merge = MergeTransform::new();
         let counter = OrderedListStateful::new();
         let collector = DropSink::<OrderedList>::new();

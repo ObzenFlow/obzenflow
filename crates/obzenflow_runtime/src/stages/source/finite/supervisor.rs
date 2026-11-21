@@ -75,7 +75,7 @@ pub(crate) struct FiniteSourceSupervisor<H: UnifiedFiniteSourceHandler + Send + 
     /// The continuation admitted with the source (FLOWIP-134i B8).
     pub(crate) continuation: SourceContinuation,
 
-    pub(crate) system: Option<Arc<str>>,
+    pub(crate) system: Arc<str>,
 
     /// Adaptive backoff for synchronous idle polls (FLOWIP-086i).
     pub(crate) idle_backoff: IdleBackoff,
@@ -611,7 +611,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                     &stage_flow_context,
                     SourcePollKind::Finite,
                     resuming,
-                    self.system.as_deref(),
+                    &self.system,
                 )
                 .await?;
                 // A positioned reader pins its input before its first record.
@@ -1106,7 +1106,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceSupervis
             stage_flow_context,
             SourcePollKind::Finite,
             true,
-            self.system.as_deref(),
+            &self.system,
         )
         .await?;
 

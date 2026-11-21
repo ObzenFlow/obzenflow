@@ -79,6 +79,7 @@ impl ChannelSource {
     }
 }
 
+#[obzenflow::system("channel-fixture")]
 impl TypedFiniteSourceHandler for ChannelSource {
     type Output = EnvelopeInput;
 
@@ -168,8 +169,8 @@ type DropSink = obzenflow::stages::sinks::DiscardSink<EnvelopeOutput>;
 
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = ChannelSource::new("a", 4);
-        let source_b = ChannelSource::new("b", 3);
+        let source_a = Port::owned(ChannelSource::new("a", 4));
+        let source_b = Port::owned(ChannelSource::new("b", 3));
         let effectful_merge = EffectfulMerge::new(calls);
         let collector = DropSink::new();
 

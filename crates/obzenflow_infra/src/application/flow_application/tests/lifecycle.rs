@@ -63,6 +63,7 @@ impl Drop for PendingPollDrop {
     }
 }
 
+#[obzenflow_runtime::effects::system("pending-lifetime")]
 #[async_trait::async_trait]
 impl obzenflow_runtime::stages::common::handlers::TypedAsyncInfiniteSourceHandler
     for PendingLifetimeSource
@@ -131,6 +132,7 @@ async fn application_drop(hosted: bool) {
         )).unwrap();
     let (left, left_started, left_cancelled) = pending_lifetime_source();
     let (right, right_started, right_cancelled) = pending_lifetime_source();
+    let (left, right) = (Port::owned(left), Port::owned(right));
     let (flow_tx, flow_rx) = oneshot::channel();
     let flow_tx = Mutex::new(Some(flow_tx));
     let application = tokio::spawn(FlowApplication::launch(
@@ -257,7 +259,7 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
     let (preparing_tx, preparing_rx) = oneshot::channel();
     let application = tokio::spawn(FlowApplication::launch(
         FlowDefinition::materialize(move |_| {
-            let source = IdleInfiniteSource;
+            let source = Port::owned(IdleInfiniteSource);
             let sink = noop_sink();
             Ok(flow! {
                 name: "application_drop_preparation", journals: crate::journal::memory_journals(),
@@ -366,7 +368,7 @@ async fn hosted_start_observes_runtime_exit_before_readiness() {
         )).unwrap();
         let result = tokio::time::timeout(Duration::from_secs(2), FlowApplication::launch(
             FlowDefinition::new(move |context| async move {
-                let source = IdleInfiniteSource;
+                let source = Port::owned(IdleInfiniteSource);
                 let sink = noop_sink();
                 let flow = flow! {
                     name: "startup_runtime_exit", journals: crate::journal::memory_journals(),
@@ -403,6 +405,7 @@ async fn ready_startup_signals_withhold_automatic_run() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[derive(Clone, Debug)]
     struct CountingSource(Arc<AtomicUsize>);
+    #[obzenflow_runtime::effects::system("counting")]
     impl TypedInfiniteSourceHandler for CountingSource {
         type Output = IdlePayload;
         fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
@@ -431,7 +434,7 @@ enabled = false
         let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
         let hook_observed = observed.clone();
         let definition = FlowDefinition::materialize(move |_| {
-            let source = CountingSource(source_calls);
+            let source = Port::owned(CountingSource(source_calls));
             let sink = noop_sink();
             Ok(flow! {
                 name: "startup_signal", journals: crate::journal::memory_journals(),
@@ -525,7 +528,7 @@ enabled = false
     let (flow_tx, flow_rx) = oneshot::channel();
     let flow_tx = Mutex::new(Some(flow_tx));
     let definition = FlowDefinition::materialize(move |_| {
-        let source = IdleInfiniteSource;
+        let source = Port::owned(IdleInfiniteSource);
         let sink = noop_sink();
         Ok(flow! {
             name: "startup_cleanup_join", journals: crate::journal::memory_journals(),
@@ -618,6 +621,7 @@ async fn host_completion_and_panic_remain_primary_across_application_phases() {
         terminal: bool,
         calls: Arc<AtomicUsize>,
     }
+    #[obzenflow_runtime::effects::system("test-source")]
     impl TypedFiniteSourceHandler for TestSource {
         type Output = IdlePayload;
         fn next(&mut self) -> Result<Option<Vec<IdlePayload>>, SourceError> {
@@ -736,10 +740,10 @@ enabled = false
             }
             .boxed();
             let definition = FlowDefinition::materialize(move |_| {
-                let source = TestSource {
+                let source = Port::owned(TestSource {
                     terminal: matches!(phase, FaultPhase::Terminal),
                     calls: source_calls,
-                };
+                });
                 let sink = noop_sink();
                 Ok(flow! {
                     name: "managed_host_fault",
@@ -952,7 +956,7 @@ enabled = false
                 tokio::spawn(async {})
             });
         let definition = FlowDefinition::materialize(move |_| {
-            let source = IdleInfiniteSource;
+            let source = Port::owned(IdleInfiniteSource);
             let sink = noop_sink();
             Ok(flow! {
                 name: "embedded_host_scope", journals: crate::journal::memory_journals(),
@@ -1060,7 +1064,7 @@ enabled = false
                 let admitted_tx = Mutex::new(Some(admitted_tx));
                 let application = FlowApplication::launch(
                     FlowDefinition::materialize(move |_| {
-                        let source = IdleInfiniteSource;
+                        let source = Port::owned(IdleInfiniteSource);
                         let sink = noop_sink();
                         Ok(flow! {
                             name: "failed_exit_signal", journals: crate::journal::memory_journals(),
@@ -1168,6 +1172,7 @@ enabled = false
 async fn graceful_finite_completion_and_infinite_cancellation_match_application_results() {
     #[derive(Clone, Debug)]
     struct WaitingFiniteSource;
+    #[obzenflow_runtime::effects::system("waiting-finite")]
     impl TypedFiniteSourceHandler for WaitingFiniteSource {
         type Output = IdlePayload;
         fn next(&mut self) -> Result<Option<Vec<IdlePayload>>, SourceError> {
@@ -1178,7 +1183,7 @@ async fn graceful_finite_completion_and_infinite_cancellation_match_application_
         for cancel in [false, true] {
             let definition = if finite {
                 FlowDefinition::materialize(move |_| {
-                    let source = WaitingFiniteSource;
+                    let source = Port::owned(WaitingFiniteSource);
                     let sink = noop_sink();
                     Ok(flow! {
                         name: "finite_stop_outcome", journals: crate::journal::memory_journals(),
@@ -1188,7 +1193,7 @@ async fn graceful_finite_completion_and_infinite_cancellation_match_application_
                 })
             } else {
                 FlowDefinition::materialize(move |_| {
-                    let source = IdleInfiniteSource;
+                    let source = Port::owned(IdleInfiniteSource);
                     let sink = noop_sink();
                     Ok(flow! {
                         name: "infinite_stop_outcome", journals: crate::journal::memory_journals(),

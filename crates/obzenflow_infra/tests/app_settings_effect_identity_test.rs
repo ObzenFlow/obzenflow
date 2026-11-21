@@ -299,10 +299,10 @@ async fn build(
         journal_base.to_path_buf(),
     );
     let handle = FlowDefinition::materialize_with(move |_, settings: Settings| {
-        let reader = ReattachingSource(BoundedReader {
+        let reader = Port::to(ReattachingSource(BoundedReader {
             next_value: first_value,
             remaining: count,
-        });
+        }));
         let score_transform = ScoreTransform {
             app: App {
                 threshold: settings.affinity.threshold,
@@ -1062,12 +1062,14 @@ async fn build_accounts(
 ) -> Result<FlowHandle> {
     let base = journal_base.to_path_buf();
     FlowDefinition::materialize_with(move |_, settings: AccountsSettings| {
-        let accounts_source = YamlSource::builder(AccountYaml)
-            .path(&settings.accounts_file)
-            .selection(YamlSelection::SequenceAt("/accounts".into()))
-            .batch_size(1)
-            .build()
-            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
+        let accounts_source = Port::to(
+            YamlSource::builder(AccountYaml)
+                .path(&settings.accounts_file)
+                .selection(YamlSelection::SequenceAt("/accounts".into()))
+                .batch_size(1)
+                .build()
+                .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?,
+        );
         let collect_handler = replay_testkit::CountDeliveries::<Account>::new(delivered);
         Ok(flow! {
             name: "app_accounts",

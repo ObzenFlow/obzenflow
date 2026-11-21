@@ -8,6 +8,7 @@ use obzenflow_adapters::sinks::RecordingSink;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::stateful::emit;
 use obzenflow_runtime::stages::stateful::strategies::accumulators::{
@@ -62,6 +63,7 @@ impl TransactionSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("transactions")]
 impl TypedFiniteSourceHandler for TransactionSource {
     type Output = TransactionEvent;
 
@@ -94,7 +96,7 @@ impl TypedFiniteSourceHandler for TransactionSource {
 async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
     let (collecting_sink, aggregates) = RecordingSink::<ProductStatsUpdate>::new();
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let transaction_source = TransactionSource::new(10);
+        let transaction_source = Port::owned(TransactionSource::new(10));
         let sales_by_product = GroupByTyped::new(
             |event: &TransactionEvent| event.product_id.clone(),
             |stats: &mut ProductStats, event: &TransactionEvent| {
@@ -152,7 +154,7 @@ impl TypedPayload for TotalStats {
 async fn reduce_with_on_eof_emits_single_total() {
     let (collecting_sink, reduced) = RecordingSink::<TotalStats>::new();
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let transaction_source = TransactionSource::new(5);
+        let transaction_source = Port::owned(TransactionSource::new(5));
         let totals = ReduceTyped::new(
             TotalStats {
                 total_revenue: 0.0,
@@ -197,7 +199,7 @@ async fn reduce_with_on_eof_emits_single_total() {
 async fn conflate_emits_latest_value_per_key() {
     let (collecting_sink, latest) = RecordingSink::<TransactionEvent>::new();
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let transaction_source = TransactionSource::new(8);
+        let transaction_source = Port::owned(TransactionSource::new(8));
         let latest_by_product =
             ConflateTyped::new(|event: &TransactionEvent| event.product_id.clone())
                 .emit(emit::per_window(Duration::from_millis(1)))

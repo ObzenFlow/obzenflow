@@ -17,6 +17,7 @@ use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId, TypedPa
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
@@ -42,6 +43,7 @@ struct Ticks {
     next: u64,
     count: u64,
 }
+#[obzenflow_runtime::effects::system("ticks")]
 impl TypedFiniteSourceHandler for Ticks {
     type Output = Tick;
     fn next(&mut self) -> Result<Option<Vec<Tick>>, SourceError> {
@@ -61,7 +63,7 @@ impl TypedFiniteSourceHandler for Ticks {
 }
 fn definition(base: PathBuf, count: u64) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let input = Ticks { next: 0, count };
+        let input = Port::owned(Ticks { next: 0, count });
         let output = DiscardTicks::new();
         Ok(flow! {
             name: "validation_benchmark",

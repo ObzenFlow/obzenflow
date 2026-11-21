@@ -10,8 +10,10 @@ use super::{
     EffectPortResolutionError, EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName,
     NamedEffect, RequestList,
 };
+use crate::stages::common::handlers::source::OwnedSource;
 use crate::stages::common::handlers::{EffectfulStatefulHandler, EffectfulTransformHandler};
 use obzenflow_core::event::schema::{EffectOutcome, EmptySet, WithMember};
+use obzenflow_core::source::RefusedBy;
 use obzenflow_core::SystemBindingEvidence;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -39,6 +41,7 @@ pub struct Port<P: ?Sized + Send + Sync + 'static> {
     name: LogicalEffectBindingName,
     evidence: SystemBindingEvidence,
     port: Arc<SystemPort>,
+    refused_by: RefusedBy,
     port_type: PhantomData<fn() -> Arc<P>>,
 }
 
@@ -157,6 +160,64 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         >>::coerce(system.shared())))
     }
 
+    /// A source row's port that takes a direct typed handler by value. The
+    /// stage's first live acquisition takes the handler, so every clone of the
+    /// port shares one handler and a later claimant finds the input unavailable.
+    /// The handler names itself above its typed handler impl.
+    ///
+    /// ```
+    /// # use obzenflow_runtime::effects::Port;
+    /// # use obzenflow_runtime::stages::source::{FiniteSource, Refuse, SourceError, TypedFiniteSourceHandler};
+    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # struct Ticket;
+    /// # impl obzenflow_core::TypedPayload for Ticket {
+    /// #     const EVENT_TYPE: &'static str = "doc.ticket";
+    /// # }
+    /// struct ScriptedTickets;
+    ///
+    /// #[obzenflow_runtime::effects::system("scripted-tickets")]
+    /// impl TypedFiniteSourceHandler for ScriptedTickets {
+    ///     type Output = Ticket;
+    ///     fn next(&mut self) -> Result<Option<Vec<Ticket>>, SourceError> {
+    ///         Ok(None)
+    ///     }
+    /// }
+    ///
+    /// let tickets = Port::owned(ScriptedTickets);
+    /// # let port: Port<dyn FiniteSource<Ticket, Refuse>> = tickets;
+    /// ```
+    ///
+    /// An `Arc` shares a handler without handing it over, so it does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// # use obzenflow_runtime::effects::Port;
+    /// # use obzenflow_runtime::stages::source::{FiniteSource, Refuse, SourceError, TypedFiniteSourceHandler};
+    /// # use std::sync::Arc;
+    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # struct Ticket;
+    /// # impl obzenflow_core::TypedPayload for Ticket {
+    /// #     const EVENT_TYPE: &'static str = "doc.ticket";
+    /// # }
+    /// # struct ScriptedTickets;
+    /// # #[obzenflow_runtime::effects::system("scripted-tickets")]
+    /// # impl TypedFiniteSourceHandler for ScriptedTickets {
+    /// #     type Output = Ticket;
+    /// #     fn next(&mut self) -> Result<Option<Vec<Ticket>>, SourceError> {
+    /// #         Ok(None)
+    /// #     }
+    /// # }
+    /// # fn main() {
+    /// let tickets = Port::owned(Arc::new(ScriptedTickets));
+    /// # let port: Port<dyn FiniteSource<Ticket, Refuse>> = tickets;
+    /// # }
+    /// ```
+    pub fn owned<H>(handler: H) -> Self
+    where
+        H: SystemName + OwnedSource<P>,
+    {
+        Self::owned_handler::<H>(SystemPort::eager(handler.into_system()))
+    }
+
     /// A port whose system is built only when a live call needs it, at most
     /// once per run. The port's trait comes from the `#[obzenflow::port]` trait
     /// the system implements.
@@ -218,14 +279,41 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     }
 
     fn answered_by<T: SystemName>(port: SystemPort) -> Self {
-        let name = checked_system_name::<T>();
+        Self::named(checked_system_name::<T>(), port)
+    }
+
+    fn named(name: &'static str, port: SystemPort) -> Self {
         Self {
             name: LogicalEffectBindingName::of_system(name),
             evidence: SystemBindingEvidence::named(name)
                 .expect("a checked system name fits the evidence bound"),
             port: Arc::new(port),
+            refused_by: RefusedBy::Connector,
             port_type: PhantomData,
         }
+    }
+
+    fn owned_handler<T: SystemName>(port: SystemPort) -> Self {
+        Self {
+            refused_by: RefusedBy::Handler,
+            ..Self::answered_by::<T>(port)
+        }
+    }
+
+    pub(crate) fn framework_system(name: &'static str, system: Arc<P>) -> Self {
+        assert!(
+            is_system_name(name),
+            "a framework system's name follows the system name grammar"
+        );
+        Self::named(name, SystemPort::eager(system))
+    }
+
+    pub(crate) fn refused_by(&self) -> RefusedBy {
+        self.refused_by
+    }
+
+    pub(crate) fn built_system(&self) -> Option<Arc<P>> {
+        self.port.built()
     }
 
     /// The name of the system behind this port, as its evidence and diagnostics
@@ -321,7 +409,7 @@ const fn checked_system_name<T: SystemName>() -> &'static str {
 /// impl CaseSystemPort for Vendor {}
 /// ```
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port or connector trait, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
+    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, connector or source handler trait, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
     label = "this system does not name itself",
     note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]
@@ -332,7 +420,7 @@ pub trait SystemName {
 /// A built system, by value or in an `Arc`, as [`Port::to`] takes it.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port or connector trait, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
+    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, connector or source handler trait, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
     label = "this system does not name itself",
     note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]
@@ -470,6 +558,7 @@ impl<P: ?Sized + Send + Sync + 'static> Clone for Port<P> {
             name: self.name.clone(),
             evidence: self.evidence.clone(),
             port: Arc::clone(&self.port),
+            refused_by: self.refused_by,
             port_type: PhantomData,
         }
     }

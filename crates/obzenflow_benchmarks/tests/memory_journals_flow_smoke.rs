@@ -41,6 +41,7 @@ impl TestSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("test-source")]
 impl TypedFiniteSourceHandler for TestSource {
     type Output = SmokeEvent;
 
@@ -78,7 +79,7 @@ async fn memory_journals_flow_runs_to_completion() {
 
     let handle = tokio::time::timeout(Duration::from_secs(10), async {
         FlowDefinition::materialize(move |_runtime_config| {
-            let source = TestSource::new(total_events);
+            let source = Port::owned(TestSource::new(total_events));
             let sink = perform(|_: &SmokeEvent| Received).through(Port::to(CountingSink {
                 received: received_for_flow,
             }));

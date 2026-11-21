@@ -15,7 +15,7 @@ extern crate serde;
 extern crate std;
 
 use self::async_trait::async_trait;
-use self::of::effects::{Effects, StageCompletion};
+use self::of::effects::{Effects, Port, StageCompletion};
 use self::of::prelude::*;
 use self::of::schema::{outcome, Outcome, OutcomeFacts, Outcomes};
 use self::of::stages::stateful::fold;
@@ -89,6 +89,7 @@ type NoEffects = <Pure as of::effects::Command>::AllowedEffects;
 #[derive(Clone, Debug)]
 struct Pure;
 
+#[of::system("pure", effects = of::effects)]
 impl sources::TypedFiniteSourceHandler for Pure {
     type Output = Fact;
     fn next(&mut self) -> Result<Option<Vec<Fact>>, sources::SourceError> {
@@ -290,7 +291,7 @@ fn renamed_facade_outcomes_preserve_flat_facts() {
 #[test]
 fn renamed_facade_macros_and_constructors_compile() {
     FlowDefinition::materialize(|_config| {
-        let input = sources::ValuesSource::new([Fact(1)]);
+        let input = Port::owned(sources::ValuesSource::new([Fact(1)]));
         let mapped = transforms::map(|fact: Fact| fact);
         let folded = stateful::reduce(Fact(0), |sum: &mut Fact, fact: &Fact| sum.0 += fact.0)
             .emit(stateful::emit::on_eof);
@@ -360,10 +361,14 @@ fn renamed_facade_macros_and_constructors_compile() {
     join!(catalog input: Fact, Fact -> Fact => priced);
     let point_in_time = joins::AsOfJoin::new(PointInTime);
     of::flow::join!(catalog input: Fact, Fact -> Fact => point_in_time);
-    source!(Fact => Pure);
-    async_source!(Fact => Pure);
-    infinite_source!(Fact => Pure);
-    async_infinite_source!(Fact => Pure);
+    let pure: Port<dyn sources::FiniteSource<Fact, sources::Refuse>> = Port::owned(Pure);
+    source!(Fact => pure);
+    let pure: Port<dyn sources::AsyncFiniteSource<Fact, sources::Refuse>> = Port::owned(Pure);
+    async_source!(Fact => pure);
+    let pure: Port<dyn sources::InfiniteSource<Fact, sources::Refuse>> = Port::owned(Pure);
+    infinite_source!(Fact => pure);
+    let pure: Port<dyn sources::AsyncInfiniteSource<Fact, sources::Refuse>> = Port::owned(Pure);
+    async_infinite_source!(Fact => pure);
     transform!(Fact -> Fact => Pure);
     stateful!(Fact -> Fact => Pure);
     join!(catalog input: Fact, Fact -> Fact => Pure);
@@ -372,7 +377,7 @@ fn renamed_facade_macros_and_constructors_compile() {
     sink!(Fact => printed);
 
     FlowDefinition::materialize(|_config| {
-        let input = sources::ValuesSource::new([Fact(1)]);
+        let input = Port::owned(sources::ValuesSource::new([Fact(1)]));
         let console = sinks::ConsoleSink::<Fact, _>::new(sinks::DebugFormatter);
         Ok(flow! {
             journals: of::journal::memory_journals(),

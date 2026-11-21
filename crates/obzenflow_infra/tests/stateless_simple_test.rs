@@ -5,6 +5,7 @@
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -44,6 +45,7 @@ impl SimpleSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("simple")]
 impl TypedFiniteSourceHandler for SimpleSource {
     type Output = StatelessSimpleEvent;
 
@@ -63,7 +65,7 @@ impl TypedFiniteSourceHandler for SimpleSource {
 #[tokio::test]
 async fn stateless_pipeline_runs_to_completion() {
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let simple_source = SimpleSource::new(5);
+        let simple_source = Port::owned(SimpleSource::new(5));
         let doubler = MapTyped::new(|event: StatelessSimpleEvent| DoubledEvent {
             original: event.value,
             doubled: event.value * 2,

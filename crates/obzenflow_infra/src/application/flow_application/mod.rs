@@ -22,8 +22,7 @@ use super::{
 use crate::application::config::CorsModeArg;
 use crate::application::config::{ConsoleDefaults, ResolvedStartupConfig};
 use crate::web::endpoints::event_ingestion::{
-    http_ingress, HostedIngressSource, HttpIngressAttachment, IngestionConfig, Ingress,
-    IngressDecoder, IngressHandle,
+    http_ingress, HttpIngressAttachment, IngestionConfig, Ingress, IngressDecoder, IngressHandle,
 };
 #[cfg(feature = "warp-server")]
 use crate::web::host_config::{HostConfig, HostCorsConfig, HostCorsMode};
@@ -39,7 +38,9 @@ use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::prelude::FlowHandle;
+use obzenflow_runtime::stages::source::HostedIngress;
 use obzenflow_runtime::stages::LivenessSnapshots;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -310,30 +311,38 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Create and host HTTP ingress, returning its source for the flow topology.
+    /// Create and host HTTP ingress, returning its hosted port for the flow topology.
     ///
     /// The builder retains the HTTP surface and wires readiness, refusal recording
-    /// and shutdown. The application only places the returned source in `flow!`.
-    pub fn http_ingress<D>(&mut self, decoder: D, config: IngestionConfig) -> HostedIngressSource<D>
+    /// and shutdown. The application only places the returned port in an
+    /// `async_infinite_source!` row. The port names the framework's
+    /// `http-ingress` system.
+    pub fn http_ingress<D>(
+        &mut self,
+        decoder: D,
+        config: IngestionConfig,
+    ) -> Port<dyn HostedIngress<D::Output>>
     where
         D: IngressDecoder,
     {
-        let (source, http) = http_ingress(decoder, config).into_parts();
+        let (port, http) = http_ingress(decoder, config).into_parts();
         self.attach_http_ingress(http);
-        source
+        port
     }
 
-    /// Register ingress for an application-owned protocol and return its source.
+    /// Register ingress for an application-owned protocol and return its hosted port.
     ///
     /// Clone the bundle's submission handle before passing it here. The builder
-    /// wires its lifecycle; place the returned source in `flow!`.
-    pub fn ingress<D>(&mut self, ingress: Ingress<D>) -> HostedIngressSource<D>
+    /// wires its lifecycle; place the returned port in an
+    /// `async_infinite_source!` row. The port names the framework's `ingress`
+    /// system.
+    pub fn ingress<D>(&mut self, ingress: Ingress<D>) -> Port<dyn HostedIngress<D::Output>>
     where
         D: IngressDecoder,
     {
-        let (source, handle) = ingress.into_parts();
+        let (port, handle) = ingress.into_parts();
         self.attach_ingress_handle(handle);
-        source
+        port
     }
 
     /// Register an HTTP attachment obtained by explicitly splitting an ingress bundle.

@@ -9,6 +9,7 @@
 //! - count input events per-accumulate even when heartbeats are disabled (051j-2)
 
 use crate::replay_testkit;
+use obzenflow::effects::Port;
 
 use anyhow::{anyhow, Result};
 use obzenflow::testing::RecordingSink;
@@ -119,6 +120,7 @@ impl<T> BurstSource<T> {
     }
 }
 
+#[obzenflow::system("burst")]
 impl<T> TypedFiniteSourceHandler for BurstSource<T>
 where
     T: IndexedMetric + Send + Sync + 'static,
@@ -245,7 +247,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let (sink_handler, sink_events) = RecordingSink::<AggregateMetricEvent>::new();
     let journal_dir = unique_journal_dir("stateful_metrics");
     let journal_dir_for_flow = journal_dir.clone();
-    let source = BurstSource::<MetricEvent>::new(total_events);
+    let source = Port::owned(BurstSource::<MetricEvent>::new(total_events));
     let accumulator = SlowAccumulator::new(sleep_per_event);
 
     let test_handle = test_flow! {
@@ -432,8 +434,8 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
 
     let reference_events: usize = 10;
     let stream_events: usize = 0;
-    let reference_source = BurstSource::<RefMetricEvent>::new(reference_events);
-    let stream_source = BurstSource::<StreamMetricEvent>::new(stream_events);
+    let reference_source = Port::owned(BurstSource::<RefMetricEvent>::new(reference_events));
+    let stream_source = Port::owned(BurstSource::<StreamMetricEvent>::new(stream_events));
     let joiner = NoopJoin;
     let (sink, _events) = RecordingSink::<JoinedMetricEvent>::new();
 

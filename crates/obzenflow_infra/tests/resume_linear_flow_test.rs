@@ -28,6 +28,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -137,7 +138,7 @@ fn build_flow_with_observer(
     observer_calls: Option<Arc<AtomicU64>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = ReattachingSource(BoundedTicker::new(first_n, count));
+        let source_handler = Port::to(ReattachingSource(BoundedTicker::new(first_n, count)));
         let transform_handler = DoubleTransform::new();
         let sink_handler = CountingSink::<Doubled>::new(delivered);
         let transformed = match observer_calls {
@@ -239,7 +240,7 @@ async fn run_until_delivered_with_observer(
 /// consume a located archive as input).
 fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = ReattachingSource(BoundedTicker::new(first_n, count));
+        let source_handler = Port::to(ReattachingSource(BoundedTicker::new(first_n, count)));
         let transform_handler = DoubleTransform::new();
         let sink_handler = CountingSink::<Doubled>::new(delivered);
 

@@ -75,6 +75,7 @@ impl CompSource {
     }
 }
 
+#[obzenflow::system("composite")]
 impl TypedFiniteSourceHandler for CompSource {
     type Output = CompInput;
 
@@ -232,7 +233,7 @@ fn build_retry_flow(
                 .max_attempts(2),
         );
         let sink_breaker = circuit_breaker().consecutive_failures(5);
-        let source_handler = CompSource::new(source_calls);
+        let source_handler = Port::owned(CompSource::new(source_calls));
         let fan_out_handler = FanOutTransform::new();
         let effectful_handler = RetryTransform::new(calls);
         let collector_handler = perform(|output: &CompOutput| output.clone())

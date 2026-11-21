@@ -24,6 +24,7 @@ mod tests {
         TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
         TypedStatefulHandler, TypedTransformHandler,
     };
+    use obzenflow_runtime::stages::source::{FiniteSource, Refuse};
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
     use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,7 @@ mod tests {
     impl SourceTyping for Src {
         type Output = Out;
     }
+    #[obzenflow_runtime::effects::system("src")]
     impl TypedFiniteSourceHandler for Src {
         type Output = Out;
 
@@ -54,30 +56,12 @@ mod tests {
         }
     }
 
-    mod qualified {
-        use super::*;
-
-        #[derive(Clone, Debug)]
-        pub(super) struct Source;
-
-        impl SourceTyping for Source {
-            type Output = Out;
-        }
-
-        impl TypedFiniteSourceHandler for Source {
-            type Output = Out;
-
-            fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-                Ok(None)
-            }
-        }
-    }
-
     #[derive(Clone, Debug)]
     struct AsyncSrc;
     impl SourceTyping for AsyncSrc {
         type Output = Out;
     }
+    #[obzenflow_runtime::effects::system("async-src")]
     #[async_trait]
     impl TypedAsyncFiniteSourceHandler for AsyncSrc {
         type Output = Out;
@@ -92,6 +76,7 @@ mod tests {
     impl SourceTyping for InfSrc {
         type Output = Out;
     }
+    #[obzenflow_runtime::effects::system("inf-src")]
     impl TypedInfiniteSourceHandler for InfSrc {
         type Output = Out;
 
@@ -105,6 +90,7 @@ mod tests {
     impl SourceTyping for AsyncInfSrc {
         type Output = Out;
     }
+    #[obzenflow_runtime::effects::system("async-inf-src")]
     #[async_trait]
     impl TypedAsyncInfiniteSourceHandler for AsyncInfSrc {
         type Output = Out;
@@ -336,10 +322,10 @@ mod tests {
     #[test]
     fn every_stage_family_accepts_a_bound_path_in_its_maximally_decorated_form() {
         use obzenflow_adapters::middleware::rate_limit;
-        let finite = Src;
-        let async_finite = AsyncSrc;
-        let infinite = InfSrc;
-        let async_infinite = AsyncInfSrc;
+        let finite = Port::owned(Src);
+        let async_finite = Port::owned(AsyncSrc);
+        let infinite = Port::owned(InfSrc);
+        let async_infinite = Port::owned(AsyncInfSrc);
         let transform = Tr;
         let effectful_transform = FxTr;
         let stateful = St;
@@ -391,85 +377,97 @@ mod tests {
     // ── source! ─────────────────────────────────────────────────────────────
     #[test]
     fn source_typed_bare() {
-        crate::source!(Out => Src);
+        let src = Port::owned(Src);
+        crate::source!(Out => src);
     }
     #[test]
     fn source_typed_mw() {
-        crate::source!(Out => Src );
+        let src = Port::owned(Src);
+        crate::source!(Out => src );
     }
     #[test]
     fn source_typed_name() {
-        crate::source!(name: "s", Out => Src);
+        let src = Port::owned(Src);
+        crate::source!(name: "s", Out => src);
     }
     #[test]
     fn source_typed_name_mw() {
-        crate::source!(name: "s", Out => Src );
-    }
-    #[test]
-    fn source_accepts_a_qualified_unit_path() {
-        crate::source!(Out => qualified::Source);
+        let src = Port::owned(Src);
+        crate::source!(name: "s", Out => src );
     }
     #[test]
     fn source_accepts_a_function_parameter_name() {
-        fn declare(handler: Src) {
+        fn declare(handler: Port<dyn FiniteSource<Out, Refuse>>) {
             crate::source!(Out => handler);
         }
 
-        declare(Src);
+        declare(Port::owned(Src));
     }
 
     // ── async_source! ───────────────────────────────────────────────────────
     #[test]
     fn async_source_typed_bare() {
-        crate::async_source!(Out => AsyncSrc);
+        let async_src = Port::owned(AsyncSrc);
+        crate::async_source!(Out => async_src);
     }
     #[test]
     fn async_source_typed_mw() {
-        crate::async_source!(Out => AsyncSrc );
+        let async_src = Port::owned(AsyncSrc);
+        crate::async_source!(Out => async_src );
     }
     #[test]
     fn async_source_typed_name() {
-        crate::async_source!(name: "s", Out => AsyncSrc);
+        let async_src = Port::owned(AsyncSrc);
+        crate::async_source!(name: "s", Out => async_src);
     }
     #[test]
     fn async_source_typed_name_mw() {
-        crate::async_source!(name: "s", Out => AsyncSrc );
+        let async_src = Port::owned(AsyncSrc);
+        crate::async_source!(name: "s", Out => async_src );
     }
 
     // ── infinite_source! ────────────────────────────────────────────────────
     #[test]
     fn infinite_source_typed_bare() {
-        crate::infinite_source!(Out => InfSrc);
+        let inf_src = Port::owned(InfSrc);
+        crate::infinite_source!(Out => inf_src);
     }
     #[test]
     fn infinite_source_typed_mw() {
-        crate::infinite_source!(Out => InfSrc );
+        let inf_src = Port::owned(InfSrc);
+        crate::infinite_source!(Out => inf_src );
     }
     #[test]
     fn infinite_source_typed_name() {
-        crate::infinite_source!(name: "s", Out => InfSrc);
+        let inf_src = Port::owned(InfSrc);
+        crate::infinite_source!(name: "s", Out => inf_src);
     }
     #[test]
     fn infinite_source_typed_name_mw() {
-        crate::infinite_source!(name: "s", Out => InfSrc );
+        let inf_src = Port::owned(InfSrc);
+        crate::infinite_source!(name: "s", Out => inf_src );
     }
 
     // ── async_infinite_source! ──────────────────────────────────────────────
     #[test]
     fn async_infinite_source_typed_bare() {
-        crate::async_infinite_source!(Out => AsyncInfSrc);
+        let async_inf_src = Port::owned(AsyncInfSrc);
+        crate::async_infinite_source!(Out => async_inf_src);
     }
     #[test]
     fn async_infinite_source_typed_mw() {
-        crate::async_infinite_source!(Out => AsyncInfSrc );
+        let async_inf_src = Port::owned(AsyncInfSrc);
+        crate::async_infinite_source!(Out => async_inf_src );
     }
     #[test]
     fn async_infinite_source_typed_name() {
-        crate::async_infinite_source!(name: "s", Out => AsyncInfSrc);
+        let async_inf_src = Port::owned(AsyncInfSrc);
+        crate::async_infinite_source!(name: "s", Out => async_inf_src);
     }
     #[test]
     fn async_infinite_source_typed_name_mw() {
-        crate::async_infinite_source!(name: "s", Out => AsyncInfSrc );
+        let async_inf_src = Port::owned(AsyncInfSrc);
+        crate::async_infinite_source!(name: "s", Out => async_inf_src );
     }
 
     // ── transform! ──────────────────────────────────────────────────────────
@@ -618,7 +616,8 @@ mod tests {
         };
         struct PollAudit;
         impl obzenflow_runtime::stages::observer::SourcePollObserver for PollAudit {}
-        let mut source = crate::source!(Out with { circuit_breaker().consecutive_failures(3), source_poll_observer("audit", PollAudit), rate_limit(10.0) } => Src);
+        let src = Port::owned(Src);
+        let mut source = crate::source!(Out with { circuit_breaker().consecutive_failures(3), source_poll_observer("audit", PollAudit), rate_limit(10.0) } => src);
         source.prepare_middleware().unwrap();
         assert_eq!(source.stage_middleware_factories().len(), 3);
         let output = sn();

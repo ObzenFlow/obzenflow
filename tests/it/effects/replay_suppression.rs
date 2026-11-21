@@ -71,6 +71,7 @@ impl ReplaySource {
     }
 }
 
+#[obzenflow::system("replay-inputs")]
 impl TypedFiniteSourceHandler for ReplaySource {
     type Output = ReplayInput;
 
@@ -316,7 +317,7 @@ fn build_stateful_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = ReplaySource::new();
+        let inputs_handler = Port::owned(ReplaySource::new());
         let effectful_handler = ReplayStateful {
             counter: call_counter(calls),
         };

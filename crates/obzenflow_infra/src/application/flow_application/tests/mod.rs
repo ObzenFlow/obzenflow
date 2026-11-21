@@ -32,6 +32,7 @@ impl TypedPayload for IdlePayload {
 #[derive(Clone, Debug)]
 struct IdleInfiniteSource;
 
+#[obzenflow_runtime::effects::system("idle-infinite")]
 impl TypedInfiniteSourceHandler for IdleInfiniteSource {
     type Output = IdlePayload;
 
@@ -51,6 +52,7 @@ impl OneShotSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("one-shot")]
 impl TypedFiniteSourceHandler for OneShotSource {
     type Output = IdlePayload;
 

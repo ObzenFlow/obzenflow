@@ -5,6 +5,7 @@
 //! FLOWIP-134b journal oracle for scalar and dynamic synchronous transforms.
 
 use crate::{csv_demo::domain as support_domain, replay_testkit};
+use obzenflow::effects::Port;
 
 use obzenflow_core::ai::{ChunkEnvelope, TokenCount};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
@@ -65,6 +66,7 @@ impl<T> TypedValuesSource<T> {
     }
 }
 
+#[obzenflow::system("typed-values")]
 impl<T> TypedFiniteSourceHandler for TypedValuesSource<T>
 where
     T: TypedPayload + Clone + Debug + Send + Sync + 'static,
@@ -160,11 +162,11 @@ fn right_filter_fixtures() -> Vec<FilterRecord> {
 
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticket_source = TypedValuesSource::new(ticket_fixtures());
-        let seed_source = TypedValuesSource::new(chunk_fixtures());
-        let try_map_source = TypedValuesSource::new(try_map_fixtures());
-        let left_filter_source = TypedValuesSource::new(left_filter_fixtures());
-        let right_filter_source = TypedValuesSource::new(right_filter_fixtures());
+        let ticket_source = Port::owned(TypedValuesSource::new(ticket_fixtures()));
+        let seed_source = Port::owned(TypedValuesSource::new(chunk_fixtures()));
+        let try_map_source = Port::owned(TypedValuesSource::new(try_map_fixtures()));
+        let left_filter_source = Port::owned(TypedValuesSource::new(left_filter_fixtures()));
+        let right_filter_source = Port::owned(TypedValuesSource::new(right_filter_fixtures()));
         let triage = TicketTriageWitness;
         let chunker = ChunkByBudgetBuilder::new()
             .items(|seed: &ChunkSeed| seed.items.clone())

@@ -10,6 +10,7 @@
 //! was configured" and "did the data path obey it".
 
 use crate::replay_testkit;
+use obzenflow::effects::Port;
 
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
@@ -40,6 +41,7 @@ struct OneShotSource {
     emitted: bool,
 }
 
+#[obzenflow::system("one-shot")]
 impl TypedFiniteSourceHandler for OneShotSource {
     type Output = Item;
 
@@ -78,7 +80,7 @@ async fn file_configured_lineage_depth_caps_journalled_parent_ids() {
 
     let journal_base = base.clone();
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = OneShotSource { emitted: false };
+        let source = Port::owned(OneShotSource { emitted: false });
         let t1 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
         let t2 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
         let t3 = MapTyped::new(|i: Item| Item { index: i.index + 1 });

@@ -121,6 +121,7 @@ struct OrderSource {
     polls: Arc<AtomicUsize>,
 }
 
+#[obzenflow_runtime::effects::system("orders")]
 impl TypedFiniteSourceHandler for OrderSource {
     type Output = OrderAccepted;
 
@@ -287,10 +288,10 @@ pub(crate) fn build_flow(
     probe: Probe,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let orders = OrderSource {
+        let orders = Port::owned(OrderSource {
             next: 0,
             polls: probe.source_polls.clone(),
-        };
+        });
         let shipping_handoff = perform(|order: &ShippingReady| HandOffRequest {
             order_id: order.order_id,
         })

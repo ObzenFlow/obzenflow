@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::effects::Port;
 use obzenflow::stages::stateful::{self, emit};
 use obzenflow::testing::CountingSink;
 use obzenflow_core::event::ChainEvent;
@@ -51,6 +52,7 @@ impl TestEventSource {
     }
 }
 
+#[obzenflow::system("test-events")]
 impl TypedFiniteSourceHandler for TestEventSource {
     type Output = SeedEvent;
 
@@ -81,6 +83,7 @@ impl DelayedEofEventSource {
     }
 }
 
+#[obzenflow::system("delayed-eof-events")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for DelayedEofEventSource {
     type Output = SeedEvent;
@@ -203,7 +206,7 @@ async fn count_journal_records(run_dir: &Path) -> Result<usize> {
 #[tokio::test]
 async fn cycle_guard_rejects_cycles_with_non_transform_members() {
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestEventSource::new(1);
+        let source = Port::owned(TestEventSource::new(1));
         let stateful = NoopStateful;
         let transform = IdentityTransform::<SeedEvent>::new();
         let (sink, _count) = event_counter_sink::<SeedEvent>();
@@ -251,7 +254,7 @@ async fn cycle_guard_rejects_stateful_emit_per_window_cycle() {
     }
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestEventSource::new(1);
+        let source = Port::owned(TestEventSource::new(1));
         let window = stateful::reduce(
             WindowCount::default(),
             |acc: &mut WindowCount, _ev: &SeedEvent| acc.count += 1,
@@ -302,7 +305,7 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
     let (counter_sink, counter) = event_counter_sink::<SeedEvent>();
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestEventSource::new(5);
+        let source = Port::owned(TestEventSource::new(5));
         let transform_a = IdentityTransform::<SeedEvent>::new();
         let transform_b = DropAllTransform;
 
@@ -363,7 +366,7 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     let base_for_flow = base.clone();
 
     let (counter_sink, counter) = event_counter_sink::<SeedEvent>();
-    let source = DelayedEofEventSource::new(Duration::from_millis(500));
+    let source = Port::owned(DelayedEofEventSource::new(Duration::from_millis(500)));
     let transform_a = IdentityTransform::<SeedEvent>::new();
     let transform_b = IdentityTransform::<SeedEvent>::new();
 

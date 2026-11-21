@@ -24,6 +24,7 @@ use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinit
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
@@ -264,7 +265,7 @@ fn pull_flow(
             .map_err(|error| {
                 obzenflow_dsl::dsl::FlowBuildError::StageResourcesFailed(error.to_string())
             })?;
-        let source = HttpPullSource::new(decoder(url), config);
+        let source = Port::to(HttpPullSource::new(decoder(url), config));
         let collected = CountingSink::<HttpFixtureEvent>::new(delivered);
 
         Ok(flow! {
@@ -302,7 +303,7 @@ fn poll_flow(
             .map_err(|error| {
                 obzenflow_dsl::dsl::FlowBuildError::StageResourcesFailed(error.to_string())
             })?;
-        let source = HttpPollSource::new(decoder(url), config);
+        let source = Port::to(HttpPollSource::new(decoder(url), config));
         let collected = CountingSink::<HttpFixtureEvent>::new(delivered);
 
         Ok(flow! {

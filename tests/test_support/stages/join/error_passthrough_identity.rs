@@ -6,6 +6,7 @@
 //! own error journal, so the join receives only valid rows and joins them all.
 
 use crate::replay_testkit;
+use obzenflow::effects::Port;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -66,6 +67,7 @@ impl RefSource {
     }
 }
 
+#[obzenflow::system("references")]
 impl TypedFiniteSourceHandler for RefSource {
     type Output = RefItem;
 
@@ -93,6 +95,7 @@ impl StreamSource {
     }
 }
 
+#[obzenflow::system("streams")]
 impl TypedFiniteSourceHandler for StreamSource {
     type Output = StreamItem;
 
@@ -199,9 +202,9 @@ impl TypedJoinHandler for GuardedInnerJoin {
 
 fn build_flow(journal_base: PathBuf, typed_handler_calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = RefSource::new();
+        let reference_source = Port::owned(RefSource::new());
         let reference_validator = RefValidator::new();
-        let stream_source = StreamSource::new();
+        let stream_source = Port::owned(StreamSource::new());
         let stream_validator = Validator::new();
         let joined = GuardedInnerJoin {
             typed_handler_calls,
@@ -356,8 +359,8 @@ async fn a_join_records_the_stream_row_its_handler_rejects() {
     replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let reference_source = RefSource::new();
-            let stream_source = StreamSource::new();
+            let reference_source = Port::owned(RefSource::new());
+            let stream_source = Port::owned(StreamSource::new());
             let collector = DropSink::new();
             Ok(flow! {
                 name: "join_rejects_a_stream_row",

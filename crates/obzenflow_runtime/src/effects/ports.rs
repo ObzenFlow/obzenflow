@@ -185,6 +185,16 @@ impl SystemPort {
         }
     }
 
+    pub(super) fn built<P>(&self) -> Option<Arc<P>>
+    where
+        P: ?Sized + Send + Sync + 'static,
+    {
+        match &self.recipe {
+            PortRecipe::Eager(resolved) => resolved.port.downcast_ref::<Arc<P>>().cloned(),
+            PortRecipe::Deferred(_) => None,
+        }
+    }
+
     pub(super) fn grouped<P, R, S, F>(resolver: F) -> Self
     where
         P: ?Sized + Send + Sync + 'static,
@@ -253,7 +263,16 @@ impl SourceSystem {
         }
     }
 
-    pub(crate) fn name(&self) -> &str {
+    /// The framework's own placeholder source, with nothing for a registry to build.
+    pub fn placeholder() -> Self {
+        Self::new(
+            LogicalEffectBindingName::of_system("placeholder"),
+            Arc::new(SystemPort::eager(Arc::new(()))),
+        )
+    }
+
+    /// The name the stage records on each acquisition.
+    pub fn name(&self) -> &str {
         self.name.as_str()
     }
 

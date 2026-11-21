@@ -14,7 +14,7 @@ use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::SnapshotTableFormatter;
 use obzenflow::stages::sources::{
-    CsvDecodeError, CsvDecoder, CsvRecord, CsvSource, HostedIngressSource, IngressDecodeError,
+    CsvDecodeError, CsvDecoder, CsvRecord, CsvSource, HostedIngress, IngressDecodeError,
     IngressDecoder, IngressRecord, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection,
     YamlSource,
 };
@@ -213,9 +213,9 @@ fn retry_returned_line(returned: &RetryReturned) -> String {
 }
 
 pub fn build_flow(
-    new_accounts_source: HostedIngressSource<AccountIngress>,
-    tx_source: HostedIngressSource<LedgerIngress>,
-    ach_source: HostedIngressSource<AchIngress>,
+    new_accounts_source: Port<dyn HostedIngress<AccountOpened>>,
+    tx_source: Port<dyn HostedIngress<LedgerEntry>>,
+    ach_source: Port<dyn HostedIngress<AchDebit>>,
 ) -> FlowDefinition {
     assemble_flow(
         PathBuf::from(DEMO_JOURNAL_ROOT),
@@ -227,9 +227,9 @@ pub fn build_flow(
 
 pub fn assemble_flow(
     journal_root: PathBuf,
-    new_accounts_source: HostedIngressSource<AccountIngress>,
-    tx_source: HostedIngressSource<LedgerIngress>,
-    ach_source: HostedIngressSource<AchIngress>,
+    new_accounts_source: Port<dyn HostedIngress<AccountOpened>>,
+    tx_source: Port<dyn HostedIngress<LedgerEntry>>,
+    ach_source: Port<dyn HostedIngress<AchDebit>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: PiggyBankSettings| {
         let accounts_source = Port::to(

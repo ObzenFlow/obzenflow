@@ -50,6 +50,7 @@ struct Source {
     origin: Instant,
     sparse: bool,
 }
+#[obzenflow_runtime::effects::system("bench-inputs")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for Source {
     type Output = Input;
@@ -144,12 +145,12 @@ where
     J: FlowJournalFactory + 'static,
 {
     FlowDefinition::materialize(move |_| {
-        let source = Source {
+        let source = Port::owned(Source {
             index: 0,
             inputs: INPUTS,
             origin,
             sparse,
-        };
+        });
         let sink = perform(Input::clone as fn(&Input) -> Input).through(Port::to(Recorder {
             origin,
             delivered,
@@ -301,12 +302,12 @@ async fn build_effectful(
 ) -> FlowHandle {
     let journals = disk_journals(directory.to_owned());
     FlowDefinition::materialize(move |_| {
-        let source = Source {
+        let source = Port::owned(Source {
             index: 0,
             inputs,
             origin: Instant::now(),
             sparse: false,
-        };
+        });
         let sink = perform(Settled::clone as fn(&Settled) -> Settled)
             .through(Port::to(SettledLog { settled }));
         let settle_each = SettleEach {

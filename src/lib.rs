@@ -37,16 +37,19 @@
 //! several handler traits, each matching a different stage role.
 //!
 //! **Sources** produce events. [`crate::stages::sources::ValuesSource`] is the easiest way
-//! to emit a `Vec<T>` (or any iterator) of typed payloads:
+//! to emit a `Vec<T>` (or any iterator) of typed payloads. A source row takes a
+//! [`crate::effects::Port`] naming the system that supplies its input, so the
+//! flow builder binds the values by value with `Port::owned`:
 //!
 //! ```rust,ignore
+//! use obzenflow::effects::Port;
 //! use obzenflow::stages::sources;
 //!
 //! let readings = vec![
 //!     TemperatureReading { sensor_id: "A1".into(), celsius: 22.5 },
 //!     TemperatureReading { sensor_id: "B2".into(), celsius: 35.1 },
 //! ];
-//! let source = sources::ValuesSource::new(readings);
+//! let source = Port::owned(sources::ValuesSource::new(readings));
 //! ```
 //!
 //! **Transforms** process typed payloads one at a time. Implement
@@ -128,6 +131,7 @@
 //!
 //! ```no_run
 //! use anyhow::Result;
+//! use obzenflow::effects::Port;
 //! use obzenflow::schema::TypedPayload;
 //! use obzenflow::stages::{sources, transforms};
 //! use obzenflow::flow::{flow, sink, source, transform, FlowDefinition};
@@ -164,7 +168,7 @@
 //!     ];
 //!
 //!     let flow = FlowDefinition::materialize(move |_runtime_config| {
-//!         let readings_source = sources::ValuesSource::new(readings);
+//!         let readings_source = Port::owned(sources::ValuesSource::new(readings));
 //!         let check_temperature = transforms::map(|m: Measurement| {
 //!                 Alert {
 //!                     sensor: m.sensor.clone(),

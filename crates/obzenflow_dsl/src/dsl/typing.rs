@@ -17,8 +17,9 @@ use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactOutcome, Outcome, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
-    AdmitSource, JoinBinding, TypedJoinHandlerAdapter, UnifiedAsyncFiniteSourceHandler,
-    UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
+    AdmitSource, JoinBinding, SourceRowInput, TypedJoinHandlerAdapter,
+    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
+    UnifiedInfiniteSourceHandler,
 };
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, OutcomeContract,
@@ -43,7 +44,7 @@ const PLACEHOLDER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
 use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
 use obzenflow_runtime::effects::{
     effectful_transform_effects, Command, DeclareEffects, DeclaredEffectSet, Effects,
-    EveryPortAnswers, PortList, SinkHandler, SinkRole, StageCompletion,
+    EveryPortAnswers, Port, PortList, SinkHandler, SinkRole, SourceSystem, StageCompletion,
 };
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, JoinReferenceView, StatefulEmission, TransformHandler,
@@ -586,11 +587,32 @@ where
     .with_output_contract(output_contract)
 }
 
+/// The output and arrow a source row declares, passed by value so that a row
+/// without a port reports only the missing port.
+#[doc(hidden)]
+pub struct SourceRowArrow<PrimaryOutput, ArrowOutputSet>(
+    PhantomData<fn() -> (PrimaryOutput, ArrowOutputSet)>,
+);
+
+impl<PrimaryOutput, ArrowOutputSet> SourceRowArrow<PrimaryOutput, ArrowOutputSet> {
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<PrimaryOutput, ArrowOutputSet> Default for SourceRowArrow<PrimaryOutput, ArrowOutputSet> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+type RowOutputMembers<P, Family> = <<Port<P> as AdmitSource<Family>>::Output as Outcome>::Members;
+
 /// Canonical admission factory for a real synchronous finite source.
 #[doc(hidden)]
 pub fn typed_finite_source_descriptor<
-    H,
-    Kind,
+    T,
+    P,
     PrimaryOutput,
     ArrowOutputSet,
     PrimaryOutputIndex,
@@ -598,28 +620,34 @@ pub fn typed_finite_source_descriptor<
     HandlerToArrowProof,
 >(
     name: impl Into<String>,
-    handler: H,
+    input: T,
+    _arrow: SourceRowArrow<PrimaryOutput, ArrowOutputSet>,
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: AdmitSource<dyn UnifiedFiniteSourceHandler, Kind>,
-    H::Handler: UnifiedFiniteSourceHandler,
+    T: SourceRowInput<Port = Port<P>>,
+    P: ?Sized + Send + Sync + 'static,
+    Port<P>: AdmitSource<dyn UnifiedFiniteSourceHandler>,
+    <Port<P> as AdmitSource<dyn UnifiedFiniteSourceHandler>>::Handler: UnifiedFiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
-    <H::Output as Outcome>::Members:
+        + ArrowOutputsAreDeclaredByHandler<
+            RowOutputMembers<P, dyn UnifiedFiniteSourceHandler>,
+            ArrowToHandlerProof,
+        >,
+    RowOutputMembers<P, dyn UnifiedFiniteSourceHandler>:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let (handler, source_system) = handler.prepare_with_system();
+    let admitted = input.into_port().admit();
     let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
         name: name.into(),
-        handler,
-        continuation: H::CONTINUATION,
-        source_system,
+        handler: admitted.handler,
+        continuation: admitted.continuation,
+        source_system: admitted.system,
         source_policies,
         ingress_policy,
         observers,
@@ -630,8 +658,8 @@ where
 /// Canonical admission factory for a real asynchronous finite source.
 #[doc(hidden)]
 pub fn typed_async_finite_source_descriptor<
-    H,
-    Kind,
+    T,
+    P,
     PrimaryOutput,
     ArrowOutputSet,
     PrimaryOutputIndex,
@@ -639,25 +667,36 @@ pub fn typed_async_finite_source_descriptor<
     HandlerToArrowProof,
 >(
     name: impl Into<String>,
-    handler: H,
+    input: T,
+    _arrow: SourceRowArrow<PrimaryOutput, ArrowOutputSet>,
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, Kind>,
-    H::Handler: UnifiedAsyncFiniteSourceHandler,
+    T: SourceRowInput<Port = Port<P>>,
+    P: ?Sized + Send + Sync + 'static,
+    Port<P>: AdmitSource<dyn UnifiedAsyncFiniteSourceHandler>,
+    <Port<P> as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler>>::Handler:
+        UnifiedAsyncFiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
-    <H::Output as Outcome>::Members:
+        + ArrowOutputsAreDeclaredByHandler<
+            RowOutputMembers<P, dyn UnifiedAsyncFiniteSourceHandler>,
+            ArrowToHandlerProof,
+        >,
+    RowOutputMembers<P, dyn UnifiedAsyncFiniteSourceHandler>:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let (handler, source_system) = handler.prepare_with_system();
-    let mut descriptor = AsyncFiniteSourceDescriptor::new(name, handler, H::CONTINUATION);
-    descriptor.source_system = source_system;
+    let admitted = input.into_port().admit();
+    let mut descriptor = AsyncFiniteSourceDescriptor::new(
+        name,
+        admitted.handler,
+        admitted.continuation,
+        admitted.system,
+    );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -667,8 +706,8 @@ where
 /// Canonical admission factory for a real synchronous infinite source.
 #[doc(hidden)]
 pub fn typed_infinite_source_descriptor<
-    H,
-    Kind,
+    T,
+    P,
     PrimaryOutput,
     ArrowOutputSet,
     PrimaryOutputIndex,
@@ -676,28 +715,35 @@ pub fn typed_infinite_source_descriptor<
     HandlerToArrowProof,
 >(
     name: impl Into<String>,
-    handler: H,
+    input: T,
+    _arrow: SourceRowArrow<PrimaryOutput, ArrowOutputSet>,
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: AdmitSource<dyn UnifiedInfiniteSourceHandler, Kind>,
-    H::Handler: UnifiedInfiniteSourceHandler,
+    T: SourceRowInput<Port = Port<P>>,
+    P: ?Sized + Send + Sync + 'static,
+    Port<P>: AdmitSource<dyn UnifiedInfiniteSourceHandler>,
+    <Port<P> as AdmitSource<dyn UnifiedInfiniteSourceHandler>>::Handler:
+        UnifiedInfiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
-    <H::Output as Outcome>::Members:
+        + ArrowOutputsAreDeclaredByHandler<
+            RowOutputMembers<P, dyn UnifiedInfiniteSourceHandler>,
+            ArrowToHandlerProof,
+        >,
+    RowOutputMembers<P, dyn UnifiedInfiniteSourceHandler>:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let (handler, source_system) = handler.prepare_with_system();
+    let admitted = input.into_port().admit();
     let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
         name: name.into(),
-        handler,
-        continuation: H::CONTINUATION,
-        source_system,
+        handler: admitted.handler,
+        continuation: admitted.continuation,
+        source_system: admitted.system,
         source_policies,
         ingress_policy,
         observers,
@@ -708,8 +754,8 @@ where
 /// Canonical admission factory for a real asynchronous infinite source.
 #[doc(hidden)]
 pub fn typed_async_infinite_source_descriptor<
-    H,
-    Kind,
+    T,
+    P,
     PrimaryOutput,
     ArrowOutputSet,
     PrimaryOutputIndex,
@@ -717,25 +763,36 @@ pub fn typed_async_infinite_source_descriptor<
     HandlerToArrowProof,
 >(
     name: impl Into<String>,
-    handler: H,
+    input: T,
+    _arrow: SourceRowArrow<PrimaryOutput, ArrowOutputSet>,
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, Kind>,
-    H::Handler: UnifiedAsyncInfiniteSourceHandler,
+    T: SourceRowInput<Port = Port<P>>,
+    P: ?Sized + Send + Sync + 'static,
+    Port<P>: AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler>,
+    <Port<P> as AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler>>::Handler:
+        UnifiedAsyncInfiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: Outcome,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, ArrowToHandlerProof>,
-    <H::Output as Outcome>::Members:
+        + ArrowOutputsAreDeclaredByHandler<
+            RowOutputMembers<P, dyn UnifiedAsyncInfiniteSourceHandler>,
+            ArrowToHandlerProof,
+        >,
+    RowOutputMembers<P, dyn UnifiedAsyncInfiniteSourceHandler>:
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let (handler, source_system) = handler.prepare_with_system();
-    let mut descriptor = AsyncInfiniteSourceDescriptor::new(name, handler, H::CONTINUATION);
-    descriptor.source_system = source_system;
+    let admitted = input.into_port().admit();
+    let mut descriptor = AsyncInfiniteSourceDescriptor::new(
+        name,
+        admitted.handler,
+        admitted.continuation,
+        admitted.system,
+    );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -766,7 +823,7 @@ where
         name: name.into(),
         handler: PlaceholderFiniteSource::<PrimaryOutput>::new(message),
         continuation: PLACEHOLDER_REFUSES,
-        source_system: None,
+        source_system: SourceSystem::placeholder(),
         source_policies,
         ingress_policy,
         observers,
@@ -795,6 +852,7 @@ where
         name,
         PlaceholderAsyncSource::<PrimaryOutput>::new(message),
         PLACEHOLDER_REFUSES,
+        SourceSystem::placeholder(),
     );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
@@ -823,7 +881,7 @@ where
         name: name.into(),
         handler: PlaceholderInfiniteSource::<PrimaryOutput>::new(message),
         continuation: PLACEHOLDER_REFUSES,
-        source_system: None,
+        source_system: SourceSystem::placeholder(),
         source_policies,
         ingress_policy,
         observers,
@@ -852,6 +910,7 @@ where
         name,
         PlaceholderAsyncSource::<PrimaryOutput>::new(message),
         PLACEHOLDER_REFUSES,
+        SourceSystem::placeholder(),
     );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;

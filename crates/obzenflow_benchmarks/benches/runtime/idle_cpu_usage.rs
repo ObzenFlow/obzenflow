@@ -14,6 +14,7 @@ use obzenflow_benchmarks::prelude::*;
 use obzenflow_benchmarks::process_cpu_time;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -55,6 +56,7 @@ impl IdleSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("idle")]
 impl TypedFiniteSourceHandler for IdleSource {
     type Output = BenchEvent;
 
@@ -100,6 +102,7 @@ async fn build_pipeline(
         return Err(anyhow::anyhow!("Unsupported stage count: {stage_count}"));
     }
 
+    let source = Port::owned(source);
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let definition = match stage_count {
             1 => flow! {

@@ -15,6 +15,7 @@ use obzenflow_runtime::stages::SourceError;
 #[derive(Clone, Debug)]
 pub struct ReattachingSource<R>(pub R);
 
+#[obzenflow_runtime::effects::system("reattaching")]
 impl<R> InfiniteSourceConnector for ReattachingSource<R>
 where
     R: TypedInfiniteSourceHandler + Clone + 'static,

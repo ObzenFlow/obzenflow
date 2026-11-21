@@ -100,6 +100,7 @@ impl RefSource {
     }
 }
 
+#[obzenflow::system("references")]
 impl TypedFiniteSourceHandler for RefSource {
     type Output = RefItem;
 
@@ -130,6 +131,7 @@ impl StreamSource {
     }
 }
 
+#[obzenflow::system("streams")]
 impl TypedFiniteSourceHandler for StreamSource {
     type Output = StreamItem;
 
@@ -223,8 +225,8 @@ fn join_fn(reference: RefItem, stream: StreamItem) -> JoinedItem {
 /// Hydrating join (FiniteEof): the structural orderer, no merge machinery.
 fn build_hydrating_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = RefSource::new();
-        let stream_source = StreamSource::new();
+        let reference_source = Port::owned(RefSource::new());
+        let stream_source = Port::owned(StreamSource::new());
         let joined = joins::inner(
             |r: &RefItem| r.key.clone(),
             |s: &StreamItem| s.key.clone(),
@@ -255,8 +257,8 @@ fn build_hydrating_flow(journal_base: PathBuf) -> FlowDefinition {
 /// and it runs the canonical cross-side merge.
 fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = RefSource::new();
-        let stream_source = StreamSource::new();
+        let reference_source = Port::owned(RefSource::new());
+        let stream_source = Port::owned(StreamSource::new());
         let joined = joins::inner_live(
             |r: &RefItem| r.key.clone(),
             |s: &StreamItem| s.key.clone(),
@@ -443,8 +445,8 @@ async fn live_join_canonical_merge_reproduces_under_replay() {
 /// interleaving, so it runs the canonical cross-side dispatch.
 fn build_live_flow_no_effect(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = RefSource::new();
-        let stream_source = StreamSource::new();
+        let reference_source = Port::owned(RefSource::new());
+        let stream_source = Port::owned(StreamSource::new());
         let joined = joins::inner_live(
             |r: &RefItem| r.key.clone(),
             |s: &StreamItem| s.key.clone(),

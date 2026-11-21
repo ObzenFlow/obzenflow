@@ -12,7 +12,8 @@ const ARGUMENTS: &str =
     "`#[obzenflow::system]` takes the system's name, as in `#[obzenflow::system(\"stripe\")]`";
 
 const NOT_A_PORT_IMPL: &str = "`#[obzenflow::system(\"…\")]` marks a system's `impl` of its port, \
-                               as in `impl PaymentGatewayPort for StripeProcessor`; a struct that \
+                               connector or source handler trait, as in \
+                               `impl PaymentGatewayPort for StripeProcessor`; a struct that \
                                serves as its own port names itself with \
                                `#[obzenflow::port(system = \"…\")]`";
 

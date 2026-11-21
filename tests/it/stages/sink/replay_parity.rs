@@ -94,6 +94,7 @@ struct ValuesSource {
     next: usize,
 }
 
+#[obzenflow::system("values-fixture")]
 impl TypedFiniteSourceHandler for ValuesSource {
     type Output = SinkRecord;
 
@@ -135,10 +136,10 @@ fn build_parity_flow(
     calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let records = ValuesSource {
+        let records = obzenflow::effects::Port::owned(ValuesSource {
             values: fixtures(),
             next: 0,
-        };
+        });
         let csv = CsvSink::builder(SinkRecordProjection)
             .path(&csv_path)
             .columns(["id", "label", "nested", "tags", "optional"])

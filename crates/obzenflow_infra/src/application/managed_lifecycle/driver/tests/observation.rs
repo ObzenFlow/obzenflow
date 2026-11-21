@@ -15,6 +15,7 @@ use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handlers::{
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
 };
+use obzenflow_runtime::stages::source::{AsyncFiniteSource, AsyncInfiniteSource};
 use obzenflow_runtime::stages::SourceError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
@@ -48,6 +49,7 @@ impl PendingSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("pending")]
 #[async_trait::async_trait]
 impl TypedAsyncFiniteSourceHandler for PendingSource {
     type Output = Payload;
@@ -117,12 +119,14 @@ async fn pending_flow(infinite: bool) -> (Arc<FlowHandle>, PendingSource, Counti
     let sink_handler = perform(|_: &Payload| Hold).through(Port::to(sink.clone()));
     let flow = FlowDefinition::materialize(move |_| {
         Ok(if infinite {
+            let source_handler: Port<dyn AsyncInfiniteSource<_, _>> = Port::owned(source_handler);
             flow! {
                 name: "observation_infinite", journals: crate::journal::memory_journals(),
                 stages: { src = async_infinite_source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },
                 topology: { src |> snk; }
             }
         } else {
+            let source_handler: Port<dyn AsyncFiniteSource<_, _>> = Port::owned(source_handler);
             flow! {
                 name: "observation_finite", journals: crate::journal::memory_journals(),
                 stages: { src = async_source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },

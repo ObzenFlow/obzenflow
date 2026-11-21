@@ -20,22 +20,22 @@ use super::erased::{
     UnifiedInfiniteSourceHandler,
 };
 use super::positioned::{PositionedFiniteReader, SeekableSource, SourceRecord};
-use super::prepared::{sealed as admission_sealed, AdmitSource, PortSource};
+use super::prepared::{sealed as admission_sealed, AdmitSource, AdmittedSource};
 use super::typed::{
     SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 use super::SourceError;
-use crate::effects::{Port, PortImpl, ServesPort, SourceSystem, SourceSystemFault};
+use crate::effects::{Port, PortImpl, ServesPort, SourceSystemFault};
 use crate::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
     InfiniteSourceConnector, SourceReaderInitContext,
 };
 use async_trait::async_trait;
 use obzenflow_core::event::SourceDiagnosticReason;
-use obzenflow_core::source::{SourceInputIdentity, SourcePosition};
+use obzenflow_core::source::{RefusedBy, SourceInputIdentity, SourcePosition};
 use obzenflow_core::OneFactOutcome;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 type Finite = dyn UnifiedFiniteSourceHandler;
@@ -49,11 +49,32 @@ type PortReader<Family, K, Out> = <K as PortContinuation<Family, Out>>::Reader;
 /// boxed reader its connectors open.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is not a continuation that connectors of this source family declare",
-    note = "a source port's type repeats its connectors' continuation: `Refuse`, `Seek<P>` for a synchronous finite source, or `Reattach<G>` for an infinite one"
+    message = "`{Self}` is not a continuation this source family allows",
+    note = "a source port's type carries its connectors' continuation: `Refuse`, `Seek<P>` for a synchronous finite source, or `Reattach<G>` for an infinite one"
 )]
 pub trait PortContinuation<Family: ?Sized, Out>: Send + Sync + 'static {
     type Reader: Send + 'static;
+}
+
+/// The value a source row's handler slot takes, which is always a [`Port`].
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this source row requires a named Port",
+    label = "`{Self}` is not a `Port`",
+    note = "bind a connector with Port::to(...), bind a direct handler with Port::owned(...), or pass the port returned by ingress registration"
+)]
+pub trait SourceRowInput {
+    type Port;
+
+    fn into_port(self) -> Self::Port;
+}
+
+impl<P: ?Sized + Send + Sync + 'static> SourceRowInput for Port<P> {
+    type Port = Port<P>;
+
+    fn into_port(self) -> Port<P> {
+        self
+    }
 }
 
 /// Boxes a connector's own reader for the port its continuation declares.
@@ -629,6 +650,132 @@ where
     }
 }
 
+const HANDLER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
+    by: RefusedBy::Handler,
+};
+
+/// The system behind a port that took a direct handler by value. The first
+/// live acquisition takes the handler, and a later one finds the input
+/// unavailable.
+#[doc(hidden)]
+pub struct OwnedHandler<H> {
+    handler: Mutex<Option<H>>,
+}
+
+impl<H> OwnedHandler<H> {
+    fn new(handler: H) -> Self {
+        Self {
+            handler: Mutex::new(Some(handler)),
+        }
+    }
+
+    fn take(&self) -> Result<H, SourceError> {
+        self.handler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .ok_or(SourceError::Other(
+                SourceDiagnosticReason::InputUnavailable.into(),
+            ))
+    }
+}
+
+impl<H: TypedFiniteSourceHandler + 'static> FiniteSourceConnector for OwnedHandler<H> {
+    type Output = H::Output;
+    type Reader = H;
+    type Continuation = Refuse;
+
+    fn open(&self, _context: SourceReaderInitContext) -> Result<H, SourceError> {
+        self.take()
+    }
+}
+
+#[async_trait]
+impl<H: TypedAsyncFiniteSourceHandler + 'static> AsyncFiniteSourceConnector for OwnedHandler<H> {
+    type Output = H::Output;
+    type Reader = H;
+    type Continuation = Refuse;
+
+    async fn open(&self, _context: SourceReaderInitContext) -> Result<H, SourceError> {
+        self.take()
+    }
+}
+
+impl<H: TypedInfiniteSourceHandler + 'static> InfiniteSourceConnector for OwnedHandler<H> {
+    type Output = H::Output;
+    type Reader = H;
+    type Continuation = Refuse;
+
+    fn open(&self, _context: SourceReaderInitContext) -> Result<H, SourceError> {
+        self.take()
+    }
+}
+
+#[async_trait]
+impl<H: TypedAsyncInfiniteSourceHandler + 'static> AsyncInfiniteSourceConnector
+    for OwnedHandler<H>
+{
+    type Output = H::Output;
+    type Reader = H;
+    type Continuation = Refuse;
+
+    async fn open(&self, _context: SourceReaderInitContext) -> Result<H, SourceError> {
+        self.take()
+    }
+}
+
+/// A direct typed handler [`Port::owned`] takes by value, with the port of
+/// its source family.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a typed source handler",
+    label = "`Port::owned` takes a typed source handler by value",
+    note = "bind a connector with `Port::to(...)`, and pass the handler itself, never an `Arc` of it"
+)]
+pub trait OwnedSource<P: ?Sized>: Send + 'static {
+    fn into_system(self) -> Arc<P>;
+}
+
+impl<H: TypedFiniteSourceHandler + 'static> OwnedSource<dyn FiniteSource<H::Output, Refuse>> for H {
+    fn into_system(self) -> Arc<dyn FiniteSource<H::Output, Refuse>> {
+        Arc::new(OwnedHandler::new(self))
+    }
+}
+
+impl<H: TypedAsyncFiniteSourceHandler + 'static>
+    OwnedSource<dyn AsyncFiniteSource<H::Output, Refuse>> for H
+{
+    fn into_system(self) -> Arc<dyn AsyncFiniteSource<H::Output, Refuse>> {
+        Arc::new(OwnedHandler::new(self))
+    }
+}
+
+impl<H: TypedInfiniteSourceHandler + 'static> OwnedSource<dyn InfiniteSource<H::Output, Refuse>>
+    for H
+{
+    fn into_system(self) -> Arc<dyn InfiniteSource<H::Output, Refuse>> {
+        Arc::new(OwnedHandler::new(self))
+    }
+}
+
+impl<H: TypedAsyncInfiniteSourceHandler + 'static>
+    OwnedSource<dyn AsyncInfiniteSource<H::Output, Refuse>> for H
+{
+    fn into_system(self) -> Arc<dyn AsyncInfiniteSource<H::Output, Refuse>> {
+        Arc::new(OwnedHandler::new(self))
+    }
+}
+
+fn port_continuation<P: ?Sized + Send + Sync + 'static>(
+    port: &Port<P>,
+    kind: SourceContinuation,
+) -> SourceContinuation {
+    match (kind, port.refused_by()) {
+        (SourceContinuation::Refuse { .. }, RefusedBy::Handler) => HANDLER_REFUSES,
+        (kind, _) => kind,
+    }
+}
+
 fn unavailable(fault: SourceSystemFault) -> SourceError {
     match fault {
         SourceSystemFault::Refused(_) => {
@@ -640,28 +787,26 @@ fn unavailable(fault: SourceSystemFault) -> SourceError {
     }
 }
 
-impl<Out, K> admission_sealed::Admitted<Finite, PortSource> for Port<dyn FiniteSource<Out, K>>
+impl<Out, K> admission_sealed::Admitted<Finite> for Port<dyn FiniteSource<Out, K>>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
     K: PortContinuation<Finite, Out>,
 {
 }
 
-impl<Out, K> AdmitSource<Finite, PortSource> for Port<dyn FiniteSource<Out, K>>
+impl<Out, K> AdmitSource<Finite> for Port<dyn FiniteSource<Out, K>>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
     K: PortContinuation<Finite, Out> + FiniteContinuation<PortReader<Finite, K, Out>, Output = Out>,
 {
     type Output = Out;
     type Handler = <K as FiniteContinuation<PortReader<Finite, K, Out>>>::Handler;
-    const CONTINUATION: SourceContinuation =
-        <K as FiniteContinuation<PortReader<Finite, K, Out>>>::KIND;
 
-    fn prepare(self) -> Self::Handler {
-        self.prepare_with_system().0
-    }
-
-    fn prepare_with_system(self) -> (Self::Handler, Option<SourceSystem>) {
+    fn admit(self) -> AdmittedSource<Self::Handler> {
+        let continuation = port_continuation(
+            &self,
+            <K as FiniteContinuation<PortReader<Finite, K, Out>>>::KIND,
+        );
         let system = self.source_system();
         let resolving = system.clone();
         let handler =
@@ -671,19 +816,22 @@ where
                     .map_err(unavailable)?
                     .open_port_reader(context)
             }));
-        (handler, Some(system))
+        AdmittedSource {
+            handler,
+            continuation,
+            system,
+        }
     }
 }
 
-impl<Out, K> admission_sealed::Admitted<AsyncFinite, PortSource>
-    for Port<dyn AsyncFiniteSource<Out, K>>
+impl<Out, K> admission_sealed::Admitted<AsyncFinite> for Port<dyn AsyncFiniteSource<Out, K>>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
     K: PortContinuation<AsyncFinite, Out>,
 {
 }
 
-impl<Out, K> AdmitSource<AsyncFinite, PortSource> for Port<dyn AsyncFiniteSource<Out, K>>
+impl<Out, K> AdmitSource<AsyncFinite> for Port<dyn AsyncFiniteSource<Out, K>>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
     K: PortContinuation<AsyncFinite, Out>
@@ -691,14 +839,12 @@ where
 {
     type Output = Out;
     type Handler = <K as AsyncFiniteContinuation<PortReader<AsyncFinite, K, Out>>>::Handler;
-    const CONTINUATION: SourceContinuation =
-        <K as AsyncFiniteContinuation<PortReader<AsyncFinite, K, Out>>>::KIND;
 
-    fn prepare(self) -> Self::Handler {
-        self.prepare_with_system().0
-    }
-
-    fn prepare_with_system(self) -> (Self::Handler, Option<SourceSystem>) {
+    fn admit(self) -> AdmittedSource<Self::Handler> {
+        let continuation = port_continuation(
+            &self,
+            <K as AsyncFiniteContinuation<PortReader<AsyncFinite, K, Out>>>::KIND,
+        );
         let system = self.source_system();
         let resolving = system.clone();
         let handler = <K as AsyncFiniteContinuation<PortReader<AsyncFinite, K, Out>>>::cold(
@@ -712,18 +858,22 @@ where
                 })
             }),
         );
-        (handler, Some(system))
+        AdmittedSource {
+            handler,
+            continuation,
+            system,
+        }
     }
 }
 
-impl<Out, K> admission_sealed::Admitted<Infinite, PortSource> for Port<dyn InfiniteSource<Out, K>>
+impl<Out, K> admission_sealed::Admitted<Infinite> for Port<dyn InfiniteSource<Out, K>>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
     K: PortContinuation<Infinite, Out>,
 {
 }
 
-impl<Out, K> AdmitSource<Infinite, PortSource> for Port<dyn InfiniteSource<Out, K>>
+impl<Out, K> AdmitSource<Infinite> for Port<dyn InfiniteSource<Out, K>>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
     K: PortContinuation<Infinite, Out>
@@ -731,14 +881,12 @@ where
 {
     type Output = Out;
     type Handler = <K as InfiniteContinuation<PortReader<Infinite, K, Out>>>::Handler;
-    const CONTINUATION: SourceContinuation =
-        <K as InfiniteContinuation<PortReader<Infinite, K, Out>>>::KIND;
 
-    fn prepare(self) -> Self::Handler {
-        self.prepare_with_system().0
-    }
-
-    fn prepare_with_system(self) -> (Self::Handler, Option<SourceSystem>) {
+    fn admit(self) -> AdmittedSource<Self::Handler> {
+        let continuation = port_continuation(
+            &self,
+            <K as InfiniteContinuation<PortReader<Infinite, K, Out>>>::KIND,
+        );
         let system = self.source_system();
         let resolving = system.clone();
         let handler = <K as InfiniteContinuation<PortReader<Infinite, K, Out>>>::cold(Box::new(
@@ -749,19 +897,22 @@ where
                     .open_port_reader(context)
             },
         ));
-        (handler, Some(system))
+        AdmittedSource {
+            handler,
+            continuation,
+            system,
+        }
     }
 }
 
-impl<Out, K> admission_sealed::Admitted<AsyncInfinite, PortSource>
-    for Port<dyn AsyncInfiniteSource<Out, K>>
+impl<Out, K> admission_sealed::Admitted<AsyncInfinite> for Port<dyn AsyncInfiniteSource<Out, K>>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
     K: PortContinuation<AsyncInfinite, Out>,
 {
 }
 
-impl<Out, K> AdmitSource<AsyncInfinite, PortSource> for Port<dyn AsyncInfiniteSource<Out, K>>
+impl<Out, K> AdmitSource<AsyncInfinite> for Port<dyn AsyncInfiniteSource<Out, K>>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
     K: PortContinuation<AsyncInfinite, Out>
@@ -769,14 +920,12 @@ where
 {
     type Output = Out;
     type Handler = <K as AsyncInfiniteContinuation<PortReader<AsyncInfinite, K, Out>>>::Handler;
-    const CONTINUATION: SourceContinuation =
-        <K as AsyncInfiniteContinuation<PortReader<AsyncInfinite, K, Out>>>::KIND;
 
-    fn prepare(self) -> Self::Handler {
-        self.prepare_with_system().0
-    }
-
-    fn prepare_with_system(self) -> (Self::Handler, Option<SourceSystem>) {
+    fn admit(self) -> AdmittedSource<Self::Handler> {
+        let continuation = port_continuation(
+            &self,
+            <K as AsyncInfiniteContinuation<PortReader<AsyncInfinite, K, Out>>>::KIND,
+        );
         let system = self.source_system();
         let resolving = system.clone();
         let handler = <K as AsyncInfiniteContinuation<PortReader<AsyncInfinite, K, Out>>>::cold(
@@ -790,7 +939,11 @@ where
                 })
             }),
         );
-        (handler, Some(system))
+        AdmittedSource {
+            handler,
+            continuation,
+            system,
+        }
     }
 }
 
@@ -809,6 +962,8 @@ mod tests {
     }
 
     struct TicketReader;
+
+    #[crate::effects::system("ticket-reader")]
     impl TypedFiniteSourceHandler for TicketReader {
         type Output = Ticket;
         fn next(&mut self) -> Result<Option<Vec<Ticket>>, SourceError> {
@@ -913,21 +1068,18 @@ mod tests {
                 })
             }
         });
-        let mut rows = [port.clone(), port].map(
-            <Port<dyn FiniteSource<Ticket, Refuse>> as AdmitSource<Finite, PortSource>>::prepare_with_system,
-        );
+        let mut rows = [port.clone(), port]
+            .map(<Port<dyn FiniteSource<Ticket, Refuse>> as AdmitSource<Finite>>::admit);
         let mut registry = EffectPortRegistry::new();
-        for (_, system) in &rows {
-            registry.install_source_system(system.as_ref().expect("a port row names a system"));
+        for row in &rows {
+            registry.install_source_system(&row.system);
         }
         let run = registry.into_run_registry();
         let start = Barrier::new(rows.len());
         std::thread::scope(|scope| {
-            for (handler, system) in &mut rows {
-                system
-                    .as_ref()
-                    .expect("a port row names a system")
-                    .attach(&run);
+            for row in &mut rows {
+                row.system.attach(&run);
+                let handler = &mut row.handler;
                 let start = &start;
                 scope.spawn(move || {
                     start.wait();
@@ -939,14 +1091,67 @@ mod tests {
         assert_eq!(opens.load(Ordering::SeqCst), 2);
     }
 
+    #[test]
+    fn owned_port_refusal_names_handler() {
+        let owned: Port<dyn FiniteSource<Ticket, Refuse>> = Port::owned(TicketReader);
+        let connector: Port<dyn FiniteSource<Ticket, Refuse>> = Port::to(ArchivedTickets);
+        assert_eq!(owned.system_name(), "ticket-reader");
+        assert_eq!(owned.admit().continuation, HANDLER_REFUSES);
+        assert_eq!(
+            connector.admit().continuation,
+            SourceContinuation::Refuse {
+                by: RefusedBy::Connector
+            }
+        );
+    }
+
+    #[test]
+    fn owned_port_second_claimant_unavailable() {
+        let port: Port<dyn FiniteSource<Ticket, Refuse>> = Port::owned(TicketReader);
+        let mut rows = [port.clone(), port]
+            .map(<Port<dyn FiniteSource<Ticket, Refuse>> as AdmitSource<Finite>>::admit);
+        let mut registry = EffectPortRegistry::new();
+        for row in &rows {
+            registry.install_source_system(&row.system);
+        }
+        let run = registry.into_run_registry();
+        let claims: Vec<Result<(), SourceError>> = rows
+            .iter_mut()
+            .map(|row| {
+                row.system.attach(&run);
+                row.handler.acquire(context())
+            })
+            .collect();
+        assert_eq!(
+            claims,
+            [
+                Ok(()),
+                Err(SourceError::Other(
+                    SourceDiagnosticReason::InputUnavailable.into()
+                ))
+            ]
+        );
+    }
+
+    #[test]
+    fn owned_port_unacquired_clone_acquires() {
+        let port: Port<dyn FiniteSource<Ticket, Refuse>> = Port::owned(TicketReader);
+        let _replayed = port.clone().admit();
+        let mut live = port.admit();
+        let mut registry = EffectPortRegistry::new();
+        registry.install_source_system(&live.system);
+        live.system.attach(&registry.into_run_registry());
+        assert_eq!(live.handler.acquire(context()), Ok(()));
+    }
+
     #[tokio::test]
     async fn source_port_reader_returns_connector_poll_timeout() {
         let port: Port<dyn AsyncFiniteSource<Ticket, Refuse>> = Port::to(SlowTickets);
-        let (mut handler, system) = <Port<dyn AsyncFiniteSource<Ticket, Refuse>> as AdmitSource<
-            AsyncFinite,
-            PortSource,
-        >>::prepare_with_system(port);
-        let system = system.expect("a port row names a system");
+        let AdmittedSource {
+            mut handler,
+            system,
+            ..
+        } = port.admit();
         let mut registry = EffectPortRegistry::new();
         registry.install_source_system(&system);
         system.attach(&registry.into_run_registry());

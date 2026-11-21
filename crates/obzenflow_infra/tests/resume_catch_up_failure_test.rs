@@ -212,8 +212,8 @@ fn build_flow(
     let b_first = ranges.b_first;
     let b_count = ranges.b_count;
     FlowDefinition::materialize(move |_runtime_config| {
-        let channel_a = ReattachingSource(ChannelTicker::new("a", a_first, a_count));
-        let channel_b = ReattachingSource(ChannelTicker::new("b", b_first, b_count));
+        let channel_a = Port::to(ReattachingSource(ChannelTicker::new("a", a_first, a_count)));
+        let channel_b = Port::to(ReattachingSource(ChannelTicker::new("b", b_first, b_count)));
         let merge_transform = MergeTransform::new();
         let effectful_tail = EffectfulTail {
             counter: Port::to(CallCounter { calls }),

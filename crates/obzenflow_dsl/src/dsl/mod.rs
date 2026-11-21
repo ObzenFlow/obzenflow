@@ -17,7 +17,7 @@
 //!
 //! ```ignore
 //! FlowDefinition::materialize(move |_runtime_config| {
-//!     let input = sources::ValuesSource::new(events);
+//!     let input = Port::owned(sources::ValuesSource::new(events));
 //!     let transform = MyTransform::new(options);
 //!     let output = sinks::ConsoleSink::new(sinks::DebugFormatter);
 //!

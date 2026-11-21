@@ -34,6 +34,7 @@ use obzenflow_infra::journal::read::{
     read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing,
 };
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -128,7 +129,7 @@ fn build_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticker = ReattachingSource(BoundedTicker::new(first_n, count));
+        let ticker = Port::to(ReattachingSource(BoundedTicker::new(first_n, count)));
         let double = DoubleTransform::new();
         let counting_sink = CountingSink::<Doubled>::new(delivered);
 

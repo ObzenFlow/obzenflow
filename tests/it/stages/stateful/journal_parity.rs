@@ -5,6 +5,7 @@
 //! FLOWIP-134e journal oracle for plain typed stateful handlers and accumulators.
 
 use crate::replay_testkit;
+use obzenflow::effects::Port;
 
 use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
@@ -166,6 +167,7 @@ impl ValuesSource {
     }
 }
 
+#[obzenflow::system("values-fixture")]
 impl TypedFiniteSourceHandler for ValuesSource {
     type Output = Input;
 
@@ -196,7 +198,7 @@ impl TypedTransformHandler for RejectThree {
 
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let input_handler = ValuesSource::new();
+        let input_handler = Port::owned(ValuesSource::new());
         let validate_handler = RejectThree;
         let fold_handler = WindowedFold;
         let grouped = stateful::group_by(

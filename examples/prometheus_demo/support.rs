@@ -5,6 +5,7 @@
 //! The demo's flow and its typed events, shared with the journal integration
 //! test that runs the same flow under `cargo test`.
 
+use obzenflow::effects::Port;
 use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit};
@@ -46,6 +47,7 @@ struct HighVolumeSource {
     outage_failures: u8,
 }
 
+#[obzenflow::system("high-volume-requests")]
 impl TypedFiniteSourceHandler for HighVolumeSource {
     type Output = DataRequest;
 
@@ -166,12 +168,12 @@ pub(crate) fn flow_definition_with_options(
         "source outage interval must be positive"
     );
     FlowDefinition::materialize(move |_runtime_config| {
-        let high_volume_source_handler = HighVolumeSource {
+        let high_volume_source_handler = Port::owned(HighVolumeSource {
             next_id: 0,
             total_events,
             outage_interval,
             outage_failures: 0,
-        };
+        });
         let error_processor_handler = error_prone_transform();
         let event_counter_handler = stateful::reduce(
             EventCountState::default(),

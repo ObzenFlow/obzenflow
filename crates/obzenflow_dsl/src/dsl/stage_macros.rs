@@ -148,17 +148,13 @@ macro_rules! __obzenflow_admit_typed_source {
         let __ingress_policy: Option<Box<dyn $crate::__private::MiddlewareFactory>> =
             None $(.or_else(|| Some($crate::__private::capture_middleware($ingress))))?;
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
-            vec![$($crate::__private::capture_middleware($observer)),*];        $crate::dsl::typing::$factory::<
-            _,
-            _,
-            $out,
-            $crate::__obzenflow_row_facts![$($member),+],
-            _,
-            _,
-            _,
-        >(
+            vec![$($crate::__private::capture_middleware($observer)),*];        $crate::dsl::typing::$factory(
             $name,
             $handler,
+            $crate::dsl::typing::SourceRowArrow::<
+                $out,
+                $crate::__obzenflow_row_facts![$($member),+],
+            >::new(),
             __source_policies,
             __ingress_policy,
             __observers,        )
@@ -169,9 +165,10 @@ macro_rules! __obzenflow_admit_typed_source {
         let __ingress_policy: Option<Box<dyn $crate::__private::MiddlewareFactory>> =
             None $(.or_else(|| Some($crate::__private::capture_middleware($ingress))))?;
         let __observers: Vec<Box<dyn $crate::__private::MiddlewareFactory>> =
-            vec![$($crate::__private::capture_middleware($observer)),*];        $crate::dsl::typing::$factory::<_, _, $out, $out, _, _, _>(
+            vec![$($crate::__private::capture_middleware($observer)),*];        $crate::dsl::typing::$factory(
             $name,
             $handler,
+            $crate::dsl::typing::SourceRowArrow::<$out, $out>::new(),
             __source_policies,
             __ingress_policy,
             __observers,        )
@@ -429,25 +426,25 @@ macro_rules! __obzenflow_source_attachment_contract {
     ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "source!",
-            "let source = MySource::new(...); events = source!(Event => source);"
+            "let source = Port::to(MySource::new(...)); events = source!(Event => source);"
         )
     };
     ($out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "source!",
-            "let source = MySource::new(...); events = source!(Event => source);"
+            "let source = Port::to(MySource::new(...)); events = source!(Event => source);"
         )
     };
     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "source!",
-            "let source = MySource::new(...); events = source!(name: \"events\", Event => source);"
+            "let source = Port::to(MySource::new(...)); events = source!(name: \"events\", Event => source);"
         )
     };
     (name: $name:literal, $out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "source!",
-            "let source = MySource::new(...); events = source!(name: \"events\", Event => source);"
+            "let source = Port::to(MySource::new(...)); events = source!(name: \"events\", Event => source);"
         )
     };
 }
@@ -608,49 +605,49 @@ macro_rules! __obzenflow_async_source_attachment_contract {
     ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_async_source_timeout_diagnostic!(
             "async_source!",
-            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);"
+            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_source!(Event => source);"
         )
     };
     ($out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_async_source_timeout_diagnostic!(
             "async_source!",
-            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);"
+            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_source!(Event => source);"
         )
     };
     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_async_source_timeout_diagnostic!(
             "async_source!",
-            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);"
+            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_source!(Event => source);"
         )
     };
     (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_async_source_timeout_diagnostic!(
             "async_source!",
-            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);"
+            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_source!(Event => source);"
         )
     };
     ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "async_source!",
-            "let source = MyAsyncSource::new(...); events = async_source!(Event => source);"
+            "let source = Port::to(MyAsyncSource::new(...)); events = async_source!(Event => source);"
         )
     };
     ($out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "async_source!",
-            "let source = MyAsyncSource::new(...); events = async_source!(Event => source);"
+            "let source = Port::to(MyAsyncSource::new(...)); events = async_source!(Event => source);"
         )
     };
     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "async_source!",
-            "let source = MyAsyncSource::new(...); events = async_source!(name: \"events\", Event => source);"
+            "let source = Port::to(MyAsyncSource::new(...)); events = async_source!(name: \"events\", Event => source);"
         )
     };
     (name: $name:literal, $out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "async_source!",
-            "let source = MyAsyncSource::new(...); events = async_source!(name: \"events\", Event => source);"
+            "let source = Port::to(MyAsyncSource::new(...)); events = async_source!(name: \"events\", Event => source);"
         )
     };
 }
@@ -895,25 +892,25 @@ macro_rules! __obzenflow_infinite_source_attachment_contract {
     ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "infinite_source!",
-            "let source = MyInfiniteSource::new(...); events = infinite_source!(Event => source);"
+            "let source = Port::to(MyInfiniteSource::new(...)); events = infinite_source!(Event => source);"
         )
     };
     ($out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "infinite_source!",
-            "let source = MyInfiniteSource::new(...); events = infinite_source!(Event => source);"
+            "let source = Port::to(MyInfiniteSource::new(...)); events = infinite_source!(Event => source);"
         )
     };
     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "infinite_source!",
-            "let source = MyInfiniteSource::new(...); events = infinite_source!(name: \"events\", Event => source);"
+            "let source = Port::to(MyInfiniteSource::new(...)); events = infinite_source!(name: \"events\", Event => source);"
         )
     };
     (name: $name:literal, $out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "infinite_source!",
-            "let source = MyInfiniteSource::new(...); events = infinite_source!(name: \"events\", Event => source);"
+            "let source = Port::to(MyInfiniteSource::new(...)); events = infinite_source!(name: \"events\", Event => source);"
         )
     };
 }
@@ -1158,49 +1155,49 @@ macro_rules! __obzenflow_async_infinite_source_attachment_contract {
     ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_async_source_timeout_diagnostic!(
             "async_infinite_source!",
-            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_infinite_source!(Event => source);"
+            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_infinite_source!(Event => source);"
         )
     };
     ($out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_async_source_timeout_diagnostic!(
             "async_infinite_source!",
-            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_infinite_source!(Event => source);"
+            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_infinite_source!(Event => source);"
         )
     };
     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_async_source_timeout_diagnostic!(
             "async_infinite_source!",
-            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_infinite_source!(Event => source);"
+            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_infinite_source!(Event => source);"
         )
     };
     (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_async_source_timeout_diagnostic!(
             "async_infinite_source!",
-            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_infinite_source!(Event => source);"
+            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_infinite_source!(Event => source);"
         )
     };
     ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "async_infinite_source!",
-            "let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(Event => source);"
+            "let source = Port::to(MyAsyncInfiniteSource::new(...)); events = async_infinite_source!(Event => source);"
         )
     };
     ($out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "async_infinite_source!",
-            "let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(Event => source);"
+            "let source = Port::to(MyAsyncInfiniteSource::new(...)); events = async_infinite_source!(Event => source);"
         )
     };
     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "async_infinite_source!",
-            "let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(name: \"events\", Event => source);"
+            "let source = Port::to(MyAsyncInfiniteSource::new(...)); events = async_infinite_source!(name: \"events\", Event => source);"
         )
     };
     (name: $name:literal, $out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "async_infinite_source!",
-            "let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(name: \"events\", Event => source);"
+            "let source = Port::to(MyAsyncInfiniteSource::new(...)); events = async_infinite_source!(name: \"events\", Event => source);"
         )
     };
 }
@@ -4289,6 +4286,120 @@ macro_rules! sink {
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
 /// # use obzenflow_adapters::middleware::{rate_limit, circuit_breaker};
 /// let source = obzenflow_dsl::source!(Fact => placeholder!()  , ingress with rate_limit(10.0));
+/// ```
+///
+/// Every executable source row takes a `Port` naming the system that supplies
+/// its input. A direct handler binds by value with `Port::owned`, a connector
+/// with `Port::to`, and hosted ingress through the port its registration
+/// returns:
+///
+/// ```
+/// # use obzenflow_runtime::effects::Port;
+/// # use obzenflow_runtime::stages::source::{
+/// #     FiniteSourceConnector, Refuse, SourceError, SourceReaderInitContext,
+/// #     TypedFiniteSourceHandler,
+/// # };
+/// # use obzenflow_runtime::stages::{HostedIngressSource, HostedSubmission};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
+/// struct Facts;
+/// #[obzenflow_runtime::effects::system("facts")]
+/// impl TypedFiniteSourceHandler for Facts {
+///     type Output = Fact;
+///     fn next(&mut self) -> Result<Option<Vec<Fact>>, SourceError> {
+///         Ok(None)
+///     }
+/// }
+///
+/// struct FactFile;
+/// #[obzenflow_runtime::effects::system("fact-file")]
+/// impl FiniteSourceConnector for FactFile {
+///     type Output = Fact;
+///     type Reader = Facts;
+///     type Continuation = Refuse;
+///     fn open(&self, _: SourceReaderInitContext) -> Result<Facts, SourceError> {
+///         Ok(Facts)
+///     }
+/// }
+///
+/// let facts = Port::owned(Facts);
+/// let fact_file = Port::to(FactFile);
+/// # let (_, submissions) = tokio::sync::mpsc::channel::<HostedSubmission<Fact>>(1);
+/// # let posted = HostedIngressSource::new(
+/// #     submissions,
+/// #     obzenflow_core::ingress::HostedIngressBindingSlot::new("grammar.facts"),
+/// # )
+/// # .into_port("ingress");
+/// let handled = obzenflow_dsl::source!(Fact => facts);
+/// let read = obzenflow_dsl::source!(Fact => fact_file);
+/// let received = obzenflow_dsl::async_infinite_source!(Fact => posted);
+/// ```
+///
+/// A named direct handler that is not bound reports "this source row requires a
+/// named Port" at the row's input:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_runtime::stages::source::{SourceError, TypedFiniteSourceHandler};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
+/// # struct Facts;
+/// # #[obzenflow_runtime::effects::system("facts")]
+/// # impl TypedFiniteSourceHandler for Facts {
+/// #     type Output = Fact;
+/// #     fn next(&mut self) -> Result<Option<Vec<Fact>>, SourceError> {
+/// #         Ok(None)
+/// #     }
+/// # }
+/// let facts = Facts;
+/// let handled = obzenflow_dsl::source!(Fact => facts);
+/// ```
+///
+/// So does a named connector:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_runtime::stages::source::{
+/// #     FiniteSourceConnector, Refuse, SourceError, SourceReaderInitContext,
+/// #     TypedFiniteSourceHandler,
+/// # };
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
+/// # struct Facts;
+/// # impl TypedFiniteSourceHandler for Facts {
+/// #     type Output = Fact;
+/// #     fn next(&mut self) -> Result<Option<Vec<Fact>>, SourceError> {
+/// #         Ok(None)
+/// #     }
+/// # }
+/// # struct FactFile;
+/// # #[obzenflow_runtime::effects::system("fact-file")]
+/// # impl FiniteSourceConnector for FactFile {
+/// #     type Output = Fact;
+/// #     type Reader = Facts;
+/// #     type Continuation = Refuse;
+/// #     fn open(&self, _: SourceReaderInitContext) -> Result<Facts, SourceError> {
+/// #         Ok(Facts)
+/// #     }
+/// # }
+/// let fact_file = FactFile;
+/// let read = obzenflow_dsl::source!(Fact => fact_file);
+/// ```
+///
+/// And so does a hosted receiver that was not registered:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_runtime::stages::{HostedIngressSource, HostedSubmission};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
+/// # let (_, submissions) = tokio::sync::mpsc::channel::<HostedSubmission<Fact>>(1);
+/// let posted = HostedIngressSource::new(
+///     submissions,
+///     obzenflow_core::ingress::HostedIngressBindingSlot::new("grammar.facts"),
+/// );
+/// let received = obzenflow_dsl::async_infinite_source!(Fact => posted);
 /// ```
 #[macro_export]
 macro_rules! source {

@@ -8,9 +8,7 @@ use super::finite::fsm::tests::TestJournal;
 use super::*;
 use crate::effects::{EffectPortRegistry, Port};
 use crate::id_conversions::StageIdExt;
-use crate::stages::common::handlers::source::prepared::{
-    AdmitSource, ConnectorSource, DirectSource, PortSource,
-};
+use crate::stages::common::handlers::source::prepared::{AdmitSource, AdmittedSource};
 use crate::stages::common::handlers::source::typed::SourceObservationSink;
 use crate::stages::common::handlers::{
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
@@ -189,6 +187,7 @@ impl AsyncInfiniteSourceConnector for Fixture {
         self.open_reader(context).await
     }
 }
+#[crate::effects::system("lifecycle-reader")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for Reader {
     type Output = Row;
@@ -224,8 +223,21 @@ struct Journals {
     error: Arc<dyn Journal<ChainEvent>>,
 }
 
-async fn resources(counts: &Counts) -> (StageId, StageResources, Journals) {
-    resources_with_ports(counts, EffectPortRegistry::new()).await
+fn admitted<F, P>(
+    port: Port<P>,
+) -> (
+    AdmittedSource<<Port<P> as AdmitSource<F>>::Handler>,
+    EffectPortRegistry,
+)
+where
+    F: ?Sized,
+    P: ?Sized + Send + Sync + 'static,
+    Port<P>: AdmitSource<F>,
+{
+    let admitted = port.admit();
+    let mut ports = EffectPortRegistry::new();
+    ports.install_source_system(&admitted.system);
+    (admitted, ports)
 }
 
 async fn resources_with_ports(
@@ -314,24 +326,29 @@ async fn notified(notify: &Notify) {
 }
 
 macro_rules! lifecycle_family {
-    ($module:ident, $builder:path, $config:path, $event:path, $state:path, $family:path) => {
+    ($module:ident, $builder:path, $config:path, $event:path, $state:path, $family:path, $connector:ty, $owned:ty) => {
         mod $module {
             use super::*;
             use $builder as Builder;
             use $config as Config;
             use $event as Event;
             use $state as State;
-            type Handler = <Fixture as AdmitSource<dyn $family, ConnectorSource>>::Handler;
+            type Handler = <$connector as AdmitSource<dyn $family>>::Handler;
             type Handle = crate::supervised_base::StandardHandle<Event<Handler>, State<Handler>>;
-            const CONTINUATION: SourceContinuation =
-                <Fixture as AdmitSource<dyn $family, ConnectorSource>>::CONTINUATION;
+
+            fn connector(fixture: Fixture) -> (AdmittedSource<Handler>, EffectPortRegistry) {
+                let port: $connector = Port::to(fixture);
+                admitted::<dyn $family, _>(port)
+            }
 
             async fn build(
                 fixture: Fixture,
                 boundary: Option<Arc<dyn SourceBoundary>>,
                 resume: bool,
             ) -> (Handle, Journals) {
-                let (stage, mut resources, journals) = resources(&fixture.counts).await;
+                let counts = fixture.counts.clone();
+                let (source, ports) = connector(fixture);
+                let (stage, mut resources, journals) = resources_with_ports(&counts, ports).await;
                 if resume {
                     resources.runtime_execution = crate::execution::RuntimeExecution::new(
                         crate::execution::RuntimeMode::Resume,
@@ -342,17 +359,19 @@ macro_rules! lifecycle_family {
                     // live acquisition. Finite positioning remains FLOWIP-134i.
                     control.record_generation_boundary(stage, control.resume_generation());
                 }
-                let mut config = Config::new(stage, "input", "lifecycle", CONTINUATION);
+                let mut config = Config::new(
+                    stage,
+                    "input",
+                    "lifecycle",
+                    source.continuation,
+                    source.system,
+                );
                 config.source_boundary = boundary;
                 (
-                    Builder::new(
-                        <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture),
-                        config,
-                        resources,
-                    )
-                    .build()
-                    .await
-                    .unwrap(),
+                    Builder::new(source.handler, config, resources)
+                        .build()
+                        .await
+                        .unwrap(),
                     journals,
                 )
             }
@@ -370,25 +389,26 @@ macro_rules! lifecycle_family {
             }
 
             #[tokio::test]
-            async fn direct_and_connector_admission_share_the_adapter_and_defer_capabilities() {
-                let direct_counts = Arc::new(Counts::default());
+            async fn owned_port_matches_connector_adapter() {
+                let owned_counts = Arc::new(Counts::default());
                 let reader = Reader {
-                    resource: Resource(direct_counts.clone()),
+                    resource: Resource(owned_counts.clone()),
                     reading: Reading::Pending,
                     drain_fails: false,
                 };
-                // Both routes must produce the very same existing adapter type.
-                let direct: Handler =
-                    <Reader as AdmitSource<dyn $family, DirectSource>>::prepare(reader);
+                let owned: $owned = Port::owned(reader);
+                let (owned, owned_ports) = admitted::<dyn $family, _>(owned);
+                let owned: AdmittedSource<Handler> = owned;
                 let fixture = Fixture::new(Opening::Ready, Reading::Pending);
                 let connector_counts = fixture.counts.clone();
-                let connector =
-                    <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture);
+                let (connector, connector_ports) = connector(fixture);
 
-                for (mut handler, counts, expected_opens) in [
-                    (direct, direct_counts, 0),
-                    (connector, connector_counts, 1),
+                for (source, ports, counts, expected_opens) in [
+                    (owned, owned_ports, owned_counts, 0),
+                    (connector, connector_ports, connector_counts, 1),
                 ] {
+                    source.system.attach(&ports.into_run_registry());
+                    let mut handler = source.handler;
                     let stage_id = StageId::new();
                     handler.install_writer_id(obzenflow_core::WriterId::from(stage_id));
                     assert_eq!(counts.opens.load(Ordering::SeqCst), 0);
@@ -415,8 +435,9 @@ macro_rules! lifecycle_family {
             async fn cancelled_acquisition_cannot_reopen() {
                 let fixture = Fixture::new(Opening::Pending, Reading::Pending);
                 let counts = fixture.counts.clone();
-                let mut handler =
-                    <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture);
+                let (source, ports) = connector(fixture);
+                source.system.attach(&ports.into_run_registry());
+                let mut handler = source.handler;
                 let context = SourceReaderInitContext {
                     stage_id: StageId::new(),
                     stage_name: "input".into(),
@@ -456,7 +477,8 @@ macro_rules! lifecycle_family {
                 for fail in [false, true] {
                     let fixture = Fixture::new(Opening::Ready, Reading::Pending);
                     let counts = fixture.counts.clone();
-                    let (stage, mut resources, _) = resources(&counts).await;
+                    let (source, ports) = connector(fixture);
+                    let (stage, mut resources, _) = resources_with_ports(&counts, ports).await;
                     let opening = Arc::new(Notify::new());
                     let release = Arc::new(Notify::new());
                     resources.runtime_execution = crate::execution::RuntimeExecution::new(
@@ -464,8 +486,8 @@ macro_rules! lifecycle_family {
                         Some(Arc::new(EmptyArchive(stage, Some((opening.clone(), release.clone()))))),
                     );
                     let handle = Builder::new(
-                        <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture),
-                        Config::new(stage, "input", "lifecycle", CONTINUATION), resources,
+                        source.handler,
+                        Config::new(stage, "input", "lifecycle", source.continuation, source.system), resources,
                     ).build().await.unwrap();
                     start(&handle).await;
                     notified(&opening).await;
@@ -492,13 +514,14 @@ macro_rules! lifecycle_family {
             async fn source_failure_is_visible_while_accepted_output_publication_settles() {
                 let fixture = Fixture::new(Opening::Ready, Reading::RowThenPending);
                 let counts = fixture.counts.clone();
-                let (stage, mut resources, _) = resources(&counts).await;
+                let (source, ports) = connector(fixture);
+                let (stage, mut resources, _) = resources_with_ports(&counts, ports).await;
                 let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
                 let (writing, release) = journal.block_matching_append(|event| matches!(event.payload, obzenflow_core::event::ChainPayload::Fact(_)));
                 resources.data_journal = journal.clone();
                 let handle = Builder::new(
-                    <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture),
-                    Config::new(stage, "input", "lifecycle", CONTINUATION), resources,
+                    source.handler,
+                    Config::new(stage, "input", "lifecycle", source.continuation, source.system), resources,
                 ).build().await.unwrap();
                 start(&handle).await;
                 notified(&writing).await;
@@ -769,7 +792,9 @@ lifecycle_family!(
     finite::FiniteSourceConfig,
     finite::FiniteSourceEvent,
     finite::FiniteSourceState,
-    UnifiedAsyncFiniteSourceHandler
+    UnifiedAsyncFiniteSourceHandler,
+    Port<dyn AsyncFiniteSource<Row, Refuse>>,
+    Port<dyn AsyncFiniteSource<Row, Refuse>>
 );
 lifecycle_family!(
     infinite_lifecycle,
@@ -777,7 +802,9 @@ lifecycle_family!(
     infinite::InfiniteSourceConfig,
     infinite::InfiniteSourceEvent,
     infinite::InfiniteSourceState,
-    UnifiedAsyncInfiniteSourceHandler
+    UnifiedAsyncInfiniteSourceHandler,
+    Port<dyn AsyncInfiniteSource<Row, Reattach<AtMostOnce>>>,
+    Port<dyn AsyncInfiniteSource<Row, Refuse>>
 );
 
 /// A synchronous connector whose open blocks until released, or for at most two
@@ -798,6 +825,7 @@ impl TypedFiniteSourceHandler for EofReader {
     }
 }
 
+#[crate::effects::system("held-open")]
 impl FiniteSourceConnector for HeldOpen {
     type Output = Row;
     type Reader = EofReader;
@@ -819,7 +847,6 @@ impl FiniteSourceConnector for HeldOpen {
 /// only the open itself could end the hold (FLOWIP-134i B18).
 #[tokio::test]
 async fn held_synchronous_open_leaves_the_runtime_responsive() {
-    type Admit = dyn UnifiedFiniteSourceHandler;
     let (release, held) = std::sync::mpsc::channel();
     // The test keeps the receiver alive after the connector is consumed.
     let held = Arc::new(std::sync::Mutex::new(held));
@@ -830,21 +857,20 @@ async fn held_synchronous_open_leaves_the_runtime_responsive() {
     };
     let counts = connector.counts.clone();
     let timed_out = connector.timed_out.clone();
-    let (stage, resources, _journals) = resources(&counts).await;
+    let port: Port<dyn FiniteSource<Row, Refuse>> = Port::to(connector);
+    let (source, ports) = admitted::<dyn UnifiedFiniteSourceHandler, _>(port);
+    let (stage, resources, _journals) = resources_with_ports(&counts, ports).await;
     let config = finite::FiniteSourceConfig::new(
         stage,
         "input",
         "lifecycle",
-        <HeldOpen as AdmitSource<Admit, ConnectorSource>>::CONTINUATION,
+        source.continuation,
+        source.system,
     );
-    let handle = finite::FiniteSourceBuilder::new(
-        <HeldOpen as AdmitSource<Admit, ConnectorSource>>::prepare(connector),
-        config,
-        resources,
-    )
-    .build()
-    .await
-    .unwrap();
+    let handle = finite::FiniteSourceBuilder::new(source.handler, config, resources)
+        .build()
+        .await
+        .unwrap();
     for event in [
         finite::FiniteSourceEvent::Initialize,
         finite::FiniteSourceEvent::Ready,
@@ -874,17 +900,18 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
     let mut fixture = Fixture::new(Opening::Ready, Reading::Eof);
     fixture.drain_fails = true;
     let counts = fixture.counts.clone();
-    let (stage, resources, journals) = resources(&counts).await;
+    let port: Port<dyn AsyncFiniteSource<Row, Refuse>> = Port::to(fixture);
+    let (source, ports) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(port);
+    let (stage, resources, journals) = resources_with_ports(&counts, ports).await;
     let data = resources.data_journal.clone();
     let handle = finite::AsyncFiniteSourceBuilder::new(
-        <Fixture as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource>>::prepare(
-            fixture,
-        ),
+        source.handler,
         finite::FiniteSourceConfig::new(
             stage,
             "input",
             "lifecycle",
-            <Fixture as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource>>::CONTINUATION,
+            source.continuation,
+            source.system,
         ),
         resources,
     )
@@ -998,26 +1025,51 @@ impl ReplayArchive for EmptyArchive {
 
 #[tokio::test]
 async fn reader_acquired_port_row_names_system() {
-    type PortRow = Port<dyn AsyncFiniteSource<Row, Refuse>>;
     let fixture = Fixture::new(Opening::Ready, Reading::Eof);
     let counts = fixture.counts.clone();
-    let port: PortRow = Port::to(fixture);
-    let (handler, system) = <PortRow as AdmitSource<
-        dyn UnifiedAsyncFiniteSourceHandler,
-        PortSource,
-    >>::prepare_with_system(port);
-    let system = system.expect("a port row names a system");
-    let mut ports = EffectPortRegistry::new();
-    ports.install_source_system(&system);
-    let (stage, resources, journals) = resources_with_ports(&counts, ports).await;
-    let mut config = finite::FiniteSourceConfig::new(
+    let port: Port<dyn AsyncFiniteSource<Row, Refuse>> = Port::to(fixture);
+    let (source, ports) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(port);
+    let systems = acquired_systems(source, ports, &counts).await;
+    assert_eq!(systems, ["lifecycle-fixture"]);
+    assert_eq!(counts.opens.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn reader_acquired_placeholder_source_names_placeholder() {
+    let counts = Arc::new(Counts::default());
+    let reader = Reader {
+        resource: Resource(counts.clone()),
+        reading: Reading::Eof,
+        drain_fails: false,
+    };
+    let source = AdmittedSource {
+        handler: crate::__private::TypedAsyncFiniteSourceHandlerAdapter::new(reader),
+        continuation: SourceContinuation::Refuse {
+            by: RefusedBy::Handler,
+        },
+        system: crate::effects::SourceSystem::placeholder(),
+    };
+    let systems = acquired_systems(source, EffectPortRegistry::new(), &counts).await;
+    assert_eq!(systems, ["placeholder"]);
+}
+
+async fn acquired_systems<H>(
+    source: AdmittedSource<H>,
+    ports: EffectPortRegistry,
+    counts: &Counts,
+) -> Vec<String>
+where
+    H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static,
+{
+    let (stage, resources, journals) = resources_with_ports(counts, ports).await;
+    let config = finite::FiniteSourceConfig::new(
         stage,
         "input",
         "lifecycle",
-        <PortRow as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, PortSource>>::CONTINUATION,
+        source.continuation,
+        source.system,
     );
-    config.source_system = Some(system);
-    let handle = finite::AsyncFiniteSourceBuilder::new(handler, config, resources)
+    let handle = finite::AsyncFiniteSourceBuilder::new(source.handler, config, resources)
         .build()
         .await
         .unwrap();
@@ -1032,16 +1084,17 @@ async fn reader_acquired_port_row_names_system() {
         .await
         .unwrap()
         .unwrap();
-    let evidence = journals.data.read_all_unordered().await.unwrap();
-    let systems: Vec<Option<&str>> = evidence
-        .iter()
+    journals
+        .data
+        .read_all_unordered()
+        .await
+        .unwrap()
+        .into_iter()
         .filter_map(|row| match &row.payload {
             ChainPayload::Execution(ExecutionPayload::SourceReaderAcquired(acquired)) => {
-                Some(acquired.system.as_deref())
+                Some(acquired.system.clone())
             }
             _ => None,
         })
-        .collect();
-    assert_eq!(systems, [Some("lifecycle-fixture")]);
-    assert_eq!(counts.opens.load(Ordering::SeqCst), 1);
+        .collect()
 }

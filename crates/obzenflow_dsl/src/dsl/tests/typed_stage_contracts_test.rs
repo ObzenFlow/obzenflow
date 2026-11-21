@@ -12,7 +12,7 @@ mod tests {
     use obzenflow_core::journal::archive::DeliveryOrder;
     use obzenflow_core::{outcome, ChainEvent, StageId, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
-    use obzenflow_runtime::effects::{Effects, StageCompletion};
+    use obzenflow_runtime::effects::{Effects, Port, StageCompletion};
     use obzenflow_runtime::feed_plan::{
         payload_key_from_type_hint, FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed,
         OutcomeContract, PayloadTypeDescriptor,
@@ -21,15 +21,16 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulTransformHandler, HostedIngressSource, IngressDecoder, JoinReferenceView,
-        StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
-        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        EffectfulTransformHandler, HostedIngressSource, JoinReferenceView, StatefulEmission,
+        TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
+        TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::stages::source::{
-        AsyncFiniteContinuation, AsyncFiniteSourceConnector, AsyncInfiniteContinuation,
-        AsyncInfiniteSourceConnector, AtMostOnce, FiniteContinuation, FiniteSourceConnector,
-        InfiniteContinuation, InfiniteSourceConnector, LatestState, Reattach, Refuse, RefusedBy,
+        AsyncFiniteContinuation, AsyncFiniteSource, AsyncFiniteSourceConnector,
+        AsyncInfiniteContinuation, AsyncInfiniteSource, AsyncInfiniteSourceConnector, AtMostOnce,
+        FiniteContinuation, FiniteSource, FiniteSourceConnector, InfiniteContinuation,
+        InfiniteSource, InfiniteSourceConnector, LatestState, Reattach, Refuse, RefusedBy,
         SourceContinuation, SourceReaderInitContext,
     };
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
@@ -123,6 +124,7 @@ mod tests {
         type Output = InputEvent;
     }
 
+    #[obzenflow_runtime::effects::system("sync-exact")]
     impl TypedFiniteSourceHandler for SyncExactSource {
         type Output = InputEvent;
 
@@ -138,6 +140,7 @@ mod tests {
         type Output = InputEvent;
     }
 
+    #[obzenflow_runtime::effects::system("async-exact")]
     #[async_trait]
     impl TypedAsyncFiniteSourceHandler for AsyncExactSource {
         type Output = InputEvent;
@@ -154,6 +157,7 @@ mod tests {
         type Output = InputEvent;
     }
 
+    #[obzenflow_runtime::effects::system("infinite-exact")]
     impl TypedInfiniteSourceHandler for InfiniteExactSource {
         type Output = InputEvent;
 
@@ -169,6 +173,7 @@ mod tests {
         type Output = InputEvent;
     }
 
+    #[obzenflow_runtime::effects::system("async-infinite-exact")]
     #[async_trait]
     impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteExactSource {
         type Output = InputEvent;
@@ -216,6 +221,7 @@ mod tests {
         }
     }
 
+    #[obzenflow_runtime::effects::system("declaring-connector")]
     impl<C: InfiniteContinuation<InfiniteExactSource, Output = InputEvent>> InfiniteSourceConnector
         for DeclaringConnector<C>
     {
@@ -247,6 +253,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct MultiExactSource;
 
+    #[obzenflow_runtime::effects::system("multi-exact")]
     impl TypedFiniteSourceHandler for MultiExactSource {
         type Output = outcome![InputEvent | AlternateEvent];
 
@@ -553,13 +560,17 @@ mod tests {
     /// continuation, which resume admission reads from the descriptor.
     #[test]
     fn source_admission_captures_each_family_continuation() {
+        let sync_exact = Port::owned(SyncExactSource);
+        let async_exact = Port::owned(AsyncExactSource);
+        let infinite_exact = Port::owned(InfiniteExactSource);
+        let async_infinite_exact = Port::owned(AsyncInfiniteExactSource);
         let direct = [
-            crate::source!(name: "source", InputEvent => SyncExactSource),
-            crate::async_source!(name: "async_source", InputEvent => AsyncExactSource),
-            crate::infinite_source!(name: "infinite", InputEvent => InfiniteExactSource),
+            crate::source!(name: "source", InputEvent => sync_exact),
+            crate::async_source!(name: "async_source", InputEvent => async_exact),
+            crate::infinite_source!(name: "infinite", InputEvent => infinite_exact),
             crate::async_infinite_source!(
                 name: "async_infinite",
-                InputEvent => AsyncInfiniteExactSource
+                InputEvent => async_infinite_exact
             ),
         ];
         let handler_refuses = SourceContinuation::Refuse {
@@ -571,12 +582,18 @@ mod tests {
             "direct handlers declare nothing, so interrupted input refuses"
         );
 
-        let finite_refuse = DeclaringConnector::<Refuse>::new();
-        let async_finite_refuse = DeclaringConnector::<Refuse>::new();
-        let infinite_refuse = DeclaringConnector::<Refuse>::new();
-        let infinite_reattach = DeclaringConnector::<Reattach<LatestState>>::new();
-        let async_infinite_refuse = DeclaringConnector::<Refuse>::new();
-        let async_infinite_reattach = DeclaringConnector::<Reattach<AtMostOnce>>::new();
+        let finite_refuse: Port<dyn FiniteSource<_, _>> =
+            Port::to(DeclaringConnector::<Refuse>::new());
+        let async_finite_refuse: Port<dyn AsyncFiniteSource<_, _>> =
+            Port::to(DeclaringConnector::<Refuse>::new());
+        let infinite_refuse: Port<dyn InfiniteSource<_, _>> =
+            Port::to(DeclaringConnector::<Refuse>::new());
+        let infinite_reattach: Port<dyn InfiniteSource<_, _>> =
+            Port::to(DeclaringConnector::<Reattach<LatestState>>::new());
+        let async_infinite_refuse: Port<dyn AsyncInfiniteSource<_, _>> =
+            Port::to(DeclaringConnector::<Refuse>::new());
+        let async_infinite_reattach: Port<dyn AsyncInfiniteSource<_, _>> =
+            Port::to(DeclaringConnector::<Reattach<AtMostOnce>>::new());
         let connectors = [
             crate::source!(name: "finite_refuse", InputEvent => finite_refuse),
             crate::async_source!(name: "async_finite_refuse", InputEvent => async_finite_refuse),
@@ -613,16 +630,12 @@ mod tests {
 
         // FLOWIP-122i B3: Runtime admits hosted ingress with the one guarantee
         // no connector can declare.
-        #[derive(Clone)]
-        struct InputIngress;
-        impl IngressDecoder for InputIngress {
-            type Output = InputEvent;
-        }
         let (_submit, queue) = tokio::sync::mpsc::channel(1);
-        let hosted = HostedIngressSource::<InputIngress>::new(
+        let hosted = HostedIngressSource::<InputEvent>::new(
             queue,
             obzenflow_core::ingress::HostedIngressBindingSlot::new("test.input"),
-        );
+        )
+        .into_port("ingress");
         let hosted = crate::async_infinite_source!(name: "hosted", InputEvent => hosted);
         assert_eq!(
             hosted.source_continuation(),
@@ -638,22 +651,46 @@ mod tests {
     }
 
     #[test]
+    fn placeholder_source_descriptors_carry_placeholder_system() {
+        let placeholders = [
+            crate::source!(name: "source", InputEvent => placeholder!()),
+            crate::async_source!(name: "async_source", InputEvent => placeholder!()),
+            crate::infinite_source!(name: "infinite", InputEvent => placeholder!()),
+            crate::async_infinite_source!(name: "async_infinite", InputEvent => placeholder!()),
+        ];
+        assert_eq!(
+            placeholders.map(|descriptor| descriptor
+                .source_system()
+                .map(|system| system.name().to_owned())),
+            [
+                Some("placeholder".to_owned()),
+                Some("placeholder".to_owned()),
+                Some("placeholder".to_owned()),
+                Some("placeholder".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn typed_macros_attach_metadata_for_exact_handlers() {
-        let source = crate::source!(name: "source", InputEvent => SyncExactSource);
+        let sync_exact = Port::owned(SyncExactSource);
+        let async_exact = Port::owned(AsyncExactSource);
+        let infinite_exact = Port::owned(InfiniteExactSource);
+        let async_infinite_exact = Port::owned(AsyncInfiniteExactSource);
+        let source = crate::source!(name: "source", InputEvent => sync_exact);
         assert_eq!(
             source.typing_metadata().unwrap().output_type,
             exact::<InputEvent>()
         );
         assert_one_member_output_contract::<InputEvent>(source.typing_metadata().unwrap());
 
-        let async_source =
-            crate::async_source!(name: "async_source", InputEvent => AsyncExactSource);
+        let async_source = crate::async_source!(name: "async_source", InputEvent => async_exact);
         assert_eq!(
             async_source.typing_metadata().unwrap().output_type,
             exact::<InputEvent>()
         );
 
-        let infinite = crate::infinite_source!(name: "infinite", InputEvent => InfiniteExactSource);
+        let infinite = crate::infinite_source!(name: "infinite", InputEvent => infinite_exact);
         assert_eq!(
             infinite.typing_metadata().unwrap().output_type,
             exact::<InputEvent>()
@@ -661,7 +698,7 @@ mod tests {
 
         let async_infinite = crate::async_infinite_source!(
             name: "async_infinite",
-            InputEvent => AsyncInfiniteExactSource
+            InputEvent => async_infinite_exact
         );
         assert_eq!(
             async_infinite.typing_metadata().unwrap().output_type,
@@ -869,9 +906,14 @@ mod tests {
 
     #[test]
     fn source_output_set_lowers_to_contract() {
+        let multi_exact: Port<dyn FiniteSource<_, _>> = Port::owned(MultiExactSource);
+        let async_multi_exact: Port<dyn AsyncFiniteSource<_, _>> = Port::owned(MultiExactSource);
+        let infinite_multi_exact: Port<dyn InfiniteSource<_, _>> = Port::owned(MultiExactSource);
+        let async_infinite_multi_exact: Port<dyn AsyncInfiniteSource<_, _>> =
+            Port::owned(MultiExactSource);
         let source = crate::source!(
             name: "multi_output_source",
-            { InputEvent, AlternateEvent } => MultiExactSource
+            { InputEvent, AlternateEvent } => multi_exact
         );
         let source_meta = source.typing_metadata().unwrap();
         assert_eq!(source_meta.output_type, exact::<InputEvent>());
@@ -882,7 +924,7 @@ mod tests {
 
         let async_source = crate::async_source!(
             name: "multi_output_async_source",
-            { InputEvent, AlternateEvent } => MultiExactSource
+            { InputEvent, AlternateEvent } => async_multi_exact
         );
         let async_source_meta = async_source.typing_metadata().unwrap();
         assert_eq!(async_source_meta.output_type, exact::<InputEvent>());
@@ -893,7 +935,7 @@ mod tests {
 
         let infinite_source = crate::infinite_source!(
             name: "multi_output_infinite_source",
-            { InputEvent, AlternateEvent } => MultiExactSource
+            { InputEvent, AlternateEvent } => infinite_multi_exact
         );
         let infinite_source_meta = infinite_source.typing_metadata().unwrap();
         assert_eq!(infinite_source_meta.output_type, exact::<InputEvent>());
@@ -904,7 +946,7 @@ mod tests {
 
         let async_infinite_source = crate::async_infinite_source!(
             name: "multi_output_async_infinite_source",
-            { InputEvent, AlternateEvent } => MultiExactSource
+            { InputEvent, AlternateEvent } => async_infinite_multi_exact
         );
         let async_infinite_source_meta = async_infinite_source.typing_metadata().unwrap();
         assert_eq!(
@@ -982,9 +1024,10 @@ mod tests {
         let join_id = StageId::new();
 
         let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        let sync_exact = Port::owned(SyncExactSource);
         descriptors.insert(
             "source".to_string(),
-            crate::source!(name: "source", InputEvent => SyncExactSource),
+            crate::source!(name: "source", InputEvent => sync_exact),
         );
         descriptors.insert(
             "transform".to_string(),
@@ -1046,11 +1089,12 @@ mod tests {
         let source_id = StageId::new();
 
         let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        let multi_exact: Port<dyn FiniteSource<_, _>> = Port::owned(MultiExactSource);
         descriptors.insert(
             "source".to_string(),
             crate::source!(
                 name: "source",
-                { InputEvent, AlternateEvent } => MultiExactSource
+                { InputEvent, AlternateEvent } => multi_exact
             ),
         );
 
@@ -1067,7 +1111,8 @@ mod tests {
 
     #[test]
     fn stage_macros_default_to_binding_derived_name_marker() {
-        let source = crate::source!(InputEvent => SyncExactSource);
+        let sync_exact = Port::owned(SyncExactSource);
+        let source = crate::source!(InputEvent => sync_exact);
         assert_eq!(
             source.name(),
             crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL
@@ -1214,11 +1259,12 @@ mod tests {
         let sink_id = StageId::new();
 
         let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        let multi_exact: Port<dyn FiniteSource<_, _>> = Port::owned(MultiExactSource);
         descriptors.insert(
             "source".to_string(),
             crate::source!(
                 name: "source",
-                { InputEvent, AlternateEvent } => MultiExactSource
+                { InputEvent, AlternateEvent } => multi_exact
             ),
         );
         descriptors.insert(
@@ -3534,11 +3580,12 @@ mod tests {
         let sink_id = StageId::new();
 
         let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        let multi_exact: Port<dyn FiniteSource<_, _>> = Port::owned(MultiExactSource);
         descriptors.insert(
             "source".to_string(),
             crate::source!(
                 name: "source",
-                { InputEvent, AlternateEvent } => MultiExactSource
+                { InputEvent, AlternateEvent } => multi_exact
             ),
         );
         descriptors.insert(
@@ -3601,11 +3648,12 @@ mod tests {
         let alternate_sink_id = StageId::new();
 
         let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        let multi_exact: Port<dyn FiniteSource<_, _>> = Port::owned(MultiExactSource);
         descriptors.insert(
             "source".to_string(),
             crate::source!(
                 name: "source",
-                { InputEvent, AlternateEvent } => MultiExactSource
+                { InputEvent, AlternateEvent } => multi_exact
             ),
         );
         descriptors.insert(

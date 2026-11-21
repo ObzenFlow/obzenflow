@@ -8,6 +8,7 @@
 //! sync stateful, or join) is a flow build error: a handler shell has no typed
 //! live-I/O unit to protect.
 
+use obzenflow::effects::Port;
 use obzenflow_adapters::middleware::{circuit_breaker, CircuitBreaker};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
@@ -37,6 +38,7 @@ struct OneShotSource {
     emitted: bool,
 }
 
+#[obzenflow::system("one-shot")]
 impl TypedFiniteSourceHandler for OneShotSource {
     type Output = GuardEvent;
 
@@ -64,7 +66,7 @@ impl TypedTransformHandler for SyncPassthrough {
 #[tokio::test]
 async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
     let result = FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = OneShotSource { emitted: false };
+        let source_handler = Port::owned(OneShotSource { emitted: false });
         let transform_handler = SyncPassthrough;
         let sink_handler = obzenflow::stages::sinks::DiscardSink::<GuardEvent>::new();
 

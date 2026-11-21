@@ -14,6 +14,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::effects::Port;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
@@ -77,6 +78,7 @@ impl SeedSource {
     }
 }
 
+#[obzenflow::system("seeds")]
 impl TypedFiniteSourceHandler for SeedSource {
     type Output = SeedEvent;
 
@@ -433,7 +435,7 @@ async fn committed_facts(
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
-    let source = SeedSource::new(30);
+    let source = Port::owned(SeedSource::new(30));
     let inject_signals = DivergenceSignalInjection::new(50);
     let delay = DelayedSeedTransform::new(Duration::from_millis(10));
     let armed = delay.armed.clone();
@@ -521,7 +523,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> {
-    let source = SeedSource::new(50);
+    let source = Port::owned(SeedSource::new(50));
     let delay = DelayedSeedTransform::new(Duration::from_millis(1));
     let armed = delay.armed.clone();
     let sink = CountingSink::new();
@@ -586,7 +588,7 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<()> {
-    let source = SeedSource::new(50);
+    let source = Port::owned(SeedSource::new(50));
     let entry = FanInEntryTransform;
     let branch_a = PassThroughTransform;
     let branch_b = PassThroughTransform;
@@ -672,7 +674,7 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
-    let source = SeedSource::new(10);
+    let source = Port::owned(SeedSource::new(10));
     let delay = DelayedSeedTransform::new(Duration::from_millis(5));
     let armed = delay.armed.clone();
     let entry = PassThroughTransform;

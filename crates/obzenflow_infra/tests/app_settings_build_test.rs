@@ -11,6 +11,7 @@ use obzenflow_dsl::{flow, infinite_source, sink, source, FlowBuildFailure, FlowD
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::journal::read::{read_run_lineage, Standing};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
@@ -171,7 +172,7 @@ impl TypedInfiniteSourceHandler for Bounded {
 
 fn resumable_flow(base: PathBuf, events: u64) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let reader = ReattachingSource(Bounded(events));
+        let reader = Port::to(ReattachingSource(Bounded(events)));
         let discard = Discard::<TestEvent>::default();
         Ok(flow! {
             name: "app_settings_resume",

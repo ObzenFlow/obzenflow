@@ -1436,6 +1436,7 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
 
     #[derive(Clone, Debug)]
     struct RecoveringSource(usize);
+    #[obzenflow_runtime::effects::system("recovering")]
     impl TypedFiniteSourceHandler for RecoveringSource {
         type Output = Item;
 
@@ -1455,7 +1456,7 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().to_path_buf();
     let definition = FlowDefinition::materialize(move |_| {
-        let input_handler = RecoveringSource(0);
+        let input_handler = obzenflow_runtime::effects::Port::owned(RecoveringSource(0));
         let output_handler = obzenflow_adapters::sinks::DiscardSink::<Item>::new();
         Ok(flow! {
             name: "source_middleware_studio",
@@ -1670,8 +1671,9 @@ async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
     for enabled in enabled_modes {
         let model = enabled.then(|| Arc::new(MetricsReadModel::default()));
         let definition = FlowDefinition::materialize(move |_| {
-            let input =
-                obzenflow_adapters::sources::ValuesSource::new(vec![Item(1), Item(2), Item(3)]);
+            let input = obzenflow_runtime::effects::Port::owned(
+                obzenflow_adapters::sources::ValuesSource::new(vec![Item(1), Item(2), Item(3)]),
+            );
             let output = obzenflow_adapters::sinks::DiscardSink::<Item>::new();
             Ok(flow! {
                 name: "terminal_reporting_proof",
@@ -1876,6 +1878,7 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
         index: usize,
         progress: Arc<ComposedProgress>,
     }
+    #[obzenflow_runtime::effects::system("gated")]
     #[async_trait::async_trait]
     impl TypedAsyncFiniteSourceHandler for GatedSource {
         type Output = Item;
@@ -1904,12 +1907,12 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
         let mut connections = Vec::new();
         for index in 0..stages - 1 {
             let name = format!("source_{index:03}");
-            let handler = GatedSource {
+            let handler = obzenflow_runtime::effects::Port::owned(GatedSource {
                 gate: gate.clone(),
                 emitted: false,
                 index,
                 progress: progress.clone(),
-            };
+            });
             let mut descriptor = async_source!(Item => handler);
             descriptor.set_name(name.clone());
             members.insert(name.clone(), descriptor.into_flow_member());

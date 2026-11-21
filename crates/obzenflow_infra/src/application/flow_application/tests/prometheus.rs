@@ -23,6 +23,7 @@ struct HeldSource {
     polls: usize,
 }
 
+#[obzenflow_runtime::effects::system("held")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for HeldSource {
     type Output = IdlePayload;
@@ -124,7 +125,7 @@ enabled = true
     let (signal_tx, signal_rx) = oneshot::channel();
     let application = tokio::spawn(FlowApplication::launch(
         FlowDefinition::materialize(move |_| {
-            let source = source.clone();
+            let source = Port::owned(source.clone());
             let sink = noop_sink();
             Ok(flow! {
                 name: "hosted_metrics", journals: crate::journal::memory_journals(),

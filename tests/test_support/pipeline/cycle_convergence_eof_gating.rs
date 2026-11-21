@@ -245,6 +245,7 @@ impl SingleSeedSource {
     }
 }
 
+#[obzenflow::system("single-seed")]
 impl TypedFiniteSourceHandler for SingleSeedSource {
     type Output = SeedEvent;
 
@@ -279,6 +280,7 @@ impl SeedThenEofSource {
     }
 }
 
+#[obzenflow::system("seed-then-eof")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for SeedThenEofSource {
     type Output = SeedEvent;
@@ -421,7 +423,10 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
         done_events: done_count.clone(),
     }));
     let iteration_started = Arc::new(Notify::new());
-    let source = SeedThenEofSource::new(target_iterations, iteration_started.clone());
+    let source = Port::owned(SeedThenEofSource::new(
+        target_iterations,
+        iteration_started.clone(),
+    ));
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
     let iter = IterationTransform::new(iter_processed_for_flow, Some(iteration_started));
 
@@ -559,6 +564,7 @@ impl SeedThenDrainSource {
     }
 }
 
+#[obzenflow::system("seed-then-drain")]
 #[async_trait]
 impl TypedAsyncInfiniteSourceHandler for SeedThenDrainSource {
     type Output = SeedEvent;
@@ -595,6 +601,7 @@ impl DualSeedSource {
     }
 }
 
+#[obzenflow::system("dual-seed")]
 impl TypedFiniteSourceHandler for DualSeedSource {
     type Output = SeedEvent;
 
@@ -632,7 +639,7 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let sink = perform(seed_kind).through(Port::to(DoneCounter {
         done_events: done_count.clone(),
     }));
-    let source = SeedThenDrainSource::new(target_iterations);
+    let source = Port::owned(SeedThenDrainSource::new(target_iterations));
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
     let iter = IterationTransform::new(iter_processed_for_flow, None);
 
@@ -780,7 +787,7 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
     let diverge_target = 1_000u64;
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = DualSeedSource::new(converge_target, diverge_target);
+        let source = Port::owned(DualSeedSource::new(converge_target, diverge_target));
         let entry = EntryConvergeTransform::new(entry_processed_for_flow);
         let iter = IterationTransform::new(iter_processed_for_flow, None);
 
@@ -841,8 +848,8 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
 #[tokio::test]
 async fn cycle_rejects_sccs_with_multiple_entry_points() {
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = SingleSeedSource::new(1);
-        let source_b = SingleSeedSource::new(1);
+        let source_a = Port::owned(SingleSeedSource::new(1));
+        let source_b = Port::owned(SingleSeedSource::new(1));
         let transform_a = EntryConvergeTransform::new(Arc::new(AtomicU64::new(0)));
         let transform_b = EntryConvergeTransform::new(Arc::new(AtomicU64::new(0)));
         let sink = perform(seed_kind).through(Port::to(DoneCounter {

@@ -88,7 +88,7 @@ async fn independent_consumer_upserts_inventory_rows() {
     let postgres = perform(|level: &InventoryLevelChanged| level.clone()).through(Port::to(system));
 
     let flow = FlowDefinition::materialize(move |_runtime_config| {
-        let levels = sources::ValuesSource::new([
+        let levels = Port::owned(sources::ValuesSource::new([
             InventoryLevelChanged {
                 warehouse: "toronto".to_string(),
                 sku: "sku-100".to_string(),
@@ -101,7 +101,7 @@ async fn independent_consumer_upserts_inventory_rows() {
                 available_units: None,
                 replenishment_due: true,
             },
-        ]);
+        ]));
         Ok(flow! {
             name: "postgres_sink_inventory_consumer",
             journals: disk_journals(journal_root),

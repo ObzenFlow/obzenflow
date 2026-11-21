@@ -10,6 +10,7 @@ use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -69,6 +70,7 @@ impl OneRefEventSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("one-ref-event")]
 impl obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler for OneRefEventSource {
     type Output = CatalogRecord;
 
@@ -95,6 +97,7 @@ impl DelayedStreamSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("delayed-stream")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for DelayedStreamSource {
     type Output = LiveEvent;
@@ -185,8 +188,8 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = OneRefEventSource::new();
-        let stream_source = DelayedStreamSource::new();
+        let reference_source = Port::owned(OneRefEventSource::new());
+        let stream_source = Port::owned(DelayedStreamSource::new());
         let slow_join = SlowJoin {
             release: join_release,
         };

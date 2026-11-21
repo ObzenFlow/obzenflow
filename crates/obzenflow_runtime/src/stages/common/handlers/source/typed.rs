@@ -4,27 +4,18 @@
 
 //! Typed source authoring and runtime envelope lowering (FLOWIP-134g).
 
-use super::continuation::{
-    AsyncFiniteContinuation, AsyncInfiniteContinuation, AsyncReaderOpener, FiniteContinuation,
-    InfiniteContinuation, RefusedBy, SourceContinuation, SyncReaderOpener,
-};
+use super::continuation::{AsyncReaderOpener, SyncReaderOpener};
 use super::erased::{
     ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncFinite, SealAsyncInfinite, SealFinite,
     SealInfinite, SourceResumeError, UnifiedAsyncFiniteSourceHandler,
     UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
 };
 use super::positioned::{PositionedFiniteReader, SourceRecord};
-use super::prepared::{
-    sealed as admission_sealed, AdmitSource, AsyncSourceReader, ConnectorSource, DirectSource,
-    SourceReader, SyncSourceReader,
-};
+use super::prepared::{AsyncSourceReader, SourceReader, SyncSourceReader};
 use super::record_de::deserialize_json;
 use super::SourceError;
 use crate::stages::common::handler_error::StageFatal;
-use crate::stages::source::{
-    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
-    InfiniteSourceConnector, SourceReaderInitContext,
-};
+use crate::stages::source::SourceReaderInitContext;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
 use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
@@ -45,12 +36,6 @@ use serde::de::DeserializeOwned;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-/// A direct handler declares no continuation, so its interrupted input
-/// refuses resume (FLOWIP-122i).
-const HANDLER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
-    by: RefusedBy::Handler,
-};
 
 pub(super) fn configuration_fatal(detail: impl Into<String>) -> StageFatal {
     StageFatal::new(
@@ -463,41 +448,6 @@ impl<H> TypedFiniteSourceHandlerAdapter<H> {
     }
 }
 
-impl<H: TypedFiniteSourceHandler + 'static>
-    admission_sealed::Admitted<dyn UnifiedFiniteSourceHandler, DirectSource> for H
-{
-}
-
-impl<H: TypedFiniteSourceHandler + 'static>
-    AdmitSource<dyn UnifiedFiniteSourceHandler, DirectSource> for H
-{
-    type Output = H::Output;
-    type Handler = TypedFiniteSourceHandlerAdapter<H>;
-    const CONTINUATION: SourceContinuation = HANDLER_REFUSES;
-
-    fn prepare(self) -> Self::Handler {
-        TypedFiniteSourceHandlerAdapter::cold(Box::new(move |_| Ok(self)))
-    }
-}
-
-impl<C: FiniteSourceConnector>
-    admission_sealed::Admitted<dyn UnifiedFiniteSourceHandler, ConnectorSource> for C
-{
-}
-
-impl<C: FiniteSourceConnector> AdmitSource<dyn UnifiedFiniteSourceHandler, ConnectorSource> for C {
-    type Output = C::Output;
-    type Handler = <C::Continuation as FiniteContinuation<C::Reader>>::Handler;
-    const CONTINUATION: SourceContinuation =
-        <C::Continuation as FiniteContinuation<C::Reader>>::KIND;
-
-    fn prepare(self) -> Self::Handler {
-        <C::Continuation as FiniteContinuation<C::Reader>>::cold(Box::new(move |context| {
-            self.open(context)
-        }))
-    }
-}
-
 impl<H: TypedFiniteSourceHandler> SealFinite for TypedFiniteSourceHandlerAdapter<H> {}
 
 impl<H: TypedFiniteSourceHandler> UnifiedFiniteSourceHandler
@@ -652,43 +602,6 @@ impl<H> TypedInfiniteSourceHandlerAdapter<H> {
     }
 }
 
-impl<H: TypedInfiniteSourceHandler + 'static>
-    admission_sealed::Admitted<dyn UnifiedInfiniteSourceHandler, DirectSource> for H
-{
-}
-
-impl<H: TypedInfiniteSourceHandler + 'static>
-    AdmitSource<dyn UnifiedInfiniteSourceHandler, DirectSource> for H
-{
-    type Output = H::Output;
-    type Handler = TypedInfiniteSourceHandlerAdapter<H>;
-    const CONTINUATION: SourceContinuation = HANDLER_REFUSES;
-
-    fn prepare(self) -> Self::Handler {
-        TypedInfiniteSourceHandlerAdapter::cold(Box::new(move |_| Ok(self)))
-    }
-}
-
-impl<C: InfiniteSourceConnector>
-    admission_sealed::Admitted<dyn UnifiedInfiniteSourceHandler, ConnectorSource> for C
-{
-}
-
-impl<C: InfiniteSourceConnector> AdmitSource<dyn UnifiedInfiniteSourceHandler, ConnectorSource>
-    for C
-{
-    type Output = C::Output;
-    type Handler = <C::Continuation as InfiniteContinuation<C::Reader>>::Handler;
-    const CONTINUATION: SourceContinuation =
-        <C::Continuation as InfiniteContinuation<C::Reader>>::KIND;
-
-    fn prepare(self) -> Self::Handler {
-        <C::Continuation as InfiniteContinuation<C::Reader>>::cold(Box::new(move |context| {
-            self.open(context)
-        }))
-    }
-}
-
 impl<H: TypedInfiniteSourceHandler> SealInfinite for TypedInfiniteSourceHandlerAdapter<H> {}
 
 impl<H> UnifiedInfiniteSourceHandler for TypedInfiniteSourceHandlerAdapter<H>
@@ -756,45 +669,6 @@ impl<H: TypedAsyncFiniteSourceHandler> TypedAsyncFiniteSourceHandlerAdapter<H> {
             observation_sink,
             recorder: Arc::new(NoObservations),
         }
-    }
-}
-
-impl<H: TypedAsyncFiniteSourceHandler + 'static>
-    admission_sealed::Admitted<dyn UnifiedAsyncFiniteSourceHandler, DirectSource> for H
-{
-}
-
-impl<H: TypedAsyncFiniteSourceHandler + 'static>
-    AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, DirectSource> for H
-{
-    type Output = H::Output;
-    type Handler = TypedAsyncFiniteSourceHandlerAdapter<H>;
-    const CONTINUATION: SourceContinuation = HANDLER_REFUSES;
-
-    fn prepare(self) -> Self::Handler {
-        TypedAsyncFiniteSourceHandlerAdapter::cold(Box::new(move |_| {
-            Box::pin(async move { Ok(self) })
-        }))
-    }
-}
-
-impl<C: AsyncFiniteSourceConnector>
-    admission_sealed::Admitted<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource> for C
-{
-}
-
-impl<C: AsyncFiniteSourceConnector>
-    AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource> for C
-{
-    type Output = C::Output;
-    type Handler = <C::Continuation as AsyncFiniteContinuation<C::Reader>>::Handler;
-    const CONTINUATION: SourceContinuation =
-        <C::Continuation as AsyncFiniteContinuation<C::Reader>>::KIND;
-
-    fn prepare(self) -> Self::Handler {
-        <C::Continuation as AsyncFiniteContinuation<C::Reader>>::cold(Box::new(move |context| {
-            Box::pin(async move { self.open(context).await })
-        }))
     }
 }
 
@@ -914,45 +788,6 @@ impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<
             observation_sink,
             recorder: Arc::new(NoObservations),
         }
-    }
-}
-
-impl<H: TypedAsyncInfiniteSourceHandler + 'static>
-    admission_sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler, DirectSource> for H
-{
-}
-
-impl<H: TypedAsyncInfiniteSourceHandler + 'static>
-    AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, DirectSource> for H
-{
-    type Output = H::Output;
-    type Handler = TypedAsyncInfiniteSourceHandlerAdapter<H>;
-    const CONTINUATION: SourceContinuation = HANDLER_REFUSES;
-
-    fn prepare(self) -> Self::Handler {
-        TypedAsyncInfiniteSourceHandlerAdapter::cold(Box::new(move |_| {
-            Box::pin(async move { Ok(self) })
-        }))
-    }
-}
-
-impl<C: AsyncInfiniteSourceConnector>
-    admission_sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler, ConnectorSource> for C
-{
-}
-
-impl<C: AsyncInfiniteSourceConnector>
-    AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, ConnectorSource> for C
-{
-    type Output = C::Output;
-    type Handler = <C::Continuation as AsyncInfiniteContinuation<C::Reader>>::Handler;
-    const CONTINUATION: SourceContinuation =
-        <C::Continuation as AsyncInfiniteContinuation<C::Reader>>::KIND;
-
-    fn prepare(self) -> Self::Handler {
-        <C::Continuation as AsyncInfiniteContinuation<C::Reader>>::cold(Box::new(move |context| {
-            Box::pin(async move { self.open(context).await })
-        }))
     }
 }
 

@@ -51,6 +51,7 @@ struct OneShotSource {
     emitted: bool,
 }
 
+#[obzenflow::system("one-shot")]
 impl TypedFiniteSourceHandler for OneShotSource {
     type Output = Item;
 
@@ -283,7 +284,7 @@ fn build_flow_future(
     Output = Result<obzenflow_runtime::prelude::FlowHandle, obzenflow_dsl::dsl::FlowBuildFailure>,
 > {
     FlowDefinition::materialize(move |_runtime_config| {
-        let one_shot_source = OneShotSource { emitted: false };
+        let one_shot_source = Port::owned(OneShotSource { emitted: false });
         let null_sink = NullSink::<Item>::new();
 
         Ok(flow! {
@@ -311,7 +312,7 @@ fn build_rate_limited_flow_future(
 > {
     FlowDefinition::materialize(move |_runtime_config| {
         let limiter = rate_limit(10.0);
-        let one_shot_source = OneShotSource { emitted: false };
+        let one_shot_source = Port::owned(OneShotSource { emitted: false });
         let null_sink = NullSink::<Item>::new();
 
         Ok(flow! {
@@ -351,7 +352,7 @@ fn build_two_effect_flow_future(
     FlowDefinition::materialize(move |_runtime_config| {
         let authorize_resilience = payment_resilience().for_effect::<Authorize>();
         let refund_resilience = payment_resilience().for_effect::<Refund>();
-        let one_shot_source = OneShotSource { emitted: false };
+        let one_shot_source = Port::owned(OneShotSource { emitted: false });
         let payment_effects = PaymentEffectsHandler::new();
         let null_sink = NullSink::<PaymentEffectFact>::new();
 

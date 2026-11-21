@@ -119,6 +119,7 @@ impl SingleSeedFanOutSource {
     }
 }
 
+#[obzenflow::system("single-seed-fan-out")]
 impl TypedFiniteSourceHandler for SingleSeedFanOutSource {
     type Output = SeedEvent;
 
@@ -283,7 +284,7 @@ async fn cycle_guard_fan_out_siblings_converge_without_spurious_abort() -> Resul
     let iter_processed_for_flow = iter_processed.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = SingleSeedFanOutSource::new(fan_out, target_round_trips);
+        let source_handler = Port::owned(SingleSeedFanOutSource::new(fan_out, target_round_trips));
         let entry_handler = FanOutEntryTransform::new(entry_processed_for_flow);
         let pass_handler = PassThroughTransform;
         let iter_handler = IterationTransform::new(iter_processed_for_flow);

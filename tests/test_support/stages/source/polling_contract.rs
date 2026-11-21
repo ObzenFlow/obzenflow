@@ -6,6 +6,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use obzenflow::effects::Port;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
@@ -359,6 +360,7 @@ impl SyncFiniteOnce {
     }
 }
 
+#[obzenflow::system("sync-finite-once")]
 impl TypedFiniteSourceHandler for SyncFiniteOnce {
     type Output = PollingEvent;
 
@@ -377,6 +379,7 @@ struct AsyncFiniteOnce {
     raw_delay: Duration,
 }
 
+#[obzenflow::system("async-finite-once")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for AsyncFiniteOnce {
     type Output = PollingEvent;
@@ -396,6 +399,7 @@ struct SyncInfiniteOnce {
     calls: Arc<AtomicUsize>,
 }
 
+#[obzenflow::system("sync-infinite-once")]
 impl TypedInfiniteSourceHandler for SyncInfiniteOnce {
     type Output = PollingEvent;
 
@@ -415,6 +419,7 @@ struct AsyncInfiniteOnce {
     raw_delay: Duration,
 }
 
+#[obzenflow::system("async-infinite-once")]
 #[async_trait]
 impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteOnce {
     type Output = PollingEvent;
@@ -458,7 +463,7 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let sync_finite_observer_for_flow = sync_finite_observer_log.clone();
     let sync_finite_policy_log = Arc::new(PolicyLog::default());
     let sync_finite_policy_for_flow = sync_finite_policy_log.clone();
-    let source = SyncFiniteOnce::new();
+    let source = Port::owned(SyncFiniteOnce::new());
     let sink = NoopSink::new();
     let sync_finite = test_flow! {
         name: "flowip_115g_sync_finite_timing",
@@ -496,10 +501,10 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let async_finite_observer_for_flow = async_finite_observer_log.clone();
     let async_finite_policy_log = Arc::new(PolicyLog::default());
     let async_finite_policy_for_flow = async_finite_policy_log.clone();
-    let source = AsyncFiniteOnce {
+    let source = Port::owned(AsyncFiniteOnce {
         emitted: false,
         raw_delay: async_raw_delay,
-    };
+    });
     let sink = NoopSink::new();
     let async_finite = test_flow! {
         name: "flowip_115g_async_finite_timing",
@@ -538,9 +543,9 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let sync_infinite_policy_log = Arc::new(PolicyLog::default());
     let sync_infinite_policy_for_flow = sync_infinite_policy_log.clone();
     let sync_infinite_calls = Arc::new(AtomicUsize::new(0));
-    let source = SyncInfiniteOnce {
+    let source = Port::owned(SyncInfiniteOnce {
         calls: sync_infinite_calls,
-    };
+    });
     let sink = NoopSink::new();
     let sync_infinite = test_flow! {
         name: "flowip_115g_sync_infinite_timing",
@@ -575,10 +580,10 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let async_infinite_policy_log = Arc::new(PolicyLog::default());
     let async_infinite_policy_for_flow = async_infinite_policy_log.clone();
     let async_infinite_calls = Arc::new(AtomicUsize::new(0));
-    let source = AsyncInfiniteOnce {
+    let source = Port::owned(AsyncInfiniteOnce {
         calls: async_infinite_calls,
         raw_delay: async_raw_delay,
-    };
+    });
     let sink = NoopSink::new();
     let async_infinite = test_flow! {
         name: "flowip_115g_async_infinite_timing",
@@ -617,6 +622,7 @@ struct TimeoutThenEof {
     timeout: Duration,
 }
 
+#[obzenflow::system("timeout-then-eof")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for TimeoutThenEof {
     type Output = PollingEvent;
@@ -641,10 +647,10 @@ fn test_flow_handler_construction_stays_cold_inside_its_enclosing_async_future()
 
     let build = async move {
         observed_calls.fetch_add(1, Ordering::SeqCst);
-        let source = TimeoutThenEof {
+        let source = Port::owned(TimeoutThenEof {
             calls: Arc::new(AtomicUsize::new(0)),
             timeout: Duration::from_secs(1),
-        };
+        });
         let sink = NoopSink::new();
 
         test_flow! {
@@ -678,10 +684,10 @@ async fn timeout_duration_precedes_boundary_settlement_and_error_normalisation()
     let policy_log_for_flow = policy_log.clone();
     let observer_log_for_flow = observer_log.clone();
     let calls_for_flow = calls.clone();
-    let source = TimeoutThenEof {
+    let source = Port::owned(TimeoutThenEof {
         calls: calls_for_flow,
         timeout,
-    };
+    });
     let sink = NoopSink::new();
     let harness = test_flow! {
         name: "flowip_115g_timeout_normalisation",
@@ -750,6 +756,7 @@ struct DisabledTimeoutThenEof {
     raw_delay: Duration,
 }
 
+#[obzenflow::system("disabled-timeout-then-eof")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for DisabledTimeoutThenEof {
     type Output = PollingEvent;
@@ -776,10 +783,10 @@ async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()>
     let policy_log_for_flow = Arc::clone(&policy_log);
     let observer_log_for_flow = Arc::clone(&observer_log);
     let calls = Arc::new(AtomicUsize::new(0));
-    let source = DisabledTimeoutThenEof {
+    let source = Port::owned(DisabledTimeoutThenEof {
         calls: Arc::clone(&calls),
         raw_delay,
-    };
+    });
     let sink = NoopSink::new();
     let harness = test_flow! {
         name: "flowip_133a_disabled_poll_timeout",
@@ -844,6 +851,7 @@ struct SyncScriptedSource {
     poll_times: Arc<Mutex<Vec<tokio::time::Instant>>>,
 }
 
+#[obzenflow::system("sync-scripted")]
 impl TypedFiniteSourceHandler for SyncScriptedSource {
     type Output = PollingEvent;
 
@@ -866,6 +874,7 @@ struct AsyncScriptedSource {
     poll_times: Arc<Mutex<Vec<tokio::time::Instant>>>,
 }
 
+#[obzenflow::system("async-scripted")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for AsyncScriptedSource {
     type Output = PollingEvent;
@@ -910,7 +919,7 @@ fn policy_report_names(events: &[JournalRecord<ChainPayload>]) -> Vec<String> {
 async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Result<()> {
     let sync_poll_times = Arc::new(Mutex::new(Vec::new()));
     let sync_poll_times_for_flow = sync_poll_times.clone();
-    let source = SyncScriptedSource {
+    let source = Port::owned(SyncScriptedSource {
         steps: vec![
             ScriptStep::NonData,
             ScriptStep::NonData,
@@ -923,7 +932,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
         ],
         index: 0,
         poll_times: sync_poll_times_for_flow,
-    };
+    });
     let sink = NoopSink::new();
     let sync_harness = test_flow! {
         name: "flowip_115g_sync_backoff",
@@ -972,7 +981,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
 
     let async_poll_times = Arc::new(Mutex::new(Vec::new()));
     let async_poll_times_for_flow = async_poll_times.clone();
-    let source = AsyncScriptedSource {
+    let source = Port::owned(AsyncScriptedSource {
         steps: vec![
             ScriptStep::NonData,
             ScriptStep::NonData,
@@ -987,7 +996,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
         ],
         index: 0,
         poll_times: async_poll_times_for_flow,
-    };
+    });
     let sink = NoopSink::new();
     let async_harness = test_flow! {
         name: "flowip_115g_async_backoff",
@@ -1060,6 +1069,7 @@ struct AsyncIdleInfiniteSource {
     first_poll: Arc<Notify>,
 }
 
+#[obzenflow::system("async-idle-infinite")]
 #[async_trait]
 impl TypedAsyncInfiniteSourceHandler for AsyncIdleInfiniteSource {
     type Output = PollingEvent;
@@ -1107,10 +1117,10 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_flow = calls.clone();
     let first_poll = Arc::new(Notify::new());
-    let source = AsyncIdleInfiniteSource {
+    let source = Port::owned(AsyncIdleInfiniteSource {
         calls: calls_for_flow,
         first_poll: first_poll.clone(),
-    };
+    });
     let sink = NoopSink::new();
     let harness = test_flow! {
         name: "flowip_115g_async_idle_interrupt",
@@ -1206,6 +1216,7 @@ struct ImmediateEof {
     calls: Arc<AtomicUsize>,
 }
 
+#[obzenflow::system("immediate-eof")]
 impl TypedFiniteSourceHandler for ImmediateEof {
     type Output = PollingEvent;
 
@@ -1221,9 +1232,9 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
     let eof_policy_log = Arc::new(PolicyLog::default());
     let eof_calls_for_flow = eof_calls.clone();
     let eof_policy_log_for_flow = eof_policy_log.clone();
-    let source = ImmediateEof {
+    let source = Port::owned(ImmediateEof {
         calls: eof_calls_for_flow,
-    };
+    });
     let sink = NoopSink::new();
     let eof_harness = test_flow! {
         name: "flowip_115g_eof_no_delay",
@@ -1264,9 +1275,9 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
     let rejected_observer_log = Arc::new(ObserverLog::default());
     let rejected_calls_for_flow = rejected_calls.clone();
     let rejected_observer_log_for_flow = rejected_observer_log.clone();
-    let source = ImmediateEof {
+    let source = Port::owned(ImmediateEof {
         calls: rejected_calls_for_flow,
-    };
+    });
     let sink = NoopSink::new();
     let rejected_harness = test_flow! {
         name: "flowip_115g_rejection_no_delay",

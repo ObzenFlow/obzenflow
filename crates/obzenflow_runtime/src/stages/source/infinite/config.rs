@@ -27,8 +27,8 @@ pub struct InfiniteSourceConfig {
     /// The continuation admitted with the source (FLOWIP-134i B8).
     pub continuation: SourceContinuation,
 
-    /// The system behind the row's port, when the row takes one.
-    pub source_system: Option<SourceSystem>,
+    /// The system the row's port names.
+    pub source_system: SourceSystem,
 
     /// Optional source control strategy for shutdown / FlowControl decisions.
     /// When not provided, the builder will default to JonestownSourceStrategy.
@@ -47,13 +47,14 @@ impl InfiniteSourceConfig {
         stage_name: impl Into<String>,
         flow_name: impl Into<String>,
         continuation: SourceContinuation,
+        source_system: SourceSystem,
     ) -> Self {
         Self {
             stage_id,
             stage_name: stage_name.into(),
             flow_name: flow_name.into(),
             continuation,
-            source_system: None,
+            source_system,
             control_strategy: None,
             source_boundary: None,
             observer_bindings: StageObserverBindings::default(),

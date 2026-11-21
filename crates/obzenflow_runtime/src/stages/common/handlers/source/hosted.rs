@@ -11,8 +11,9 @@
 //! rebuilds it by folding re-admitted rows before the slot goes live.
 //!
 //! FLOWIP-122i B3: because only that writer acknowledges after commit, hosted
-//! ingress is Runtime-owned. It implements no authoring trait and is admitted
-//! with `SenderRedelivers`, a guarantee no connector can declare.
+//! ingress is Runtime-owned. A row takes it through the sealed
+//! [`HostedIngress`] port, admitted with `SenderRedelivers`, a guarantee no
+//! connector can declare.
 
 use super::continuation::SourceContinuation;
 use super::erased::{
@@ -20,13 +21,13 @@ use super::erased::{
     UnifiedAsyncInfiniteSourceHandler,
 };
 use super::prepared::{
-    sealed as admission_sealed, AdmitSource, AsyncSourceReader, HostedSource, SourceReader,
+    sealed as admission_sealed, AdmitSource, AdmittedSource, AsyncSourceReader, SourceReader,
 };
-use super::typed::{configuration_fatal, lower_outputs, protocol_fatal, IngressDecoder};
+use super::typed::{configuration_fatal, lower_outputs, protocol_fatal};
 use super::SourceError;
+use crate::effects::Port;
 use crate::stages::common::handler_error::StageFatal;
 use crate::stages::source::SourceReaderInitContext;
-use crate::typing::SourceTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::SourceDiagnosticReason;
@@ -38,7 +39,7 @@ use obzenflow_core::{ChainEvent, EventId, OneFactOutcome, WriterId};
 use ring::digest::{digest, SHA256};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::marker::PhantomData;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
@@ -71,34 +72,28 @@ impl<T> fmt::Debug for HostedSubmission<T> {
 }
 
 /// Runtime-owned typed hosted-ingress queue core.
-pub struct HostedIngressSource<D: IngressDecoder> {
-    rx: mpsc::Receiver<HostedSubmission<D::Output>>,
+pub struct HostedIngressSource<T> {
+    rx: mpsc::Receiver<HostedSubmission<T>>,
     slot: HostedIngressBindingSlot,
     max_batch_size: usize,
-    decoder: PhantomData<fn() -> D>,
 }
 
-impl<D: IngressDecoder> fmt::Debug for HostedIngressSource<D> {
+impl<T> fmt::Debug for HostedIngressSource<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostedIngressSource")
-            .field("decoder", &std::any::type_name::<D>())
-            .field("output", &std::any::type_name::<D::Output>())
+            .field("output", &std::any::type_name::<T>())
             .field("ingress_key", self.slot.ingress_key())
             .field("max_batch_size", &self.max_batch_size)
             .finish_non_exhaustive()
     }
 }
 
-impl<D: IngressDecoder> HostedIngressSource<D> {
-    pub fn new(
-        rx: mpsc::Receiver<HostedSubmission<D::Output>>,
-        slot: HostedIngressBindingSlot,
-    ) -> Self {
+impl<T: OneFactOutcome + Send + Sync + 'static> HostedIngressSource<T> {
+    pub fn new(rx: mpsc::Receiver<HostedSubmission<T>>, slot: HostedIngressBindingSlot) -> Self {
         Self {
             rx,
             slot,
             max_batch_size: 1000,
-            decoder: PhantomData,
         }
     }
 
@@ -107,7 +102,20 @@ impl<D: IngressDecoder> HostedIngressSource<D> {
         self
     }
 
-    async fn receive_batch(&mut self) -> Result<Vec<HostedSubmission<D::Output>>, SourceError> {
+    /// The port an `async_infinite_source!` row takes for this queue, naming
+    /// the framework system that receives its submissions. Cloning the port
+    /// shares the one queue and binding slot.
+    #[doc(hidden)]
+    pub fn into_port(self, system: &'static str) -> Port<dyn HostedIngress<T>> {
+        let slot = self.slot.clone();
+        let hosted: Arc<dyn HostedIngress<T>> = Arc::new(HostedQueue {
+            slot,
+            source: Mutex::new(Some(self)),
+        });
+        Port::framework_system(system, hosted)
+    }
+
+    async fn receive_batch(&mut self) -> Result<Vec<HostedSubmission<T>>, SourceError> {
         let first = self.rx.recv().await.ok_or(SourceError::Transport(
             SourceDiagnosticReason::InputClosed.into(),
         ))?;
@@ -122,45 +130,91 @@ impl<D: IngressDecoder> HostedIngressSource<D> {
     }
 }
 
-impl<D: IngressDecoder> SourceTyping for HostedIngressSource<D> {
-    type Output = D::Output;
+mod sealed {
+    pub trait Hosted {}
 }
 
-impl<D: IngressDecoder>
-    admission_sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler, HostedSource>
-    for HostedIngressSource<D>
+/// The port an `async_infinite_source!` row takes for hosted ingress. Ingress
+/// registration returns it, and only Runtime implements it: the source's
+/// single writer settles each receipt after its row commits, so a resumed run
+/// reattaches with `SenderRedelivers`.
+pub trait HostedIngress<Out>: sealed::Hosted + Send + Sync + 'static {
+    #[doc(hidden)]
+    fn binding_slot(&self) -> HostedIngressBindingSlot;
+
+    #[doc(hidden)]
+    fn take_source(&self) -> Option<HostedIngressSource<Out>>;
+}
+
+struct HostedQueue<T> {
+    slot: HostedIngressBindingSlot,
+    source: Mutex<Option<HostedIngressSource<T>>>,
+}
+
+impl<T> sealed::Hosted for HostedQueue<T> {}
+
+impl<T: OneFactOutcome + Send + Sync + 'static> HostedIngress<T> for HostedQueue<T> {
+    fn binding_slot(&self) -> HostedIngressBindingSlot {
+        self.slot.clone()
+    }
+
+    fn take_source(&self) -> Option<HostedIngressSource<T>> {
+        self.source
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+}
+
+const SENDER_REDELIVERS: SourceContinuation = SourceContinuation::Reattach {
+    guarantee: ReattachGuarantee::SenderRedelivers,
+};
+
+impl<Out: OneFactOutcome + Send + Sync + 'static>
+    admission_sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler>
+    for Port<dyn HostedIngress<Out>>
 {
 }
 
-impl<D: IngressDecoder> AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, HostedSource>
-    for HostedIngressSource<D>
+impl<Out: OneFactOutcome + Send + Sync + 'static> AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler>
+    for Port<dyn HostedIngress<Out>>
 {
-    type Output = D::Output;
-    type Handler = HostedIngressAdapter<D>;
-    const CONTINUATION: SourceContinuation = SourceContinuation::Reattach {
-        guarantee: ReattachGuarantee::SenderRedelivers,
-    };
+    type Output = Out;
+    type Handler = HostedIngressAdapter<Out>;
 
-    fn prepare(self) -> Self::Handler {
-        HostedIngressAdapter::cold(self)
+    fn admit(self) -> AdmittedSource<Self::Handler> {
+        let hosted = self
+            .built_system()
+            .expect("ingress registration builds a hosted port's queue");
+        AdmittedSource {
+            handler: HostedIngressAdapter::cold(hosted),
+            continuation: SENDER_REDELIVERS,
+            system: self.source_system(),
+        }
     }
 }
 
 /// Runtime adapter for hosted ingress: the slot binding is captured at
 /// admission, before any open, and receipts resolve only after commit.
 #[doc(hidden)]
-pub struct HostedIngressAdapter<D: IngressDecoder> {
-    reader: AsyncSourceReader<HostedIngressSource<D>>,
+pub struct HostedIngressAdapter<T> {
+    reader: AsyncSourceReader<HostedIngressSource<T>>,
     slot: HostedIngressBindingSlot,
     admission: HostedAdmission,
     writer_id: Option<WriterId>,
 }
 
-impl<D: IngressDecoder> HostedIngressAdapter<D> {
-    fn cold(source: HostedIngressSource<D>) -> Self {
-        let slot = source.slot.clone();
+impl<T: OneFactOutcome + Send + Sync + 'static> HostedIngressAdapter<T> {
+    fn cold(hosted: Arc<dyn HostedIngress<T>>) -> Self {
+        let slot = hosted.binding_slot();
         Self {
-            reader: SourceReader::cold(Box::new(move |_| Box::pin(async move { Ok(source) }))),
+            reader: SourceReader::cold(Box::new(move |_| {
+                Box::pin(async move {
+                    hosted.take_source().ok_or(SourceError::Other(
+                        SourceDiagnosticReason::InputUnavailable.into(),
+                    ))
+                })
+            })),
             admission: HostedAdmission::new(slot.clone()),
             slot,
             writer_id: None,
@@ -168,10 +222,12 @@ impl<D: IngressDecoder> HostedIngressAdapter<D> {
     }
 }
 
-impl<D: IngressDecoder> SealAsyncInfinite for HostedIngressAdapter<D> {}
+impl<T: OneFactOutcome + Send + Sync + 'static> SealAsyncInfinite for HostedIngressAdapter<T> {}
 
 #[async_trait]
-impl<D: IngressDecoder> UnifiedAsyncInfiniteSourceHandler for HostedIngressAdapter<D> {
+impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandler
+    for HostedIngressAdapter<T>
+{
     async fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
         self.reader.acquire(context).await?;
         Ok(())
@@ -514,20 +570,13 @@ mod tests {
         const EVENT_TYPE: &'static str = "hosted.row";
     }
 
-    #[derive(Clone, Debug)]
-    struct RowIngress;
-
-    impl IngressDecoder for RowIngress {
-        type Output = Row;
-    }
-
     const KEY: &str = "bank.tx";
     const SECOND_NS: u64 = 1_000_000_000;
 
     struct Harness {
         tx: mpsc::Sender<HostedSubmission<Row>>,
         slot: HostedIngressBindingSlot,
-        adapter: HostedIngressAdapter<RowIngress>,
+        adapter: HostedIngressAdapter<Row>,
     }
 
     impl Harness {
@@ -539,8 +588,10 @@ mod tests {
                     .expect("valid timing"),
             )
             .expect("first install");
-            let source = HostedIngressSource::<RowIngress>::new(rx, slot.clone());
-            let mut adapter = source.prepare();
+            let mut adapter = HostedIngressSource::new(rx, slot.clone())
+                .into_port("ingress")
+                .admit()
+                .handler;
             let stage_id = StageId::new();
             UnifiedAsyncInfiniteSourceHandler::install_writer_id(
                 &mut adapter,
@@ -635,21 +686,20 @@ mod tests {
     /// and captures its slot binding before any open.
     #[test]
     fn admission_records_that_the_sender_redelivers_before_any_open() {
+        let (_tx, rx) = mpsc::channel::<HostedSubmission<Row>>(1);
+        let admitted = HostedIngressSource::new(rx, HostedIngressBindingSlot::new(KEY))
+            .into_port("ingress")
+            .admit();
         assert_eq!(
-            <HostedIngressSource<RowIngress> as AdmitSource<
-                dyn UnifiedAsyncInfiniteSourceHandler,
-                HostedSource,
-            >>::CONTINUATION,
+            admitted.continuation,
             SourceContinuation::Reattach {
                 guarantee: ReattachGuarantee::SenderRedelivers
             }
         );
-        let (_tx, rx) = mpsc::channel(1);
-        let adapter =
-            HostedIngressSource::<RowIngress>::new(rx, HostedIngressBindingSlot::new(KEY))
-                .prepare();
+        assert_eq!(admitted.system.name(), "ingress");
         assert_eq!(
-            adapter
+            admitted
+                .handler
                 .hosted_ingress_slot()
                 .map(|slot| slot.ingress_key().clone()),
             Some(IngressKey::from(KEY))

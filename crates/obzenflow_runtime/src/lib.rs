@@ -39,7 +39,8 @@ pub mod stages;
 pub mod __private {
     pub mod lifecycle;
 
-    pub use crate::stages::common::handlers::source::prepared::AdmitSource;
+    pub use crate::stages::common::handlers::source::prepared::{AdmitSource, AdmittedSource};
+    pub use crate::stages::common::handlers::source::SourceRowInput;
 
     // Public macros resolve through this narrow hygiene surface without
     // re-exporting Core itself as an alternate authoring gateway.

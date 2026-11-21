@@ -226,6 +226,7 @@ impl ItemSource {
     }
 }
 
+#[obzenflow::system("items")]
 impl TypedFiniteSourceHandler for ItemSource {
     type Output = DigestItem;
 
@@ -303,7 +304,7 @@ fn build_flow_with(
     ai_breaker: CircuitBreaker,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let items = ItemSource::one_to(items);
+        let items = Port::owned(ItemSource::one_to(items));
         let digest = ai::map(map_role).chunks(1).reduce(ReduceRole).on_eof();
         let collected = perform(|output: &DigestOut| output.clone()).through(collect_into(outputs));
 
@@ -330,7 +331,7 @@ fn build_recovery_flow(
     ai_breaker: CircuitBreaker,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let recovery_items = ItemSource::one_to(1);
+        let recovery_items = Port::owned(ItemSource::one_to(1));
         let digest = ai::map(MapRole::default())
             .chunks(1)
             .reduce(ReduceRole)
@@ -361,7 +362,7 @@ fn build_credit_flow(
     prepare_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let credit_items = ItemSource::one_to(2);
+        let credit_items = Port::owned(ItemSource::one_to(2));
         let digest = ai::map(MapRole {
             prepare_calls: Some(prepare_calls),
             ..MapRole::default()
@@ -395,7 +396,7 @@ fn build_interruption_flow(
     outputs: Arc<Mutex<Vec<DigestOut>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let interrupt_items = ItemSource::one_to(5);
+        let interrupt_items = Port::owned(ItemSource::one_to(5));
         let digest = ai::map(MapRole::default())
             .chunks(1)
             .reduce(ReduceRole)
@@ -2678,6 +2679,7 @@ impl PositionedFiniteReader for ContinuableItemsReader {
     }
 }
 
+#[obzenflow::system("continuable-items")]
 impl FiniteSourceConnector for ContinuableItems {
     type Output = DigestItem;
     type Reader = ContinuableItemsReader;
@@ -2698,6 +2700,7 @@ fn build_keyed_flow(
     outputs: Arc<Mutex<Vec<DigestOut>>>,
     keyed_items: ContinuableItems,
 ) -> FlowDefinition {
+    let keyed_items = Port::to(keyed_items);
     FlowDefinition::materialize(move |_| {
         let by_parity = ai::map(MapRole::default())
             .key_by(parity)
@@ -2961,7 +2964,7 @@ async fn a_map_only_provider_failure_reaches_the_error_journal() {
         .run_async(FlowDefinition::materialize({
             let journal_base = journal_base.clone();
             move |_| {
-                let items = ItemSource::one_to(2);
+                let items = Port::owned(ItemSource::one_to(2));
                 let tag = ai::map(MapRole::default()).chunks(1);
                 let tagged = obzenflow::stages::sinks::DiscardSink::<DigestPartial>::new();
 
@@ -3052,7 +3055,7 @@ impl AiRole<Partials<DigestItem, DigestPartial>> for OneRole {
 
 fn build_one_role_flow(journal_base: PathBuf, reduce_version: &'static str) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let items = ItemSource::one_to(3);
+        let items = Port::owned(ItemSource::one_to(3));
         let role = OneRole { reduce_version };
         let digest = ai::map(role).chunks(1).reduce(role).on_eof();
         let collected = perform(|output: &DigestOut| output.clone())

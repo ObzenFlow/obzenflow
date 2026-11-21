@@ -23,6 +23,7 @@ mod replay_testkit {
     pub use self::{discard::*, stage_journal::*, unsynced_application::*, unsynced_context::*};
 }
 
+use obzenflow::effects::Port;
 use obzenflow::flow::{flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;
@@ -120,6 +121,7 @@ impl Ticks {
     }
 }
 
+#[obzenflow::system("ticks")]
 impl TypedFiniteSourceHandler for Ticks {
     type Output = Tick;
 
@@ -135,7 +137,7 @@ impl TypedFiniteSourceHandler for Ticks {
 
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticks_handler = Ticks::new();
+        let ticks_handler = Port::owned(Ticks::new());
         let out_handler = replay_testkit::Discard::<Tick>::default();
 
         Ok(flow! {
@@ -159,6 +161,7 @@ struct RejectingTicks {
     next: u64,
 }
 
+#[obzenflow::system("rejecting-ticks")]
 impl TypedFiniteSourceHandler for RejectingTicks {
     type Output = Tick;
 
@@ -184,7 +187,7 @@ async fn a_run_that_rejects_500_rows_completes_and_show_lists_them_all() {
     replay_testkit::unsynced_application()
         .with_cli_args(["rejecting-ticks"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let ticks_handler = RejectingTicks { next: 1 };
+            let ticks_handler = Port::owned(RejectingTicks { next: 1 });
             let out_handler = replay_testkit::Discard::<Tick>::default();
             Ok(flow! {
                 name: "cli_rejections",
@@ -2100,6 +2103,7 @@ mod hosted {
             struct PacedTicks {
                 emitted: u64,
             }
+            #[obzenflow::system("paced-ticks")]
             #[async_trait::async_trait]
             impl obzenflow::stages::sources::TypedAsyncFiniteSourceHandler for PacedTicks {
                 type Output = Tick;
@@ -2113,7 +2117,7 @@ mod hosted {
                     Ok(Some(vec![tick]))
                 }
             }
-            let source = PacedTicks { emitted: 0 };
+            let source = Port::owned(PacedTicks { emitted: 0 });
             let sink = replay_testkit::Discard::<Tick>::default();
             Ok(flow! {
                 name: "cli_process_lifetime", journals: disk_journals(root),
@@ -2507,7 +2511,7 @@ impl SlowDiscard {
 
 fn lagging_sink_flow(root: PathBuf, delay: Duration) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticks_handler = Ticks::new();
+        let ticks_handler = Port::owned(Ticks::new());
         let out_handler = obzenflow::effects::perform(|_: &Tick| Discard)
             .through(obzenflow::effects::Port::to(SlowDiscard { delay }));
         Ok(flow! {

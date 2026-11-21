@@ -4,6 +4,7 @@
 
 //! FLOWIP-133a host-preflight witnesses for deferred handler construction.
 
+use obzenflow::effects::Port;
 use obzenflow::stages::sinks;
 use obzenflow::stages::sources;
 use obzenflow_core::TypedPayload;
@@ -38,7 +39,7 @@ fn materialised_probe(
     FlowDefinition::materialize(move |_| {
         constructor_calls.fetch_add(1, Ordering::SeqCst);
 
-        let input = sources::ValuesSource::new(Vec::<ProbeEvent>::new());
+        let input = Port::owned(sources::ValuesSource::new(Vec::<ProbeEvent>::new()));
         let output = sinks::ConsoleSink::<ProbeEvent, _>::new(sinks::DebugFormatter);
 
         Ok(flow! {

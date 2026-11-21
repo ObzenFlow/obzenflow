@@ -20,22 +20,28 @@
 //!
 //! ## Construction catalog
 //!
-//! | Integration | Entry point |
-//! |---|---|
-//! | Owned values | [`ValuesSource::new`] |
-//! | Tokio receiver | [`ChannelSource::new`] |
-//! | CSV or TSV | [`CsvSource::builder`] |
-//! | YAML document | [`YamlSource::builder`] |
-//! | HTTP pull | [`HttpPullSource::new`] |
-//! | HTTP polling | [`HttpPollSource::new`] |
-//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` |
+//! Every source row takes a [`crate::effects::Port`] naming the system that
+//! supplies its input, and each acquisition records that name.
+//!
+//! | Integration | Entry point | Row binding | System |
+//! |---|---|---|---|
+//! | Owned values | [`ValuesSource::new`] | `Port::owned` | `values` |
+//! | Tokio receiver | [`ChannelSource::new`] | `Port::to` | `channel` |
+//! | CSV or TSV | [`CsvSource::builder`] | `Port::to` | `files` |
+//! | YAML document | [`YamlSource::builder`] | `Port::to` | `files` |
+//! | HTTP pull | [`HttpPullSource::new`] | `Port::to` | `http` |
+//! | HTTP polling | [`HttpPollSource::new`] | `Port::to` | `http` |
+//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` | the returned port | `http-ingress` |
 //!
 //! New polling behaviour implements the appropriate typed handler:
 //! [`TypedFiniteSourceHandler`], [`TypedAsyncFiniteSourceHandler`],
-//! [`TypedInfiniteSourceHandler`] or [`TypedAsyncInfiniteSourceHandler`].
-//! Resource-owning integrations use the corresponding connector and reader. A
-//! direct handler declares no continuation, so a resume refuses its interrupted
-//! input; a source that must continue after an interruption is a connector.
+//! [`TypedInfiniteSourceHandler`] or [`TypedAsyncInfiniteSourceHandler`],
+//! names itself with `#[obzenflow::system("…")]` above that impl, and binds
+//! with `Port::owned`. Resource-owning integrations use the corresponding
+//! connector and reader, name the connector the same way and bind with
+//! `Port::to`. A direct handler declares no continuation, so a resume refuses
+//! its interrupted input; a source that must continue after an interruption is
+//! a connector.
 //!
 //! ## Source errors
 //!
@@ -62,6 +68,7 @@
 //!
 //! ```rust
 //! use obzenflow::schema::TypedPayload;
+//! use obzenflow::effects::Port;
 //! use obzenflow::stages::sources::{CsvDecoder, CsvSource};
 //! use serde::{Deserialize, Serialize};
 //!
@@ -82,9 +89,11 @@
 //!     type Output = Customer;
 //! }
 //!
-//! let customers = CsvSource::builder(CustomerCsv)
-//!     .path("customers.csv")
-//!     .build()?;
+//! let customers = Port::to(
+//!     CsvSource::builder(CustomerCsv)
+//!         .path("customers.csv")
+//!         .build()?,
+//! );
 //! // Inside flow!'s stages block: customers = source!(Customer => customers);
 //! # Ok::<(), anyhow::Error>(())
 //! ```
@@ -103,6 +112,7 @@
 //! root sequence, or a sequence at an RFC 6901 pointer.
 //!
 //! ```rust
+//! use obzenflow::effects::Port;
 //! use obzenflow::schema::TypedPayload;
 //! use obzenflow::stages::sources::{
 //!     YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
@@ -134,10 +144,12 @@
 //!     }
 //! }
 //!
-//! let accounts = YamlSource::builder(AccountYaml)
-//!     .path("accounts.yaml")
-//!     .selection(YamlSelection::SequenceAt("/accounts".into()))
-//!     .build()?;
+//! let accounts = Port::to(
+//!     YamlSource::builder(AccountYaml)
+//!         .path("accounts.yaml")
+//!         .selection(YamlSelection::SequenceAt("/accounts".into()))
+//!         .build()?,
+//! );
 //! // Inside flow!'s stages block: accounts = source!(AccountOpened => accounts);
 //! # Ok::<(), anyhow::Error>(())
 //! ```
@@ -193,7 +205,8 @@
 //!
 //! Register the decoder through `FlowApplication::builder().http_ingress(decoder,
 //! config)` (or `.ingress` for another transport), which returns the
-//! [`HostedIngressSource`]. Custom hosting can explicitly compose bundles with
+//! [`HostedIngress`] port an `async_infinite_source!` row takes. Custom hosting
+//! can explicitly compose bundles with
 //! [`crate::application::ingress::ingress_source`] or
 //! [`crate::application::ingress::http_ingress`]. Hosted ingress acknowledges a
 //! submission only after its row commits, so a resumed run reattaches it live
@@ -241,10 +254,8 @@ pub use obzenflow_adapters::sources::{
 };
 
 pub use obzenflow_adapters::sources::http_pull::{HttpRetryConfig, ListDetailState};
-/// Hosted-ingress source and its application-owned decoder contract.
-pub use obzenflow_adapters::sources::{
-    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord,
-};
+/// The application-owned decoder contract for hosted ingress.
+pub use obzenflow_adapters::sources::{IngressDecodeError, IngressDecoder, IngressRecord};
 
 /// HTTP pull and poll sources, decoders, and configuration types.
 pub use obzenflow_adapters::sources::{
@@ -281,10 +292,11 @@ pub use obzenflow_runtime::stages::source::{
     InfiniteSourceConnector, SourceReaderInitContext,
 };
 
-/// The port each source family's row takes. A flow builder writes one only in
-/// the signature of a helper that returns a source's port.
+/// The port each source family's row takes, and the hosted port ingress
+/// registration returns. A flow builder writes one only in the signature of a
+/// helper that takes or returns a source's port.
 pub use obzenflow_runtime::stages::source::{
-    AsyncFiniteSource, AsyncInfiniteSource, FiniteSource, InfiniteSource,
+    AsyncFiniteSource, AsyncInfiniteSource, FiniteSource, HostedIngress, InfiniteSource,
 };
 
 /// Connector continuation declarations, their reattachment guarantees and the

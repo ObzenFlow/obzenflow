@@ -233,10 +233,10 @@ fn blocking_console_disk_flow_preserves_filtering_and_completed_journal() {
     let journal_root = dir.path().join("journals");
     let (source_input, input) = mpsc::channel(1);
     let (entered, source_entered) = mpsc::unbounded_channel();
-    let source = ControlledSource {
+    let source = Port::owned(ControlledSource {
         input: Arc::new(tokio::sync::Mutex::new(input)),
         entered,
-    };
+    });
     let (console_tx, console_rx) = oneshot::channel();
     let driver = Mutex::new(Some((console_rx, source_input, source_entered)));
     let (proved_tx, proved_rx) = std::sync::mpsc::sync_channel(1);
@@ -432,6 +432,7 @@ struct ControlledSource {
     entered: mpsc::UnboundedSender<()>,
 }
 
+#[obzenflow_runtime::effects::system("controlled")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for ControlledSource {
     type Output = IdlePayload;
@@ -565,10 +566,10 @@ fn telemetry_proof(cancel: bool) {
             .unwrap();
             let (source_input, input) = mpsc::channel(1);
             let (entered, mut source_entered) = mpsc::unbounded_channel();
-            let source = ControlledSource {
+            let source = Port::owned(ControlledSource {
                 input: Arc::new(tokio::sync::Mutex::new(input)),
                 entered,
-            };
+            });
             let (flow_tx, flow_rx) = oneshot::channel();
             let flow_tx = Mutex::new(Some(flow_tx));
             let (console_tx, console_rx) = oneshot::channel();

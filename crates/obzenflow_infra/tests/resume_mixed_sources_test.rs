@@ -126,6 +126,7 @@ impl FiniteChannelSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("finite-channel")]
 impl TypedFiniteSourceHandler for FiniteChannelSource {
     type Output = ChannelTick;
 
@@ -276,9 +277,10 @@ fn build_flow(
     let inf_first = ranges.inf_first;
     let inf_count = ranges.inf_count;
     FlowDefinition::materialize(move |_runtime_config| {
-        let finite_handler = FiniteChannelSource::new("f", fin_first, fin_count);
-        let infinite_handler =
-            ReattachingSource(InfiniteChannelSource::new("i", inf_first, inf_count));
+        let finite_handler = Port::owned(FiniteChannelSource::new("f", fin_first, fin_count));
+        let infinite_handler = Port::to(ReattachingSource(InfiniteChannelSource::new(
+            "i", inf_first, inf_count,
+        )));
         let merge_handler = MergeTransform::new();
         let effectful_handler = EffectfulTail {
             counter: Port::to(CallCounter { calls }),
@@ -667,6 +669,7 @@ struct StallingFiniteSource {
     polls: Arc<AtomicUsize>,
 }
 
+#[obzenflow_runtime::effects::system("stalling-finite")]
 impl TypedFiniteSourceHandler for StallingFiniteSource {
     type Output = ChannelTick;
 
@@ -682,11 +685,11 @@ fn build_stalling_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let finite_handler = StallingFiniteSource {
+        let finite_handler = Port::owned(StallingFiniteSource {
             rows: FiniteChannelSource::new("f", 1, 3),
             polls,
-        };
-        let infinite_handler = ReattachingSource(InfiniteChannelSource::new("i", 101, 2));
+        });
+        let infinite_handler = Port::to(ReattachingSource(InfiniteChannelSource::new("i", 101, 2)));
         let merge_handler = MergeTransform::new();
         let collect_handler = CountingSink::<Merged>::new(delivered);
 
@@ -821,6 +824,7 @@ struct PolledTicker {
     polls: Arc<AtomicUsize>,
 }
 
+#[obzenflow_runtime::effects::system("polled-ticker")]
 impl TypedInfiniteSourceHandler for PolledTicker {
     type Output = ChannelTick;
 
@@ -836,10 +840,10 @@ fn build_ticker_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticker_handler = PolledTicker {
+        let ticker_handler = Port::owned(PolledTicker {
             ticks: InfiniteChannelSource::new("t", 1, 2),
             polls,
-        };
+        });
         let merge_handler = MergeTransform::new();
         let collect_handler = CountingSink::<Merged>::new(delivered);
 
@@ -869,10 +873,10 @@ fn build_reattaching_ticker_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticker_handler = ReattachingSource(PolledTicker {
+        let ticker_handler = Port::to(ReattachingSource(PolledTicker {
             ticks: InfiniteChannelSource::new("t", 3, 1),
             polls,
-        });
+        }));
         let merge_handler = MergeTransform::new();
         let collect_handler = CountingSink::<Merged>::new(delivered);
 
@@ -1029,7 +1033,7 @@ fn build_channel_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let channel_source = ChannelSource::new(ticks);
+        let channel_source = Port::to(ChannelSource::new(ticks));
         let merge_handler = MergeTransform::new();
         let collect_handler = CountingSink::<Merged>::new(delivered);
 
@@ -1182,11 +1186,13 @@ fn build_csv_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let orders_source = CsvSource::builder(decoder)
-            .path(input)
-            .chunk_size(1)
-            .build()
-            .expect("valid CSV configuration");
+        let orders_source = Port::to(
+            CsvSource::builder(decoder)
+                .path(input)
+                .chunk_size(1)
+                .build()
+                .expect("valid CSV configuration"),
+        );
         let collect_handler = replay_testkit::CountDeliveries::<Order>::new(delivered);
 
         Ok(flow! {
@@ -1511,6 +1517,7 @@ impl LazyOrders {
     }
 }
 
+#[obzenflow_runtime::effects::system("lazy-orders")]
 impl FiniteSourceConnector for LazyOrders {
     type Output = Order;
     type Reader = LazyOrderReader;
@@ -1640,6 +1647,7 @@ fn lazy_flow(
 ) -> FlowDefinition {
     let journals = journal_base.to_path_buf();
     let collect_handler = perform(|_: &Order| CountOrder).through(Port::to(collect_handler));
+    let orders_source = Port::to(orders_source);
     FlowDefinition::materialize(move |_runtime_config| {
         Ok(flow! {
             name: "resume_lazy",
@@ -1735,6 +1743,7 @@ struct UnpositionedOrders {
     next: u64,
 }
 
+#[obzenflow_runtime::effects::system("unpositioned-orders")]
 impl TypedFiniteSourceHandler for UnpositionedOrders {
     type Output = Order;
 
@@ -1790,6 +1799,7 @@ impl PositionedFiniteReader for RevisedOrderReader {
     }
 }
 
+#[obzenflow_runtime::effects::system("revised-lazy-orders")]
 impl FiniteSourceConnector for RevisedLazyOrders {
     type Output = Order;
     type Reader = RevisedOrderReader;
@@ -1855,7 +1865,7 @@ async fn input_recorded_without_positions_refuses_the_resume_at_admission() -> R
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
     let delivered = Arc::new(AtomicUsize::new(0));
-    let unpositioned = UnpositionedOrders::default();
+    let unpositioned = Port::owned(UnpositionedOrders::default());
     let recorded = record_interrupted(
         &journal_base,
         orders_flow!(&journal_base, unpositioned, delivered.clone()),
@@ -1866,6 +1876,7 @@ async fn input_recorded_without_positions_refuses_the_resume_at_admission() -> R
 
     let positioned = LazyOrders::new();
     let fetched = positioned.fetched.clone();
+    let positioned = Port::to(positioned);
     let refusal = refused_at_admission(
         &journal_base,
         &recorded,
@@ -1899,6 +1910,7 @@ async fn a_changed_position_version_refuses_the_resume_at_admission() -> Result<
 
     let revised = RevisedLazyOrders(LazyOrders::new());
     let fetched = revised.0.fetched.clone();
+    let revised = Port::to(revised);
     let refusal = refused_at_admission(
         &journal_base,
         &recorded,
@@ -2212,11 +2224,13 @@ async fn a_changed_decoder_output_type_fails_at_re_admission() -> Result<()> {
         })
         .await,
     );
-    let orders_source = CsvSource::builder(OrderV2Csv)
-        .path(input.clone())
-        .chunk_size(1)
-        .build()
-        .expect("valid CSV configuration");
+    let orders_source = Port::to(
+        CsvSource::builder(OrderV2Csv)
+            .path(input.clone())
+            .chunk_size(1)
+            .build()
+            .expect("valid CSV configuration"),
+    );
     let collect_handler =
         replay_testkit::CountDeliveries::<OrderV2>::new(Arc::new(AtomicUsize::new(0)));
     let journals = journal_base.clone();

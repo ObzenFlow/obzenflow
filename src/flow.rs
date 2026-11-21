@@ -30,9 +30,9 @@
 //! # impl TypedPayload for OrderPlaced { const EVENT_TYPE: &'static str = "order.placed"; }
 //!
 //! let definition = FlowDefinition::materialize(|_| {
-//! # let queue = sources::ValuesSource::new(Vec::<QueueOrder>::new());
-//! # let web = sources::ValuesSource::new(Vec::<WebOrder>::new());
-//! # let csv = sources::ValuesSource::new(Vec::<CsvOrder>::new());
+//! # let queue = obzenflow::effects::Port::owned(sources::ValuesSource::new(Vec::<QueueOrder>::new()));
+//! # let web = obzenflow::effects::Port::owned(sources::ValuesSource::new(Vec::<WebOrder>::new()));
+//! # let csv = obzenflow::effects::Port::owned(sources::ValuesSource::new(Vec::<CsvOrder>::new()));
 //! # let output = sinks::ConsoleSink::new(|order: &OrderPlaced| order.id.to_string());
 //!     let from_queue = transforms::map(|order: QueueOrder| OrderPlaced { id: order.id });
 //!     let from_web = transforms::map(|order: WebOrder| OrderPlaced { id: order.order_id });

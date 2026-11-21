@@ -14,6 +14,7 @@
 
 use anyhow::Result;
 use obzenflow::application::FlowApplication;
+use obzenflow::effects::Port;
 use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;
@@ -113,7 +114,8 @@ fn main() -> Result<()> {
 
     FlowApplication::builder().run_blocking(FlowDefinition::materialize(
         move |_runtime_config| {
-            let characters_handler = sources::ValuesSource::new(build_char_inputs(&INPUT_LINES));
+            let characters_handler =
+                Port::owned(sources::ValuesSource::new(build_char_inputs(&INPUT_LINES)));
             let transform_text_handler = transforms::map(|input: CharInput| TextChunk {
                 text: transform_char(input.character),
             });

@@ -142,7 +142,7 @@ enabled = false
         },
     );
     let definition = FlowDefinition::materialize(move |_| {
-        let input = OneShotSource::new();
+        let input = Port::owned(OneShotSource::new());
         let output = noop_sink();
         Ok(flow! {
             name: "missing_ingress_source",
@@ -173,6 +173,7 @@ async fn authentication_admission_failure_prevents_automatic_run() {
 
     #[derive(Clone, Debug)]
     struct CountingSource(Arc<AtomicUsize>);
+    #[obzenflow_runtime::effects::system("counting")]
     impl TypedInfiniteSourceHandler for CountingSource {
         type Output = IdlePayload;
         fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
@@ -209,7 +210,7 @@ enabled = false
     let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
     let hook_observed = observed.clone();
     let definition = FlowDefinition::new(move |context| async move {
-        let source = CountingSource(source_calls);
+        let source = Port::owned(CountingSource(source_calls));
         let sink = noop_sink();
         let handle = flow! {
             name: "auth_admission_no_automatic_run",
@@ -269,6 +270,7 @@ async fn occupied_port_prevents_automatic_run() {
 
     #[derive(Clone, Debug)]
     struct CountingSource(Arc<AtomicUsize>);
+    #[obzenflow_runtime::effects::system("counting")]
     impl TypedInfiniteSourceHandler for CountingSource {
         type Output = IdlePayload;
         fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
@@ -304,7 +306,7 @@ enabled = false
     let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
     let hook_observed = observed.clone();
     let definition = FlowDefinition::new(move |context| async move {
-        let source = CountingSource(source_calls);
+        let source = Port::owned(CountingSource(source_calls));
         let sink = noop_sink();
         let handle = flow! {
             name: "bind_admission_no_automatic_run",
@@ -465,7 +467,7 @@ enabled = false
         Duration::from_secs(10),
         FlowApplication::launch(
             FlowDefinition::materialize(move |_runtime_config| {
-                let source = IdleInfiniteSource;
+                let source = Port::owned(IdleInfiniteSource);
                 let sink = noop_sink();
 
                 Ok(flow! {
@@ -537,7 +539,7 @@ enabled = false
         Duration::from_secs(10),
         FlowApplication::launch(
             FlowDefinition::materialize(move |_runtime_config| {
-                let source = OneShotSource::new();
+                let source = Port::owned(OneShotSource::new());
                 let sink = noop_sink();
 
                 Ok(flow! {
@@ -730,7 +732,7 @@ shutdown_timeout_secs = 2
         Duration::from_secs(15),
         FlowApplication::launch(
             FlowDefinition::materialize(move |_runtime_config| {
-                let source = IdleInfiniteSource;
+                let source = Port::owned(IdleInfiniteSource);
                 let sink = noop_sink();
 
                 Ok(flow! {

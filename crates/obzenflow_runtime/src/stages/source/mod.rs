@@ -63,9 +63,9 @@ pub use boundary::{
 
 pub use crate::stages::common::handlers::source::{
     AsyncFiniteContinuation, AsyncFiniteSource, AsyncInfiniteContinuation, AsyncInfiniteSource,
-    AtMostOnce, FiniteContinuation, FiniteSource, InfiniteContinuation, InfiniteSource,
-    LatestState, LiveGuarantee, PositionedFiniteReader, Reattach, RecordDeError, Refuse, Seek,
-    SeekableSource, SourceError, SourceRecord, TypedAsyncFiniteSourceHandler,
+    AtMostOnce, FiniteContinuation, FiniteSource, HostedIngress, InfiniteContinuation,
+    InfiniteSource, LatestState, LiveGuarantee, PositionedFiniteReader, Reattach, RecordDeError,
+    Refuse, Seek, SeekableSource, SourceError, SourceRecord, TypedAsyncFiniteSourceHandler,
     TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 #[doc(hidden)]

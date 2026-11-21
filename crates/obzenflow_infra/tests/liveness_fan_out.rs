@@ -10,7 +10,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{Effects, StageCompletion};
+use obzenflow_runtime::effects::{Effects, Port, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -70,6 +70,7 @@ impl DelayedTwoEventSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("delayed-two-event")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for DelayedTwoEventSource {
     type Output = ProbeEvent;
@@ -198,7 +199,7 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let numbers_handler = DelayedTwoEventSource::new(source_finish_gate);
+        let numbers_handler = Port::owned(DelayedTwoEventSource::new(source_finish_gate));
         let slow_handler = SlowTransform::new();
         let fast_handler = FastTransform::new();
         let slow_sink_handler = NoopSink::<SlowProbeEvent>::new();

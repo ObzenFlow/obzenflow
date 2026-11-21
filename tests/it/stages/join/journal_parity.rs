@@ -10,6 +10,7 @@
 //! ordinary middleware.
 
 use crate::replay_testkit;
+use obzenflow::effects::Port;
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
@@ -91,6 +92,7 @@ impl ReferenceSource {
     }
 }
 
+#[obzenflow::system("references")]
 impl TypedFiniteSourceHandler for ReferenceSource {
     type Output = ReferenceItem;
 
@@ -134,6 +136,7 @@ impl StreamSource {
     }
 }
 
+#[obzenflow::system("streams")]
 impl TypedFiniteSourceHandler for StreamSource {
     type Output = StreamItem;
 
@@ -259,8 +262,8 @@ fn build_flow(
     join_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let references = ReferenceSource::new(reference_reads.clone());
-        let streams = StreamSource::new(stream_reads.clone());
+        let references = Port::owned(ReferenceSource::new(reference_reads.clone()));
+        let streams = Port::owned(StreamSource::new(stream_reads.clone()));
         let reference_validate = IdentityReference;
         let stream_validate = RejectMarkedStream;
         let joined = ExactJoin {
@@ -655,9 +658,9 @@ async fn invalid_authored_join_forms_fail_before_journal_provider_evaluation() {
             let providers = providers.clone();
             let reads = reads.clone();
             FlowDefinition::materialize(move |_| {
-                let catalog = ReferenceSource::new(reads.clone());
-                let stream = ReferenceSource::new(reads.clone());
-                let other = ReferenceSource::new(reads);
+                let catalog = Port::owned(ReferenceSource::new(reads.clone()));
+                let stream = Port::owned(ReferenceSource::new(reads.clone()));
+                let other = Port::owned(ReferenceSource::new(reads));
                 let joiner = obzenflow::stages::joins::inner(
                     |row: &ReferenceItem| row.key.clone(),
                     |row: &ReferenceItem| row.key.clone(),
@@ -726,8 +729,8 @@ async fn invalid_authored_join_forms_fail_before_journal_provider_evaluation() {
 #[tokio::test]
 async fn test_flow_rejects_plain_join_input_before_journal_provider_evaluation() {
     let providers = Arc::new(AtomicUsize::new(0));
-    let reference = ReferenceSource::new(Arc::new(AtomicUsize::new(0)));
-    let stream = StreamSource::new(Arc::new(AtomicUsize::new(0)));
+    let reference = Port::owned(ReferenceSource::new(Arc::new(AtomicUsize::new(0))));
+    let stream = Port::owned(StreamSource::new(Arc::new(AtomicUsize::new(0))));
     let joiner = ExactJoin {
         calls: Arc::new(AtomicUsize::new(0)),
     };

@@ -12,6 +12,7 @@
 //! matches under whole-run verification. A `Completed` archive still replays
 //! as `Natural` and finalizes.
 
+use obzenflow::effects::Port;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::{TypedPayload, WriterId};
@@ -75,6 +76,7 @@ impl Ticks {
     }
 }
 
+#[obzenflow::system("ticks")]
 impl TypedFiniteSourceHandler for Ticks {
     type Output = Tick;
 
@@ -219,7 +221,7 @@ async fn synthesized_kinds(run_dir: &Path) -> Vec<Option<EofKind>> {
 macro_rules! linear_flow {
     ($journal_base:expr, $delivered:expr, $source:expr) => {
         FlowDefinition::materialize(move |_runtime_config| {
-            let ticks = $source;
+            let ticks = Port::owned($source);
             let summer = SumHandler::new();
             let out = replay_testkit::CountDeliveries::<SumResult>::new($delivered);
 
@@ -476,8 +478,8 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     macro_rules! fan_in_flow {
         ($base:expr, $delivered:expr) => {
             FlowDefinition::materialize(move |_runtime_config| {
-                let fast = Ticks::sealing(3);
-                let slow = Ticks::stalling(4);
+                let fast = Port::owned(Ticks::sealing(3));
+                let slow = Port::owned(Ticks::stalling(4));
                 let summer = SumHandler::new();
                 let out = replay_testkit::CountDeliveries::<SumResult>::new($delivered);
 
@@ -627,6 +629,7 @@ struct Pulse {
     emit: u64,
 }
 
+#[obzenflow::system("pulse")]
 impl TypedInfiniteSourceHandler for Pulse {
     type Output = Tick;
 
@@ -652,8 +655,8 @@ async fn graceful_stop_truncates_finite_and_infinite_inputs_of_a_stateful_fan_in
     let base = journal_base.clone();
     let counter = delivered.clone();
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let unread = Ticks::stalling(4);
-        let live = Pulse { next: 1, emit: 4 };
+        let unread = Port::owned(Ticks::stalling(4));
+        let live = Port::owned(Pulse { next: 1, emit: 4 });
         let summer = SumHandler::new();
         let out = replay_testkit::CountDeliveries::<SumResult>::new(counter);
         Ok(flow! {

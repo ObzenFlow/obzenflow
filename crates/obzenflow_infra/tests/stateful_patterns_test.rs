@@ -11,6 +11,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::stages::common::handlers::{
     StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
@@ -78,6 +79,7 @@ impl NumberSource {
     }
 }
 
+#[obzenflow_runtime::effects::system("numbers")]
 impl TypedFiniteSourceHandler for NumberSource {
     type Output = NumberEvent;
 
@@ -101,6 +103,7 @@ impl EmptySource {
     }
 }
 
+#[obzenflow_runtime::effects::system("empty")]
 impl TypedFiniteSourceHandler for EmptySource {
     type Output = NumberEvent;
 
@@ -275,7 +278,7 @@ async fn counter_emits_single_event_on_drain() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = NumberSource::new(5);
+            let source_handler = Port::owned(NumberSource::new(5));
             let counter_handler = CounterHandler::new();
 
             Ok(flow! {
@@ -308,7 +311,7 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = NumberSource::new(5);
+            let source_handler = Port::owned(NumberSource::new(5));
             let accumulator_handler = AccumulatorHandler::new();
 
             Ok(flow! {
@@ -339,7 +342,7 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = NumberSource::new(10);
+            let source_handler = Port::owned(NumberSource::new(10));
             let sum_handler = SumHandler::new();
 
             Ok(flow! {
@@ -374,7 +377,7 @@ async fn immediate_emitter_emits_during_accumulating() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = NumberSource::new(5);
+            let source_handler = Port::owned(NumberSource::new(5));
             let emitter_handler = ImmediateEmitter::new();
 
             Ok(flow! {
@@ -415,7 +418,7 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = EmptySource::new();
+            let source_handler = Port::owned(EmptySource::new());
             let counter_handler = CounterHandler::new();
 
             Ok(flow! {

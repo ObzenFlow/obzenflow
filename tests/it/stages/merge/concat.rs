@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use crate::replay_testkit;
+use obzenflow::effects::Port;
 
 use anyhow::{anyhow, Result};
 use obzenflow::flow::{flow, merge, sink, source, FlowDefinition};
@@ -47,8 +48,8 @@ struct Inputs {
 
 fn build(journal_base: PathBuf, inputs: Inputs) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let first_source = ValuesSource::new(notes("first", inputs.first));
-        let last_source = ValuesSource::new(notes("last", inputs.last));
+        let first_source = Port::owned(ValuesSource::new(notes("first", inputs.first)));
+        let last_source = Port::owned(ValuesSource::new(notes("last", inputs.last)));
         let collector = DiscardSink::<Note>::new();
         let rate = inputs.first_rate;
         let journals = journal_base.clone();

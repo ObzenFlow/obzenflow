@@ -67,6 +67,7 @@ struct TwoTicketSource {
     step: u8,
 }
 
+#[obzenflow::system("two-tickets")]
 impl TypedFiniteSourceHandler for TwoTicketSource {
     type Output = TicketRaised;
 
@@ -97,7 +98,7 @@ fn control_interleaving_flow(
         let embed = ai::infer(EmbedSummary::of_width(3));
         let chat_breaker = circuit_breaker().consecutive_failures(5);
         let embedding_breaker = circuit_breaker().consecutive_failures(5);
-        let input = TwoTicketSource::default();
+        let input = Port::owned(TwoTicketSource::default());
         let collected =
             perform(|output: &TicketEmbedded| output.clone()).through(collect_into(outputs));
 

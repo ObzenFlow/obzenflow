@@ -90,6 +90,7 @@ struct FixtureSource<T> {
     reads: Arc<SourceReads>,
 }
 
+#[obzenflow::system("fixtures")]
 impl<T: TypedPayload + Clone + Send + Sync + 'static> TypedFiniteSourceHandler
     for FixtureSource<T>
 {
@@ -352,14 +353,14 @@ struct TriageRun {
 fn build_triage_flow(root: PathBuf, run: TriageRun) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
         let reads = Arc::new(SourceReads::default());
-        let seeds = FixtureSource {
+        let seeds = obzenflow::effects::Port::owned(FixtureSource {
             rows: seed_rows(),
             reads: reads.clone(),
-        };
-        let scales = FixtureSource {
+        });
+        let scales = obzenflow::effects::Port::owned(FixtureSource {
             rows: scale_rows(),
             reads,
-        };
+        });
         let joined = obzenflow::stages::joins::inner(
             |scale: &Scale| scale.key,
             |seed: &Seed| seed.key,

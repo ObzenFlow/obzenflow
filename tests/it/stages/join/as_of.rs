@@ -4,6 +4,7 @@
 
 use chrono::{NaiveDate, NaiveDateTime};
 use obzenflow::application::LogLevel;
+use obzenflow::effects::Port;
 use obzenflow::flow::{flow, join, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::journal::read::{
@@ -66,12 +67,12 @@ fn rate(currency: &str, effective_at: NaiveDateTime, rate: f64) -> FxRate {
 
 fn priced_flow(journal_root: PathBuf, rates: Vec<FxRate>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let rates = ValuesSource::new(rates.clone());
-        let payments = ValuesSource::new(vec![Payment {
+        let rates = Port::owned(ValuesSource::new(rates.clone()));
+        let payments = Port::owned(ValuesSource::new(vec![Payment {
             txn_id: 1,
             currency: "EUR".to_string(),
             booked_at: at(14, 30),
-        }]);
+        }]));
         let price = joins::left_as_of(
             |rate: &FxRate| rate.currency.clone(),
             |rate: &FxRate| rate.effective_at,

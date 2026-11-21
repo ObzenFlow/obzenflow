@@ -27,12 +27,12 @@ pub use erased::{
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
     UnifiedInfiniteSourceHandler,
 };
-pub use hosted::{HostedIngressSource, HostedSubmission, IngressReceiptSender};
+pub use hosted::{HostedIngress, HostedIngressSource, HostedSubmission, IngressReceiptSender};
 pub use port::{AsyncFiniteSource, AsyncInfiniteSource, FiniteSource, InfiniteSource};
 #[doc(hidden)]
 pub use port::{
-    BoxesReader, PortAsyncFiniteReader, PortAsyncInfiniteReader, PortContinuation,
-    PortFiniteReader, PortInfiniteReader, PortPositionedReader,
+    BoxesReader, OwnedHandler, OwnedSource, PortAsyncFiniteReader, PortAsyncInfiniteReader,
+    PortContinuation, PortFiniteReader, PortInfiniteReader, PortPositionedReader, SourceRowInput,
 };
 pub use positioned::{PositionedFiniteReader, SeekableSource, SourceRecord};
 pub use record_de::RecordDeError;
