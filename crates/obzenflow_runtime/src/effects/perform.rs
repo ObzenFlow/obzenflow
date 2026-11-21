@@ -164,8 +164,8 @@ where
 {
     type Request = R;
 
-    fn prepare(&self, input: &In) -> Result<R, HandlerError> {
-        Ok((self.request)(input))
+    fn prepare(&self, input: In) -> Result<R, HandlerError> {
+        Ok((self.request)(&input))
     }
 }
 

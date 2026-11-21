@@ -91,7 +91,7 @@ impl<T> Command for DiscardSink<T> {
 impl<T: TypedPayload + Send + Sync + 'static> SinkRole<T> for DiscardSink<T> {
     type Request = Discarded;
 
-    fn prepare(&self, _input: &T) -> Result<Discarded, HandlerError> {
+    fn prepare(&self, _input: T) -> Result<Discarded, HandlerError> {
         Ok(Discarded)
     }
 }

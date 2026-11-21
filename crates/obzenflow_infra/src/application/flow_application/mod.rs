@@ -1240,9 +1240,12 @@ impl FlowApplication {
         let run = locator.path().to_path_buf();
         let mut status = flow.terminal_status();
         let mut offers = ArchiveOffers::default();
-        for verb in [ReplayVerb::Replay, ReplayVerb::Resume] {
-            let Ok(evidence) = DiskReplayArchive::written_run_evidence(run.clone(), verb).await
-            else {
+        let evidence = DiskReplayArchive::footer_evidence(&run).await;
+        for (verb, evidence) in [ReplayVerb::Replay, ReplayVerb::Resume]
+            .into_iter()
+            .zip(evidence)
+        {
+            let Some(evidence) = evidence else {
                 continue;
             };
             if verb == ReplayVerb::Replay {

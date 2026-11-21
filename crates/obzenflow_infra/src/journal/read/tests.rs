@@ -200,6 +200,87 @@ impl Run {
     }
 }
 
+#[tokio::test]
+async fn footer_replay_preserves_independent_offers() {
+    use crate::journal::disk::replay_archive::DiskReplayArchive;
+    use obzenflow_core::journal::archive::manifest::EFFECT_BINDING_DESCRIPTOR_CAPABILITY;
+    use obzenflow_core::journal::archive_actions::ReplayVerb;
+    let mut run = Run::new();
+    run.manifest
+        .capabilities
+        .insert(EFFECT_BINDING_DESCRIPTOR_CAPABILITY.into(), 1);
+    run.save_manifest();
+    run.system(run.factory.pipeline_running()).await;
+    run.data(1).await;
+    let path = run.dir.path();
+    let expected = DiskReplayArchive::written_run_evidence(path.into(), ReplayVerb::Replay)
+        .await
+        .unwrap();
+    let both = DiskReplayArchive::footer_evidence(path).await;
+    assert_eq!(both, [Some(expected.clone()), Some(expected.clone())]);
+    run.manifest.replay = Some(obzenflow_core::journal::RunManifestReplayConfig {
+        replay_from: path.join("missing").display().to_string(),
+        allow_incomplete_archive: false,
+    });
+    run.save_manifest();
+    assert_eq!(
+        DiskReplayArchive::footer_evidence(path).await,
+        [Some(expected), None]
+    );
+
+    let mut original = Run::new();
+    original.manifest.capabilities = run.manifest.capabilities.clone();
+    original.save_manifest();
+    original.system(original.factory.pipeline_running()).await;
+    let resume =
+        DiskReplayArchive::written_run_evidence(original.dir.path().into(), ReplayVerb::Resume)
+            .await
+            .unwrap();
+    run.manifest.replay.as_mut().unwrap().replay_from = original.dir.path().display().to_string();
+    run.save_manifest();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path.join("data.log"))
+        .unwrap()
+        .write_all(b"OJF0.0")
+        .unwrap();
+    assert_eq!(
+        DiskReplayArchive::footer_evidence(path).await,
+        [None, Some(resume)]
+    );
+}
+
+#[tokio::test]
+async fn footer_foreign_sink_frame_refused() {
+    use crate::journal::disk::replay_archive::DiskReplayArchive;
+    use obzenflow_core::journal::archive::manifest::EFFECT_BINDING_DESCRIPTOR_CAPABILITY;
+    let mut run = Run::new();
+    run.manifest
+        .capabilities
+        .insert(EFFECT_BINDING_DESCRIPTOR_CAPABILITY.into(), 1);
+    let stage = run.manifest.stages.get_mut("source").unwrap();
+    stage.stage_type = StageType::Sink;
+    stage.is_effectful = true;
+    run.save_manifest();
+    run.system(run.factory.pipeline_running()).await;
+    run.data(1).await;
+    assert!(DiskReplayArchive::footer_evidence(run.dir.path())
+        .await
+        .iter()
+        .all(Option::is_some));
+    let path = run.dir.path().join("data.log");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(b"OJF0.0")
+        .unwrap();
+    assert_eq!(
+        DiskReplayArchive::footer_evidence(run.dir.path()).await,
+        [None, None]
+    );
+}
+
 async fn available(tail: &mut RunTail) -> Vec<RunRecord> {
     let mut records = vec![];
     while let TailRead::Record(record) = tail.read_next().await.unwrap() {

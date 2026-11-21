@@ -168,7 +168,7 @@ impl<T> Command for RecordingSink<T> {
 impl<T: TypedPayload + Send + Sync + 'static> SinkRole<T> for RecordingSink<T> {
     type Request = RecordedInput;
 
-    fn prepare(&self, input: &T) -> Result<RecordedInput, HandlerError> {
+    fn prepare(&self, input: T) -> Result<RecordedInput, HandlerError> {
         serde_json::to_value(input)
             .map(|payload| RecordedInput { payload })
             .map_err(|error| HandlerError::Validation(error.to_string()))
@@ -266,7 +266,7 @@ impl<T> Command for CountingSink<T> {
 impl<T: TypedPayload + Send + Sync + 'static> SinkRole<T> for CountingSink<T> {
     type Request = Counted;
 
-    fn prepare(&self, _input: &T) -> Result<Counted, HandlerError> {
+    fn prepare(&self, _input: T) -> Result<Counted, HandlerError> {
         Ok(Counted)
     }
 }

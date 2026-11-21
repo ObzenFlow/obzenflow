@@ -962,3 +962,12 @@ async fn grouped_late_refusal_records_failure() {
     );
     assert_eq!(journal.events()[0].event_type(), "effect.execution_failed");
 }
+
+#[test]
+fn nested_request_hash_matches_recording() {
+    let request = serde_json::json!({"z": 3, "a": [{"z": 2, "a": 1}, 0]});
+    assert_eq!(
+        super::super::identity::hash_json_value(request).unwrap(),
+        "13674e8b3703710250cfe837b12a4919c0d457d364e07a0c25e7497d8741dfa7"
+    );
+}

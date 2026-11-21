@@ -28,7 +28,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
 use ring::digest::{digest, SHA256};
 use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};

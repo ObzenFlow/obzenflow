@@ -9,10 +9,9 @@ use obzenflow_core::TypedPayload;
 
 type Member = (AtomicCommitEntry, DeliveredRecord<ChainPayload>);
 
-struct Pending<R: SinkRequest> {
+struct Pending {
     index: usize,
     declaration: EffectDeclaration,
-    call: Call<R>,
     live: LiveCall,
     permit: SinkPermit,
 }
@@ -182,7 +181,7 @@ pub(in crate::effects) struct SinkGroup<C: SinkRole<In>, In> {
     cores: Vec<EffectsCore>,
     results: Vec<Result<(), HandlerError>>,
     guards: Vec<(super::super::history::EffectCursorGuard, EffectCursor)>,
-    admitted: Vec<Pending<C::Request>>,
+    admitted: Vec<(Pending, Call<C::Request>)>,
     marker: PhantomData<fn(In)>,
 }
 
@@ -225,7 +224,7 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> OpenSinkBatch fo
         let mut close = false;
         let mut history_error = None;
         let result = async {
-            let request = self.role.prepare(&input?)?;
+            let request = self.role.prepare(input?)?;
             let call = Call::new(request, core.project_named_effect::<Call<C::Request>>()?);
             let declaration = core.authorise_call(&call)?;
             let selected = core.select_call(&call, declaration.clone()).await;
@@ -265,13 +264,15 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> OpenSinkBatch fo
                 }
             }
             close = permit.closes_group;
-            self.admitted.push(Pending {
-                index,
-                declaration,
+            self.admitted.push((
+                Pending {
+                    index,
+                    declaration,
+                    live,
+                    permit,
+                },
                 call,
-                live,
-                permit,
-            });
+            ));
             Ok(())
         }
         .await;
@@ -308,7 +309,7 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> SinkGroup<C, In>
             admitted,
             ..
         } = self;
-        if let Some(head) = admitted.first() {
+        if let Some((head, _)) = admitted.first() {
             let core = &cores[head.index];
             let group = head.live.effect.binding_context.ports.group::<C::Request>();
             let safety = head.live.effect.identity.safety;
@@ -324,7 +325,7 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> SinkGroup<C, In>
                 if prestarted {
                     let starts = admitted
                         .iter()
-                        .map(|p| {
+                        .map(|(p, _)| {
                             AffineStart::new(
                                 &cores[p.index],
                                 &p.live.effect,
@@ -335,15 +336,23 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> SinkGroup<C, In>
                         .collect::<Result<_, _>>()?;
                     core.publish_sink_members("sink-starts:v1:", starts).await?;
                 }
+                let physical_size = if group.is_some() { admitted.len() } else { 1 };
                 let mut remaining = admitted.into_iter();
-                while let Some(first) = remaining.next() {
-                    *input = first.index;
-                    let mut calls = vec![first];
-                    if group.is_some() {
-                        calls.extend(&mut remaining);
-                    }
-                    let mut physical =
-                        shared_call(&cores, &mut calls, group.clone(), prestarted).await?;
+                while remaining.len() > 0 {
+                    let (mut calls, requests): (Vec<_>, Vec<_>) = remaining
+                        .by_ref()
+                        .take(physical_size)
+                        .map(|(pending, call)| (pending, call.request))
+                        .unzip();
+                    *input = calls[0].index;
+                    let mut physical = shared_call(
+                        &cores,
+                        &mut calls,
+                        requests.into(),
+                        group.clone(),
+                        prestarted,
+                    )
+                    .await?;
                     for mut p in calls {
                         let core = &mut cores[p.index];
                         let mut controls = p
@@ -393,7 +402,7 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> SinkGroup<C, In>
                     }
                 }
             } else {
-                for p in admitted {
+                for (p, call) in admitted {
                     *input = p.index;
                     let core = &mut cores[p.index];
                     let LiveCall {
@@ -403,7 +412,7 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> SinkGroup<C, In>
                     } = p.live;
                     guards.push((guard, live.cursor.clone()));
                     let result = core
-                        .execute_live(p.call, live, prior_attempts)
+                        .execute_live(call, live, prior_attempts)
                         .await
                         .map(drop);
                     if let Err(error @ EffectError::DestinationChanged { .. }) = result {
@@ -480,7 +489,7 @@ struct SharedResult<T> {
 struct PhysicalWrite<R: SinkRequest> {
     system: Option<Arc<dyn SinkGroupSystem<R>>>,
     reservations: Mutex<Vec<Box<dyn FnOnce() + Send + Sync>>>,
-    requests: Vec<R>,
+    requests: Arc<[R]>,
     ctx: EffectContext,
     starts: Vec<(u32, AffineStart)>,
     published: std::sync::atomic::AtomicU32,
@@ -530,7 +539,7 @@ impl<R: SinkRequest> PhysicalWrite<R> {
         }
         lifecycle.mark_started();
         let result = match &self.system {
-            Some(system) => system.write_group(&self.requests, &self.ctx).await,
+            Some(system) => system.write_group(self.requests.clone(), &self.ctx).await,
             None => {
                 let port = self.ctx.port(super::super::call::call_port_slot::<R>())?;
                 self.requests[0]
@@ -552,7 +561,8 @@ impl<R: SinkRequest> PhysicalWrite<R> {
 
 async fn shared_call<R: SinkRequest>(
     cores: &[EffectsCore],
-    pending: &mut [Pending<R>],
+    pending: &mut [Pending],
+    requests: Arc<[R]>,
     system: Option<Arc<dyn SinkGroupSystem<R>>>,
     prestarted: bool,
 ) -> Result<SharedResult<R::Outcome>, EffectError> {
@@ -584,7 +594,7 @@ async fn shared_call<R: SinkRequest>(
     let write = Arc::new(PhysicalWrite {
         system,
         reservations,
-        requests: pending.iter().map(|p| p.call.request.clone()).collect(),
+        requests,
         ctx: head.live.effect.binding_context.clone(),
         starts,
         published: u32::from(prestarted).into(),

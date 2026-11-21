@@ -551,6 +551,10 @@ async fn write_output(
         ConsoleOutput::Text(frame) | ConsoleOutput::Verbatim(frame) => frame.clone(),
         ConsoleOutput::Empty => return Ok(()),
     };
+    write_frame(destination, frame).await
+}
+
+async fn write_frame(destination: OutputDestination, frame: String) -> Result<(), EffectError> {
     blocking_io(move || destination.write_frame(&frame))
         .await?
         .map(|_| ())
@@ -567,6 +571,8 @@ fn console_port(destination: OutputDestination) -> Port<dyn ConsolePort> {
 }
 
 /// A sink that writes each input to the console, formatted by `F`.
+/// Stdout and stderr write once per input. The runtime journals up to 64
+/// queued results together by default, with zero maximum wait.
 pub struct ConsoleSink<T, F = JsonFormatter> {
     formatter: F,
     destination: Option<OutputDestination>,
@@ -620,8 +626,8 @@ impl<T, F> ConsoleSink<T, F> {
         self
     }
 
-    /// Write through another system that answers `ConsolePort`, such as a
-    /// test port.
+    /// Write through another system that answers `ConsolePort`. A replacement
+    /// uses the framework's one-request default.
     pub fn through(mut self, port: Port<dyn ConsolePort>) -> Self {
         self.destination = None;
         self.port = port;
@@ -645,9 +651,17 @@ where
 {
     type Request = ConsoleOutput;
 
-    fn prepare(&self, input: &T) -> Result<ConsoleOutput, HandlerError> {
+    fn batch_defaults(&self) -> SinkBatchDefaults {
+        if self.destination.is_some() {
+            super::queued_batch_defaults()
+        } else {
+            SinkBatchDefaults::default()
+        }
+    }
+
+    fn prepare(&self, input: T) -> Result<ConsoleOutput, HandlerError> {
         self.formatter
-            .format(input)
+            .format(&input)
             .map_err(|error| HandlerError::Validation(error.to_string()))
     }
 }
@@ -702,10 +716,8 @@ impl ConsoleTable {
 #[system("console-table")]
 #[async_trait]
 impl ConsoleTablePort for ConsoleTable {
-    async fn write_row(&self, row: &TableRow, ctx: &EffectContext) -> Result<(), EffectError> {
-        self.write_group(std::slice::from_ref(row), ctx)
-            .await
-            .map(|_| ())
+    async fn write_row(&self, row: &TableRow, _: &EffectContext) -> Result<(), EffectError> {
+        self.render_rows(std::slice::from_ref(row)).await
     }
 }
 
@@ -713,13 +725,19 @@ impl ConsoleTablePort for ConsoleTable {
 impl SinkGroupSystem<TableRow> for ConsoleTable {
     async fn write_group(
         &self,
-        rows: &[TableRow],
+        rows: std::sync::Arc<[TableRow]>,
         _: &EffectContext,
     ) -> Result<Vec<()>, EffectError> {
+        self.render_rows(&rows).await?;
+        Ok(vec![(); rows.len()])
+    }
+}
+
+impl ConsoleTable {
+    async fn render_rows(&self, rows: &[TableRow]) -> Result<(), EffectError> {
         let cells: Vec<_> = rows.iter().map(|row| &row.cells).collect();
         let frame = render_table(&self.columns, &cells, self.max_width);
-        write_output(self.destination, &ConsoleOutput::Text(frame)).await?;
-        Ok(vec![(); rows.len()])
+        write_frame(self.destination, frame).await
     }
 }
 
@@ -803,9 +821,9 @@ where
 {
     type Request = TableRow;
 
-    fn prepare(&self, input: &T) -> Result<TableRow, HandlerError> {
+    fn prepare(&self, input: T) -> Result<TableRow, HandlerError> {
         self.formatter
-            .prepare_row(input)
+            .prepare_row(&input)
             .map(|cells| TableRow { cells })
             .map_err(|error| HandlerError::Validation(error.to_string()))
     }
@@ -850,6 +868,16 @@ mod tests {
     }
 
     #[test]
+    fn console_defaults_follow_destination() {
+        let stdout = ConsoleSink::<TestEvent>::new(JsonFormatter);
+        assert_eq!(stdout.batch_defaults().size.unwrap().get(), 64);
+        let stderr = stdout.to_stderr();
+        assert_eq!(stderr.batch_defaults().size.unwrap().get(), 64);
+        let external = stderr.through(Port::to(Captured(Default::default())));
+        assert!(external.batch_defaults().size.is_none());
+    }
+
+    #[test]
     fn formatters_render_one_item() {
         let item = TestEvent {
             value: "hello".into(),
@@ -883,7 +911,7 @@ mod tests {
                 vec![e.value.clone()]
             }));
         let error = sink
-            .prepare(&TestEvent { value: "x".into() })
+            .prepare(TestEvent { value: "x".into() })
             .expect_err("one cell for two columns");
         assert!(error.to_string().contains("does not match its columns"));
     }
@@ -930,7 +958,7 @@ mod tests {
             .through(Port::to(Captured(seen.clone())));
         assert_eq!(sink.ports().0.system_name(), "captured-console");
         let request = sink
-            .prepare(&TestEvent {
+            .prepare(TestEvent {
                 value: "one".into(),
             })
             .unwrap();

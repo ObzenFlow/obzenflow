@@ -20,7 +20,7 @@ where
         effect.label(),
         schema_version,
         stage_logic_version,
-        hash_json_value(&effect.canonical_input())?,
+        hash_json_value(effect.canonical_input())?,
         binding,
     ))
 }
@@ -29,33 +29,15 @@ pub(super) fn descriptor_hash(
     descriptor: &EffectDescriptor,
 ) -> Result<EffectDescriptorHash, EffectError> {
     Ok(EffectDescriptorHash::from(hash_json_value(
-        &serde_json::to_value(descriptor).map_err(|e| EffectError::Serialization(e.to_string()))?,
+        serde_json::to_value(descriptor).map_err(|e| EffectError::Serialization(e.to_string()))?,
     )?))
 }
 
-pub(super) fn hash_json_value(value: &Value) -> Result<String, EffectError> {
-    let canonical = canonicalize_json_value(value.clone());
+pub(super) fn hash_json_value(mut value: Value) -> Result<String, EffectError> {
+    value.sort_all_objects();
     let bytes =
-        serde_json::to_vec(&canonical).map_err(|e| EffectError::Serialization(e.to_string()))?;
+        serde_json::to_vec(&value).map_err(|e| EffectError::Serialization(e.to_string()))?;
     Ok(hex_digest(digest(&SHA256, &bytes).as_ref()))
-}
-
-fn canonicalize_json_value(value: Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut entries: Vec<_> = map.into_iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut out = Map::new();
-            for (key, value) in entries {
-                out.insert(key, canonicalize_json_value(value));
-            }
-            Value::Object(out)
-        }
-        Value::Array(values) => {
-            Value::Array(values.into_iter().map(canonicalize_json_value).collect())
-        }
-        other => other,
-    }
 }
 
 fn hex_digest(bytes: &[u8]) -> String {

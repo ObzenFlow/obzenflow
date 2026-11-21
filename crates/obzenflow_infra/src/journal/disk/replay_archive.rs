@@ -23,6 +23,7 @@ use obzenflow_core::journal::archive::manifest::{
     JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
+use obzenflow_core::journal::archive_actions::{ArchiveEvidence, ReplayVerb};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
 use obzenflow_core::source::RecordedSourceFrontier;
 use obzenflow_core::{ChainEvent, StageId};
@@ -67,6 +68,12 @@ enum Liveness {
     Stopped,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanPurpose {
+    Recovery,
+    WrittenFooter,
+}
+
 impl DiskReplayArchive {
     /// Open an archive to replay it. The archive's status never refuses here;
     /// admission decides from [`Self::evidence`].
@@ -74,8 +81,13 @@ impl DiskReplayArchive {
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
     ) -> Result<Self, ReplayError> {
-        let mut archive =
-            Self::open_replay(archive_path, allow_incomplete_archive, Liveness::Probe).await?;
+        let mut archive = Self::open_replay(
+            archive_path,
+            allow_incomplete_archive,
+            Liveness::Probe,
+            ScanPurpose::Recovery,
+        )
+        .await?;
         archive.record_interrupted_appends();
         Ok(archive)
     }
@@ -130,6 +142,7 @@ impl DiskReplayArchive {
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
         liveness: Liveness,
+        purpose: ScanPurpose,
     ) -> Result<Self, ReplayError> {
         let (archive_path, manifest) = Self::read_manifest(archive_path)?;
         let live_writer = liveness == Liveness::Probe
@@ -139,13 +152,14 @@ impl DiskReplayArchive {
             manifest,
             allow_incomplete_archive,
             live_writer,
+            purpose,
         )
         .await
     }
 
     /// The evidence archive admission reads.
-    pub fn evidence(&self) -> obzenflow_core::journal::archive_actions::ArchiveEvidence {
-        use obzenflow_core::journal::archive_actions::{ArchiveEvidence, SourceEvidence};
+    pub fn evidence(&self) -> ArchiveEvidence {
+        use obzenflow_core::journal::archive_actions::SourceEvidence;
         ArchiveEvidence {
             status: self.status,
             live_writer: self.live_writer,
@@ -167,14 +181,43 @@ impl DiskReplayArchive {
     /// would open it. The run must have stopped and be the head of its history.
     pub async fn written_run_evidence(
         run: PathBuf,
-        verb: obzenflow_core::journal::archive_actions::ReplayVerb,
-    ) -> Result<obzenflow_core::journal::archive_actions::ArchiveEvidence, ReplayError> {
-        use obzenflow_core::journal::archive_actions::ReplayVerb;
+        verb: ReplayVerb,
+    ) -> Result<ArchiveEvidence, ReplayError> {
         let archive = match verb {
-            ReplayVerb::Replay => Self::open_replay(run, false, Liveness::Stopped).await?,
-            ReplayVerb::Resume => Self::open_resume(run, false, Liveness::Stopped).await?,
+            ReplayVerb::Replay => {
+                Self::open_replay(run, false, Liveness::Stopped, ScanPurpose::Recovery).await?
+            }
+            ReplayVerb::Resume => {
+                Self::open_resume(run, false, Liveness::Stopped, ScanPurpose::Recovery).await?
+            }
         };
         Ok(archive.evidence())
+    }
+
+    pub(crate) async fn footer_evidence(run: &Path) -> [Option<ArchiveEvidence>; 2] {
+        let Ok((path, manifest)) = Self::read_manifest(run.to_owned()) else {
+            return [None, None];
+        };
+        let original = replayed_run(&manifest);
+        let purpose = ScanPurpose::WrittenFooter;
+        let head = Self::open_manifest(path, manifest, false, false, purpose)
+            .await
+            .ok();
+        let replay = head.as_ref().map(Self::evidence);
+        let resume = if let Some(original) = original {
+            Self::open_resume(original, false, Liveness::Stopped, purpose)
+                .await
+                .ok()
+                .map(|head| head.evidence())
+        } else if let Some(head) = head.filter(|head| head.unfinished_parent().is_some()) {
+            head.with_ancestors(purpose)
+                .await
+                .ok()
+                .map(|head| head.evidence())
+        } else {
+            replay.clone()
+        };
+        [replay, resume]
     }
 
     /// An archive's canonical path and its gated manifest, before any journal
@@ -273,6 +316,7 @@ impl DiskReplayArchive {
         manifest: RunManifest,
         allow_incomplete_archive: bool,
         live_writer: bool,
+        purpose: ScanPurpose,
     ) -> Result<Self, ReplayError> {
         // Journal incarnations are manifest-bound, including empty journals.
         // Incomplete admission cannot turn a conflicting descriptor into evidence.
@@ -348,13 +392,14 @@ impl DiskReplayArchive {
             ReadPolicy::SealedScan {
                 tolerate_torn_tail: status != ArchiveStatus::Completed,
             },
+            purpose,
         )?;
         let entered_generation = manifest
             .resume
             .as_ref()
             .map(|resume| resume.resume_generation)
             .unwrap_or(0);
-        if entered_generation > scan.max_generation.0 {
+        if purpose == ScanPurpose::Recovery && entered_generation > scan.max_generation.0 {
             tracing::debug!(
                 archive_path = %archive_path.display(),
                 manifest_generation = entered_generation,
@@ -390,8 +435,13 @@ impl DiskReplayArchive {
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
     ) -> Result<Self, ReplayError> {
-        let mut head =
-            Self::open_resume(archive_path, allow_incomplete_archive, Liveness::Probe).await?;
+        let mut head = Self::open_resume(
+            archive_path,
+            allow_incomplete_archive,
+            Liveness::Probe,
+            ScanPurpose::Recovery,
+        )
+        .await?;
         head.record_interrupted_appends();
         Ok(head)
     }
@@ -400,53 +450,59 @@ impl DiskReplayArchive {
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
         liveness: Liveness,
+        purpose: ScanPurpose,
     ) -> Result<Self, ReplayError> {
         let (archive_path, manifest) = Self::resolve_replayed_run(archive_path)?;
         let live_writer = match liveness {
             Liveness::Probe => super::continuation::admit(&archive_path, &manifest)?,
             Liveness::Stopped => false,
         };
-        let mut head = Self::open_manifest(
+        let head = Self::open_manifest(
             archive_path,
             manifest,
             allow_incomplete_archive,
             live_writer,
+            purpose,
         )
         .await?;
-        if live_writer {
-            return Ok(head);
+        head.with_ancestors(purpose).await
+    }
+
+    async fn with_ancestors(mut self, purpose: ScanPurpose) -> Result<Self, ReplayError> {
+        if self.live_writer {
+            return Ok(self);
         }
         let mut ancestors: Vec<Arc<Self>> = Vec::new();
-        let mut parent = head.unfinished_parent();
+        let mut parent = self.unfinished_parent();
         while let Some(ancestor) = parent {
-            if ancestor == head.archive_path || ancestors.iter().any(|a| a.archive_path == ancestor)
+            if ancestor == self.archive_path || ancestors.iter().any(|a| a.archive_path == ancestor)
             {
                 return Err(ReplayError::Parse {
                     message: format!(
                         "the resume lineage of {} returns to {}",
-                        head.archive_path.display(),
+                        self.archive_path.display(),
                         ancestor.display()
                     ),
                 });
             }
             if !ancestor.exists() {
                 return Err(ReplayError::AncestorMissing {
-                    archive: head.archive_path.clone(),
+                    archive: self.archive_path.clone(),
                     ancestor,
                 });
             }
-            let opened = Self::open_replay(ancestor.clone(), true, Liveness::Stopped)
+            let opened = Self::open_replay(ancestor.clone(), true, Liveness::Stopped, purpose)
                 .await
                 .map_err(|error| ReplayError::AncestorUnreadable {
-                    archive: head.archive_path.clone(),
+                    archive: self.archive_path.clone(),
                     ancestor,
                     source: Box::new(error),
                 })?;
             parent = opened.unfinished_parent();
             ancestors.push(Arc::new(opened));
         }
-        head.merge_lineage(ancestors)?;
-        Ok(head)
+        self.merge_lineage(ancestors)?;
+        Ok(self)
     }
 
     /// The first run a chain of replays reproduces (B13): a replay adds
@@ -1026,6 +1082,7 @@ fn scan_source_journals(
     archive_path: &Path,
     manifest: &RunManifest,
     policy: ReadPolicy,
+    purpose: ScanPurpose,
 ) -> Result<SourceJournalScan, ReplayError> {
     use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
     use obzenflow_core::event::ChainPayload;
@@ -1039,7 +1096,7 @@ fn scan_source_journals(
     for (stage_key, stage_info) in &manifest.stages {
         if stage_info.is_effectful && !stage_info.stage_type.is_source() {
             let path = archive_path.join(&stage_info.data_journal_file);
-            max_generation = max_generation.max(scan_marker_generation(&path, policy)?);
+            max_generation = max_generation.max(scan_marker_generation(&path, policy, purpose)?);
             continue;
         }
         if !stage_info.stage_type.is_source() {
@@ -1136,7 +1193,11 @@ fn scan_source_journals(
     })
 }
 
-fn scan_marker_generation(path: &Path, policy: ReadPolicy) -> Result<u64, ReplayError> {
+fn scan_marker_generation(
+    path: &Path,
+    policy: ReadPolicy,
+    purpose: ScanPurpose,
+) -> Result<u64, ReplayError> {
     use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
     use obzenflow_core::event::ChainPayload;
     if !path.exists() {
@@ -1157,6 +1218,12 @@ fn scan_marker_generation(path: &Path, policy: ReadPolicy) -> Result<u64, Replay
             source: e,
         })?
     {
+        if purpose == ScanPurpose::WrittenFooter {
+            if super::codec::frame::validate(&buf).is_ok() {
+                continue;
+            }
+            return scan_marker_generation(path, policy, ScanPurpose::Recovery);
+        }
         let record_offset = offset;
         offset += consumed as u64;
         match dispose(

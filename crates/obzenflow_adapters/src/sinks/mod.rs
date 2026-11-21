@@ -28,6 +28,18 @@ pub use recording::{
 };
 pub use tracing::{TracingLevel, TracingOutput, TracingPort, TracingSink};
 
+fn queued_batch_defaults() -> obzenflow_runtime::effects::SinkBatchDefaults {
+    obzenflow_runtime::effects::SinkBatchDefaults {
+        size: std::num::NonZeroUsize::new(64),
+        max_wait: None,
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }

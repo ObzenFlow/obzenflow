@@ -6608,8 +6608,8 @@ mod csv_register {
     impl CsvProjection for EntryRow {
         type Input = LedgerEntry;
         type Row = LedgerEntry;
-        fn project(&self, entry: &LedgerEntry) -> Result<LedgerEntry, HandlerError> {
-            Ok(entry.clone())
+        fn project(&self, entry: LedgerEntry) -> Result<LedgerEntry, HandlerError> {
+            Ok(entry)
         }
     }
 
@@ -6979,7 +6979,11 @@ mod csv_register {
     async fn refuse_changed_register(name: &str) -> (Scenario, PathBuf) {
         let scenario = fresh(name);
         let file = register_file(&scenario);
-        let child = Child::spawn(&scenario, Vec::new(), Some(Hold::RegisterWrite(3)));
+        let child = Child::spawn(
+            &scenario,
+            sink_group_config(&scenario, 1),
+            Some(Hold::RegisterWrite(3)),
+        );
         let run = child.run().await;
         let held = rows(&ENTRIES[..3]);
         until(&run, name, |archive| {
@@ -7066,7 +7070,11 @@ mod csv_register {
         let scenario = fresh(name);
         let file = || std::fs::read_to_string(register_file(&scenario)).unwrap_or_default();
         let held = rows(&ENTRIES[..held_write]);
-        let child = Child::spawn(&scenario, Vec::new(), Some(Hold::RegisterWrite(held_write)));
+        let child = Child::spawn(
+            &scenario,
+            sink_group_config(&scenario, 1),
+            Some(Hold::RegisterWrite(held_write)),
+        );
         let run = child.run().await;
         until(&run, name, |archive| {
             appended(archive) == held_write - 1 && file() == held

@@ -28,7 +28,7 @@ impl<R: CallRequest<Records = RecordedReply>> SinkRequest for R {}
 pub trait SinkGroupSystem<R: SinkRequest>: Send + Sync + 'static {
     async fn write_group(
         &self,
-        requests: &[R],
+        requests: std::sync::Arc<[R]>,
         context: &super::EffectContext,
     ) -> Result<Vec<R::Outcome>, super::EffectError>;
 }
@@ -53,7 +53,8 @@ pub trait SinkRole<In>: Command + Send + Sync + 'static {
     /// The request the sink sends for each input.
     type Request: SinkRequest;
 
-    fn prepare(&self, input: &In) -> Result<Self::Request, HandlerError>;
+    /// Consumes the input so its fields can move into the request.
+    fn prepare(&self, input: In) -> Result<Self::Request, HandlerError>;
 
     #[doc(hidden)]
     fn batch_defaults(&self) -> SinkBatchDefaults {
@@ -147,7 +148,7 @@ where
         input: In,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        let request = self.role.prepare(&input)?;
+        let request = self.role.prepare(input)?;
         match fx.send(request).await {
             Err(error) if !error.is_replay_rejection() => return Err(error.into()),
             Ok(_) | Err(_) => {}

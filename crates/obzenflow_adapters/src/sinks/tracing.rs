@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
-    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkRole,
+    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkBatchDefaults, SinkRole,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
@@ -109,12 +109,12 @@ fn tracing_port() -> Port<dyn TracingPort> {
     PORT.get_or_init(|| Port::to(Tracing)).clone()
 }
 
-/// A sink that emits one tracing event per input. The callback builds the
-/// event from the input; only the live system emits it, so a replay, which
-/// calls no system, emits nothing.
+/// A sink that emits one tracing event per live input. With the built-in
+/// system the runtime journals up to 64 queued outcomes together by default,
+/// with zero maximum wait. Replay emits no tracing events.
 pub struct TracingSink<T, F> {
     event: F,
-    port: Port<dyn TracingPort>,
+    replacement: Option<Port<dyn TracingPort>>,
     _input: PhantomData<fn() -> T>,
 }
 
@@ -126,17 +126,17 @@ where
     pub fn new(event: F) -> Self {
         Self {
             event,
-            port: tracing_port(),
+            replacement: None,
             _input: PhantomData,
         }
     }
 }
 
 impl<T, F> TracingSink<T, F> {
-    /// Emit through another system that answers `TracingPort`, such as a test
-    /// port.
+    /// Emit through another system that answers `TracingPort`. A replacement
+    /// uses the framework's one-request default.
     pub fn through(mut self, port: Port<dyn TracingPort>) -> Self {
-        self.port = port;
+        self.replacement = Some(port);
         self
     }
 }
@@ -145,7 +145,7 @@ impl<T, F: Clone> Clone for TracingSink<T, F> {
     fn clone(&self) -> Self {
         Self {
             event: self.event.clone(),
-            port: self.port.clone(),
+            replacement: self.replacement.clone(),
             _input: PhantomData,
         }
     }
@@ -155,7 +155,7 @@ impl<T, F> std::fmt::Debug for TracingSink<T, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TracingSink")
             .field("input", &std::any::type_name::<T>())
-            .field("port", &self.port)
+            .field("port", &self.ports().0)
             .finish_non_exhaustive()
     }
 }
@@ -165,7 +165,7 @@ impl<T, F> Command for TracingSink<T, F> {
     type AllowedEffects = DeclaredEffectSet<WithMember<TracingOutput, EmptySet>>;
 
     fn ports(&self) -> Self::Ports {
-        (self.port.clone(), ())
+        (self.replacement.clone().unwrap_or_else(tracing_port), ())
     }
 }
 
@@ -176,8 +176,16 @@ where
 {
     type Request = TracingOutput;
 
-    fn prepare(&self, input: &T) -> Result<TracingOutput, HandlerError> {
-        Ok((self.event)(input))
+    fn batch_defaults(&self) -> SinkBatchDefaults {
+        if self.replacement.is_none() {
+            super::queued_batch_defaults()
+        } else {
+            SinkBatchDefaults::default()
+        }
+    }
+
+    fn prepare(&self, input: T) -> Result<TracingOutput, HandlerError> {
+        Ok((self.event)(&input))
     }
 }
 
@@ -193,11 +201,18 @@ mod tests {
     }
 
     #[test]
+    fn tracing_defaults_follow_destination() {
+        let sink = TracingSink::new(|_: &Item| TracingOutput::info("ready"));
+        assert_eq!(sink.batch_defaults().size.unwrap().get(), 64);
+        assert!(sink.through(tracing_port()).batch_defaults().size.is_none());
+    }
+
+    #[test]
     fn tracing_request_carries_named_fields() {
         let sink = TracingSink::new(|item: &Item| {
             TracingOutput::info("terminal item observed").field("value", item.0)
         });
-        let request = sink.prepare(&Item(7)).unwrap();
+        let request = sink.prepare(Item(7)).unwrap();
         assert_eq!(request.message, "terminal item observed");
         assert_eq!(request.fields.get("value"), Some(&Value::from(7)));
         assert_eq!(sink.ports().0.system_name(), "tracing");
@@ -221,7 +236,7 @@ mod tests {
         let sink = TracingSink::new(|item: &Item| {
             TracingOutput::info("terminal item observed").field("value", item.0)
         });
-        let request = sink.prepare(&Item(7)).unwrap();
+        let request = sink.prepare(Item(7)).unwrap();
         assert_eq!(
             events.load(std::sync::atomic::Ordering::SeqCst),
             0,

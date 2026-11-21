@@ -42,14 +42,14 @@ pub trait CsvProjection: Clone + Send + Sync + 'static {
     /// Serializable object used for column selection and row encoding.
     type Row: Serialize;
 
-    /// Project one domain input into its CSV-facing row.
-    fn project(&self, input: &Self::Input) -> Result<Self::Row, HandlerError>;
+    /// Consume one domain input to build its CSV row.
+    fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError>;
 }
 
 /// One row a CSV sink appends: the projected row's fields, by name.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CsvRow {
-    fields: Map<String, Value>,
+    fields: Arc<Map<String, Value>>,
 }
 
 /// What one append records: the file's length and SHA-256 after the row.
@@ -98,7 +98,7 @@ enum Written {
 }
 
 struct CsvRegister {
-    layout: CsvLayout,
+    layout: Arc<CsvLayout>,
     state: Arc<Mutex<RegisterState>>,
 }
 
@@ -106,7 +106,7 @@ struct CsvRegister {
 #[async_trait]
 impl CsvRegisterPort for CsvRegister {
     async fn append(&self, row: &CsvRow, ctx: &EffectContext) -> Result<Appended, EffectError> {
-        self.write_group(std::slice::from_ref(row), ctx)
+        self.write_group(Arc::from([row.clone()]), ctx)
             .await
             .map(|mut replies| replies.remove(0))
     }
@@ -116,7 +116,7 @@ impl CsvRegisterPort for CsvRegister {
 impl SinkGroupSystem<CsvRow> for CsvRegister {
     async fn write_group(
         &self,
-        rows: &[CsvRow],
+        rows: Arc<[CsvRow]>,
         ctx: &EffectContext,
     ) -> Result<Vec<Appended>, EffectError> {
         let closed = matches!(
@@ -131,7 +131,6 @@ impl SinkGroupSystem<CsvRow> for CsvRegister {
         let continues_history = ctx.continues_history();
         let layout = self.layout.clone();
         let state = Arc::clone(&self.state);
-        let rows = rows.to_vec();
         blocking_io(move || {
             let mut state = state.lock().map_err(|_| poisoned_lock())?;
             if matches!(*state, RegisterState::Closed) {
@@ -258,49 +257,34 @@ impl OpenRegister {
     }
 
     fn append_group(&mut self, layout: &CsvLayout, rows: &[CsvRow]) -> io::Result<Vec<Appended>> {
-        let mut bytes = Vec::new();
+        let mut writer = WriterBuilder::new()
+            .delimiter(layout.delimiter)
+            .from_writer(Vec::new());
         let mut replies = Vec::with_capacity(rows.len());
         for row in rows {
-            replies.push(self.encode(layout, &row.fields, &mut bytes)?);
+            let columns = self.columns.get_or_insert_with(|| {
+                let mut names: Vec<_> = row.fields.keys().cloned().collect();
+                names.sort();
+                names
+            });
+            let start = writer.get_ref().len();
+            if self.header_written == Written::Nothing {
+                writer.write_record(layout.headers.as_ref().unwrap_or(columns))?;
+            }
+            writer.write_record(columns.iter().map(|name| cell(row.fields.get(name))))?;
+            writer.flush()?;
+            let bytes = &writer.get_ref()[start..];
+            self.header_written = Written::Header;
+            self.length += bytes.len() as u64;
+            self.digest.update(bytes);
+            replies.push(Appended {
+                length: self.length,
+                sha256: hex(self.digest.clone().finish().as_ref()),
+            });
         }
-        self.file.write_all(&bytes)?;
+        self.file.write_all(writer.get_ref())?;
         self.file.sync_data()?;
         Ok(replies)
-    }
-
-    fn encode(
-        &mut self,
-        layout: &CsvLayout,
-        fields: &Map<String, Value>,
-        bytes: &mut Vec<u8>,
-    ) -> io::Result<Appended> {
-        let columns = self
-            .columns
-            .get_or_insert_with(|| {
-                let mut columns: Vec<String> = fields.keys().cloned().collect();
-                columns.sort();
-                columns
-            })
-            .clone();
-        let start = bytes.len();
-        {
-            let mut writer = WriterBuilder::new()
-                .delimiter(layout.delimiter)
-                .from_writer(&mut *bytes);
-            if self.header_written == Written::Nothing {
-                writer.write_record(layout.headers.as_ref().unwrap_or(&columns))?;
-            }
-            writer.write_record(columns.iter().map(|column| cell(fields.get(column))))?;
-            writer.flush()?;
-        }
-        let bytes = &bytes[start..];
-        self.header_written = Written::Header;
-        self.length += bytes.len() as u64;
-        self.digest.update(bytes);
-        Ok(Appended {
-            length: self.length,
-            sha256: hex(self.digest.clone().finish().as_ref()),
-        })
     }
 }
 
@@ -348,13 +332,18 @@ fn header_columns(prefix: impl Read, delimiter: u8) -> csv::Result<Option<Vec<St
         .transpose()
 }
 
-fn cell(value: Option<&Value>) -> String {
+fn cell(value: Option<&Value>) -> std::borrow::Cow<'_, [u8]> {
     match value {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Number(number)) => number.to_string(),
-        Some(Value::Bool(flag)) => flag.to_string(),
-        Some(other @ (Value::Array(_) | Value::Object(_))) => other.to_string(),
+        None | Some(Value::Null) => b"".as_slice().into(),
+        Some(Value::String(text)) => text.as_bytes().into(),
+        Some(Value::Number(number)) => number.to_string().into_bytes().into(),
+        Some(Value::Bool(flag)) => if *flag {
+            b"true".as_slice()
+        } else {
+            b"false".as_slice()
+        }
+        .into(),
+        Some(other @ (Value::Array(_) | Value::Object(_))) => other.to_string().into_bytes().into(),
     }
 }
 
@@ -374,9 +363,10 @@ fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
     let digest = ring::digest::digest(&SHA256, path.as_os_str().as_encoded_bytes());
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let instance = format!("{}.{name}", hex(&digest.as_ref()[..16]));
+    let layout = Arc::new(layout);
     Port::deferred_grouped::<CsvRow, _, _>(move || {
         Ok::<_, EffectPortResolutionError>(CsvRegister {
-            layout: layout.clone(),
+            layout: Arc::clone(&layout),
             state: Arc::new(Mutex::new(RegisterState::Closed)),
         })
     })
@@ -521,6 +511,8 @@ impl<P> CsvSinkBuilder<P> {
 }
 
 /// A sink that appends each input, projected by `P`, as one CSV row.
+/// The built-in file register writes and syncs up to 64 queued rows together
+/// by default, with zero maximum wait.
 #[derive(Clone)]
 pub struct CsvSink<P> {
     projection: P,
@@ -559,8 +551,8 @@ where
 }
 
 impl<P> CsvSink<P> {
-    /// Append through another system that answers `CsvRegisterPort`, such as
-    /// a test port.
+    /// Append through another system that answers `CsvRegisterPort`. A replacement
+    /// uses the framework's one-request default unless the builder sets a size.
     pub fn through(mut self, port: Port<dyn CsvRegisterPort>) -> Self {
         self.destination = CsvDestination::Port(port);
         self
@@ -584,13 +576,19 @@ impl<P: CsvProjection> SinkRole<P::Input> for CsvSink<P> {
     type Request = CsvRow;
 
     fn batch_defaults(&self) -> SinkBatchDefaults {
-        self.batch
+        let mut batch = self.batch;
+        if batch.size.is_none() && matches!(self.destination, CsvDestination::File(_)) {
+            batch.size = super::queued_batch_defaults().size;
+        }
+        batch
     }
 
-    fn prepare(&self, input: &P::Input) -> Result<CsvRow, HandlerError> {
+    fn prepare(&self, input: P::Input) -> Result<CsvRow, HandlerError> {
         let row = self.projection.project(input)?;
         match serde_json::to_value(row) {
-            Ok(Value::Object(fields)) => Ok(CsvRow { fields }),
+            Ok(Value::Object(fields)) => Ok(CsvRow {
+                fields: Arc::new(fields),
+            }),
             Ok(other) => Err(HandlerError::Validation(format!(
                 "CsvSink requires object rows, got {other}"
             ))),
@@ -622,6 +620,12 @@ mod tests {
         fields
     }
 
+    fn row(id: u64) -> CsvRow {
+        CsvRow {
+            fields: fields(id).into(),
+        }
+    }
+
     #[test]
     fn register_directories_distinguish_bindings() {
         let east = register_port(layout(Path::new("east/register.csv")));
@@ -645,8 +649,52 @@ mod tests {
         type Input = Entry;
         type Row = Entry;
 
-        fn project(&self, entry: &Entry) -> Result<Entry, HandlerError> {
-            Ok(entry.clone())
+        fn project(&self, entry: Entry) -> Result<Entry, HandlerError> {
+            Ok(entry)
+        }
+    }
+
+    #[test]
+    fn register_defaults_follow_destination() {
+        let builder = CsvSink::builder(EntryRow).path("register.csv");
+        let make_port = || register_port(layout(Path::new("replacement.csv")));
+        let sink = builder.clone().build().unwrap();
+        assert_eq!(sink.batch_defaults().size.unwrap().get(), 64);
+        assert!(sink.through(make_port()).batch_defaults().size.is_none());
+        let configured = builder
+            .batch_size(8)
+            .unwrap()
+            .build()
+            .unwrap()
+            .through(make_port());
+        assert_eq!(configured.batch_defaults().size.unwrap().get(), 8);
+    }
+
+    #[test]
+    fn grouped_replies_match_csv_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let layout = CsvLayout {
+            columns: Some(vec!["id".into(), "name".into()]),
+            headers: Some(vec!["ID".into(), "Name".into()]),
+            delimiter: b';',
+            ..layout(&path)
+        };
+        let mut first = fields(1);
+        first.insert("name".into(), Value::String("a;\"b\"\nc".into()));
+        let first = CsvRow {
+            fields: first.into(),
+        };
+        let mut register = OpenRegister::open(&layout, None, false).unwrap();
+        let replies = register.append_group(&layout, &[first, row(2)]).unwrap();
+        let expected = b"ID;Name\n1;\"a;\"\"b\"\"\nc\"\n2;row-2\n";
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+        for (reply, length) in replies.iter().zip([expected.len() - 8, expected.len()]) {
+            assert_eq!(reply.length, length as u64);
+            assert_eq!(
+                reply.sha256,
+                hex(ring::digest::digest(&SHA256, &expected[..length]).as_ref())
+            );
         }
     }
 
@@ -714,7 +762,7 @@ mod tests {
         std::fs::write(&path, "stale\n").unwrap();
         let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
         let appended = register
-            .append_group(&layout(&path), &[CsvRow { fields: fields(1) }])
+            .append_group(&layout(&path), &[row(1)])
             .unwrap()
             .remove(0);
         assert_eq!(
@@ -730,18 +778,14 @@ mod tests {
         let path = dir.path().join("register.csv");
         let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
         let recorded = register
-            .append_group(&layout(&path), &[CsvRow { fields: fields(1) }])
+            .append_group(&layout(&path), &[row(1)])
             .unwrap()
             .remove(0);
-        register
-            .append_group(&layout(&path), &[CsvRow { fields: fields(2) }])
-            .unwrap();
+        register.append_group(&layout(&path), &[row(2)]).unwrap();
         drop(register);
 
         let mut resumed = OpenRegister::open(&layout(&path), Some(&recorded), true).unwrap();
-        resumed
-            .append_group(&layout(&path), &[CsvRow { fields: fields(2) }])
-            .unwrap();
+        resumed.append_group(&layout(&path), &[row(2)]).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "id,name\n1,row-1\n2,row-2\n"
@@ -756,7 +800,7 @@ mod tests {
         let path = dir.path().join("register.csv");
         let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
         let recorded = register
-            .append_group(&layout(&path), &[CsvRow { fields: fields(1) }])
+            .append_group(&layout(&path), &[row(1)])
             .unwrap()
             .remove(0);
         drop(register);
@@ -776,14 +820,24 @@ mod tests {
         first.insert("name".into(), Value::from("x".repeat(128 * 1024)));
         let recorded = OpenRegister::open(&layout, None, false)
             .unwrap()
-            .append_group(&layout, &[CsvRow { fields: first }])
+            .append_group(
+                &layout,
+                &[CsvRow {
+                    fields: first.into(),
+                }],
+            )
             .unwrap()
             .remove(0);
         let mut next = fields(2);
         next.insert("extra".into(), Value::from("ignored"));
         let resumed = OpenRegister::open(&layout, Some(&recorded), true)
             .unwrap()
-            .append_group(&layout, &[CsvRow { fields: next }])
+            .append_group(
+                &layout,
+                &[CsvRow {
+                    fields: next.into(),
+                }],
+            )
             .unwrap()
             .remove(0);
         let file = std::fs::read(path).unwrap();
@@ -802,15 +856,12 @@ mod tests {
         let mut register = OpenRegister::open(&layout, None, false).unwrap();
         register.file = File::open(&path).unwrap();
         let register = CsvRegister {
-            layout,
+            layout: layout.into(),
             state: Arc::new(Mutex::new(RegisterState::Open(Box::new(register)))),
         };
         let ctx = EffectContext::for_test(FlowId::new(), "register", 1);
         for id in 1..=2 {
-            let error = register
-                .append(&CsvRow { fields: fields(id) }, &ctx)
-                .await
-                .unwrap_err();
+            let error = register.append(&row(id), &ctx).await.unwrap_err();
             assert!(matches!(error, EffectError::DestinationChanged { .. }));
         }
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
@@ -821,18 +872,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("register.csv");
         let register = CsvRegister {
-            layout: layout(&path),
+            layout: layout(&path).into(),
             state: Arc::new(Mutex::new(RegisterState::Closed)),
         };
         let ctx = EffectContext::for_test(FlowId::new(), "register", 0);
-        let first = register
-            .append(&CsvRow { fields: fields(1) }, &ctx)
-            .await
-            .unwrap();
-        let second = register
-            .append(&CsvRow { fields: fields(2) }, &ctx)
-            .await
-            .unwrap();
+        let first = register.append(&row(1), &ctx).await.unwrap();
+        let second = register.append(&row(2), &ctx).await.unwrap();
         assert!(second.length > first.length);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),

@@ -2540,14 +2540,14 @@ impl EffectsCore {
                 label,
                 1,
                 self.ctx.stage.stage_logic_version.clone(),
-                hash_json_value(&Value::String(label.to_string()))?,
+                hash_json_value(Value::String(label.to_string()))?,
             ),
             RecordedValue::Settlement => EffectDescriptor::new(
                 SETTLEMENT_EFFECT_TYPE,
                 "settlement",
                 1,
                 "1",
-                hash_json_value(&Value::String("settlement".to_string()))?,
+                hash_json_value(Value::String("settlement".to_string()))?,
             ),
         };
         let descriptor_hash = descriptor_hash(&descriptor)?;

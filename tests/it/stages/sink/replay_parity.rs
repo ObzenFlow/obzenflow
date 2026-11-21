@@ -48,8 +48,8 @@ impl CsvProjection for SinkRecordProjection {
     type Input = SinkRecord;
     type Row = SinkRecord;
 
-    fn project(&self, input: &Self::Input) -> Result<Self::Row, HandlerError> {
-        Ok(input.clone())
+    fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(input)
     }
 }
 

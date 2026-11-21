@@ -124,8 +124,8 @@ impl CsvProjection for EnrichedTicketCsv {
     type Input = EnrichedTicket;
     type Row = EnrichedTicket;
 
-    fn project(&self, ticket: &Self::Input) -> Result<Self::Row, HandlerError> {
-        Ok(ticket.clone())
+    fn project(&self, ticket: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(ticket)
     }
 }
 
