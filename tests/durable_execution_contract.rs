@@ -648,6 +648,11 @@ fn durable_execution_contract_child() {
             app.run_blocking(source_ports::reattaching_flow(scenario, plan.fix))
         }
         Graph::SourcePortCsv => app.run_blocking(source_ports::csv_flow(scenario)),
+        Graph::SourcePortOwned => app.run_blocking(source_ports::owned_flow(
+            scenario,
+            source_ports::owned_values(),
+        )),
+        Graph::SourcePortOwnedKept => source_ports::replay_then_live(app, scenario),
     };
     if let Err(error) = result {
         eprintln!("{error}");
@@ -694,6 +699,8 @@ enum Graph {
     SourcePortReplay,
     SourcePortReattach,
     SourcePortCsv,
+    SourcePortOwned,
+    SourcePortOwnedKept,
 }
 
 fn payment_config(scenario: &Scenario) -> PathBuf {
@@ -7165,13 +7172,15 @@ mod csv_register {
 
 mod source_ports {
     use super::*;
+    use obzenflow::application::{ApplicationError, FlowApplicationBuilder};
     use obzenflow::effects::EffectPortResolutionError;
     use obzenflow::flow::infinite_source;
     use obzenflow::middleware::rate_limit;
     use obzenflow::stages::sources::{
-        AtMostOnce, CsvDecoder, CsvSource, FiniteSourceConnector, InfiniteSource,
+        AtMostOnce, CsvDecoder, CsvSource, FiniteSource, FiniteSourceConnector, InfiniteSource,
         InfiniteSourceConnector, Reattach, Refuse, SourceDiagnosticReason, SourceError,
         SourceReaderInitContext, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        ValuesSource,
     };
     use obzenflow_core::event::payloads::execution_payload::{
         SourceContinuationRefusal, SourceOpenIntent,
@@ -7394,6 +7403,70 @@ mod source_ports {
         })
     }
 
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    pub(super) struct Unclonable {
+        n: u64,
+    }
+    impl TypedPayload for Unclonable {
+        const EVENT_TYPE: &'static str = "durable_contract.source_ports.unclonable";
+    }
+
+    pub(super) fn owned_values() -> effects::Port<dyn FiniteSource<Unclonable, Refuse>> {
+        effects::Port::owned(ValuesSource::new(
+            (1..=TICKS).map(|n| Unclonable { n }).collect::<Vec<_>>(),
+        ))
+    }
+
+    pub(super) fn owned_flow(
+        scenario: &Scenario,
+        values: effects::Port<dyn FiniteSource<Unclonable, Refuse>>,
+    ) -> FlowDefinition {
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            let discard = DiscardSink::<Unclonable>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_source_port_owned",
+                journals: disk_journals(journals),
+
+                stages: {
+                    items = source!(Unclonable => values);
+                    discard = sink!(Unclonable => discard);
+                },
+
+                topology: {
+                    items |> discard;
+                }
+            })
+        })
+    }
+
+    pub(super) fn replay_then_live(
+        replay: FlowApplicationBuilder,
+        scenario: &Scenario,
+    ) -> Result<(), ApplicationError> {
+        let values = owned_values();
+        let kept = values.clone();
+        replay.run_blocking(owned_flow(scenario, values))?;
+        FlowApplication::builder()
+            .with_cli_args(["obzenflow"])
+            .run_blocking(owned_flow(scenario, kept))
+    }
+
+    fn unclonables(archive: &Archive, stage: &str) -> Vec<u64> {
+        archive
+            .facts::<Unclonable>(stage)
+            .map(|(_, item)| item.n)
+            .collect()
+    }
+
+    fn is_replay(run: &Path) -> bool {
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run.join("run_manifest.json")).expect("read the manifest"),
+        )
+        .expect("the manifest parses");
+        manifest["replay"].is_object()
+    }
+
     async fn interrupted_rows(scenario: &Scenario, name: &str) -> (PathBuf, Vec<u64>) {
         let child = Child::spawn(scenario, Vec::new(), None);
         let run = child.run().await;
@@ -7607,6 +7680,55 @@ mod source_ports {
             [SourceContinuationRefusal::InputChanged {
                 part: "file".into()
             }]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn owned_port_replay_preserves_input() {
+        let name = "source_port_owned_replay";
+        let scenario = Scenario::for_graph(name, Graph::SourcePortOwned);
+        let live = Child::spawn(&scenario, Vec::new(), None).completed().await;
+        let recorded = Archive::read(&live).await;
+        assert_eq!(
+            acquisitions(&recorded, "items"),
+            [("values".to_string(), SourceOpenIntent::Start)]
+        );
+        assert_eq!(unclonables(&recorded, "items"), [1, 2, 3, 4]);
+
+        let kept = Scenario {
+            graph: Graph::SourcePortOwnedKept,
+            ..scenario.clone()
+        };
+        let before = scenario.runs();
+        let child = Child::spawn(&kept, replay(&live), None);
+        assert!(
+            child.exit().await.success(),
+            "{name}: the replay and the live run complete"
+        );
+        let runs: Vec<PathBuf> = scenario.runs().difference(&before).cloned().collect();
+        let (replays, lives): (Vec<&PathBuf>, Vec<&PathBuf>) =
+            runs.iter().partition(|run| is_replay(run));
+        let ([replayed], [relived]) = (replays.as_slice(), lives.as_slice()) else {
+            panic!("{name}: the child writes one replay and one live run: {runs:?}");
+        };
+
+        let replayed = Archive::read(replayed).await;
+        assert!(
+            acquisitions(&replayed, "items").is_empty(),
+            "{name}: the replay acquires nothing"
+        );
+        assert_eq!(unclonables(&replayed, "items"), [1, 2, 3, 4]);
+
+        let relived = Archive::read(relived).await;
+        assert_eq!(
+            acquisitions(&relived, "items"),
+            [("values".to_string(), SourceOpenIntent::Start)],
+            "{name}: the kept clone acquires the original input"
+        );
+        assert_eq!(
+            unclonables(&relived, "items"),
+            [1, 2, 3, 4],
+            "{name}: each value arrives once"
         );
     }
 }

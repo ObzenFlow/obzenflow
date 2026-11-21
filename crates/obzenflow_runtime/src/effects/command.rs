@@ -961,7 +961,7 @@ pub trait AnswersEffect<E: Effect> {
 
 impl<P, R> AnswersEffect<Call<R>> for Port<P>
 where
-    P: ?Sized + Send + Sync + 'static,
+    P: ?Sized + PortEffects + Send + Sync + 'static,
     R: CallRequest<Port = P>,
 {
     fn declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {

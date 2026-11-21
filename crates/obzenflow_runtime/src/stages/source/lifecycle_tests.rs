@@ -363,12 +363,12 @@ macro_rules! lifecycle_family {
                     stage,
                     "input",
                     "lifecycle",
-                    source.continuation,
-                    source.system,
+                    source.continuation(),
+                    source.system().clone(),
                 );
                 config.source_boundary = boundary;
                 (
-                    Builder::new(source.handler, config, resources)
+                    Builder::new(source, config, resources)
                         .build()
                         .await
                         .unwrap(),
@@ -485,10 +485,8 @@ macro_rules! lifecycle_family {
                         crate::execution::RuntimeMode::Replay,
                         Some(Arc::new(EmptyArchive(stage, Some((opening.clone(), release.clone()))))),
                     );
-                    let handle = Builder::new(
-                        source.handler,
-                        Config::new(stage, "input", "lifecycle", source.continuation, source.system), resources,
-                    ).build().await.unwrap();
+                    let config = Config::new(stage, "input", "lifecycle", source.continuation(), source.system().clone());
+                        let handle = Builder::new(source, config, resources).build().await.unwrap();
                     start(&handle).await;
                     notified(&opening).await;
                     assert!(matches!(handle.current_state(), State::AcquiringInput));
@@ -519,10 +517,8 @@ macro_rules! lifecycle_family {
                 let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
                 let (writing, release) = journal.block_matching_append(|event| matches!(event.payload, obzenflow_core::event::ChainPayload::Fact(_)));
                 resources.data_journal = journal.clone();
-                let handle = Builder::new(
-                    source.handler,
-                    Config::new(stage, "input", "lifecycle", source.continuation, source.system), resources,
-                ).build().await.unwrap();
+                let config = Config::new(stage, "input", "lifecycle", source.continuation(), source.system().clone());
+                    let handle = Builder::new(source, config, resources).build().await.unwrap();
                 start(&handle).await;
                 notified(&writing).await;
                 handle.send_event(Event::Error("failure during source publication".into())).await.unwrap();
@@ -864,10 +860,10 @@ async fn held_synchronous_open_leaves_the_runtime_responsive() {
         stage,
         "input",
         "lifecycle",
-        source.continuation,
-        source.system,
+        source.continuation(),
+        source.system().clone(),
     );
-    let handle = finite::FiniteSourceBuilder::new(source.handler, config, resources)
+    let handle = finite::FiniteSourceBuilder::new(source, config, resources)
         .build()
         .await
         .unwrap();
@@ -904,20 +900,17 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
     let (source, ports) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(port);
     let (stage, resources, journals) = resources_with_ports(&counts, ports).await;
     let data = resources.data_journal.clone();
-    let handle = finite::AsyncFiniteSourceBuilder::new(
-        source.handler,
-        finite::FiniteSourceConfig::new(
-            stage,
-            "input",
-            "lifecycle",
-            source.continuation,
-            source.system,
-        ),
-        resources,
-    )
-    .build()
-    .await
-    .unwrap();
+    let config = finite::FiniteSourceConfig::new(
+        stage,
+        "input",
+        "lifecycle",
+        source.continuation(),
+        source.system().clone(),
+    );
+    let handle = finite::AsyncFiniteSourceBuilder::new(source, config, resources)
+        .build()
+        .await
+        .unwrap();
     for event in [
         finite::FiniteSourceEvent::Initialize,
         finite::FiniteSourceEvent::Ready,
@@ -1066,10 +1059,10 @@ where
         stage,
         "input",
         "lifecycle",
-        source.continuation,
-        source.system,
+        source.continuation(),
+        source.system().clone(),
     );
-    let handle = finite::AsyncFiniteSourceBuilder::new(source.handler, config, resources)
+    let handle = finite::AsyncFiniteSourceBuilder::new(source, config, resources)
         .build()
         .await
         .unwrap();

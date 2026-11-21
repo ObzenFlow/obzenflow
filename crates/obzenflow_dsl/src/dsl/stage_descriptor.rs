@@ -20,7 +20,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_runtime::__private::UnifiedJoinHandler;
+use obzenflow_runtime::__private::{AdmittedSource, UnifiedJoinHandler};
 use obzenflow_runtime::stages::observer::{
     observer_shell_surfaces_for_stage as runtime_observer_shell_surfaces_for_stage, ObserverSurface,
 };
@@ -692,9 +692,7 @@ pub(crate) fn validate_authored_effect_declarations(
 /// Crate-private erased descriptor for finite source stages.
 pub(crate) struct FiniteSourceDescriptor<H: UnifiedFiniteSourceHandler + 'static> {
     pub(crate) name: String,
-    pub(crate) handler: H,
-    pub(crate) continuation: SourceContinuation,
-    pub(crate) source_system: SourceSystem,
+    pub(crate) source: AdmittedSource<H>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
@@ -717,11 +715,11 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
-        Some(self.continuation)
+        Some(self.source.continuation())
     }
 
     fn source_system(&self) -> Option<SourceSystem> {
-        Some(self.source_system.clone())
+        Some(self.source.system().clone())
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -788,24 +786,20 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Install the stage writer id at the erased runtime boundary.
-        let mut handler = self.handler;
-        handler.install_writer_id(writer_id);
-
         // Create the stage configuration
         let mut source_config = FiniteSourceConfig::new(
             config.stage_id,
             &config.name,
             &config.flow_name,
-            self.continuation,
-            self.source_system,
+            self.source.continuation(),
+            self.source.system().clone(),
         )
         .with_observer_bindings(source_binding.observers.into_bindings());
         source_config.control_strategy = source_binding.completion_gate;
         source_config.source_boundary = source_binding.source_boundary;
 
         // Use the builder to create the handle
-        let handle = FiniteSourceBuilder::new(handler, source_config, resources)
+        let handle = FiniteSourceBuilder::new(self.source, source_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -828,9 +822,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 /// Crate-private erased descriptor for async finite source stages.
 pub(crate) struct AsyncFiniteSourceDescriptor<H: UnifiedAsyncFiniteSourceHandler + 'static> {
     pub(crate) name: String,
-    pub(crate) handler: H,
-    pub(crate) continuation: SourceContinuation,
-    pub(crate) source_system: SourceSystem,
+    pub(crate) source: AdmittedSource<H>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
@@ -838,17 +830,10 @@ pub(crate) struct AsyncFiniteSourceDescriptor<H: UnifiedAsyncFiniteSourceHandler
 
 impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSourceDescriptor<H> {
     /// Create a new async finite source descriptor carrying the handler's configured timeout.
-    pub(crate) fn new(
-        name: impl Into<String>,
-        handler: H,
-        continuation: SourceContinuation,
-        source_system: SourceSystem,
-    ) -> Self {
+    pub(crate) fn new(name: impl Into<String>, source: AdmittedSource<H>) -> Self {
         Self {
             name: name.into(),
-            handler,
-            continuation,
-            source_system,
+            source,
             source_policies: Vec::new(),
             ingress_policy: None,
             observers: Vec::new(),
@@ -873,11 +858,11 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
-        Some(self.continuation)
+        Some(self.source.continuation())
     }
 
     fn source_system(&self) -> Option<SourceSystem> {
-        Some(self.source_system.clone())
+        Some(self.source.system().clone())
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -944,24 +929,20 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Install the stage writer id at the erased runtime boundary.
-        let mut handler = self.handler;
-        handler.install_writer_id(writer_id);
-
         // Create the stage configuration
         let mut source_config = FiniteSourceConfig::new(
             config.stage_id,
             &config.name,
             &config.flow_name,
-            self.continuation,
-            self.source_system,
+            self.source.continuation(),
+            self.source.system().clone(),
         )
         .with_observer_bindings(source_binding.observers.into_bindings());
         source_config.control_strategy = source_binding.completion_gate;
         source_config.source_boundary = source_binding.source_boundary;
 
         // Use the builder to create the handle
-        let handle = AsyncFiniteSourceBuilder::new(handler, source_config, resources)
+        let handle = AsyncFiniteSourceBuilder::new(self.source, source_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -983,9 +964,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 /// Crate-private erased descriptor for infinite source stages.
 pub(crate) struct InfiniteSourceDescriptor<H: UnifiedInfiniteSourceHandler + 'static> {
     pub(crate) name: String,
-    pub(crate) handler: H,
-    pub(crate) continuation: SourceContinuation,
-    pub(crate) source_system: SourceSystem,
+    pub(crate) source: AdmittedSource<H>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
@@ -1008,11 +987,11 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
-        Some(self.continuation)
+        Some(self.source.continuation())
     }
 
     fn source_system(&self) -> Option<SourceSystem> {
-        Some(self.source_system.clone())
+        Some(self.source.system().clone())
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -1079,24 +1058,20 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Install the stage writer id at the erased runtime boundary.
-        let mut handler = self.handler;
-        handler.install_writer_id(writer_id);
-
         // Create the stage configuration
         let mut source_config = InfiniteSourceConfig::new(
             config.stage_id,
             &config.name,
             &config.flow_name,
-            self.continuation,
-            self.source_system,
+            self.source.continuation(),
+            self.source.system().clone(),
         )
         .with_observer_bindings(source_binding.observers.into_bindings());
         source_config.control_strategy = source_binding.completion_gate;
         source_config.source_boundary = source_binding.source_boundary;
 
         // Use the builder to create the handle
-        let handle = InfiniteSourceBuilder::new(handler, source_config, resources)
+        let handle = InfiniteSourceBuilder::new(self.source, source_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -1119,9 +1094,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 /// Crate-private erased descriptor for async infinite source stages.
 pub(crate) struct AsyncInfiniteSourceDescriptor<H: UnifiedAsyncInfiniteSourceHandler + 'static> {
     pub(crate) name: String,
-    pub(crate) handler: H,
-    pub(crate) continuation: SourceContinuation,
-    pub(crate) source_system: SourceSystem,
+    pub(crate) source: AdmittedSource<H>,
     hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
@@ -1135,18 +1108,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static>
     ///
     /// The handler contract defaults infinite sources to no poll timeout so push
     /// sources can block efficiently (e.g. `recv().await`).
-    pub(crate) fn new(
-        name: impl Into<String>,
-        handler: H,
-        continuation: SourceContinuation,
-        source_system: SourceSystem,
-    ) -> Self {
-        let hosted_ingress_slot = handler.hosted_ingress_slot();
+    pub(crate) fn new(name: impl Into<String>, source: AdmittedSource<H>) -> Self {
+        let hosted_ingress_slot = source.handler().hosted_ingress_slot();
         Self {
             name: name.into(),
-            handler,
-            continuation,
-            source_system,
+            source,
             hosted_ingress_slot,
             source_policies: Vec::new(),
             ingress_policy: None,
@@ -1178,11 +1144,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
     }
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
-        Some(self.continuation)
+        Some(self.source.continuation())
     }
 
     fn source_system(&self) -> Option<SourceSystem> {
-        Some(self.source_system.clone())
+        Some(self.source.system().clone())
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -1254,22 +1220,18 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Install the stage writer id at the erased runtime boundary.
-        let mut handler = self.handler;
-        handler.install_writer_id(writer_id);
-
         let mut source_config = InfiniteSourceConfig::new(
             config.stage_id,
             &config.name,
             &config.flow_name,
-            self.continuation,
-            self.source_system,
+            self.source.continuation(),
+            self.source.system().clone(),
         )
         .with_observer_bindings(source_binding.observers.into_bindings());
         source_config.control_strategy = source_binding.completion_gate;
         source_config.source_boundary = source_binding.source_boundary;
 
-        let handle = AsyncInfiniteSourceBuilder::new(handler, source_config, resources)
+        let handle = AsyncInfiniteSourceBuilder::new(self.source, source_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -3397,12 +3359,14 @@ mod tests {
     fn async_finite_source_descriptor_carries_configured_poll_timeout() {
         let descriptor = AsyncFiniteSourceDescriptor::new(
             "configured",
-            DummyAsyncFiniteSourceConfigured,
-            HANDLER_REFUSES,
-            SourceSystem::placeholder(),
+            AdmittedSource::new(
+                DummyAsyncFiniteSourceConfigured,
+                HANDLER_REFUSES,
+                SourceSystem::placeholder(),
+            ),
         );
         assert_eq!(
-            UnifiedAsyncFiniteSourceHandler::poll_timeout(&descriptor.handler),
+            UnifiedAsyncFiniteSourceHandler::poll_timeout(descriptor.source.handler()),
             Some(Duration::from_secs(123))
         );
     }
@@ -3411,12 +3375,14 @@ mod tests {
     fn async_finite_source_descriptor_uses_handler_contract_default() {
         let descriptor = AsyncFiniteSourceDescriptor::new(
             "defaulted",
-            DummyAsyncFiniteSourceDefault,
-            HANDLER_REFUSES,
-            SourceSystem::placeholder(),
+            AdmittedSource::new(
+                DummyAsyncFiniteSourceDefault,
+                HANDLER_REFUSES,
+                SourceSystem::placeholder(),
+            ),
         );
         assert_eq!(
-            UnifiedAsyncFiniteSourceHandler::poll_timeout(&descriptor.handler),
+            UnifiedAsyncFiniteSourceHandler::poll_timeout(descriptor.source.handler()),
             Some(Duration::from_secs(30))
         );
     }
@@ -3425,12 +3391,14 @@ mod tests {
     fn async_finite_source_descriptor_preserves_configured_disabled_timeout() {
         let descriptor = AsyncFiniteSourceDescriptor::new(
             "disabled",
-            DummyAsyncFiniteSourceDisabled,
-            HANDLER_REFUSES,
-            SourceSystem::placeholder(),
+            AdmittedSource::new(
+                DummyAsyncFiniteSourceDisabled,
+                HANDLER_REFUSES,
+                SourceSystem::placeholder(),
+            ),
         );
         assert_eq!(
-            UnifiedAsyncFiniteSourceHandler::poll_timeout(&descriptor.handler),
+            UnifiedAsyncFiniteSourceHandler::poll_timeout(descriptor.source.handler()),
             None
         );
     }
@@ -3439,9 +3407,11 @@ mod tests {
     fn topology_uses_resolved_family_settings_and_stable_semantic_keys() {
         let mut descriptor = AsyncInfiniteSourceDescriptor::new(
             "source",
-            DummyAsyncInfiniteSourceDefault,
-            HANDLER_REFUSES,
-            SourceSystem::placeholder(),
+            AdmittedSource::new(
+                DummyAsyncInfiniteSourceDefault,
+                HANDLER_REFUSES,
+                SourceSystem::placeholder(),
+            ),
         );
         descriptor.source_policies = vec![
             Box::new(
@@ -3515,12 +3485,14 @@ mod tests {
     fn async_infinite_source_descriptor_carries_configured_poll_timeout() {
         let descriptor = AsyncInfiniteSourceDescriptor::new(
             "configured",
-            DummyAsyncInfiniteSourceConfigured,
-            HANDLER_REFUSES,
-            SourceSystem::placeholder(),
+            AdmittedSource::new(
+                DummyAsyncInfiniteSourceConfigured,
+                HANDLER_REFUSES,
+                SourceSystem::placeholder(),
+            ),
         );
         assert_eq!(
-            UnifiedAsyncInfiniteSourceHandler::poll_timeout(&descriptor.handler),
+            UnifiedAsyncInfiniteSourceHandler::poll_timeout(descriptor.source.handler()),
             Some(Duration::from_secs(7))
         );
     }
@@ -3529,12 +3501,14 @@ mod tests {
     fn async_infinite_source_descriptor_uses_handler_contract_default() {
         let descriptor = AsyncInfiniteSourceDescriptor::new(
             "defaulted",
-            DummyAsyncInfiniteSourceDefault,
-            HANDLER_REFUSES,
-            SourceSystem::placeholder(),
+            AdmittedSource::new(
+                DummyAsyncInfiniteSourceDefault,
+                HANDLER_REFUSES,
+                SourceSystem::placeholder(),
+            ),
         );
         assert_eq!(
-            UnifiedAsyncInfiniteSourceHandler::poll_timeout(&descriptor.handler),
+            UnifiedAsyncInfiniteSourceHandler::poll_timeout(descriptor.source.handler()),
             None
         );
     }
@@ -4022,9 +3996,11 @@ mod tests {
 
         let descriptor = FiniteSourceDescriptor {
             name: "cb_source".to_string(),
-            handler: DummyFiniteSource,
-            continuation: HANDLER_REFUSES,
-            source_system: SourceSystem::placeholder(),
+            source: AdmittedSource::new(
+                DummyFiniteSource,
+                HANDLER_REFUSES,
+                SourceSystem::placeholder(),
+            ),
             source_policies: vec![Box::new(breaker)],
             ingress_policy: None,
             observers: vec![],

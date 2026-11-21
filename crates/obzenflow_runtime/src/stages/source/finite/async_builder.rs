@@ -9,6 +9,7 @@ use super::config::FiniteSourceConfig;
 use super::fsm::{FiniteSourceContext, FiniteSourceContextInit, FiniteSourceState};
 use super::handle::FiniteSourceHandle;
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::handlers::source::prepared::AdmittedSource;
 use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
@@ -32,9 +33,13 @@ pub struct AsyncFiniteSourceBuilder<H: UnifiedAsyncFiniteSourceHandler + Send + 
 }
 
 impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSourceBuilder<H> {
-    pub fn new(handler: H, config: FiniteSourceConfig, resources: StageResources) -> Self {
+    pub fn new(
+        source: AdmittedSource<H>,
+        config: FiniteSourceConfig,
+        resources: StageResources,
+    ) -> Self {
         Self {
-            handler,
+            handler: source.handler,
             config,
             resources,
             instrumentation: None,

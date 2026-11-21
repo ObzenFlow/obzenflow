@@ -32,7 +32,6 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
     for required in [
         "FlowDefinition::materialize(move |_| {",
         "use obzenflow::stages::sources;",
-        "let evidence = Port::owned(sources::ValuesSource::new([input]));",
         "impl AiRole<ReducedEvidence> for GenerateBrief {",
         "let generate_brief = ai::infer(GenerateBrief);",
         "brief = ai!(ReducedEvidence -> DecisionBrief with ai_breaker => generate_brief);",

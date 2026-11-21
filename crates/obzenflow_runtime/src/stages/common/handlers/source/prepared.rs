@@ -18,12 +18,37 @@ pub(super) mod sealed {
 }
 
 /// A source row's port after admission: its cold handler, the continuation
-/// registered before any open, and the system the port names.
+/// registered before any open, and the system the port names. Only a source
+/// builder takes the handler, so only its supervisor acquires, polls and
+/// settles it.
 #[doc(hidden)]
 pub struct AdmittedSource<H> {
-    pub handler: H,
-    pub continuation: SourceContinuation,
-    pub system: SourceSystem,
+    pub(crate) handler: H,
+    pub(crate) continuation: SourceContinuation,
+    pub(crate) system: SourceSystem,
+}
+
+impl<H> AdmittedSource<H> {
+    /// A handler admitted without a port, such as a placeholder's.
+    pub fn new(handler: H, continuation: SourceContinuation, system: SourceSystem) -> Self {
+        Self {
+            handler,
+            continuation,
+            system,
+        }
+    }
+
+    pub fn continuation(&self) -> SourceContinuation {
+        self.continuation
+    }
+
+    pub fn system(&self) -> &SourceSystem {
+        &self.system
+    }
+
+    pub fn handler(&self) -> &H {
+        &self.handler
+    }
 }
 
 /// Admit the port a source row takes into the existing runtime adapter for

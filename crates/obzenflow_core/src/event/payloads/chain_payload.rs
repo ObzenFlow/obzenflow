@@ -68,7 +68,10 @@ impl ChainPayload {
                 (EventKind::CompositeData, event_type) => {
                     CompositeDataPayload::schema_version_of(event_type).map_or(1, NonZeroU32::get)
                 }
-                (EventKind::Execution, "runtime.source.cleanup_failed") => 2,
+                (
+                    EventKind::Execution,
+                    "runtime.source.cleanup_failed" | "runtime.source.reader_acquired",
+                ) => 2,
                 _ => 1,
             };
             if payload_schema_version.get() != expected {

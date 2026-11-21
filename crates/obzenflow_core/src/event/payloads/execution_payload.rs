@@ -703,7 +703,9 @@ pub struct AiChunkingPlannedFact {
 impl ExecutionPayload {
     pub const fn payload_schema_version(&self) -> std::num::NonZeroU32 {
         match self {
-            Self::SourceCleanupFailed(_) => std::num::NonZeroU32::new(2).unwrap(),
+            Self::SourceCleanupFailed(_) | Self::SourceReaderAcquired(_) => {
+                std::num::NonZeroU32::new(2).unwrap()
+            }
             _ => std::num::NonZeroU32::MIN,
         }
     }

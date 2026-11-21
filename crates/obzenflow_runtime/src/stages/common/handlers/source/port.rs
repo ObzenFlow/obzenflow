@@ -35,6 +35,8 @@ use async_trait::async_trait;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::source::{RefusedBy, SourceInputIdentity, SourcePosition};
 use obzenflow_core::OneFactOutcome;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -44,6 +46,13 @@ type Infinite = dyn UnifiedInfiniteSourceHandler;
 type AsyncInfinite = dyn UnifiedAsyncInfiniteSourceHandler;
 
 type PortReader<Family, K, Out> = <K as PortContinuation<Family, Out>>::Reader;
+
+type ReaderPoll<'a, T> = Pin<Box<dyn Future<Output = Result<T, SourceError>> + Send + 'a>>;
+
+mod sealed {
+    pub trait RowInput {}
+    pub trait Owned<P: ?Sized> {}
+}
 
 /// The continuations a source port of one family can repeat, each with the
 /// boxed reader its connectors open.
@@ -63,11 +72,13 @@ pub trait PortContinuation<Family: ?Sized, Out>: Send + Sync + 'static {
     label = "`{Self}` is not a `Port`",
     note = "bind a connector with Port::to(...), bind a direct handler with Port::owned(...), or pass the port returned by ingress registration"
 )]
-pub trait SourceRowInput {
+pub trait SourceRowInput: sealed::RowInput {
     type Port;
 
     fn into_port(self) -> Self::Port;
 }
+
+impl<P: ?Sized + Send + Sync + 'static> sealed::RowInput for Port<P> {}
 
 impl<P: ?Sized + Send + Sync + 'static> SourceRowInput for Port<P> {
     type Port = Port<P>;
@@ -144,7 +155,6 @@ pub struct PortAsyncFiniteReader<Out> {
     reader: Box<dyn TypedAsyncFiniteSourceHandler<Output = Out>>,
 }
 
-#[async_trait]
 impl<Out> TypedAsyncFiniteSourceHandler for PortAsyncFiniteReader<Out>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
@@ -155,12 +165,20 @@ where
         self.reader.poll_timeout()
     }
 
-    async fn next(&mut self) -> Result<Option<Vec<Out>>, SourceError> {
-        self.reader.next().await
+    fn next<'life0, 'async_trait>(&'life0 mut self) -> ReaderPoll<'async_trait, Option<Vec<Out>>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.reader.next()
     }
 
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        self.reader.drain().await
+    fn drain<'life0, 'async_trait>(&'life0 mut self) -> ReaderPoll<'async_trait, ()>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.reader.drain()
     }
 
     fn install_source_observation_sink(&mut self, sink: SourceObservationSink) {
@@ -191,7 +209,6 @@ pub struct PortAsyncInfiniteReader<Out> {
     reader: Box<dyn TypedAsyncInfiniteSourceHandler<Output = Out>>,
 }
 
-#[async_trait]
 impl<Out> TypedAsyncInfiniteSourceHandler for PortAsyncInfiniteReader<Out>
 where
     Out: OneFactOutcome + Send + Sync + 'static,
@@ -202,12 +219,20 @@ where
         self.reader.poll_timeout()
     }
 
-    async fn next(&mut self) -> Result<Vec<Out>, SourceError> {
-        self.reader.next().await
+    fn next<'life0, 'async_trait>(&'life0 mut self) -> ReaderPoll<'async_trait, Vec<Out>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.reader.next()
     }
 
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        self.reader.drain().await
+    fn drain<'life0, 'async_trait>(&'life0 mut self) -> ReaderPoll<'async_trait, ()>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.reader.drain()
     }
 
     fn install_source_observation_sink(&mut self, sink: SourceObservationSink) {
@@ -728,12 +753,32 @@ impl<H: TypedAsyncInfiniteSourceHandler + 'static> AsyncInfiniteSourceConnector
 /// its source family.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is not a typed source handler",
-    label = "`Port::owned` takes a typed source handler by value",
-    note = "bind a connector with `Port::to(...)`, and pass the handler itself, never an `Arc` of it"
+    message = "`{Self}` is not a typed source handler this port can own",
+    label = "`Port::owned` takes a handler of the port's source family by value",
+    note = "`Port::owned` binds a `TypedFiniteSourceHandler` to `FiniteSource<_, Refuse>`, a `TypedAsyncFiniteSourceHandler` to `AsyncFiniteSource<_, Refuse>`, a `TypedInfiniteSourceHandler` to `InfiniteSource<_, Refuse>` and a `TypedAsyncInfiniteSourceHandler` to `AsyncInfiniteSource<_, Refuse>`; bind a connector with `Port::to(...)`, and pass the handler itself, never an `Arc` of it"
 )]
-pub trait OwnedSource<P: ?Sized>: Send + 'static {
+pub trait OwnedSource<P: ?Sized>: sealed::Owned<P> + Send + 'static {
     fn into_system(self) -> Arc<P>;
+}
+
+impl<H: TypedFiniteSourceHandler + 'static> sealed::Owned<dyn FiniteSource<H::Output, Refuse>>
+    for H
+{
+}
+
+impl<H: TypedAsyncFiniteSourceHandler + 'static>
+    sealed::Owned<dyn AsyncFiniteSource<H::Output, Refuse>> for H
+{
+}
+
+impl<H: TypedInfiniteSourceHandler + 'static> sealed::Owned<dyn InfiniteSource<H::Output, Refuse>>
+    for H
+{
+}
+
+impl<H: TypedAsyncInfiniteSourceHandler + 'static>
+    sealed::Owned<dyn AsyncInfiniteSource<H::Output, Refuse>> for H
+{
 }
 
 impl<H: TypedFiniteSourceHandler + 'static> OwnedSource<dyn FiniteSource<H::Output, Refuse>> for H {
@@ -1106,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_port_second_claimant_unavailable() {
+    fn owned_port_second_claimant_refused() {
         let port: Port<dyn FiniteSource<Ticket, Refuse>> = Port::owned(TicketReader);
         let mut rows = [port.clone(), port]
             .map(<Port<dyn FiniteSource<Ticket, Refuse>> as AdmitSource<Finite>>::admit);

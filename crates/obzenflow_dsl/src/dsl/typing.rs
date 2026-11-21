@@ -17,7 +17,7 @@ use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactOutcome, Outcome, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
-    AdmitSource, JoinBinding, SourceRowInput, TypedJoinHandlerAdapter,
+    AdmitSource, AdmittedSource, JoinBinding, SourceRowInput, TypedJoinHandlerAdapter,
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
     UnifiedInfiniteSourceHandler,
 };
@@ -642,12 +642,9 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let admitted = input.into_port().admit();
     let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
         name: name.into(),
-        handler: admitted.handler,
-        continuation: admitted.continuation,
-        source_system: admitted.system,
+        source: input.into_port().admit(),
         source_policies,
         ingress_policy,
         observers,
@@ -690,13 +687,7 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let admitted = input.into_port().admit();
-    let mut descriptor = AsyncFiniteSourceDescriptor::new(
-        name,
-        admitted.handler,
-        admitted.continuation,
-        admitted.system,
-    );
+    let mut descriptor = AsyncFiniteSourceDescriptor::new(name, input.into_port().admit());
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -738,12 +729,9 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let admitted = input.into_port().admit();
     let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
         name: name.into(),
-        handler: admitted.handler,
-        continuation: admitted.continuation,
-        source_system: admitted.system,
+        source: input.into_port().admit(),
         source_policies,
         ingress_policy,
         observers,
@@ -786,13 +774,7 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let admitted = input.into_port().admit();
-    let mut descriptor = AsyncInfiniteSourceDescriptor::new(
-        name,
-        admitted.handler,
-        admitted.continuation,
-        admitted.system,
-    );
+    let mut descriptor = AsyncInfiniteSourceDescriptor::new(name, input.into_port().admit());
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -821,9 +803,11 @@ where
     );
     let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
         name: name.into(),
-        handler: PlaceholderFiniteSource::<PrimaryOutput>::new(message),
-        continuation: PLACEHOLDER_REFUSES,
-        source_system: SourceSystem::placeholder(),
+        source: AdmittedSource::new(
+            PlaceholderFiniteSource::<PrimaryOutput>::new(message),
+            PLACEHOLDER_REFUSES,
+            SourceSystem::placeholder(),
+        ),
         source_policies,
         ingress_policy,
         observers,
@@ -850,9 +834,11 @@ where
     );
     let mut descriptor = AsyncFiniteSourceDescriptor::new(
         name,
-        PlaceholderAsyncSource::<PrimaryOutput>::new(message),
-        PLACEHOLDER_REFUSES,
-        SourceSystem::placeholder(),
+        AdmittedSource::new(
+            PlaceholderAsyncSource::<PrimaryOutput>::new(message),
+            PLACEHOLDER_REFUSES,
+            SourceSystem::placeholder(),
+        ),
     );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
@@ -879,9 +865,11 @@ where
     );
     let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
         name: name.into(),
-        handler: PlaceholderInfiniteSource::<PrimaryOutput>::new(message),
-        continuation: PLACEHOLDER_REFUSES,
-        source_system: SourceSystem::placeholder(),
+        source: AdmittedSource::new(
+            PlaceholderInfiniteSource::<PrimaryOutput>::new(message),
+            PLACEHOLDER_REFUSES,
+            SourceSystem::placeholder(),
+        ),
         source_policies,
         ingress_policy,
         observers,
@@ -908,9 +896,11 @@ where
     );
     let mut descriptor = AsyncInfiniteSourceDescriptor::new(
         name,
-        PlaceholderAsyncSource::<PrimaryOutput>::new(message),
-        PLACEHOLDER_REFUSES,
-        SourceSystem::placeholder(),
+        AdmittedSource::new(
+            PlaceholderAsyncSource::<PrimaryOutput>::new(message),
+            PLACEHOLDER_REFUSES,
+            SourceSystem::placeholder(),
+        ),
     );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;

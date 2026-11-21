@@ -458,6 +458,35 @@ async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<C
     replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(relative)).await
 }
 
+fn acquired_systems(rows: &[JournalRecord<ChainPayload>]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|row| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::SourceReaderAcquired(acquired)) => {
+                Some(acquired.system.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn stories_then_eof(rows: &[JournalRecord<ChainPayload>]) -> Vec<u64> {
+    let eof = rows
+        .iter()
+        .position(JournalRecord::is_eof)
+        .expect("hn_stories writes EOF");
+    assert!(
+        rows[eof..]
+            .iter()
+            .all(|row| domain::HnStory::from_event(&row.authored()).is_none()),
+        "no story follows EOF"
+    );
+    rows[..eof]
+        .iter()
+        .filter_map(|row| domain::HnStory::from_event(&row.authored()))
+        .map(|story| story.id.0)
+        .collect()
+}
+
 fn map_inputs(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<AiMapReduceMapInput<DigestItem>> {
     envelopes
         .iter()
@@ -856,9 +885,7 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
         "digest = ai!(FormattedStory -> HnDigestSummary with { ai_breaker, ai_retry } => digest);",
         "impl AiRole<Chunk<FormattedStory>> for HnDigest {",
         "impl AiRole<Partials<FormattedStory, HnDigestGroupSummary>> for HnDigest {",
-        "HnSource::Live => Port::to(HttpPullSource::new(decoder, http_source_config)),",
-        "HnSource::Mock => Port::to(ScriptedStories::new(scripted_stories(max_stories))),",
-        "#[effect(type = \"hn.digest.publish\", at_least_once, records = reply)]",
+        "#[effect(type = \"hn.digest.publish\", at_least_once, records = reply, schema_version = 2)]",
         "PostgresStatement::insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)",
         "DigestOutput::Console => Port::to(ConsoleDigest),",
         "DigestOutput::Postgres => Port::deferred(PostgresDigest::from_env),",
@@ -2108,6 +2135,15 @@ async fn digest_rate_limit_delivers_summary() {
         .expect("a rate-limited chunk is retried and the digest delivered");
 
     let archive = latest_run_dir(&journal_base);
+    let stories = stage_envelopes(&archive, "hn_stories").await;
+    assert_eq!(acquired_systems(&stories), ["scripted-stories"]);
+    assert_eq!(
+        stories_then_eof(&stories),
+        scripted::scripted_stories(60)
+            .iter()
+            .map(|story| story.id.0)
+            .collect::<Vec<_>>()
+    );
     let map = stage_envelopes(&archive, "digest__map").await;
     let collect = stage_envelopes(&archive, "digest__collect").await;
     let reduce = stage_envelopes(&archive, "digest__reduce").await;
@@ -2301,8 +2337,15 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
             .map(|row| serde_json::to_value(&row.envelope.observability).unwrap())
             .collect::<Vec<_>>()
     };
-    let live_packets = source_packets(stage_envelopes(&live_archive, "hn_stories").await);
-    let replay_packets = source_packets(stage_envelopes(&replay_archive, "hn_stories").await);
+    let live_stories = stage_envelopes(&live_archive, "hn_stories").await;
+    let replay_stories = stage_envelopes(&replay_archive, "hn_stories").await;
+    assert_eq!(acquired_systems(&live_stories), ["http"]);
+    assert!(acquired_systems(&replay_stories).is_empty());
+    let live_story_ids = stories_then_eof(&live_stories);
+    assert!(!live_story_ids.is_empty());
+    assert_eq!(stories_then_eof(&replay_stories), live_story_ids);
+    let live_packets = source_packets(live_stories);
+    let replay_packets = source_packets(replay_stories);
     assert!(live_packets.iter().any(|packet| !packet.is_null()));
     assert!(live_packets.iter().any(serde_json::Value::is_null));
     assert_eq!(replay_packets, live_packets);

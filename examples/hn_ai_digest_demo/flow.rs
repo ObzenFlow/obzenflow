@@ -66,12 +66,13 @@ struct HnDigestSummary {
 
 impl TypedPayload for HnDigestSummary {
     const EVENT_TYPE: &'static str = "hn.digest_summary";
+    const SCHEMA_VERSION: u32 = 2;
 }
 
 #[obzenflow::port]
 #[async_trait]
 trait DigestOutputPort {
-    #[effect(type = "hn.digest.publish", at_least_once, records = reply)]
+    #[effect(type = "hn.digest.publish", at_least_once, records = reply, schema_version = 2)]
     async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError>;
 }
 

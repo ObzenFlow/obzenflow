@@ -234,29 +234,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn values_port_moves_unclonable_items() {
-        use obzenflow_runtime::effects::Port;
-        use obzenflow_runtime::stages::common::handlers::source::OwnedSource;
-        use obzenflow_runtime::stages::source::{FiniteSource, Refuse};
-
-        let port: Port<dyn FiniteSource<Item, Refuse>> =
-            Port::owned(ValuesSource::new(vec![Item(1), Item(2)]));
-        assert_eq!(port.system_name(), "values");
-
-        let system: std::sync::Arc<dyn FiniteSource<Item, Refuse>> =
-            ValuesSource::new(vec![Item(1), Item(2)]).into_system();
-        let mut reader = system.open_port_reader(context()).unwrap();
-        assert_eq!(reader.next().unwrap(), Some(vec![Item(1)]));
-        assert_eq!(reader.next().unwrap(), Some(vec![Item(2)]));
-        assert_eq!(reader.next().unwrap(), None);
-        assert!(matches!(
-            system.open_port_reader(context()),
-            Err(SourceError::Other(diagnostic))
-                if diagnostic.reason() == SourceDiagnosticReason::InputUnavailable
-        ));
-    }
-
     #[tokio::test]
     async fn channel_source_transfers_its_receiver_to_one_reader() {
         let (_tx, rx) = mpsc::channel::<Item>(1);

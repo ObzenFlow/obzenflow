@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::command::{Command, Port};
+use super::command::{Command, Port, PortEffects};
 use super::{CallRequest, DeclaredEffectSet, Effects, StageCompletion};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
@@ -77,8 +77,98 @@ pub struct PerformRequest<F, In, R> {
 }
 
 impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
-    /// Supplies the port the request names, which makes this a command.
-    pub fn through(self, port: Port<R::Port>) -> Perform<F, In, R> {
+    /// Supplies the port the request names, which makes this a command. Only a
+    /// port declared with `#[obzenflow::port]` answers a request:
+    ///
+    /// ```
+    /// # use obzenflow_runtime::effects::{
+    /// #     perform, CallRequest, DomainFacts, EffectContext, EffectError, Idempotent, Port,
+    /// # };
+    /// # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    /// # struct Ticket;
+    /// # impl obzenflow_core::TypedPayload for Ticket {
+    /// #     const EVENT_TYPE: &'static str = "doc.ticket";
+    /// # }
+    /// #[obzenflow_runtime::effects::port]
+    /// trait TicketDesk {}
+    /// struct Desk;
+    /// #[obzenflow_runtime::effects::system("desk")]
+    /// impl TicketDesk for Desk {}
+    ///
+    /// # #[derive(Debug, Clone, serde::Serialize)]
+    /// # struct Read;
+    /// # #[obzenflow_runtime::effects::__async_trait]
+    /// # impl CallRequest for Read {
+    /// #     const EFFECT_TYPE: &'static str = "doc.read";
+    /// #     type Safety = Idempotent;
+    /// #     type Port = dyn TicketDesk;
+    /// #     type Outcome = Ticket;
+    /// #     type Records = DomainFacts;
+    /// #     async fn call(&self, _: &dyn TicketDesk, _: &mut EffectContext) -> Result<Ticket, EffectError> {
+    /// #         Ok(Ticket)
+    /// #     }
+    /// # }
+    /// let read = perform(|_: &Ticket| Read).through(Port::to(Desk));
+    /// ```
+    ///
+    /// A source row's port declares no effect, so it answers none:
+    ///
+    /// ```compile_fail,E0277
+    /// # use obzenflow_runtime::effects::{
+    /// #     perform, CallRequest, DomainFacts, EffectContext, EffectError, Idempotent, Port,
+    /// # };
+    /// # use obzenflow_runtime::stages::source::{
+    /// #     FiniteSource, FiniteSourceConnector, Refuse, SourceError, SourceReaderInitContext,
+    /// #     TypedFiniteSourceHandler,
+    /// # };
+    /// # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    /// # struct Ticket;
+    /// # impl obzenflow_core::TypedPayload for Ticket {
+    /// #     const EVENT_TYPE: &'static str = "doc.ticket";
+    /// # }
+    /// # struct TicketReader;
+    /// # impl TypedFiniteSourceHandler for TicketReader {
+    /// #     type Output = Ticket;
+    /// #     fn next(&mut self) -> Result<Option<Vec<Ticket>>, SourceError> {
+    /// #         Ok(None)
+    /// #     }
+    /// # }
+    /// struct Tickets;
+    /// #[obzenflow_runtime::effects::system("tickets")]
+    /// impl FiniteSourceConnector for Tickets {
+    ///     type Output = Ticket;
+    ///     type Reader = TicketReader;
+    ///     type Continuation = Refuse;
+    ///     fn open(&self, _: SourceReaderInitContext) -> Result<TicketReader, SourceError> {
+    ///         Ok(TicketReader)
+    ///     }
+    /// }
+    ///
+    /// # #[derive(Debug, Clone, serde::Serialize)]
+    /// # struct Read;
+    /// # #[obzenflow_runtime::effects::__async_trait]
+    /// # impl CallRequest for Read {
+    /// #     const EFFECT_TYPE: &'static str = "doc.read";
+    /// #     type Safety = Idempotent;
+    /// #     type Port = dyn FiniteSource<Ticket, Refuse>;
+    /// #     type Outcome = Ticket;
+    /// #     type Records = DomainFacts;
+    /// #     async fn call(
+    /// #         &self,
+    /// #         _: &dyn FiniteSource<Ticket, Refuse>,
+    /// #         _: &mut EffectContext,
+    /// #     ) -> Result<Ticket, EffectError> {
+    /// #         Ok(Ticket)
+    /// #     }
+    /// # }
+    /// # fn main() {
+    /// let read = perform(|_: &Ticket| Read).through(Port::to(Tickets));
+    /// # }
+    /// ```
+    pub fn through(self, port: Port<R::Port>) -> Perform<F, In, R>
+    where
+        R::Port: PortEffects,
+    {
         Perform {
             request: self.request,
             port,

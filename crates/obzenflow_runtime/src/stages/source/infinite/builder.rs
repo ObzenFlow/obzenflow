@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::handlers::source::prepared::AdmittedSource;
 use crate::stages::common::handlers::UnifiedInfiniteSourceHandler;
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
@@ -35,9 +36,13 @@ pub struct InfiniteSourceBuilder<H: UnifiedInfiniteSourceHandler + Send + Sync +
 
 impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> InfiniteSourceBuilder<H> {
     /// Create a new infinite source builder
-    pub fn new(handler: H, config: InfiniteSourceConfig, resources: StageResources) -> Self {
+    pub fn new(
+        source: AdmittedSource<H>,
+        config: InfiniteSourceConfig,
+        resources: StageResources,
+    ) -> Self {
         Self {
-            handler,
+            handler: source.handler,
             config,
             resources,
             instrumentation: None,
