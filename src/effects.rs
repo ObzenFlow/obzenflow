@@ -49,7 +49,7 @@ pub mod http {
         Body, Bytes, HeaderMap, HeaderName, HeaderValue, HttpClient, HttpClientError, HttpMethod,
         HttpRequest, HttpResponse, MockHttpClient, Url,
     };
-    pub use obzenflow_infra::http_client::{default_http_client, HttpClientFactoryError};
+    pub use obzenflow_infra::clients::http::{default_http_client, HttpClientFactoryError};
 }
 
 /// PostgreSQL output for an application's system. The system supplies the SQL
@@ -58,7 +58,7 @@ pub mod http {
 /// maps a client failure to an effect error. Requires the `postgres` feature.
 #[cfg(feature = "postgres")]
 pub mod postgres {
-    pub use obzenflow_infra::sinks::client::postgres::{
+    pub use obzenflow_infra::clients::postgres::{
         default_postgres_client, unsent, PostgresBindings, PostgresClient, PostgresClientError,
         PostgresConfigError, PostgresConnection, PostgresStatement, PostgresStatementError,
         PostgresTransport,

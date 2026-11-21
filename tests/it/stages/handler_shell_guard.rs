@@ -994,15 +994,15 @@ fn production_http_constructor_sites(root: &Path) -> Vec<(PathBuf, String, Strin
 #[test]
 fn default_http_source_transport_stays_cold_until_execute() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let factory = fs::read_to_string(root.join("crates/obzenflow_infra/src/http_client/mod.rs"))
+    let factory = fs::read_to_string(root.join("crates/obzenflow_infra/src/clients/http/mod.rs"))
         .expect("read default HTTP client factory");
     let reqwest_source =
-        fs::read_to_string(root.join("crates/obzenflow_infra/src/http_client/reqwest_client.rs"))
+        fs::read_to_string(root.join("crates/obzenflow_infra/src/clients/http/reqwest_client.rs"))
             .expect("read reqwest HTTP client");
 
     let mut guarded = vec![
         root.join("src/stages/sources.rs"),
-        root.join("crates/obzenflow_infra/src/http_client/mod.rs"),
+        root.join("crates/obzenflow_infra/src/clients/http/mod.rs"),
         root.join("crates/obzenflow_adapters/src/sources/http_pull.rs"),
         root.join("crates/obzenflow_infra/src/web/studio_registration.rs"),
     ];
@@ -1068,7 +1068,7 @@ fn default_http_source_transport_stays_cold_until_execute() {
     for (path, _constructor, context) in source_client_sites {
         assert_eq!(
             path,
-            Path::new("crates/obzenflow_infra/src/http_client/reqwest_client.rs"),
+            Path::new("crates/obzenflow_infra/src/clients/http/reqwest_client.rs"),
             "concrete reqwest construction escaped its infra owner: {sites:?}"
         );
         assert_eq!(

@@ -14,11 +14,10 @@
 
 pub mod ai;
 pub mod application;
+pub mod clients;
 pub mod env;
-pub mod http_client;
 pub mod journal;
 pub mod simulated;
-pub mod sinks;
 #[cfg(feature = "test-support")]
 pub mod testing;
 pub mod verify;

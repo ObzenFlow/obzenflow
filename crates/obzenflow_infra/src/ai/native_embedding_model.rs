@@ -6,7 +6,7 @@ use crate::ai::endpoint_identity::{
     bound_embedding_target, default_ollama_base_url, default_openai_base_url,
 };
 use crate::ai::provider_errors::{unclaimed_status, unreadable_body, ModelCalls};
-use crate::http_client::ReqwestHttpClient;
+use crate::clients::http::ReqwestHttpClient;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     AiProvider, AiProviderError, EmbeddingDimensions, EmbeddingModel, EmbeddingRequest,

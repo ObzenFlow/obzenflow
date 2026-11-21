@@ -260,7 +260,7 @@ pub use obzenflow_core::http_client::{
 };
 
 /// Default HTTP pull and poll configuration composed by the infra layer.
-pub use obzenflow_infra::http_client::{
+pub use obzenflow_infra::clients::http::{
     http_poll_config, http_pull_config, HttpClientFactoryError,
 };
 

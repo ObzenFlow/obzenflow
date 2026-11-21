@@ -9,7 +9,7 @@ use crate::ai::endpoint_identity::{
     bound_chat_target, default_ollama_base_url, default_openai_base_url,
 };
 use crate::ai::provider_errors::ModelCalls;
-use crate::http_client::ReqwestHttpClient;
+use crate::clients::http::ReqwestHttpClient;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     AiProvider, AiProviderError, ChatMessage, ChatModel, ChatParams, ChatRequest, ChatResponse,

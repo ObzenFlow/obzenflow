@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Clients used by sink systems to write to their destinations.
+//! Clients that sources and systems hold to reach outside services.
 
+pub mod http;
 #[cfg(feature = "postgres")]
 pub mod postgres;

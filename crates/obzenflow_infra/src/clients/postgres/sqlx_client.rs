@@ -6,9 +6,9 @@ use super::{
     PostgresBindings, PostgresClient, PostgresClientError, PostgresConfigError, PostgresConnection,
     PostgresStatement,
 };
-use ::sqlx::postgres::PgPoolOptions;
-use ::sqlx::PgPool;
 use async_trait::async_trait;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,7 +49,7 @@ impl PostgresClient for SqlxPostgresClient {
             .acquire()
             .await
             .map_err(|error| PostgresClientError::Connection(error.to_string()))?;
-        let query = ::sqlx::query_with(statement.sql(), arguments);
+        let query = sqlx::query_with(statement.sql(), arguments);
         match tokio::time::timeout(self.operation_timeout, query.execute(&mut *connection)).await {
             Ok(Ok(done)) => Ok(done.rows_affected()),
             Ok(Err(error)) => Err(statement_error(error)),
@@ -62,13 +62,13 @@ impl PostgresClient for SqlxPostgresClient {
     }
 }
 
-fn statement_error(error: ::sqlx::Error) -> PostgresClientError {
+fn statement_error(error: sqlx::Error) -> PostgresClientError {
     match error {
-        ::sqlx::Error::Database(database) => PostgresClientError::Refused {
+        sqlx::Error::Database(database) => PostgresClientError::Refused {
             sqlstate: database.code().map(|code| code.into_owned()),
             message: database.message().to_string(),
         },
-        ::sqlx::Error::Encode(error) => PostgresClientError::Unencodable(error.to_string()),
+        sqlx::Error::Encode(error) => PostgresClientError::Unencodable(error.to_string()),
         error => PostgresClientError::Transport(error.to_string()),
     }
 }
@@ -76,7 +76,7 @@ fn statement_error(error: ::sqlx::Error) -> PostgresClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sinks::client::postgres::PostgresTransport;
+    use crate::clients::postgres::PostgresTransport;
 
     #[tokio::test]
     async fn zero_timeout_refused() {

@@ -515,7 +515,7 @@ async fn source_retry_observes_one_cached_initialization_failure() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn abort_during_initialization_cancels_the_waiter_before_request_send() {
     const TEST_NAME: &str = concat!(
-        "http_client::reqwest_client::replay_tests::",
+        "clients::http::reqwest_client::replay_tests::",
         "abort_during_initialization_cancels_the_waiter_before_request_send"
     );
     if !enter_isolated_test(TEST_NAME) {
@@ -600,7 +600,7 @@ async fn abort_during_initialization_cancels_the_waiter_before_request_send() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn strict_replay_keeps_the_default_source_client_cold() {
     const TEST_NAME: &str = concat!(
-        "http_client::reqwest_client::replay_tests::",
+        "clients::http::reqwest_client::replay_tests::",
         "strict_replay_keeps_the_default_source_client_cold"
     );
     if !enter_isolated_test(TEST_NAME) {
@@ -677,7 +677,7 @@ async fn strict_replay_keeps_the_default_source_client_cold() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resume_initializes_only_after_the_recorded_prefix_crosses_continue_live() {
     const TEST_NAME: &str = concat!(
-        "http_client::reqwest_client::replay_tests::",
+        "clients::http::reqwest_client::replay_tests::",
         "resume_initializes_only_after_the_recorded_prefix_crosses_continue_live"
     );
     if !enter_isolated_test(TEST_NAME) {
