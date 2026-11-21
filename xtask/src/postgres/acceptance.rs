@@ -65,7 +65,7 @@ pub(super) const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres",
             "--lib",
-            "postgres_client::",
+            "sinks::client::postgres::",
         ],
     },
     CommandSpec {

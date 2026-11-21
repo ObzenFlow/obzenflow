@@ -2,26 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The PostgreSQL client systems speak through.
-//!
-//! Each call executes one statement in PostgreSQL's autocommit.
-
-mod bindings;
-mod client;
-mod error;
-mod statement;
-
-pub use bindings::PostgresBindings;
-pub use client::PostgresClient;
-pub use error::{unsent, PostgresClientError};
-pub use statement::{PostgresStatement, PostgresStatementError};
-
-use async_trait::async_trait;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
-use sqlx::{ConnectOptions as _, PgPool};
+use ::sqlx::postgres::{PgConnectOptions, PgSslMode};
+use ::sqlx::ConnectOptions as _;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
@@ -71,10 +55,10 @@ impl PostgresTransport {
 /// Parsed connection options whose formatting never shows the URL or password.
 #[derive(Clone)]
 pub struct PostgresConnection {
-    options: Box<PgConnectOptions>,
+    pub(super) options: Box<PgConnectOptions>,
     transport: PostgresTransport,
-    acquire_timeout: Duration,
-    operation_timeout: Duration,
+    pub(super) acquire_timeout: Duration,
+    pub(super) operation_timeout: Duration,
 }
 
 impl PostgresConnection {
@@ -172,67 +156,6 @@ fn preflight_url(url: &str, transport: PostgresTransport) -> Result<(), Postgres
     Ok(())
 }
 
-/// The framework's PostgreSQL client for `connection`. No connection opens
-/// until the first statement runs.
-pub fn default_postgres_client(
-    connection: PostgresConnection,
-) -> Result<Arc<dyn PostgresClient>, PostgresConfigError> {
-    if connection.acquire_timeout.is_zero() || connection.operation_timeout.is_zero() {
-        return Err(PostgresConfigError::InvalidTimeout);
-    }
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .min_connections(0)
-        .acquire_timeout(connection.acquire_timeout)
-        .connect_lazy_with(*connection.options);
-    Ok(Arc::new(SqlxPostgresClient {
-        pool,
-        operation_timeout: connection.operation_timeout,
-    }))
-}
-
-struct SqlxPostgresClient {
-    pool: PgPool,
-    operation_timeout: Duration,
-}
-
-#[async_trait]
-impl PostgresClient for SqlxPostgresClient {
-    async fn send(
-        &self,
-        statement: &PostgresStatement,
-        bindings: PostgresBindings,
-    ) -> Result<u64, PostgresClientError> {
-        let arguments = bindings.into_arguments()?;
-        let mut connection = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|error| PostgresClientError::Connection(error.to_string()))?;
-        let query = sqlx::query_with(statement.sql(), arguments);
-        match tokio::time::timeout(self.operation_timeout, query.execute(&mut *connection)).await {
-            Ok(Ok(done)) => Ok(done.rows_affected()),
-            Ok(Err(error)) => Err(statement_error(error)),
-            Err(_) => Err(PostgresClientError::Timeout(format!(
-                "statement on {} ran past {:?}",
-                statement.destination(),
-                self.operation_timeout
-            ))),
-        }
-    }
-}
-
-fn statement_error(error: sqlx::Error) -> PostgresClientError {
-    match error {
-        sqlx::Error::Database(database) => PostgresClientError::Refused {
-            sqlstate: database.code().map(|code| code.into_owned()),
-            message: database.message().to_string(),
-        },
-        sqlx::Error::Encode(error) => PostgresClientError::Unencodable(error.to_string()),
-        error => PostgresClientError::Transport(error.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,19 +192,5 @@ mod tests {
         )
         .unwrap();
         assert!(!format!("{connection:?}").contains("sentinel"));
-    }
-
-    #[tokio::test]
-    async fn zero_timeout_refused() {
-        let connection = PostgresConnection::from_url(
-            "postgres://user@localhost/db",
-            PostgresTransport::ExternallyProtectedPlaintext,
-        )
-        .unwrap()
-        .with_operation_timeout(Duration::ZERO);
-        assert!(matches!(
-            default_postgres_client(connection),
-            Err(PostgresConfigError::InvalidTimeout)
-        ));
     }
 }

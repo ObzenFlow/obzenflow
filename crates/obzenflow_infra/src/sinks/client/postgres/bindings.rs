@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use super::PostgresClientError;
-use sqlx::postgres::PgArguments;
-use sqlx::{Arguments, Encode, Postgres, Type};
+use ::sqlx::postgres::PgArguments;
+use ::sqlx::{Arguments, Encode, Postgres, Type};
 use std::fmt;
 
 /// The arguments for one statement, encoded in parameter order using SQLx

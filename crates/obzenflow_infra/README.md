@@ -29,7 +29,7 @@ configured service.
 | --- | --- |
 | `warp-server` | Managed HTTP host. |
 | `reqwest-client` | Default outbound HTTP client. |
-| `postgres` | Injectable PostgreSQL client, SQLx parameter binding and autocommit execution. |
+| `postgres` | Sink systems use `sinks::client::postgres` to bind and execute PostgreSQL statements in autocommit. |
 | `prometheus` | Prometheus reporting integration. |
 | `studio-registration` | Studio registration, with HTTP and Prometheus support. |
 | `ai-rig` | AI provider bindings. |

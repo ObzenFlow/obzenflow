@@ -17,9 +17,8 @@ pub mod application;
 pub mod env;
 pub mod http_client;
 pub mod journal;
-#[cfg(feature = "postgres")]
-pub mod postgres_client;
 pub mod simulated;
+pub mod sinks;
 #[cfg(feature = "test-support")]
 pub mod testing;
 pub mod verify;

@@ -2,7 +2,22 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{PostgresBindings, PostgresClientError, PostgresStatement};
+//! PostgreSQL writes for application-defined sink systems.
+//!
+//! The default client executes each statement in autocommit.
+
+mod bindings;
+mod connection;
+mod error;
+mod sqlx;
+mod statement;
+
+pub use self::sqlx::default_postgres_client;
+pub use bindings::PostgresBindings;
+pub use connection::{PostgresConfigError, PostgresConnection, PostgresTransport};
+pub use error::{unsent, PostgresClientError};
+pub use statement::{PostgresStatement, PostgresStatementError};
+
 use async_trait::async_trait;
 
 /// What a system speaks through to reach PostgreSQL.
@@ -32,10 +47,10 @@ impl dyn PostgresClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::encode::IsNull;
-    use sqlx::error::BoxDynError;
-    use sqlx::postgres::{PgArgumentBuffer, PgTypeInfo};
-    use sqlx::{Encode, Postgres, Type};
+    use ::sqlx::encode::IsNull;
+    use ::sqlx::error::BoxDynError;
+    use ::sqlx::postgres::{PgArgumentBuffer, PgTypeInfo};
+    use ::sqlx::{Encode, Postgres, Type};
 
     struct InvalidParameter;
 

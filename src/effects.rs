@@ -58,7 +58,7 @@ pub mod http {
 /// maps a client failure to an effect error. Requires the `postgres` feature.
 #[cfg(feature = "postgres")]
 pub mod postgres {
-    pub use obzenflow_infra::postgres_client::{
+    pub use obzenflow_infra::sinks::client::postgres::{
         default_postgres_client, unsent, PostgresBindings, PostgresClient, PostgresClientError,
         PostgresConfigError, PostgresConnection, PostgresStatement, PostgresStatementError,
         PostgresTransport,
