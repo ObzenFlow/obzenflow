@@ -116,6 +116,7 @@ impl<T: TypedPayload> SourceTyping for ChannelSource<T> {
     type Output = T;
 }
 
+#[obzenflow_runtime::effects::system("channel")]
 #[async_trait]
 impl<T: TypedPayload + Send + Sync + 'static> AsyncInfiniteSourceConnector for ChannelSource<T> {
     type Output = T;

@@ -12,7 +12,7 @@ endpoint = "ollama"
 model = "llama3.1:8b"
 request_timeout_ms = 150000
 
-# `source = "live"` reads the Hacker News API; "mock" serves a loopback fixture.
+# `source = "live"` reads the Hacker News API; "mock" reads scripted stories.
 # Pacing is `events_per_second` under [middleware.stages.hn_stories.rate_limiter].
 # `output` publishes the digest to the console or, with "postgres", to PostgreSQL.
 [app]

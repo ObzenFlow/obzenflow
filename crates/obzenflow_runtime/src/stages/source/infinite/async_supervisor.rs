@@ -74,6 +74,8 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     /// The continuation admitted with the source (FLOWIP-134i B8).
     pub(crate) continuation: SourceContinuation,
 
+    pub(crate) system: Option<Arc<str>>,
+
     /// Adaptive backoff for async polls that deliver no data.
     pub(crate) idle_backoff: IdleBackoff,
 
@@ -514,6 +516,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
             flow_context: self.flow_context.clone(),
             stage_id: self.stage_id,
             continuation: self.continuation,
+            system: self.system.clone(),
             external_events: self.external_events.begin_turn(),
             state_watcher: self.state_watcher.clone(),
             last_state: Some(state.clone()),
@@ -657,6 +660,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                         ),
                         SourcePollKind::AsyncInfinite,
                         ctx.runtime_execution.resume_control().is_some(),
+                        self.system.as_deref(),
                     )
                     .await?;
                     // Return to control dispatch before admitting the first poll.

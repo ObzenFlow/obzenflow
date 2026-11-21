@@ -215,18 +215,24 @@ pub fn build_flow() -> FlowDefinition {
 
 pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, app: AmlApp| {
-        let history_feed = CsvSource::builder(AccountHistoryCsv)
-            .path(&app.account_history)
-            .build()
-            .map_err(resources_failed)?;
-        let transactions_feed = CsvSource::builder(TransactionCsv)
-            .path(&app.transactions)
-            .build()
-            .map_err(resources_failed)?;
-        let rates_feed = CsvSource::builder(RateCsv)
-            .path(&app.fx_rates)
-            .build()
-            .map_err(resources_failed)?;
+        let history_feed = Port::to(
+            CsvSource::builder(AccountHistoryCsv)
+                .path(&app.account_history)
+                .build()
+                .map_err(resources_failed)?,
+        );
+        let transactions_feed = Port::to(
+            CsvSource::builder(TransactionCsv)
+                .path(&app.transactions)
+                .build()
+                .map_err(resources_failed)?,
+        );
+        let rates_feed = Port::to(
+            CsvSource::builder(RateCsv)
+                .path(&app.fx_rates)
+                .build()
+                .map_err(resources_failed)?,
+        );
         let profile = AccountProfile;
         let price = AsOfJoin::new(PriceInUsd);
         let scorer = Scorer::through(match app.risk_engine {

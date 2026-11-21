@@ -219,6 +219,7 @@ impl<D: YamlDecoder> SourceTyping for YamlSource<D> {
     type Output = D::Output;
 }
 
+#[obzenflow_runtime::effects::system("files")]
 impl<D: YamlDecoder> FiniteSourceConnector for YamlSource<D> {
     type Output = D::Output;
     type Reader = YamlReader<D>;

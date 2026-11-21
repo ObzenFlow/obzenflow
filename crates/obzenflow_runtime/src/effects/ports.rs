@@ -228,6 +228,82 @@ impl SystemPort {
     }
 }
 
+/// The system behind a source row's port: the name its stage records and the
+/// recipe the run's registry builds.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct SourceSystem {
+    name: LogicalEffectBindingName,
+    system: Arc<SystemPort>,
+    registry: Arc<Mutex<Option<EffectPortRegistry>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceSystemFault {
+    Refused(EffectPortResolutionError),
+    Unbuilt,
+}
+
+impl SourceSystem {
+    pub(super) fn new(name: LogicalEffectBindingName, system: Arc<SystemPort>) -> Self {
+        Self {
+            name,
+            system,
+            registry: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    pub(crate) fn attach(&self, registry: &EffectPortRegistry) {
+        *self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(registry.clone());
+    }
+
+    pub(crate) fn resolve<P>(&self) -> Result<Arc<P>, SourceSystemFault>
+    where
+        P: ?Sized + Send + Sync + 'static,
+    {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or(SourceSystemFault::Unbuilt)?;
+        let resolved =
+            registry
+                .resolve_at(self.system.coordinate)
+                .map_err(|fault| match fault {
+                    PortResolutionFault::Resolver(ResolverVerdictError::Provider(error)) => {
+                        SourceSystemFault::Refused(error)
+                    }
+                    PortResolutionFault::Resolver(
+                        ResolverVerdictError::Panicked | ResolverVerdictError::NotMaterialised,
+                    )
+                    | PortResolutionFault::MissingRegistration => SourceSystemFault::Unbuilt,
+                })?;
+        resolved
+            .port
+            .downcast_ref::<Arc<P>>()
+            .cloned()
+            .ok_or(SourceSystemFault::Unbuilt)
+    }
+}
+
+impl std::fmt::Debug for SourceSystem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceSystem")
+            .field("system", &self.name.as_str())
+            .field("recipe", &"<not disclosed>")
+            .finish()
+    }
+}
+
 enum PendingRegistrationState {
     Pending(Vec<(BindingCoordinate, PortRecipe)>),
     Collected,
@@ -749,18 +825,33 @@ impl EffectPortRegistry {
         &self,
         slot: &BoundEffectPortSlot,
     ) -> Result<ErasedResolvedEffectPort, EffectPortViewBuildError> {
-        let Some(entries) = self.run_entries.as_ref() else {
-            return match self.recipes.get(&slot.coordinate) {
-                Some(PortRecipe::Eager(port)) => Ok(port.clone()),
-                Some(PortRecipe::Deferred(_)) => Err(EffectPortViewBuildError::Resolver {
+        self.resolve_at(slot.coordinate)
+            .map_err(|fault| match fault {
+                PortResolutionFault::MissingRegistration => {
+                    EffectPortViewBuildError::MissingRegistration
+                }
+                PortResolutionFault::Resolver(verdict) => EffectPortViewBuildError::Resolver {
                     slot: slot.requirement.label,
-                    verdict: ResolverVerdictError::NotMaterialised,
-                }),
-                None => Err(EffectPortViewBuildError::MissingRegistration),
+                    verdict,
+                },
+            })
+    }
+
+    fn resolve_at(
+        &self,
+        coordinate: BindingCoordinate,
+    ) -> Result<ErasedResolvedEffectPort, PortResolutionFault> {
+        let Some(entries) = self.run_entries.as_ref() else {
+            return match self.recipes.get(&coordinate) {
+                Some(PortRecipe::Eager(port)) => Ok(port.clone()),
+                Some(PortRecipe::Deferred(_)) => Err(PortResolutionFault::Resolver(
+                    ResolverVerdictError::NotMaterialised,
+                )),
+                None => Err(PortResolutionFault::MissingRegistration),
             };
         };
-        let Some(entry) = entries.get(&slot.coordinate) else {
-            return Err(EffectPortViewBuildError::MissingRegistration);
+        let Some(entry) = entries.get(&coordinate) else {
+            return Err(PortResolutionFault::MissingRegistration);
         };
         match entry {
             RunPortEntry::Eager(port) => Ok(port.clone()),
@@ -772,12 +863,23 @@ impl EffectPortRegistry {
                 })
                 .as_ref()
                 .cloned()
-                .map_err(|error| EffectPortViewBuildError::Resolver {
-                    slot: slot.requirement.label,
-                    verdict: *error,
-                }),
+                .map_err(|error| PortResolutionFault::Resolver(*error)),
         }
     }
+
+    /// Add the system behind a source row's port, so a run builds a deferred
+    /// one at most once however many rows share the port.
+    #[doc(hidden)]
+    pub fn install_source_system(&mut self, source: &SourceSystem) {
+        Arc::make_mut(&mut self.recipes)
+            .insert(source.system.coordinate, source.system.recipe.clone());
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PortResolutionFault {
+    MissingRegistration,
+    Resolver(ResolverVerdictError),
 }
 
 impl std::fmt::Debug for EffectPortRegistry {

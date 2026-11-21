@@ -85,6 +85,7 @@ impl<E: crate::supervised_base::with_external_events::ExternalControlEvent + Sen
 }
 
 use crate::backpressure::{BackpressureWriter, StallEpisode};
+use crate::effects::{EffectPortRegistry, SourceSystem};
 use crate::feed_plan::OutcomeContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
@@ -567,12 +568,22 @@ pub(crate) async fn record_source_stage_fatal(
     Ok(())
 }
 
+pub(crate) fn bind_source_system(
+    source: Option<&SourceSystem>,
+    registry: &EffectPortRegistry,
+) -> Option<Arc<str>> {
+    let source = source?;
+    source.attach(registry);
+    Some(Arc::from(source.name()))
+}
+
 /// Commit an acquired reader before anything it reads (FLOWIP-134i B2).
 pub(crate) async fn commit_reader_acquired(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     stage_flow_context: &FlowContext,
     source_type: SourcePollKind,
     resuming: bool,
+    system: Option<&str>,
 ) -> Result<(), BoxError> {
     let intent = if resuming {
         SourceOpenIntent::Resume
@@ -585,6 +596,7 @@ pub(crate) async fn commit_reader_acquired(
         ExecutionPayload::SourceReaderAcquired(SourceReaderAcquiredFact {
             source_type,
             intent,
+            system: system.map(str::to_owned),
         }),
     )
     .await?;

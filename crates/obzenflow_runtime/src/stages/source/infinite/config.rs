@@ -4,6 +4,7 @@
 
 //! Configuration for infinite source stages
 
+use crate::effects::SourceSystem;
 use crate::stages::observer::StageObserverBindings;
 use crate::stages::source::boundary::SourceBoundary;
 use crate::stages::source::strategies::CompletionGate;
@@ -25,6 +26,9 @@ pub struct InfiniteSourceConfig {
 
     /// The continuation admitted with the source (FLOWIP-134i B8).
     pub continuation: SourceContinuation,
+
+    /// The system behind the row's port, when the row takes one.
+    pub source_system: Option<SourceSystem>,
 
     /// Optional source control strategy for shutdown / FlowControl decisions.
     /// When not provided, the builder will default to JonestownSourceStrategy.
@@ -49,6 +53,7 @@ impl InfiniteSourceConfig {
             stage_name: stage_name.into(),
             flow_name: flow_name.into(),
             continuation,
+            source_system: None,
             control_strategy: None,
             source_boundary: None,
             observer_bindings: StageObserverBindings::default(),
@@ -68,6 +73,7 @@ impl std::fmt::Debug for InfiniteSourceConfig {
             .field("stage_name", &self.stage_name)
             .field("flow_name", &self.flow_name)
             .field("continuation", &self.continuation)
+            .field("source_system", &self.source_system)
             .field("control_strategy", &self.control_strategy)
             .field("has_source_boundary", &self.source_boundary.is_some())
             .field("has_observers", &!self.observer_bindings.is_empty())

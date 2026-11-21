@@ -7,6 +7,7 @@ use super::domain::{
 };
 use anyhow::Result;
 use obzenflow::application::{FlowApplication, LogLevel, Presentation};
+use obzenflow::effects::Port;
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{flow, join, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow::journal::disk_journals;
@@ -135,15 +136,19 @@ fn resources_failed(error: impl std::fmt::Display) -> FlowBuildError {
 
 fn build_flow() -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: SupportSlaSettings| {
-        let customers = CsvSource::builder(CustomerCsv)
-            .path(&settings.customers_csv)
-            .build()
-            .map_err(resources_failed)?;
-        let tickets = CsvSource::builder(TicketCsv)
-            .path(&settings.tickets_csv)
-            .chunk_size(25)
-            .build()
-            .map_err(resources_failed)?;
+        let customers = Port::to(
+            CsvSource::builder(CustomerCsv)
+                .path(&settings.customers_csv)
+                .build()
+                .map_err(resources_failed)?,
+        );
+        let tickets = Port::to(
+            CsvSource::builder(TicketCsv)
+                .path(&settings.tickets_csv)
+                .chunk_size(25)
+                .build()
+                .map_err(resources_failed)?,
+        );
 
         if let Some(outputs) = settings
             .output_csv

@@ -566,6 +566,9 @@ pub struct SourceOpenFailedFact {
 pub struct SourceReaderAcquiredFact {
     pub source_type: SourcePollKind,
     pub intent: SourceOpenIntent,
+    /// The system the reader came from, for a source row that takes a port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
 }
 
 /// Where a source was when it released its reader.

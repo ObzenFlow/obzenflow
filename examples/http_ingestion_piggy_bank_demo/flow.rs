@@ -5,6 +5,7 @@
 use super::domain::*;
 use super::handlers::{AccountLedger, Assess};
 use super::money::UsdCents;
+use obzenflow::effects::Port;
 use obzenflow::flow::{
     async_infinite_source, flow, join, merge, sink, source, stateful, transform, FlowBuildError,
     FlowDefinition,
@@ -231,21 +232,27 @@ pub fn assemble_flow(
     ach_source: HostedIngressSource<AchIngress>,
 ) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: PiggyBankSettings| {
-        let accounts_source = YamlSource::builder(AccountYaml)
-            .path(settings.accounts_file)
-            .selection(YamlSelection::SequenceAt("/accounts".into()))
-            .build()
-            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
-        let ledger_source = CsvSource::builder(LedgerCsv)
-            .path(settings.transactions_file)
-            .chunk_size(1)
-            .build()
-            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
-        let ach_debits_source = CsvSource::builder(AchDebitCsv)
-            .path(settings.ach_debits_file)
-            .chunk_size(1)
-            .build()
-            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
+        let accounts_source = Port::to(
+            YamlSource::builder(AccountYaml)
+                .path(settings.accounts_file)
+                .selection(YamlSelection::SequenceAt("/accounts".into()))
+                .build()
+                .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?,
+        );
+        let ledger_source = Port::to(
+            CsvSource::builder(LedgerCsv)
+                .path(settings.transactions_file)
+                .chunk_size(1)
+                .build()
+                .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?,
+        );
+        let ach_debits_source = Port::to(
+            CsvSource::builder(AchDebitCsv)
+                .path(settings.ach_debits_file)
+                .chunk_size(1)
+                .build()
+                .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?,
+        );
         let batch_presentments = transforms::map(present);
         let live_presentments = transforms::map(present);
         let assess_handler = Assess::new(settings.fee_rule);

@@ -9,6 +9,7 @@
 
 use super::continuation::{AsyncReaderOpener, SourceContinuation, SyncReaderOpener};
 use super::SourceError;
+use crate::effects::SourceSystem;
 use crate::stages::source::SourceReaderInitContext;
 use obzenflow_core::OneFactOutcome;
 
@@ -31,12 +32,23 @@ pub trait AdmitSource<Family: ?Sized, Kind>:
     const CONTINUATION: SourceContinuation;
 
     fn prepare(self) -> Self::Handler;
+
+    /// The handler, with the system its row's port names when the row takes one.
+    fn prepare_with_system(self) -> (Self::Handler, Option<SourceSystem>)
+    where
+        Self: Sized,
+    {
+        (self.prepare(), None)
+    }
 }
 
 #[doc(hidden)]
 pub enum DirectSource {}
 #[doc(hidden)]
 pub enum ConnectorSource {}
+/// A `Port` whose system is a connector of the row's family.
+#[doc(hidden)]
+pub enum PortSource {}
 /// Hosted ingress, admitted by Runtime because only its single writer
 /// acknowledges after commit (FLOWIP-122i B3).
 #[doc(hidden)]

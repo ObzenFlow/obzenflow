@@ -4,24 +4,22 @@
 
 //! Example entrypoint and application hosting for the HN AI digest demo.
 
-use super::config::HnSettings;
+use super::config::{HnSettings, HnSource};
 use super::flow::{
     build_flow_definition, HnFlowOptions, HN_SOURCE_BREAKER_COOLDOWN_SECS,
     HN_SOURCE_BREAKER_FAILURES,
 };
 use anyhow::Result;
 use obzenflow::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
-use obzenflow::flow::{FlowBuildError, FlowDefinition};
+use obzenflow::flow::FlowDefinition;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::runtime::Builder;
 
 pub(crate) fn settings_flow_definition(reads_mock: Arc<AtomicBool>) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: HnSettings| {
-        let inputs = settings
-            .into_inputs()
-            .map_err(|error| FlowBuildError::StageResourcesFailed(format!("{error:#}")))?;
-        reads_mock.store(inputs.mode_label == "mock", Ordering::SeqCst);
+        let inputs = settings.into_inputs();
+        reads_mock.store(matches!(inputs.source, HnSource::Mock), Ordering::SeqCst);
         Ok(build_flow_definition(inputs, HnFlowOptions::default()))
     })
 }

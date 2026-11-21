@@ -281,6 +281,12 @@ pub use obzenflow_runtime::stages::source::{
     InfiniteSourceConnector, SourceReaderInitContext,
 };
 
+/// The port each source family's row takes. A flow builder writes one only in
+/// the signature of a helper that returns a source's port.
+pub use obzenflow_runtime::stages::source::{
+    AsyncFiniteSource, AsyncInfiniteSource, FiniteSource, InfiniteSource,
+};
+
 /// Connector continuation declarations, their reattachment guarantees and the
 /// positioned reader contract (FLOWIP-134i, FLOWIP-122i).
 pub use obzenflow_runtime::stages::source::{

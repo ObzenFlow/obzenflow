@@ -423,6 +423,7 @@ impl<D: CsvDecoder> std::fmt::Debug for CsvReader<D> {
     }
 }
 
+#[obzenflow_runtime::effects::system("files")]
 impl<D: CsvDecoder> FiniteSourceConnector for CsvSource<D> {
     type Output = D::Output;
     type Reader = CsvReader<D>;

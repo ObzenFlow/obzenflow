@@ -614,10 +614,12 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
+    let (handler, source_system) = handler.prepare_with_system();
     let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
         name: name.into(),
-        handler: handler.prepare(),
+        handler,
         continuation: H::CONTINUATION,
+        source_system,
         source_policies,
         ingress_policy,
         observers,
@@ -653,7 +655,9 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let mut descriptor = AsyncFiniteSourceDescriptor::new(name, handler.prepare(), H::CONTINUATION);
+    let (handler, source_system) = handler.prepare_with_system();
+    let mut descriptor = AsyncFiniteSourceDescriptor::new(name, handler, H::CONTINUATION);
+    descriptor.source_system = source_system;
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -688,10 +692,12 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
+    let (handler, source_system) = handler.prepare_with_system();
     let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
         name: name.into(),
-        handler: handler.prepare(),
+        handler,
         continuation: H::CONTINUATION,
+        source_system,
         source_policies,
         ingress_policy,
         observers,
@@ -727,8 +733,9 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let mut descriptor =
-        AsyncInfiniteSourceDescriptor::new(name, handler.prepare(), H::CONTINUATION);
+    let (handler, source_system) = handler.prepare_with_system();
+    let mut descriptor = AsyncInfiniteSourceDescriptor::new(name, handler, H::CONTINUATION);
+    descriptor.source_system = source_system;
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -759,6 +766,7 @@ where
         name: name.into(),
         handler: PlaceholderFiniteSource::<PrimaryOutput>::new(message),
         continuation: PLACEHOLDER_REFUSES,
+        source_system: None,
         source_policies,
         ingress_policy,
         observers,
@@ -815,6 +823,7 @@ where
         name: name.into(),
         handler: PlaceholderInfiniteSource::<PrimaryOutput>::new(message),
         continuation: PLACEHOLDER_REFUSES,
+        source_system: None,
         source_policies,
         ingress_policy,
         observers,
@@ -1833,6 +1842,10 @@ impl StageDescriptor for TypedStageDescriptor {
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
         self.inner.source_continuation()
+    }
+
+    fn source_system(&self) -> Option<obzenflow_runtime::effects::SourceSystem> {
+        self.inner.source_system()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
@@ -3038,6 +3051,10 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
         self.inner.source_continuation()
+    }
+
+    fn source_system(&self) -> Option<obzenflow_runtime::effects::SourceSystem> {
+        self.inner.source_system()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {

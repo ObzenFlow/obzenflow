@@ -158,12 +158,15 @@ pub use identity::{
     deterministic_event_id, deterministic_event_time, deterministic_payload_event_id,
     deterministic_typed_output_event, EffectOutputOrdinal,
 };
+pub(crate) use ports::SourceSystemFault;
 pub use ports::{
     EffectBindingBuildError, EffectPortRegistry, EffectPortResolutionError, EffectPortResolver,
     EffectRegistrationCollectionError,
 };
 #[doc(hidden)]
-pub use ports::{EffectPortResolverWithMetadata, EffectRegistrationBuilder, ResolvedEffectPort};
+pub use ports::{
+    EffectPortResolverWithMetadata, EffectRegistrationBuilder, ResolvedEffectPort, SourceSystem,
+};
 pub(crate) use recovery::ProgressJournal;
 pub use recovery::{EffectProgress, InputHolds};
 pub(crate) use runtime::EffectsCore;

@@ -1147,6 +1147,7 @@ impl<D: PullDecoder> HttpPullSource<D> {
     }
 }
 
+#[obzenflow_runtime::effects::system("http")]
 #[async_trait]
 impl<D: PullDecoder> AsyncFiniteSourceConnector for HttpPullSource<D> {
     type Output = D::Output;
@@ -1189,6 +1190,7 @@ impl<D: PullDecoder> HttpPollSource<D> {
 /// current state, so a resumed run reattaches with `LatestState` (FLOWIP-122i).
 /// An interruption costs what a long gap between polls costs, so rows that
 /// leave a windowed endpoint while no reader polls are never observed.
+#[obzenflow_runtime::effects::system("http")]
 #[async_trait]
 impl<D: PullDecoder> AsyncInfiniteSourceConnector for HttpPollSource<D> {
     type Output = D::Output;

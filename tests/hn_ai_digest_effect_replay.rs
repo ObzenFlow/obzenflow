@@ -24,7 +24,7 @@ mod exported_jsonl {
 pub mod fake_ai;
 #[path = "../examples/hn_ai_digest_demo/flow.rs"]
 mod hn_demo_flow;
-#[path = "../examples/hn_ai_digest_demo/mock_server.rs"]
+#[path = "support/hn_mock_server.rs"]
 mod mock_server;
 #[cfg(feature = "e2e")]
 #[path = "support/postgres"]
@@ -32,6 +32,8 @@ mod postgres_support {
     mod pool;
     pub use self::pool::*;
 }
+#[path = "../examples/hn_ai_digest_demo/scripted.rs"]
+mod scripted;
 #[path = "../examples/hn_ai_digest_demo/util.rs"]
 mod util;
 
@@ -196,6 +198,12 @@ impl AiRole<Partials<DigestItem, DigestPartial>> for ReduceRole {
 
 fn recording() -> FakeChatModels {
     FakeChatModels::replying(|_| FIXTURE_REPLY.to_string())
+}
+
+fn live_base_url() -> obzenflow::stages::sources::Url {
+    config::HN_LIVE_BASE_URL
+        .parse()
+        .expect("the HN API URL is valid")
 }
 
 fn is_reduce_request(request: &obzenflow_core::ai::ChatRequest) -> bool {
@@ -847,7 +855,8 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
         "digest = ai!(FormattedStory -> HnDigestSummary with { ai_breaker, ai_retry } => digest);",
         "impl AiRole<Chunk<FormattedStory>> for HnDigest {",
         "impl AiRole<Partials<FormattedStory, HnDigestGroupSummary>> for HnDigest {",
-        "let hn_source = HttpPullSource::new(decoder, http_source_config);",
+        "HnSource::Live => Port::to(HttpPullSource::new(decoder, http_source_config)),",
+        "HnSource::Mock => Port::to(ScriptedStories::new(scripted_stories(max_stories))),",
         "#[effect(type = \"hn.digest.publish\", at_least_once, records = reply)]",
         "PostgresStatement::insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)",
         "DigestOutput::Console => Port::to(ConsoleDigest),",
@@ -1840,15 +1849,14 @@ async fn postgres_output_inserts_one_hn_digest() {
 
     let temp = tempfile::tempdir().expect("temporary PostgreSQL HN-flow journal root");
     let journal_base = temp.path().join("target/hn-ai-digest-logs");
-    let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let inputs = config::HnRunInputs {
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: config::DEFAULT_HN_SOURCE_RATE_LIMIT,
         max_stories_per_group: 5,
         interests: Some("runtime protocols".to_string()),
-        mode_label: "mock".to_string(),
-        base_url: server.base_url(),
+        source: config::HnSource::Mock,
+        base_url: live_base_url(),
         output: config::DigestOutput::Postgres,
     };
     let config_path = witness_config(temp.path(), |_| {});
@@ -1869,7 +1877,6 @@ async fn postgres_output_inserts_one_hn_digest() {
         .await
         .expect("the shared HN flow delivers its digest to PostgreSQL");
 
-    assert!(server.request_count() > 0);
     assert_eq!(models.call_count(), 2);
 
     let count_rows = format!("SELECT COUNT(*) FROM \"{schema}\".hn_digest_summaries");
@@ -1904,7 +1911,7 @@ async fn postgres_output_inserts_one_hn_digest() {
     assert_eq!(row.0, 1);
     assert!(row.1);
     assert_eq!(row.2, "mock");
-    assert_eq!(row.3, "mock://hacker-news/");
+    assert_eq!(row.3, "scripted-stories");
     assert_eq!(row.4, "ollama");
     assert_eq!(row.5, "llama3.1:8b");
     assert_eq!(row.6, "heuristic");
@@ -2030,21 +2037,20 @@ async fn hn_settings_convert_to_the_run_inputs_the_flow_reads() {
          [digest]\ngroup_max_stories = 4\n",
     )
     .unwrap();
-    let inputs = settings.into_inputs().expect("a mock source starts");
+    let inputs = settings.into_inputs();
     assert_eq!(inputs.max_stories, 5);
     assert_eq!(inputs.poll_timeout_secs, 10);
     assert_eq!(inputs.interests.as_deref(), Some("runtime protocols"));
     assert_eq!(inputs.max_stories_per_group, 4);
-    assert_eq!(inputs.mode_label, "mock");
-    assert_eq!(inputs.base_url.host_str(), Some("127.0.0.1"));
+    assert!(matches!(inputs.source, config::HnSource::Mock));
     assert_eq!(
         inputs.source_rate_limit,
         config::DEFAULT_HN_SOURCE_RATE_LIMIT
     );
 
     let live: config::HnSettings = toml::from_str("source = \"live\"").unwrap();
-    let live = live.into_inputs().unwrap();
-    assert_eq!(live.mode_label, "live");
+    let live = live.into_inputs();
+    assert!(matches!(live.source, config::HnSource::Live));
     assert_eq!(
         live.base_url.as_str(),
         "https://hacker-news.firebaseio.com/"
@@ -2061,15 +2067,14 @@ async fn hn_settings_convert_to_the_run_inputs_the_flow_reads() {
 async fn digest_rate_limit_delivers_summary() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
-    let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let inputs = config::HnRunInputs {
         max_stories: 60,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
         max_stories_per_group: 10,
         interests: None,
-        mode_label: "mock".to_string(),
-        base_url: server.base_url(),
+        source: config::HnSource::Mock,
+        base_url: live_base_url(),
         output: config::DigestOutput::Console,
     };
     let config_path = witness_config(temp.path(), |_| {});
@@ -2132,15 +2137,14 @@ async fn digest_rate_limit_delivers_summary() {
 async fn hn_group_size_zero_fails_the_build_naming_the_stage() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
-    let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let inputs = config::HnRunInputs {
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
         max_stories_per_group: 0,
         interests: None,
-        mode_label: "mock".to_string(),
-        base_url: server.base_url(),
+        source: config::HnSource::Mock,
+        base_url: live_base_url(),
         output: config::DigestOutput::Console,
     };
     let config_path = witness_config(temp.path(), |_| {});
@@ -2178,7 +2182,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         source_rate_limit: 1_000.0,
         max_stories_per_group: 5,
         interests: Some("runtime protocols".to_string()),
-        mode_label: "mock".to_string(),
+        source: config::HnSource::Live,
         base_url: server.base_url(),
         output: config::DigestOutput::Console,
     };
@@ -2261,15 +2265,6 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     assert!(storage.effect_record_envelope.count > 0);
     assert!(storage.composite_record_envelope.count > 0);
 
-    // Replay prepares a fresh host fixture with a different physical endpoint.
-    // The live guard can be retired; neither endpoint is durable flow identity.
-    drop(server);
-    let replay_server =
-        mock_server::spawn_mock_hn_server().expect("strict replay HN server starts");
-    let replay_inputs = config::HnRunInputs {
-        base_url: replay_server.base_url(),
-        ..demo_inputs
-    };
     let replay = FakeChatModels::forbidden();
     FlowApplication::builder()
         .with_cli_args(vec![
@@ -2281,7 +2276,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         ])
         .with_ai_models(replay.resolvers())
         .run_async(hn_demo_flow::build_flow_definition(
-            replay_inputs,
+            demo_inputs,
             hn_demo_flow::HnFlowOptions {
                 journal_base: journal_base.clone(),
             },
@@ -2292,9 +2287,9 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     assert_eq!(replay.connect_count(), 0);
     assert_eq!(replay.call_count(), 0);
     assert_eq!(
-        replay_server.request_count(),
-        0,
-        "strict replay may start a fresh host fixture but must not poll it"
+        server.request_count(),
+        live_source_requests,
+        "strict replay must not poll the endpoint the live run read"
     );
     let replay_archive = latest_run_dir(&journal_base);
     // Archived source attachments keep their original selection and stamps;

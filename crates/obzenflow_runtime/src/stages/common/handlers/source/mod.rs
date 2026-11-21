@@ -7,6 +7,7 @@
 pub(crate) mod continuation;
 mod erased;
 mod hosted;
+mod port;
 mod positioned;
 pub(crate) mod prepared;
 mod record_de;
@@ -27,6 +28,12 @@ pub use erased::{
     UnifiedInfiniteSourceHandler,
 };
 pub use hosted::{HostedIngressSource, HostedSubmission, IngressReceiptSender};
+pub use port::{AsyncFiniteSource, AsyncInfiniteSource, FiniteSource, InfiniteSource};
+#[doc(hidden)]
+pub use port::{
+    BoxesReader, PortAsyncFiniteReader, PortAsyncInfiniteReader, PortContinuation,
+    PortFiniteReader, PortInfiniteReader, PortPositionedReader,
+};
 pub use positioned::{PositionedFiniteReader, SeekableSource, SourceRecord};
 pub use record_de::RecordDeError;
 pub use traits::SourceError;

@@ -28,11 +28,6 @@ impl MockHnServer {
     pub fn request_count(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
     }
-
-    pub fn detach(mut self) -> Url {
-        self.task.take();
-        self.base_url()
-    }
 }
 
 impl Drop for MockHnServer {

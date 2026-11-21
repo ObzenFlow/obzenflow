@@ -4,7 +4,7 @@
 
 use super::binding::is_system_name;
 use super::call::{call_port_slot, Call, CallRequest};
-use super::ports::SystemPort;
+use super::ports::{SourceSystem, SystemPort};
 use super::{
     Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectError, EffectName,
     EffectPortResolutionError, EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName,
@@ -19,6 +19,11 @@ use std::sync::Arc;
 /// A port `P` with the system that answers it chosen. A command holds one per
 /// port type, in a `#[port]` field or through `through`, and performs requests
 /// through `fx` without ever seeing the system.
+///
+/// A source row takes one too. Its system is a source connector, its port
+/// type is the row's family of `FiniteSource`, `AsyncFiniteSource`,
+/// `InfiniteSource` or `AsyncInfiniteSource`, and the source's supervisor
+/// opens and polls the reader. No read is an effect call.
 ///
 /// A port trait is `Send` and `Sync`, so a system that isn't thread-safe is
 /// refused at its own `impl`:
@@ -229,6 +234,10 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         self.name.as_str()
     }
 
+    pub(crate) fn source_system(&self) -> SourceSystem {
+        SourceSystem::new(self.name.clone(), Arc::clone(&self.port))
+    }
+
     /// The same port bound under `system.instance`, for a framework system
     /// whose instances each hold their own destination, such as one file each.
     /// Characters a binding name can't hold become `_`.
@@ -312,7 +321,7 @@ const fn checked_system_name<T: SystemName>() -> &'static str {
 /// impl CaseSystemPort for Vendor {}
 /// ```
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
+    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port or connector trait, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
     label = "this system does not name itself",
     note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]
@@ -323,7 +332,7 @@ pub trait SystemName {
 /// A built system, by value or in an `Arc`, as [`Port::to`] takes it.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
+    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port or connector trait, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
     label = "this system does not name itself",
     note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]

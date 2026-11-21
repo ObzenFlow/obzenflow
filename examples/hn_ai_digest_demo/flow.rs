@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::config::{DigestOutput, HnDigestPostgresConfig, HnRunInputs};
+use super::config::{DigestOutput, HnDigestPostgresConfig, HnRunInputs, HnSource};
 use super::decoder::hn_story_decoder;
 use super::domain::{FormattedStory, HnStory};
+use super::scripted::{scripted_stories, ScriptedStories};
 use super::util::truncate_chars;
 use async_trait::async_trait;
 use obzenflow::ai::{
@@ -49,7 +50,7 @@ impl TypedPayload for HnDigestGroupSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnDigestSummary {
     mode: String,
-    base_url: String,
+    source_identity: String,
     ai_provider: String,
     ai_model: String,
     token_estimator: EstimateSource,
@@ -124,7 +125,7 @@ impl DigestOutputPort for PostgresDigest {
 
                 bindings
                     .bind(&digest.mode)
-                    .bind(&digest.base_url)
+                    .bind(&digest.source_identity)
                     .bind(&digest.ai_provider)
                     .bind(&digest.ai_model)
                     .bind(token_estimator)
@@ -149,7 +150,7 @@ fn digest_output(output: DigestOutput) -> Port<dyn DigestOutputPort> {
 struct HnDigest {
     interests: Option<String>,
     mode: String,
-    base_url: String,
+    source_identity: String,
 }
 
 impl AiRole<Chunk<FormattedStory>> for HnDigest {
@@ -213,7 +214,7 @@ impl HnDigest {
         let (stories, group_summaries) = input.into_parts();
         HnDigestSummary {
             mode: self.mode.clone(),
-            base_url: self.base_url.clone(),
+            source_identity: self.source_identity.clone(),
             ai_provider: reply.observability.provider.to_string(),
             ai_model: reply.observability.model.clone(),
             token_estimator: reply
@@ -315,33 +316,13 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             source_rate_limit,
             max_stories_per_group,
             interests,
-            mode_label,
+            source,
             base_url,
             output,
         } = inputs;
         let HnFlowOptions { journal_base } = options;
 
-        // The mock server binds an ephemeral loopback port for each process.
-        // Its guard stays in the host; only this owned endpoint enters the
-        // source. Durable output names the logical mock source.
-        let base_url_for_summary = if mode_label == "mock" {
-            "mock://hacker-news/".to_string()
-        } else {
-            base_url.to_string()
-        };
-
-        let roles = HnDigest {
-            interests,
-            mode: mode_label,
-            base_url: base_url_for_summary,
-        };
-        let digest = ai::map(roles.clone())
-            .chunks(max_stories_per_group)
-            .reduce(roles)
-            .on_eof();
-        let ai_breaker = circuit_breaker().consecutive_failures(HN_AI_BREAKER_FAILURES);
-        let ai_retry = retry();
-        let decoder = hn_story_decoder(base_url, max_stories);
+        let decoder = hn_story_decoder(base_url.clone(), max_stories);
         let http_source_config = http_pull_config()
             .map_err(|error| {
                 FlowBuildError::StageResourcesFailed(format!(
@@ -356,7 +337,26 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                     "HN HTTP source configuration failed: {error}"
                 ))
             })?;
-        let hn_source = HttpPullSource::new(decoder, http_source_config);
+        let hn_source = match source {
+            HnSource::Live => Port::to(HttpPullSource::new(decoder, http_source_config)),
+            HnSource::Mock => Port::to(ScriptedStories::new(scripted_stories(max_stories))),
+        };
+        let source_identity = match source {
+            HnSource::Live => base_url.to_string(),
+            HnSource::Mock => hn_source.system_name().to_string(),
+        };
+
+        let roles = HnDigest {
+            interests,
+            mode: source.label().to_string(),
+            source_identity,
+        };
+        let digest = ai::map(roles.clone())
+            .chunks(max_stories_per_group)
+            .reduce(roles)
+            .on_eof();
+        let ai_breaker = circuit_breaker().consecutive_failures(HN_AI_BREAKER_FAILURES);
+        let ai_retry = retry();
         let formatter = transforms::map(|story: HnStory| format_story(story));
         let source_breaker = circuit_breaker()
             .consecutive_failures(HN_SOURCE_BREAKER_FAILURES)
@@ -397,7 +397,7 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
     out.push_str("HN AI Digest — Summary\n");
     out.push_str("======================\n");
     out.push_str(&format!("mode: {}\n", summary.mode));
-    out.push_str(&format!("base_url: {}\n", summary.base_url));
+    out.push_str(&format!("source_identity: {}\n", summary.source_identity));
     out.push_str(&format!("ai_provider: {}\n", summary.ai_provider));
     out.push_str(&format!("ai_model: {}\n", summary.ai_model));
     out.push_str(&format!("token_estimator: {:?}\n", summary.token_estimator));

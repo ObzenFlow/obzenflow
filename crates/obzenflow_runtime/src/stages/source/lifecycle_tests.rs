@@ -6,9 +6,10 @@
 
 use super::finite::fsm::tests::TestJournal;
 use super::*;
+use crate::effects::{EffectPortRegistry, Port};
 use crate::id_conversions::StageIdExt;
 use crate::stages::common::handlers::source::prepared::{
-    AdmitSource, ConnectorSource, DirectSource,
+    AdmitSource, ConnectorSource, DirectSource, PortSource,
 };
 use crate::stages::common::handlers::source::typed::SourceObservationSink;
 use crate::stages::common::handlers::{
@@ -169,6 +170,7 @@ impl Reader {
     }
 }
 
+#[crate::effects::system("lifecycle-fixture")]
 #[async_trait]
 impl AsyncFiniteSourceConnector for Fixture {
     type Output = Row;
@@ -223,6 +225,13 @@ struct Journals {
 }
 
 async fn resources(counts: &Counts) -> (StageId, StageResources, Journals) {
+    resources_with_ports(counts, EffectPortRegistry::new()).await
+}
+
+async fn resources_with_ports(
+    counts: &Counts,
+    ports: EffectPortRegistry,
+) -> (StageId, StageResources, Journals) {
     let mut topology = obzenflow_topology::TopologyBuilder::new();
     let source = topology.add_stage(Some("input".into()));
     let sink = topology.add_stage(Some("output".into()));
@@ -246,6 +255,7 @@ async fn resources(counts: &Counts) -> (StageId, StageResources, Journals) {
         HashMap::from([(stage, journal()), (sink, journal())]),
         HashMap::from([(stage, journal()), (sink, journal())]),
     )
+    .with_effect_ports(ports)
     .build()
     .await
     .unwrap();
@@ -984,4 +994,54 @@ impl ReplayArchive for EmptyArchive {
     ) -> Result<(), ReplayError> {
         unreachable!()
     }
+}
+
+#[tokio::test]
+async fn reader_acquired_port_row_names_system() {
+    type PortRow = Port<dyn AsyncFiniteSource<Row, Refuse>>;
+    let fixture = Fixture::new(Opening::Ready, Reading::Eof);
+    let counts = fixture.counts.clone();
+    let port: PortRow = Port::to(fixture);
+    let (handler, system) = <PortRow as AdmitSource<
+        dyn UnifiedAsyncFiniteSourceHandler,
+        PortSource,
+    >>::prepare_with_system(port);
+    let system = system.expect("a port row names a system");
+    let mut ports = EffectPortRegistry::new();
+    ports.install_source_system(&system);
+    let (stage, resources, journals) = resources_with_ports(&counts, ports).await;
+    let mut config = finite::FiniteSourceConfig::new(
+        stage,
+        "input",
+        "lifecycle",
+        <PortRow as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, PortSource>>::CONTINUATION,
+    );
+    config.source_system = Some(system);
+    let handle = finite::AsyncFiniteSourceBuilder::new(handler, config, resources)
+        .build()
+        .await
+        .unwrap();
+    for event in [
+        finite::FiniteSourceEvent::Initialize,
+        finite::FiniteSourceEvent::Ready,
+        finite::FiniteSourceEvent::Start,
+    ] {
+        handle.send_event(event).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(3), handle.wait_for_completion())
+        .await
+        .unwrap()
+        .unwrap();
+    let evidence = journals.data.read_all_unordered().await.unwrap();
+    let systems: Vec<Option<&str>> = evidence
+        .iter()
+        .filter_map(|row| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::SourceReaderAcquired(acquired)) => {
+                Some(acquired.system.as_deref())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(systems, [Some("lifecycle-fixture")]);
+    assert_eq!(counts.opens.load(Ordering::SeqCst), 1);
 }

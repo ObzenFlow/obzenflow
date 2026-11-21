@@ -918,7 +918,7 @@ where
             let declarations = descriptor.effect_declarations();
             authored_effect_declarations.extend(declarations);
         }
-        let effect_ports = EffectPortRegistry::collect_from_declarations(
+        let mut effect_ports = EffectPortRegistry::collect_from_declarations(
             authored_effect_declarations.iter(),
         )
         .map_err(|error| match error {
@@ -949,6 +949,11 @@ where
                 detail: "the authored declaration has no pending package",
             },
         })?;
+        for descriptor in descriptors.values() {
+            if let Some(system) = descriptor.source_system() {
+                effect_ports.install_source_system(&system);
+            }
+        }
 
         // Create services
         use obzenflow_runtime::pipeline::config::StageConfig;

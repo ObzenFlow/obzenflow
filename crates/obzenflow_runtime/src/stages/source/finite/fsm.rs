@@ -1067,6 +1067,7 @@ pub(crate) mod tests {
                         pending_failure: None,
                         reader_acquired: false,
                         exit: None,
+                        system: None,
                         $($extra: $value,)*
                     };
                     let build_sync = || $sync {
@@ -1085,6 +1086,7 @@ pub(crate) mod tests {
                         pending_failure: None,
                         reader_acquired: false,
                         exit: None,
+                        system: None,
                         $($extra: $value,)*
                     };
                     let build_fsm = |initial_state| {
