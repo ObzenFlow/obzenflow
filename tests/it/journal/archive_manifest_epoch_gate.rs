@@ -298,9 +298,9 @@ async fn claimed_hosted_slot_fails_preflight() {
             let (_, first_rx) = tokio::sync::mpsc::channel(1);
             let (_, second_rx) = tokio::sync::mpsc::channel(1);
             let first = HostedIngressSource::<Input>::new(first_rx, shared_slot.clone())
-                .into_port("ingress");
-            let second =
-                HostedIngressSource::<Input>::new(second_rx, shared_slot).into_port("ingress");
+                .into_port(obzenflow_core::ingress::HostedIngressSystem::Ingress);
+            let second = HostedIngressSource::<Input>::new(second_rx, shared_slot)
+                .into_port(obzenflow_core::ingress::HostedIngressSystem::Ingress);
             Ok(flow! {
                 name: "hosted_slot_ownership_preflight",
                 journals: disk_journals(journal_root),

@@ -208,7 +208,7 @@ ignored by default; CI runs it explicitly to require byte-for-byte encoding and
 exact logical decoding within the current schema. To run it locally:
 
 ```sh
-cargo test -p obzenflow_infra --lib current_schema_fixtures_preserve_bytes_and_logical_records -- --ignored
+cargo test -p obzenflow_infra --lib codec_current_schema_reproduces_fixtures -- --ignored
 ```
 
 The verification test always compares the committed frames and never updates

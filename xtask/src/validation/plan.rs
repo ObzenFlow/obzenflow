@@ -13,7 +13,7 @@ use std::{
 };
 
 pub(super) const CODEC_TEST: &str =
-    "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records";
+    "journal::disk::codec::tests::codec_current_schema_reproduces_fixtures";
 
 pub(super) const LEAK_WAIT: &str = "200ms";
 

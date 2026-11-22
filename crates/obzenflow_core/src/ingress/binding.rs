@@ -14,8 +14,24 @@ use super::boundary::IngressBoundaryMiddleware;
 use super::timing::IngressTiming;
 use super::IngressKey;
 use crate::{StageId, StageKey};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+
+/// The two framework systems that accept hosted submissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedIngressSystem {
+    Ingress,
+    HttpIngress,
+}
+
+impl HostedIngressSystem {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ingress => "ingress",
+            Self::HttpIngress => "http-ingress",
+        }
+    }
+}
 
 /// The boundary plus replay-stable identity the DSL fills into a hosted-ingress
 /// slot during source-stage materialization.
@@ -30,6 +46,8 @@ pub struct FilledHostedIngress {
     /// Replay-stable source stage key (`StageConfig.name`, the `run_manifest.json`
     /// key).
     pub stage_key: StageKey,
+    /// Reads the linked source stage’s current execution phase.
+    pub source_is_live: Box<dyn Fn() -> bool + Send + Sync>,
     /// The composed ingress admission boundary, or `None` when a hosted source
     /// has no ingress middleware attached (the slot is still filled so startup
     /// can verify every hosted surface was placed in topology).
@@ -65,10 +83,6 @@ impl std::error::Error for HostedIngressAlreadyBound {}
 pub struct HostedIngressBindingSlot {
     ingress_key: IngressKey,
     cell: Arc<OnceLock<FilledHostedIngress>>,
-    /// FLOWIP-120n F12: whether the linked source admits live input. True
-    /// outside replay; held false from bind until the resume handoff, and for
-    /// the whole of a strict replay.
-    resume_live: Arc<AtomicBool>,
     /// FLOWIP-084l: the configured timing, installed once at hosting.
     timing: Arc<OnceLock<IngressTiming>>,
     /// FLOWIP-084l: identity-index entries, published by the source's writer.
@@ -80,7 +94,6 @@ impl HostedIngressBindingSlot {
         Self {
             ingress_key: ingress_key.into(),
             cell: Arc::new(OnceLock::new()),
-            resume_live: Arc::new(AtomicBool::new(true)),
             timing: Arc::new(OnceLock::new()),
             idempotency_entries: Arc::new(AtomicU64::new(0)),
         }
@@ -117,23 +130,10 @@ impl HostedIngressBindingSlot {
         self.cell.get().is_some()
     }
 
-    /// FLOWIP-120n F12: hold ingress admission until the linked source goes
-    /// live. Applied at DSL bind time under `--resume-from` and
-    /// `--replay-from`; a strict replay never goes live (FLOWIP-084l).
-    pub fn hold_until_live(&self) {
-        self.resume_live.store(false, Ordering::Release);
-    }
-
-    /// FLOWIP-120n F12: mark the linked source live. The source supervisor
-    /// calls this at the catch-up handoff.
-    pub fn mark_resume_live(&self) {
-        self.resume_live.store(true, Ordering::Release);
-    }
-
-    /// Whether the linked source admits live input (always true outside
-    /// replay).
+    /// Whether the bound source currently admits live input.
     pub fn is_resume_live(&self) -> bool {
-        self.resume_live.load(Ordering::Acquire)
+        self.filled()
+            .is_some_and(|binding| (binding.source_is_live)())
     }
 
     /// Install the configured timing once; a second install returns it back.
@@ -168,15 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_live_defaults_true_and_flag_is_shared_across_clones() {
-        let slot = HostedIngressBindingSlot::new("orders");
-        let surface_half = slot.clone();
-        assert!(surface_half.is_resume_live());
-
-        slot.hold_until_live();
-        assert!(!surface_half.is_resume_live());
-
-        slot.mark_resume_live();
-        assert!(surface_half.is_resume_live());
+    fn unbound_ingress_refuses_live_input() {
+        assert!(!HostedIngressBindingSlot::new("orders").is_resume_live());
     }
 }

@@ -487,6 +487,29 @@ fn stories_then_eof(rows: &[JournalRecord<ChainPayload>]) -> Vec<u64> {
         .collect()
 }
 
+#[tokio::test]
+async fn scripted_polls_return_single_stories() {
+    use obzenflow::stages::sources::{
+        AsyncFiniteSourceConnector, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
+    };
+    let mut reader = scripted::ScriptedStories::new(scripted::scripted_stories(60))
+        .open(SourceReaderInitContext {
+            stage_id: obzenflow_core::StageId::new(),
+            stage_name: "hn_stories".into(),
+            flow_name: "hn_ai_digest_demo".into(),
+        })
+        .await
+        .unwrap();
+    for id in (100..160).filter(|id| (id - 99) % 11 != 0) {
+        let batch = reader.next().await.unwrap().expect("one story per poll");
+        let [story] = batch.as_slice() else {
+            panic!("expected one story")
+        };
+        assert_eq!(story.id.0, id);
+    }
+    assert!(reader.next().await.unwrap().is_none());
+}
+
 fn map_inputs(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<AiMapReduceMapInput<DigestItem>> {
     envelopes
         .iter()
@@ -575,6 +598,7 @@ fn assert_grouping_authorship(
 
 #[derive(Debug, PartialEq)]
 struct StableSinkCall {
+    schema_version: u32,
     effect_type: String,
     request_hash: String,
     outcome: serde_json::Value,
@@ -589,6 +613,7 @@ fn stable_sink_calls(sink_events: &[JournalRecord<ChainPayload>]) -> Vec<StableS
                 return None;
             };
             Some(StableSinkCall {
+                schema_version: record.descriptor.schema_version.get(),
                 effect_type: record.descriptor.effect_type.to_string(),
                 request_hash: record.descriptor.canonical_input_hash.to_string(),
                 outcome: serde_json::to_value(&record.outcome)
@@ -885,7 +910,6 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
         "digest = ai!(FormattedStory -> HnDigestSummary with { ai_breaker, ai_retry } => digest);",
         "impl AiRole<Chunk<FormattedStory>> for HnDigest {",
         "impl AiRole<Partials<FormattedStory, HnDigestGroupSummary>> for HnDigest {",
-        "#[effect(type = \"hn.digest.publish\", at_least_once, records = reply, schema_version = 2)]",
         "PostgresStatement::insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)",
         "DigestOutput::Console => Port::to(ConsoleDigest),",
         "DigestOutput::Postgres => Port::deferred(PostgresDigest::from_env),",
@@ -1953,6 +1977,10 @@ async fn postgres_output_inserts_one_hn_digest() {
     );
 
     let archive = latest_run_dir(&journal_base);
+    let stories = stage_envelopes(&archive, "hn_stories").await;
+    assert_eq!(acquired_systems(&stories), ["scripted-stories"]);
+    let story_ids = stories_then_eof(&stories);
+    assert_eq!(story_ids, [100, 101, 102, 103, 104]);
     let sink = stage_envelopes(&archive, "digest_summary").await;
     let calls = stable_sink_calls(&sink);
     let [call] = calls.as_slice() else {
@@ -1962,6 +1990,7 @@ async fn postgres_output_inserts_one_hn_digest() {
         );
     };
     assert_eq!(call.effect_type, "hn.digest.publish");
+    assert_eq!(call.schema_version, 2);
     assert_eq!(call.outcome["outcome"], "succeeded");
 
     let mut offline_config = shipped_config("obzenflow.postgres.toml");
@@ -1999,6 +2028,9 @@ async fn postgres_output_inserts_one_hn_digest() {
     );
     let replay_archive = latest_run_dir(&journal_base);
     assert_ne!(replay_archive, archive);
+    let replay_stories = stage_envelopes(&replay_archive, "hn_stories").await;
+    assert!(acquired_systems(&replay_stories).is_empty());
+    assert_eq!(stories_then_eof(&replay_stories), story_ids);
     let replayed = stage_envelopes(&replay_archive, "digest_summary").await;
     assert_eq!(stable_sink_calls(&replayed), calls);
     let rows_after_replay = sqlx::query_scalar::<_, i64>(&count_rows)
@@ -2209,7 +2241,7 @@ async fn hn_group_size_zero_fails_the_build_naming_the_stage() {
 }
 
 #[tokio::test]
-async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
+async fn hn_replay_reconstructs_digest() {
     let temp = tempfile::tempdir().expect("temporary real HN-flow journal root");
     let journal_base = temp.path().join("journals");
     let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
@@ -2268,6 +2300,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let live_reduce = stage_envelopes(&live_archive, "digest__reduce").await;
     let live_digest_summary = stage_envelopes(&live_archive, "digest_summary").await;
     let live_sink_calls = stable_sink_calls(&live_digest_summary);
+    assert!(live_sink_calls.iter().all(|call| call.schema_version == 2));
     assert!(
         !live_sink_calls.is_empty(),
         "the production digest summary must settle at least one sink call"

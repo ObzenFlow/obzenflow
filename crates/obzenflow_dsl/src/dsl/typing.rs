@@ -13,6 +13,7 @@ use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
 use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactOutcome, Outcome, TypedFactType, TypedPayload};
@@ -21,6 +22,10 @@ use obzenflow_runtime::__private::{
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
     UnifiedInfiniteSourceHandler,
 };
+use obzenflow_runtime::effects::{
+    effectful_transform_effects, Command, DeclareEffects, DeclaredEffectSet, Effects,
+    EveryPortAnswers, Port, PortList, SinkHandler, SinkRole, StageCompletion,
+};
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, OutcomeContract,
     PayloadTypeDescriptor,
@@ -28,24 +33,7 @@ use obzenflow_runtime::feed_plan::{
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::traits::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler,
-};
-use obzenflow_runtime::stages::common::handlers::source::{
-    RefusedBy, SourceContinuation, SourceError,
-};
-
-/// A placeholder stands in for a handler, which declares no continuation
-/// (FLOWIP-122i).
-const PLACEHOLDER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
-    by: RefusedBy::Handler,
-};
-use obzenflow_core::event::schema::{EmptySet, FactsOf, WithMember};
-use obzenflow_runtime::effects::{
-    effectful_transform_effects, Command, DeclareEffects, DeclaredEffectSet, Effects,
-    EveryPortAnswers, Port, PortList, SinkHandler, SinkRole, SourceSystem, StageCompletion,
-};
+use obzenflow_runtime::stages::common::handlers::source::SourceContinuation;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, JoinReferenceView, StatefulEmission, TransformHandler,
     TypedJoinHandler, TypedStatefulHandler, TypedStatefulHandlerAdapter, TypedTransformHandler,
@@ -53,7 +41,7 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
-use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
+use obzenflow_runtime::typing::TransformTyping;
 use obzenflow_topology::{
     EdgeKind, EdgeTypingInfo, EdgeTypingLabelSource, EdgeTypingRole, StageTypingInfo, Topology,
     TypeHintInfo,
@@ -803,11 +791,7 @@ where
     );
     let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
         name: name.into(),
-        source: AdmittedSource::new(
-            PlaceholderFiniteSource::<PrimaryOutput>::new(message),
-            PLACEHOLDER_REFUSES,
-            SourceSystem::placeholder(),
-        ),
+        source: AdmittedSource::placeholder(message),
         source_policies,
         ingress_policy,
         observers,
@@ -832,14 +816,8 @@ where
         true,
         message.map(str::to_string),
     );
-    let mut descriptor = AsyncFiniteSourceDescriptor::new(
-        name,
-        AdmittedSource::new(
-            PlaceholderAsyncSource::<PrimaryOutput>::new(message),
-            PLACEHOLDER_REFUSES,
-            SourceSystem::placeholder(),
-        ),
-    );
+    let mut descriptor =
+        AsyncFiniteSourceDescriptor::new(name, AdmittedSource::placeholder(message));
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -865,11 +843,7 @@ where
     );
     let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
         name: name.into(),
-        source: AdmittedSource::new(
-            PlaceholderInfiniteSource::<PrimaryOutput>::new(message),
-            PLACEHOLDER_REFUSES,
-            SourceSystem::placeholder(),
-        ),
+        source: AdmittedSource::placeholder(message),
         source_policies,
         ingress_policy,
         observers,
@@ -894,14 +868,8 @@ where
         true,
         message.map(str::to_string),
     );
-    let mut descriptor = AsyncInfiniteSourceDescriptor::new(
-        name,
-        AdmittedSource::new(
-            PlaceholderAsyncSource::<PrimaryOutput>::new(message),
-            PLACEHOLDER_REFUSES,
-            SourceSystem::placeholder(),
-        ),
-    );
+    let mut descriptor =
+        AsyncInfiniteSourceDescriptor::new(name, AdmittedSource::placeholder(message));
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -1311,173 +1279,6 @@ fn placeholder_message(stage_kind: &str, message: Option<&str>) -> String {
     match message {
         Some(message) => format!("{stage_kind} placeholder executed: {message}"),
         None => format!("{stage_kind} placeholder executed"),
-    }
-}
-
-pub struct PlaceholderFiniteSource<T> {
-    _phantom: PhantomData<T>,
-    message: Option<&'static str>,
-    warned: Arc<AtomicBool>,
-}
-
-impl<T> PlaceholderFiniteSource<T> {
-    pub fn new(message: Option<&'static str>) -> Self {
-        Self {
-            _phantom: PhantomData,
-            message,
-            warned: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
-
-impl<T> Clone for PlaceholderFiniteSource<T> {
-    fn clone(&self) -> Self {
-        Self {
-            _phantom: PhantomData,
-            message: self.message,
-            warned: Arc::clone(&self.warned),
-        }
-    }
-}
-
-impl<T> fmt::Debug for PlaceholderFiniteSource<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PlaceholderFiniteSource")
-            .field("message", &self.message)
-            .finish()
-    }
-}
-
-impl<T> SourceTyping for PlaceholderFiniteSource<T> {
-    type Output = T;
-}
-
-impl<T> FiniteSourceHandler for PlaceholderFiniteSource<T>
-where
-    T: Send + Sync + 'static,
-{
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        if !self.warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!("{}", placeholder_message("finite source", self.message));
-        }
-        Ok(None)
-    }
-}
-
-pub struct PlaceholderAsyncSource<T> {
-    _phantom: PhantomData<T>,
-    message: Option<&'static str>,
-    warned: Arc<AtomicBool>,
-}
-
-impl<T> PlaceholderAsyncSource<T> {
-    pub fn new(message: Option<&'static str>) -> Self {
-        Self {
-            _phantom: PhantomData,
-            message,
-            warned: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
-
-impl<T> Clone for PlaceholderAsyncSource<T> {
-    fn clone(&self) -> Self {
-        Self {
-            _phantom: PhantomData,
-            message: self.message,
-            warned: Arc::clone(&self.warned),
-        }
-    }
-}
-
-impl<T> fmt::Debug for PlaceholderAsyncSource<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PlaceholderAsyncSource")
-            .field("message", &self.message)
-            .finish()
-    }
-}
-
-impl<T> SourceTyping for PlaceholderAsyncSource<T> {
-    type Output = T;
-}
-
-#[async_trait]
-impl<T> AsyncFiniteSourceHandler for PlaceholderAsyncSource<T>
-where
-    T: Send + Sync + 'static,
-{
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        if !self.warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!("{}", placeholder_message("async source", self.message));
-        }
-        Ok(None)
-    }
-}
-
-#[async_trait]
-impl<T> AsyncInfiniteSourceHandler for PlaceholderAsyncSource<T>
-where
-    T: Send + Sync + 'static,
-{
-    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        if !self.warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!(
-                "{}",
-                placeholder_message("async infinite source", self.message)
-            );
-        }
-        Ok(Vec::new())
-    }
-}
-
-pub struct PlaceholderInfiniteSource<T> {
-    _phantom: PhantomData<T>,
-    message: Option<&'static str>,
-    warned: Arc<AtomicBool>,
-}
-
-impl<T> PlaceholderInfiniteSource<T> {
-    pub fn new(message: Option<&'static str>) -> Self {
-        Self {
-            _phantom: PhantomData,
-            message,
-            warned: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
-
-impl<T> Clone for PlaceholderInfiniteSource<T> {
-    fn clone(&self) -> Self {
-        Self {
-            _phantom: PhantomData,
-            message: self.message,
-            warned: Arc::clone(&self.warned),
-        }
-    }
-}
-
-impl<T> fmt::Debug for PlaceholderInfiniteSource<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PlaceholderInfiniteSource")
-            .field("message", &self.message)
-            .finish()
-    }
-}
-
-impl<T> SourceTyping for PlaceholderInfiniteSource<T> {
-    type Output = T;
-}
-
-impl<T> InfiniteSourceHandler for PlaceholderInfiniteSource<T>
-where
-    T: Send + Sync + 'static,
-{
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        if !self.warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!("{}", placeholder_message("infinite source", self.message));
-        }
-        Ok(Vec::new())
     }
 }
 

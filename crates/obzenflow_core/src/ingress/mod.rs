@@ -34,7 +34,9 @@ pub use admission::{
     EdgeShedReason, IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
     IngressAttemptSeq, IngressRefusalKind, IngressRefusalReason,
 };
-pub use binding::{FilledHostedIngress, HostedIngressAlreadyBound, HostedIngressBindingSlot};
+pub use binding::{
+    FilledHostedIngress, HostedIngressAlreadyBound, HostedIngressBindingSlot, HostedIngressSystem,
+};
 pub use boundary::IngressBoundaryMiddleware;
 pub use identity::{
     IngressContentDigest, IngressOriginal, IngressReceipt, IngressRequestId,

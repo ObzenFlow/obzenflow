@@ -45,7 +45,8 @@ pub use obzenflow_adapters::sources::http::{
     HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord,
 };
 use obzenflow_core::ingress::{
-    HostedIngressBindingSlot, IngressAttemptContext, IngressRequestId, OUTCOME_UNKNOWN_RETRY_AFTER,
+    HostedIngressBindingSlot, HostedIngressSystem, IngressAttemptContext, IngressRequestId,
+    OUTCOME_UNKNOWN_RETRY_AFTER,
 };
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
@@ -65,9 +66,6 @@ use crate::application::{
 use batch_event::BatchEventEndpoint;
 use health::IngestionHealthEndpoint;
 use single_event::SingleEventEndpoint;
-
-const HTTP_INGRESS_SYSTEM: &str = "http-ingress";
-const INGRESS_SYSTEM: &str = "ingress";
 
 /// Cloneable developer-owned ingress sender.
 pub struct IngressHandle<T>
@@ -363,10 +361,10 @@ pub fn ingress_source<D>(decoder: D, config: IngestionConfig) -> Ingress<D>
 where
     D: IngressDecoder,
 {
-    hosted_ingress(decoder, config, INGRESS_SYSTEM)
+    hosted_ingress(decoder, config, HostedIngressSystem::Ingress)
 }
 
-fn hosted_ingress<D>(decoder: D, config: IngestionConfig, system: &'static str) -> Ingress<D>
+fn hosted_ingress<D>(decoder: D, config: IngestionConfig, system: HostedIngressSystem) -> Ingress<D>
 where
     D: IngressDecoder,
 {
@@ -394,7 +392,7 @@ where
         port,
         handle,
         decoder,
-    } = hosted_ingress(decoder, config, HTTP_INGRESS_SYSTEM);
+    } = hosted_ingress(decoder, config, HostedIngressSystem::HttpIngress);
     let surface = create_ingestion_surface(handle.state(), decoder);
     HttpIngress {
         port,

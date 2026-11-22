@@ -7,6 +7,7 @@
 pub(crate) mod continuation;
 mod erased;
 mod hosted;
+pub(crate) mod placeholder;
 mod port;
 mod positioned;
 pub(crate) mod prepared;

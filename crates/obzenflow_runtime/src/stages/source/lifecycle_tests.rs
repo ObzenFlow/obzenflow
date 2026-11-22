@@ -363,8 +363,6 @@ macro_rules! lifecycle_family {
                     stage,
                     "input",
                     "lifecycle",
-                    source.continuation(),
-                    source.system().clone(),
                 );
                 config.source_boundary = boundary;
                 (
@@ -485,7 +483,7 @@ macro_rules! lifecycle_family {
                         crate::execution::RuntimeMode::Replay,
                         Some(Arc::new(EmptyArchive(stage, Some((opening.clone(), release.clone()))))),
                     );
-                    let config = Config::new(stage, "input", "lifecycle", source.continuation(), source.system().clone());
+                    let config = Config::new(stage, "input", "lifecycle");
                         let handle = Builder::new(source, config, resources).build().await.unwrap();
                     start(&handle).await;
                     notified(&opening).await;
@@ -517,7 +515,7 @@ macro_rules! lifecycle_family {
                 let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
                 let (writing, release) = journal.block_matching_append(|event| matches!(event.payload, obzenflow_core::event::ChainPayload::Fact(_)));
                 resources.data_journal = journal.clone();
-                let config = Config::new(stage, "input", "lifecycle", source.continuation(), source.system().clone());
+                let config = Config::new(stage, "input", "lifecycle");
                     let handle = Builder::new(source, config, resources).build().await.unwrap();
                 start(&handle).await;
                 notified(&writing).await;
@@ -856,13 +854,7 @@ async fn held_synchronous_open_leaves_the_runtime_responsive() {
     let port: Port<dyn FiniteSource<Row, Refuse>> = Port::to(connector);
     let (source, ports) = admitted::<dyn UnifiedFiniteSourceHandler, _>(port);
     let (stage, resources, _journals) = resources_with_ports(&counts, ports).await;
-    let config = finite::FiniteSourceConfig::new(
-        stage,
-        "input",
-        "lifecycle",
-        source.continuation(),
-        source.system().clone(),
-    );
+    let config = finite::FiniteSourceConfig::new(stage, "input", "lifecycle");
     let handle = finite::FiniteSourceBuilder::new(source, config, resources)
         .build()
         .await
@@ -900,13 +892,7 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
     let (source, ports) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(port);
     let (stage, resources, journals) = resources_with_ports(&counts, ports).await;
     let data = resources.data_journal.clone();
-    let config = finite::FiniteSourceConfig::new(
-        stage,
-        "input",
-        "lifecycle",
-        source.continuation(),
-        source.system().clone(),
-    );
+    let config = finite::FiniteSourceConfig::new(stage, "input", "lifecycle");
     let handle = finite::AsyncFiniteSourceBuilder::new(source, config, resources)
         .build()
         .await
@@ -1055,13 +1041,7 @@ where
     H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static,
 {
     let (stage, resources, journals) = resources_with_ports(counts, ports).await;
-    let config = finite::FiniteSourceConfig::new(
-        stage,
-        "input",
-        "lifecycle",
-        source.continuation(),
-        source.system().clone(),
-    );
+    let config = finite::FiniteSourceConfig::new(stage, "input", "lifecycle");
     let handle = finite::AsyncFiniteSourceBuilder::new(source, config, resources)
         .build()
         .await

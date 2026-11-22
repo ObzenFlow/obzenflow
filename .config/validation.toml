@@ -16,7 +16,7 @@ test_program_build_jobs = 2
 
 [[ignored]]
 binary = "obzenflow_infra"
-test = "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records"
+test = "journal::disk::codec::tests::codec_current_schema_reproduces_fixtures"
 owner = "journal-fixtures lane"
 
 [[ignored]]
@@ -440,7 +440,7 @@ rationale = "Each generated case writes two source journals to a temporary direc
 
 [[prerequisites]]
 binary = "obzenflow_infra"
-test = "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records"
+test = "journal::disk::codec::tests::codec_current_schema_reproduces_fixtures"
 lanes = ["journal-fixtures"]
 capabilities = ["temp-files"]
 rationale = "Cold decode, relocation and byte preservation use temporary on-disk copies of the checked-in codec fixtures."

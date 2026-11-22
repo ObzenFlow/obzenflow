@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 
@@ -132,6 +132,7 @@ fn refusal_reasons(facts: &[SystemPayload]) -> Vec<(IngressRefusalReason, u64)> 
 
 /// A hosted edge with no running source: admission and refusals only.
 struct Edge {
+    live: Arc<AtomicBool>,
     state: IngestionState<Order>,
     rx: Option<mpsc::Receiver<HostedSubmission<Order>>>,
     journal: Arc<MemoryJournal<SystemEvent>>,
@@ -140,9 +141,12 @@ struct Edge {
 impl Edge {
     fn new(config: IngestionConfig, boundary: Option<Arc<dyn IngressBoundaryMiddleware>>) -> Self {
         let (state, rx) = IngestionState::new(config);
+        let live = Arc::new(AtomicBool::new(true));
+        let source_phase = live.clone();
         state
             .ingress_slot()
             .fill(FilledHostedIngress {
+                source_is_live: Box::new(move || source_phase.load(Ordering::Acquire)),
                 stage_id: StageId::new(),
                 stage_key: "orders".into(),
                 boundary,
@@ -152,6 +156,7 @@ impl Edge {
         state.install_evidence_writer(IngressEvidenceWriter::for_test(journal.clone()));
         Self {
             state,
+            live,
             rx: Some(rx),
             journal,
         }
@@ -316,7 +321,7 @@ async fn not_ready_refusals_carry_the_request_id() {
 async fn ingress_stays_unavailable_until_the_source_is_live() {
     let edge = Edge::plain();
     edge.ready().await;
-    edge.state.ingress_slot().hold_until_live();
+    edge.live.store(false, Ordering::Release);
     let response = unary(
         edge.single()
             .handle(post("/api/ingest/events", order("1", 1), None))
@@ -325,7 +330,7 @@ async fn ingress_stays_unavailable_until_the_source_is_live() {
     );
     assert_eq!(body(&response)["code"], "not_ready");
 
-    edge.state.ingress_slot().mark_resume_live();
+    edge.live.store(true, Ordering::Release);
     let health = IngestionHealthEndpoint::new(edge.state.clone());
     let response = unary(
         health
@@ -516,6 +521,7 @@ async fn unrepresentable_values_are_refused_at_the_failing_field() {
     state
         .ingress_slot()
         .fill(FilledHostedIngress {
+            source_is_live: Box::new(|| true),
             stage_id: StageId::new(),
             stage_key: "tagged".into(),
             boundary: None,
@@ -660,6 +666,7 @@ async fn accepted_observation_follows_enqueue_on_single_batch_and_handle_paths()
         state
             .ingress_slot()
             .fill(FilledHostedIngress {
+                source_is_live: Box::new(|| true),
                 stage_id: StageId::new(),
                 stage_key: "observed".into(),
                 boundary: Some(Arc::new(CountEnqueuedBeforeObservation {
@@ -776,6 +783,7 @@ async fn evidence_failure_answers_listener_unavailable() {
     state
         .ingress_slot()
         .fill(FilledHostedIngress {
+            source_is_live: Box::new(|| true),
             stage_id: StageId::new(),
             stage_key: "orders".into(),
             boundary: Some(Arc::new(AlwaysReject)),

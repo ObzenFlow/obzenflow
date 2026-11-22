@@ -289,6 +289,7 @@ fn plan_stage_observers(
 
 fn build_source_middleware_and_register_policies(
     config: &StageConfig,
+    execution: &obzenflow_runtime::execution::RuntimeExecution,
     stage_type: StageType,
     writer_id: WriterId,
     plan: SourceMiddlewarePlan,
@@ -364,15 +365,10 @@ fn build_source_middleware_and_register_policies(
         slot.fill(obzenflow_core::ingress::FilledHostedIngress {
             stage_id: config.stage_id,
             stage_key: config.name.clone().into(),
+            source_is_live: execution.source_liveness(config.stage_id),
             boundary: ingress_boundary,
         })
         .map_err(|e| format!("Stage '{}': {e}", config.name))?;
-        // FLOWIP-120n F12: under resume, hosted ingress refuses until the
-        // source supervisor marks the slot live at the catch-up handoff. A
-        // strict replay never goes live, so it refuses throughout (FLOWIP-084l).
-        if obzenflow_runtime::bootstrap::replay_bootstrap().is_some() {
-            slot.hold_until_live();
-        }
     }
 
     let source_boundary = if source_policies.is_empty() {
@@ -765,6 +761,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 
         let source_binding = build_source_middleware_and_register_policies(
             &config,
+            &resources.runtime_execution,
             StageType::FiniteSource,
             writer_id,
             SourceMiddlewarePlan {
@@ -787,14 +784,9 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         let instrumentation = Arc::new(instrumentation);
 
         // Create the stage configuration
-        let mut source_config = FiniteSourceConfig::new(
-            config.stage_id,
-            &config.name,
-            &config.flow_name,
-            self.source.continuation(),
-            self.source.system().clone(),
-        )
-        .with_observer_bindings(source_binding.observers.into_bindings());
+        let mut source_config =
+            FiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
+                .with_observer_bindings(source_binding.observers.into_bindings());
         source_config.control_strategy = source_binding.completion_gate;
         source_config.source_boundary = source_binding.source_boundary;
 
@@ -908,6 +900,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 
         let source_binding = build_source_middleware_and_register_policies(
             &config,
+            &resources.runtime_execution,
             StageType::FiniteSource,
             writer_id,
             SourceMiddlewarePlan {
@@ -930,14 +923,9 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         let instrumentation = Arc::new(instrumentation);
 
         // Create the stage configuration
-        let mut source_config = FiniteSourceConfig::new(
-            config.stage_id,
-            &config.name,
-            &config.flow_name,
-            self.source.continuation(),
-            self.source.system().clone(),
-        )
-        .with_observer_bindings(source_binding.observers.into_bindings());
+        let mut source_config =
+            FiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
+                .with_observer_bindings(source_binding.observers.into_bindings());
         source_config.control_strategy = source_binding.completion_gate;
         source_config.source_boundary = source_binding.source_boundary;
 
@@ -1037,6 +1025,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 
         let source_binding = build_source_middleware_and_register_policies(
             &config,
+            &resources.runtime_execution,
             StageType::InfiniteSource,
             writer_id,
             SourceMiddlewarePlan {
@@ -1059,14 +1048,9 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         let instrumentation = Arc::new(instrumentation);
 
         // Create the stage configuration
-        let mut source_config = InfiniteSourceConfig::new(
-            config.stage_id,
-            &config.name,
-            &config.flow_name,
-            self.source.continuation(),
-            self.source.system().clone(),
-        )
-        .with_observer_bindings(source_binding.observers.into_bindings());
+        let mut source_config =
+            InfiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
+                .with_observer_bindings(source_binding.observers.into_bindings());
         source_config.control_strategy = source_binding.completion_gate;
         source_config.source_boundary = source_binding.source_boundary;
 
@@ -1109,7 +1093,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static>
     /// The handler contract defaults infinite sources to no poll timeout so push
     /// sources can block efficiently (e.g. `recv().await`).
     pub(crate) fn new(name: impl Into<String>, source: AdmittedSource<H>) -> Self {
-        let hosted_ingress_slot = source.handler().hosted_ingress_slot();
+        let hosted_ingress_slot = source.hosted_ingress_slot();
         Self {
             name: name.into(),
             source,
@@ -1199,6 +1183,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
 
         let source_binding = build_source_middleware_and_register_policies(
             &config,
+            &resources.runtime_execution,
             StageType::InfiniteSource,
             writer_id,
             SourceMiddlewarePlan {
@@ -1220,14 +1205,9 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        let mut source_config = InfiniteSourceConfig::new(
-            config.stage_id,
-            &config.name,
-            &config.flow_name,
-            self.source.continuation(),
-            self.source.system().clone(),
-        )
-        .with_observer_bindings(source_binding.observers.into_bindings());
+        let mut source_config =
+            InfiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
+                .with_observer_bindings(source_binding.observers.into_bindings());
         source_config.control_strategy = source_binding.completion_gate;
         source_config.source_boundary = source_binding.source_boundary;
 
@@ -2858,19 +2838,9 @@ mod tests {
         IdempotencyKeyPolicy, LogicalEffectBindingName, Named,
     };
     use obzenflow_runtime::message_bus::FsmMessageBus;
-    use obzenflow_runtime::stages::common::handlers::source::traits::FiniteSourceHandler;
-    use obzenflow_runtime::stages::common::handlers::source::traits::{
-        AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler,
-    };
     use obzenflow_runtime::stages::resources_builder::SubscriptionFactory;
-    use obzenflow_runtime::stages::source::RefusedBy;
     use obzenflow_runtime::stages::LivenessSnapshots;
     use serde_json::json;
-
-    /// Raw test handlers declare no continuation.
-    const HANDLER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
-        by: RefusedBy::Handler,
-    };
 
     fn effective_config_for_stage(
         stage_name: &str,
@@ -3270,149 +3240,10 @@ mod tests {
         assert!(err.contains("more than once"));
     }
 
-    #[derive(Clone, Debug)]
-    struct DummyFiniteSource;
-
-    impl FiniteSourceHandler for DummyFiniteSource {
-        fn next(
-            &mut self,
-        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime::stages::SourceError> {
-            // This dummy source never emits data; it's used only to verify that the
-            // circuit breaker middleware wires up a CircuitBreakerSourceStrategy.
-            Ok(None)
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct DummyAsyncFiniteSourceDefault;
-
-    #[async_trait]
-    impl AsyncFiniteSourceHandler for DummyAsyncFiniteSourceDefault {
-        async fn next(
-            &mut self,
-        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime::stages::SourceError> {
-            Ok(None)
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct DummyAsyncFiniteSourceConfigured;
-
-    #[async_trait]
-    impl AsyncFiniteSourceHandler for DummyAsyncFiniteSourceConfigured {
-        fn poll_timeout(&self) -> Option<Duration> {
-            Some(Duration::from_secs(123))
-        }
-
-        async fn next(
-            &mut self,
-        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime::stages::SourceError> {
-            Ok(None)
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct DummyAsyncFiniteSourceDisabled;
-
-    #[async_trait]
-    impl AsyncFiniteSourceHandler for DummyAsyncFiniteSourceDisabled {
-        fn poll_timeout(&self) -> Option<Duration> {
-            None
-        }
-
-        async fn next(
-            &mut self,
-        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime::stages::SourceError> {
-            Ok(None)
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct DummyAsyncInfiniteSourceDefault;
-
-    #[async_trait]
-    impl AsyncInfiniteSourceHandler for DummyAsyncInfiniteSourceDefault {
-        async fn next(
-            &mut self,
-        ) -> Result<Vec<ChainEvent>, obzenflow_runtime::stages::SourceError> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct DummyAsyncInfiniteSourceConfigured;
-
-    #[async_trait]
-    impl AsyncInfiniteSourceHandler for DummyAsyncInfiniteSourceConfigured {
-        fn poll_timeout(&self) -> Option<Duration> {
-            Some(Duration::from_secs(7))
-        }
-
-        async fn next(
-            &mut self,
-        ) -> Result<Vec<ChainEvent>, obzenflow_runtime::stages::SourceError> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[test]
-    fn async_finite_source_descriptor_carries_configured_poll_timeout() {
-        let descriptor = AsyncFiniteSourceDescriptor::new(
-            "configured",
-            AdmittedSource::new(
-                DummyAsyncFiniteSourceConfigured,
-                HANDLER_REFUSES,
-                SourceSystem::placeholder(),
-            ),
-        );
-        assert_eq!(
-            UnifiedAsyncFiniteSourceHandler::poll_timeout(descriptor.source.handler()),
-            Some(Duration::from_secs(123))
-        );
-    }
-
-    #[test]
-    fn async_finite_source_descriptor_uses_handler_contract_default() {
-        let descriptor = AsyncFiniteSourceDescriptor::new(
-            "defaulted",
-            AdmittedSource::new(
-                DummyAsyncFiniteSourceDefault,
-                HANDLER_REFUSES,
-                SourceSystem::placeholder(),
-            ),
-        );
-        assert_eq!(
-            UnifiedAsyncFiniteSourceHandler::poll_timeout(descriptor.source.handler()),
-            Some(Duration::from_secs(30))
-        );
-    }
-
-    #[test]
-    fn async_finite_source_descriptor_preserves_configured_disabled_timeout() {
-        let descriptor = AsyncFiniteSourceDescriptor::new(
-            "disabled",
-            AdmittedSource::new(
-                DummyAsyncFiniteSourceDisabled,
-                HANDLER_REFUSES,
-                SourceSystem::placeholder(),
-            ),
-        );
-        assert_eq!(
-            UnifiedAsyncFiniteSourceHandler::poll_timeout(descriptor.source.handler()),
-            None
-        );
-    }
-
     #[test]
     fn topology_uses_resolved_family_settings_and_stable_semantic_keys() {
-        let mut descriptor = AsyncInfiniteSourceDescriptor::new(
-            "source",
-            AdmittedSource::new(
-                DummyAsyncInfiniteSourceDefault,
-                HANDLER_REFUSES,
-                SourceSystem::placeholder(),
-            ),
-        );
+        let mut descriptor =
+            AsyncInfiniteSourceDescriptor::new("source", AdmittedSource::placeholder(None));
         descriptor.source_policies = vec![
             Box::new(
                 obzenflow_adapters::middleware::circuit_breaker()
@@ -3482,38 +3313,6 @@ mod tests {
     }
 
     #[test]
-    fn async_infinite_source_descriptor_carries_configured_poll_timeout() {
-        let descriptor = AsyncInfiniteSourceDescriptor::new(
-            "configured",
-            AdmittedSource::new(
-                DummyAsyncInfiniteSourceConfigured,
-                HANDLER_REFUSES,
-                SourceSystem::placeholder(),
-            ),
-        );
-        assert_eq!(
-            UnifiedAsyncInfiniteSourceHandler::poll_timeout(descriptor.source.handler()),
-            Some(Duration::from_secs(7))
-        );
-    }
-
-    #[test]
-    fn async_infinite_source_descriptor_uses_handler_contract_default() {
-        let descriptor = AsyncInfiniteSourceDescriptor::new(
-            "defaulted",
-            AdmittedSource::new(
-                DummyAsyncInfiniteSourceDefault,
-                HANDLER_REFUSES,
-                SourceSystem::placeholder(),
-            ),
-        );
-        assert_eq!(
-            UnifiedAsyncInfiniteSourceHandler::poll_timeout(descriptor.source.handler()),
-            None
-        );
-    }
-
-    #[test]
     fn hosted_ingress_source_fills_slot_and_binds_limiter_to_ingress() {
         use obzenflow_core::ingress::{
             HostedIngressBindingSlot, IngressAdmissionDecision, IngressAttemptContext,
@@ -3537,6 +3336,10 @@ mod tests {
         // control position.
         build_source_middleware_and_register_policies(
             &config,
+            &obzenflow_runtime::execution::RuntimeExecution::new(
+                obzenflow_runtime::execution::RuntimeMode::Live,
+                None,
+            ),
             StageType::InfiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {
@@ -3595,6 +3398,10 @@ mod tests {
 
         let error = match build_source_middleware_and_register_policies(
             &config,
+            &obzenflow_runtime::execution::RuntimeExecution::new(
+                obzenflow_runtime::execution::RuntimeMode::Live,
+                None,
+            ),
             StageType::InfiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {
@@ -3652,6 +3459,10 @@ mod tests {
         let slot = HostedIngressBindingSlot::new("bank.accounts");
         let bound = build_source_middleware_and_register_policies(
             &config,
+            &obzenflow_runtime::execution::RuntimeExecution::new(
+                obzenflow_runtime::execution::RuntimeMode::Live,
+                None,
+            ),
             StageType::InfiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {
@@ -3781,6 +3592,10 @@ mod tests {
         // but with a user-authored factory.
         build_source_middleware_and_register_policies(
             &config,
+            &obzenflow_runtime::execution::RuntimeExecution::new(
+                obzenflow_runtime::execution::RuntimeMode::Live,
+                None,
+            ),
             StageType::InfiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {
@@ -3996,11 +3811,7 @@ mod tests {
 
         let descriptor = FiniteSourceDescriptor {
             name: "cb_source".to_string(),
-            source: AdmittedSource::new(
-                DummyFiniteSource,
-                HANDLER_REFUSES,
-                SourceSystem::placeholder(),
-            ),
+            source: AdmittedSource::placeholder(None),
             source_policies: vec![Box::new(breaker)],
             ingress_policy: None,
             observers: vec![],
@@ -4655,6 +4466,10 @@ mod observer_placement_negative_tests {
 
         build_source_middleware_and_register_policies(
             &config,
+            &obzenflow_runtime::execution::RuntimeExecution::new(
+                obzenflow_runtime::execution::RuntimeMode::Live,
+                None,
+            ),
             StageType::FiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {

@@ -4330,7 +4330,7 @@ macro_rules! sink {
 /// #     submissions,
 /// #     obzenflow_core::ingress::HostedIngressBindingSlot::new("grammar.facts"),
 /// # )
-/// # .into_port("ingress");
+/// # .into_port(obzenflow_core::ingress::HostedIngressSystem::Ingress);
 /// let handled = obzenflow_dsl::source!(Fact => facts);
 /// let read = obzenflow_dsl::source!(Fact => fact_file);
 /// let received = obzenflow_dsl::async_infinite_source!(Fact => posted);

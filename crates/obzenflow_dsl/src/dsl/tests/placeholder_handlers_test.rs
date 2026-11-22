@@ -2,13 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::dsl::typing::{
-    PlaceholderAsyncSource, PlaceholderFiniteSource, PlaceholderInfiniteSource, PlaceholderJoin,
-    PlaceholderStateful, PlaceholderTransform,
-};
+use crate::dsl::typing::{PlaceholderJoin, PlaceholderStateful, PlaceholderTransform};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
-use obzenflow_runtime::__private::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
+use obzenflow_runtime::__private::{
+    PlaceholderSource, TypedJoinHandlerAdapter, UnifiedJoinHandler,
+};
 use obzenflow_runtime::stages::common::handlers::source::traits::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
     InfiniteSourceHandler,
@@ -19,14 +18,14 @@ use serde_json::json;
 
 #[test]
 fn placeholder_finite_source_signals_eof() {
-    let mut handler = PlaceholderFiniteSource::<u8>::new(None);
+    let mut handler = PlaceholderSource::new(None);
     let next = FiniteSourceHandler::next(&mut handler).expect("finite source next");
     assert!(next.is_none());
 }
 
 #[test]
 fn placeholder_infinite_source_idles_with_empty_batch() {
-    let mut handler = PlaceholderInfiniteSource::<u8>::new(None);
+    let mut handler = PlaceholderSource::new(None);
     let next = InfiniteSourceHandler::next(&mut handler).expect("infinite source next");
     assert!(next.is_empty());
 }
@@ -54,14 +53,14 @@ async fn placeholder_transform_drains_cleanly() {
 
 #[tokio::test]
 async fn placeholder_async_source_is_safe_in_both_modes() {
-    let mut handler = PlaceholderAsyncSource::<u8>::new(None);
+    let mut handler = PlaceholderSource::new(None);
 
-    let finite = <PlaceholderAsyncSource<u8> as AsyncFiniteSourceHandler>::next(&mut handler)
+    let finite = <PlaceholderSource as AsyncFiniteSourceHandler>::next(&mut handler)
         .await
         .expect("async finite next");
     assert!(finite.is_none());
 
-    let infinite = <PlaceholderAsyncSource<u8> as AsyncInfiniteSourceHandler>::next(&mut handler)
+    let infinite = <PlaceholderSource as AsyncInfiniteSourceHandler>::next(&mut handler)
         .await
         .expect("async infinite next");
     assert!(infinite.is_empty());

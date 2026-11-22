@@ -29,15 +29,6 @@ pub struct AdmittedSource<H> {
 }
 
 impl<H> AdmittedSource<H> {
-    /// A handler admitted without a port, such as a placeholder's.
-    pub fn new(handler: H, continuation: SourceContinuation, system: SourceSystem) -> Self {
-        Self {
-            handler,
-            continuation,
-            system,
-        }
-    }
-
     pub fn continuation(&self) -> SourceContinuation {
         self.continuation
     }
@@ -45,9 +36,11 @@ impl<H> AdmittedSource<H> {
     pub fn system(&self) -> &SourceSystem {
         &self.system
     }
+}
 
-    pub fn handler(&self) -> &H {
-        &self.handler
+impl<H: super::UnifiedAsyncInfiniteSourceHandler> AdmittedSource<H> {
+    pub fn hosted_ingress_slot(&self) -> Option<obzenflow_core::ingress::HostedIngressBindingSlot> {
+        self.handler.hosted_ingress_slot()
     }
 }
 

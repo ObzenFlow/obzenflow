@@ -39,6 +39,7 @@ pub mod stages;
 pub mod __private {
     pub mod lifecycle;
 
+    pub use crate::stages::common::handlers::source::placeholder::PlaceholderSource;
     pub use crate::stages::common::handlers::source::prepared::{AdmitSource, AdmittedSource};
     pub use crate::stages::common::handlers::source::SourceRowInput;
 

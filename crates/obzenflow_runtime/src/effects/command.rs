@@ -330,7 +330,10 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// whose instances each hold their own destination, such as one file each.
     /// Characters a binding name can't hold become `_`.
     #[doc(hidden)]
-    pub fn instance(mut self, instance: &str) -> Self {
+    pub fn instance(mut self, instance: &str) -> Self
+    where
+        P: PortEffects,
+    {
         let qualified: String = format!("{}.{instance}", self.name.as_str())
             .chars()
             .map(|character| {

@@ -260,3 +260,110 @@ impl<T: AsyncInfiniteSourceHandler + Send + Sync> UnifiedAsyncInfiniteSourceHand
 
 pub(super) use sealed::{AsyncFinite as SealAsyncFinite, AsyncInfinite as SealAsyncInfinite};
 pub(super) use sealed::{Finite as SealFinite, Infinite as SealInfinite};
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    struct DummyAsyncFiniteSourceDefault;
+
+    #[async_trait]
+    impl AsyncFiniteSourceHandler for DummyAsyncFiniteSourceDefault {
+        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DummyAsyncFiniteSourceConfigured;
+
+    #[async_trait]
+    impl AsyncFiniteSourceHandler for DummyAsyncFiniteSourceConfigured {
+        fn poll_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(123))
+        }
+
+        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DummyAsyncFiniteSourceDisabled;
+
+    #[async_trait]
+    impl AsyncFiniteSourceHandler for DummyAsyncFiniteSourceDisabled {
+        fn poll_timeout(&self) -> Option<Duration> {
+            None
+        }
+
+        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DummyAsyncInfiniteSourceDefault;
+
+    #[async_trait]
+    impl AsyncInfiniteSourceHandler for DummyAsyncInfiniteSourceDefault {
+        async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DummyAsyncInfiniteSourceConfigured;
+
+    #[async_trait]
+    impl AsyncInfiniteSourceHandler for DummyAsyncInfiniteSourceConfigured {
+        fn poll_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(7))
+        }
+
+        async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn finite_custom_timeout_forwards_deadline() {
+        assert_eq!(
+            UnifiedAsyncFiniteSourceHandler::poll_timeout(&DummyAsyncFiniteSourceConfigured),
+            Some(Duration::from_secs(123))
+        );
+    }
+
+    #[test]
+    fn finite_default_timeout_returns_deadline() {
+        assert_eq!(
+            UnifiedAsyncFiniteSourceHandler::poll_timeout(&DummyAsyncFiniteSourceDefault),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn finite_disabled_timeout_returns_none() {
+        assert_eq!(
+            UnifiedAsyncFiniteSourceHandler::poll_timeout(&DummyAsyncFiniteSourceDisabled),
+            None
+        );
+    }
+
+    #[test]
+    fn infinite_custom_timeout_forwards_deadline() {
+        assert_eq!(
+            UnifiedAsyncInfiniteSourceHandler::poll_timeout(&DummyAsyncInfiniteSourceConfigured),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn infinite_default_timeout_returns_none() {
+        assert_eq!(
+            UnifiedAsyncInfiniteSourceHandler::poll_timeout(&DummyAsyncInfiniteSourceDefault),
+            None
+        );
+    }
+}

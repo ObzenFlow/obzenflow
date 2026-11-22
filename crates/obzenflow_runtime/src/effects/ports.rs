@@ -264,7 +264,7 @@ impl SourceSystem {
     }
 
     /// The framework's own placeholder source, with nothing for a registry to build.
-    pub fn placeholder() -> Self {
+    pub(crate) fn placeholder() -> Self {
         Self::new(
             LogicalEffectBindingName::of_system("placeholder"),
             Arc::new(SystemPort::eager(Arc::new(()))),

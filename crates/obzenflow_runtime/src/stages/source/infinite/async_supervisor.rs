@@ -921,26 +921,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     // heartbeat to live; late prefix events stay
                                     // reconstruction-scoped by their in-band generation.
                                     complete_catch_up_handoff(&catch_up).await?;
-                                    // FLOWIP-120n F12: a hosted ingress surface admits
-                                    // from here on.
-                                    match self
-                                        .handler
-                                        .as_ref()
-                                        .expect("Running owns a source handler")
-                                        .hosted_ingress_slot()
-                                    {
-                                        Some(slot) => {
-                                            slot.mark_resume_live();
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                "resume handoff: hosted ingress marked live"
-                                            );
-                                        }
-                                        None => tracing::debug!(
-                                            stage_name = %ctx.stage_name,
-                                            "resume handoff: no hosted ingress slot on handler"
-                                        ),
-                                    }
                                     self.replay_driver = None;
                                     self.idle_backoff.reset();
                                     self.pending_idle_delay = None;

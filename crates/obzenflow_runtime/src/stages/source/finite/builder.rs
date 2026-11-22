@@ -28,7 +28,7 @@ use super::supervisor::FiniteSourceSupervisor;
 
 /// Builder for creating finite source stages
 pub struct FiniteSourceBuilder<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> {
-    handler: H,
+    source: AdmittedSource<H>,
     config: FiniteSourceConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
@@ -42,7 +42,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceBuilder<
         resources: StageResources,
     ) -> Self {
         Self {
-            handler: source.handler,
+            source,
             config,
             resources,
             instrumentation: None,
@@ -117,7 +117,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
         });
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081).
-        let mut handler = self.handler;
+        let mut handler = self.source.handler;
         handler.install_writer_id(WriterId::from(self.config.stage_id));
         handler.install_observation_recorder(context.instrumentation.observation_recorder());
 
@@ -128,8 +128,8 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
             data_journal: self.resources.data_journal.clone(),
             flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
-            continuation: self.config.continuation,
-            system: bind_source_system(&self.config.source_system, &self.resources.effect_ports),
+            continuation: self.source.continuation,
+            system: bind_source_system(&self.source.system, &self.resources.effect_ports),
             idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
                 Duration::from_millis(10),

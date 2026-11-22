@@ -635,7 +635,7 @@ mod tests {
             queue,
             obzenflow_core::ingress::HostedIngressBindingSlot::new("test.input"),
         )
-        .into_port("ingress");
+        .into_port(obzenflow_core::ingress::HostedIngressSystem::Ingress);
         let hosted = crate::async_infinite_source!(name: "hosted", InputEvent => hosted);
         assert_eq!(
             hosted.source_continuation(),

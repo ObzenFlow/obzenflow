@@ -32,8 +32,8 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::ingress::{
-    HostedIngressBindingSlot, IngressContentDigest, IngressContext, IngressReceipt,
-    IngressRequestId,
+    HostedIngressBindingSlot, HostedIngressSystem, IngressContentDigest, IngressContext,
+    IngressReceipt, IngressRequestId,
 };
 use obzenflow_core::{ChainEvent, EventId, OneFactOutcome, WriterId};
 use ring::digest::{digest, SHA256};
@@ -106,13 +106,13 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedIngressSource<T> {
     /// the framework system that receives its submissions. Cloning the port
     /// shares the one queue and binding slot.
     #[doc(hidden)]
-    pub fn into_port(self, system: &'static str) -> Port<dyn HostedIngress<T>> {
+    pub fn into_port(self, system: HostedIngressSystem) -> Port<dyn HostedIngress<T>> {
         let slot = self.slot.clone();
         let hosted: Arc<dyn HostedIngress<T>> = Arc::new(HostedQueue {
             slot,
             source: Mutex::new(Some(self)),
         });
-        Port::framework_system(system, hosted)
+        Port::framework_system(system.name(), hosted)
     }
 
     async fn receive_batch(&mut self) -> Result<Vec<HostedSubmission<T>>, SourceError> {
@@ -589,7 +589,7 @@ mod tests {
             )
             .expect("first install");
             let mut adapter = HostedIngressSource::new(rx, slot.clone())
-                .into_port("ingress")
+                .into_port(HostedIngressSystem::Ingress)
                 .admit()
                 .handler;
             let stage_id = StageId::new();
@@ -688,7 +688,7 @@ mod tests {
     fn admission_records_that_the_sender_redelivers_before_any_open() {
         let (_tx, rx) = mpsc::channel::<HostedSubmission<Row>>(1);
         let admitted = HostedIngressSource::new(rx, HostedIngressBindingSlot::new(KEY))
-            .into_port("ingress")
+            .into_port(HostedIngressSystem::Ingress)
             .admit();
         assert_eq!(
             admitted.continuation,

@@ -11,7 +11,6 @@ use obzenflow::stages::sources::{
 
 const LISTED_STORIES: usize = 64;
 const DELETED_EVERY_NTH: usize = 11;
-const STORIES_PER_POLL: usize = 10;
 const TOPICS: [&str; 10] = [
     "Rust",
     "AI",
@@ -91,7 +90,6 @@ impl TypedAsyncFiniteSourceHandler for ScriptedStoriesReader {
     type Output = HnStory;
 
     async fn next(&mut self) -> Result<Option<Vec<HnStory>>, SourceError> {
-        let batch: Vec<HnStory> = self.stories.by_ref().take(STORIES_PER_POLL).collect();
-        Ok((!batch.is_empty()).then_some(batch))
+        Ok(self.stories.next().map(|story| vec![story]))
     }
 }

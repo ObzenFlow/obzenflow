@@ -693,6 +693,12 @@ impl RuntimeExecution {
         self.strategy.source_phase_for(stage)
     }
 
+    /// Read-only liveness for a hosted ingress bound to this source.
+    pub fn source_liveness(&self, stage: StageId) -> Box<dyn Fn() -> bool + Send + Sync> {
+        let strategy = Arc::clone(&self.strategy);
+        Box::new(move || strategy.source_phase_for(stage) == SourceExecutionPhase::Live)
+    }
+
     /// What a source does once its recorded input is exhausted.
     pub fn source_replay_exhausted(&self, stage: StageId) -> SourceReplayExhaustion {
         self.strategy.source_replay_exhausted(stage)
