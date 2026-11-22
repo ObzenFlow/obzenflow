@@ -289,7 +289,6 @@ fn plan_stage_observers(
 
 fn build_source_middleware_and_register_policies(
     config: &StageConfig,
-    execution: &obzenflow_runtime::execution::RuntimeExecution,
     stage_type: StageType,
     writer_id: WriterId,
     plan: SourceMiddlewarePlan,
@@ -365,7 +364,6 @@ fn build_source_middleware_and_register_policies(
         slot.fill(obzenflow_core::ingress::FilledHostedIngress {
             stage_id: config.stage_id,
             stage_key: config.name.clone().into(),
-            source_is_live: execution.source_liveness(config.stage_id),
             boundary: ingress_boundary,
         })
         .map_err(|e| format!("Stage '{}': {e}", config.name))?;
@@ -761,7 +759,6 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 
         let source_binding = build_source_middleware_and_register_policies(
             &config,
-            &resources.runtime_execution,
             StageType::FiniteSource,
             writer_id,
             SourceMiddlewarePlan {
@@ -900,7 +897,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 
         let source_binding = build_source_middleware_and_register_policies(
             &config,
-            &resources.runtime_execution,
             StageType::FiniteSource,
             writer_id,
             SourceMiddlewarePlan {
@@ -1025,7 +1021,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 
         let source_binding = build_source_middleware_and_register_policies(
             &config,
-            &resources.runtime_execution,
             StageType::InfiniteSource,
             writer_id,
             SourceMiddlewarePlan {
@@ -1183,7 +1178,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
 
         let source_binding = build_source_middleware_and_register_policies(
             &config,
-            &resources.runtime_execution,
             StageType::InfiniteSource,
             writer_id,
             SourceMiddlewarePlan {
@@ -3336,10 +3330,6 @@ mod tests {
         // control position.
         build_source_middleware_and_register_policies(
             &config,
-            &obzenflow_runtime::execution::RuntimeExecution::new(
-                obzenflow_runtime::execution::RuntimeMode::Live,
-                None,
-            ),
             StageType::InfiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {
@@ -3398,10 +3388,6 @@ mod tests {
 
         let error = match build_source_middleware_and_register_policies(
             &config,
-            &obzenflow_runtime::execution::RuntimeExecution::new(
-                obzenflow_runtime::execution::RuntimeMode::Live,
-                None,
-            ),
             StageType::InfiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {
@@ -3459,10 +3445,6 @@ mod tests {
         let slot = HostedIngressBindingSlot::new("bank.accounts");
         let bound = build_source_middleware_and_register_policies(
             &config,
-            &obzenflow_runtime::execution::RuntimeExecution::new(
-                obzenflow_runtime::execution::RuntimeMode::Live,
-                None,
-            ),
             StageType::InfiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {
@@ -3592,10 +3574,6 @@ mod tests {
         // but with a user-authored factory.
         build_source_middleware_and_register_policies(
             &config,
-            &obzenflow_runtime::execution::RuntimeExecution::new(
-                obzenflow_runtime::execution::RuntimeMode::Live,
-                None,
-            ),
             StageType::InfiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {
@@ -4466,10 +4444,6 @@ mod observer_placement_negative_tests {
 
         build_source_middleware_and_register_policies(
             &config,
-            &obzenflow_runtime::execution::RuntimeExecution::new(
-                obzenflow_runtime::execution::RuntimeMode::Live,
-                None,
-            ),
             StageType::FiniteSource,
             WriterId::from(stage_id),
             SourceMiddlewarePlan {

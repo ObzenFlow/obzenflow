@@ -30,8 +30,6 @@ pub struct FilledHostedIngress {
     /// Replay-stable source stage key (`StageConfig.name`, the `run_manifest.json`
     /// key).
     pub stage_key: StageKey,
-    /// Reads the linked source stage’s current execution phase.
-    pub source_is_live: Box<dyn Fn() -> bool + Send + Sync>,
     /// The composed ingress admission boundary, or `None` when a hosted source
     /// has no ingress middleware attached (the slot is still filled so startup
     /// can verify every hosted surface was placed in topology).
@@ -114,12 +112,6 @@ impl HostedIngressBindingSlot {
         self.cell.get().is_some()
     }
 
-    /// Whether the bound source currently admits live input.
-    pub fn is_resume_live(&self) -> bool {
-        self.filled()
-            .is_some_and(|binding| (binding.source_is_live)())
-    }
-
     /// Install the configured timing once; a second install returns it back.
     pub fn install_timing(&self, timing: IngressTiming) -> Result<(), IngressTiming> {
         self.timing.set(timing)
@@ -149,10 +141,5 @@ mod tests {
         let slot = HostedIngressBindingSlot::new("orders");
         assert!(slot.same_binding(&slot.clone()));
         assert!(!slot.same_binding(&HostedIngressBindingSlot::new("orders")));
-    }
-
-    #[test]
-    fn unbound_ingress_refuses_live_input() {
-        assert!(!HostedIngressBindingSlot::new("orders").is_resume_live());
     }
 }

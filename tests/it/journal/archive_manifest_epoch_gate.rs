@@ -289,7 +289,6 @@ async fn claimed_hosted_slot_fails_preflight() {
             slot.fill(FilledHostedIngress {
                 stage_id: previous_stage,
                 stage_key: "previous".into(),
-                source_is_live: Box::new(|| false),
                 boundary: None,
             })
             .unwrap();

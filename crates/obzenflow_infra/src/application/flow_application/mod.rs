@@ -963,6 +963,7 @@ impl FlowApplication {
                         // journal so they can append attempt evidence. A surface with
                         // evidence recording enabled fails startup here if it is None.
                         ingress_evidence: flow_handle.ingress_evidence(),
+                        source_phases: flow_handle.source_phases(),
                     }) {
                         Ok(wired) => application
                             .tasks

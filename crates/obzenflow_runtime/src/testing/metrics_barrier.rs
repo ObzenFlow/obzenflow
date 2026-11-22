@@ -425,6 +425,7 @@ mod tests {
             stage_journals: vec![],
             system_journals: vec![],
             ingress_evidence: None,
+            source_phases: None,
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
 
@@ -470,6 +471,7 @@ mod tests {
             stage_journals: vec![],
             system_journals: vec![],
             ingress_evidence: None,
+            source_phases: None,
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
 

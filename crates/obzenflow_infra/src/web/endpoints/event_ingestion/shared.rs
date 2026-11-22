@@ -16,6 +16,7 @@ use obzenflow_core::ingress::{
     IngressRequestId, IngressRequestIdentity,
 };
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::execution::{SourceExecutionPhase, SourceExecutionPhases};
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::{
     prove_journal_form, HostedSubmission, IngressDecodeError, IngressDecoder, IngressRecord,
@@ -358,6 +359,7 @@ impl EdgeRefusal {
 pub struct IngestionState<T> {
     tx: mpsc::Sender<HostedSubmission<T>>,
     ready: Arc<AtomicBool>,
+    source_phases: Arc<OnceLock<SourceExecutionPhases>>,
     buffer_capacity: usize,
     pub(crate) config: IngestionConfig,
     /// FLOWIP-115d: the hosted-ingress binding slot, shared with this surface's
@@ -373,6 +375,7 @@ impl<T> Clone for IngestionState<T> {
         Self {
             tx: self.tx.clone(),
             ready: self.ready.clone(),
+            source_phases: self.source_phases.clone(),
             buffer_capacity: self.buffer_capacity,
             config: self.config.clone(),
             ingress_slot: self.ingress_slot.clone(),
@@ -397,6 +400,7 @@ impl<T> IngestionState<T> {
         let state = Self {
             tx,
             ready: Arc::new(AtomicBool::new(false)),
+            source_phases: Arc::new(OnceLock::new()),
             buffer_capacity,
             config,
             ingress_slot,
@@ -461,7 +465,7 @@ impl<T> IngestionState<T> {
     pub fn is_ready(&self) -> bool {
         // FLOWIP-120n F12: during resume catch-up a Running pipeline still
         // refuses ingress until the hosted source crosses to live.
-        self.ready.load(Ordering::Acquire) && self.ingress_slot.is_resume_live()
+        self.ready.load(Ordering::Acquire) && self.resume_live()
     }
 
     /// The pipeline-running conjunct of readiness (health diagnostics).
@@ -469,9 +473,24 @@ impl<T> IngestionState<T> {
         self.ready.load(Ordering::Acquire)
     }
 
-    /// The resume-live conjunct of readiness (health diagnostics).
+    /// The resume-live conjunct of readiness (health diagnostics): whether
+    /// Runtime reports the bound source's execution phase as live.
     pub fn resume_live(&self) -> bool {
-        self.ingress_slot.is_resume_live()
+        matches!(self.source_phase(), Some(SourceExecutionPhase::Live))
+    }
+
+    fn source_phase(&self) -> Option<SourceExecutionPhase> {
+        let stage = self.ingress_slot.filled()?.stage_id;
+        Some(self.source_phases.get()?.phase_for(stage))
+    }
+
+    pub(crate) fn install_source_phases(&self, phases: SourceExecutionPhases) {
+        if self.source_phases.set(phases).is_err() {
+            tracing::debug!(
+                ingress_key = %self.ingress_key(),
+                "ingress source phases already installed"
+            );
+        }
     }
 
     /// Wire ready signal from `FlowHandle::state_receiver()`.
@@ -730,6 +749,7 @@ fn resolve_ingress_key(ingress_key: Option<IngressKey>, fallback_base_path: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     struct Probe {
@@ -740,6 +760,17 @@ mod tests {
         const EVENT_TYPE: &'static str = "probe";
     }
 
+    fn live_phases() -> SourceExecutionPhases {
+        RuntimeExecution::new(RuntimeMode::Live, None).source_phases()
+    }
+
+    #[test]
+    fn unbound_ingress_refuses_live_input() {
+        let (state, _) = IngestionState::<Probe>::new(IngestionConfig::default());
+        state.install_source_phases(live_phases());
+        assert!(!state.resume_live());
+    }
+
     #[tokio::test]
     async fn watch_pipeline_state_toggles_ready_on_running() {
         let (state, _) = IngestionState::<Probe>::new(IngestionConfig::default());
@@ -748,10 +779,10 @@ mod tests {
             .fill(obzenflow_core::ingress::FilledHostedIngress {
                 stage_id: obzenflow_core::StageId::new(),
                 stage_key: "probe".into(),
-                source_is_live: Box::new(|| true),
                 boundary: None,
             })
             .unwrap();
+        state.install_source_phases(live_phases());
         assert!(!state.is_ready());
 
         let (tx, rx) = watch::channel(PipelineState::Created);

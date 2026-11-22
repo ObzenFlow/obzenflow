@@ -467,6 +467,19 @@ fn replay_incomplete(status: ArchiveStatus, allow_incomplete: bool) -> bool {
     !archive_is_sealed(status) && allow_incomplete
 }
 
+/// Read-only view of each source stage's execution phase. A host that serves
+/// a hosted source takes it from the flow handle. Only Runtime builds one, and
+/// it can't move a stage to live.
+#[derive(Clone, Debug)]
+pub struct SourceExecutionPhases(Arc<dyn ExecutionStrategy>);
+
+impl SourceExecutionPhases {
+    /// Whether the source is reconstructing or polling live.
+    pub fn phase_for(&self, stage: StageId) -> SourceExecutionPhase {
+        self.0.source_phase_for(stage)
+    }
+}
+
 /// The runtime-owned execution authority. Holds the chosen strategy and the
 /// archive as an I/O resource, and forwards every replay-versus-live query to
 /// the strategy. This is the callers' surface; the strategy itself never sees
@@ -532,8 +545,9 @@ impl RuntimeExecution {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn resume_for_test(resume_generation: ReaderGeneration) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn resume_for_test(resume_generation: ReaderGeneration) -> Self {
         let state = Arc::new(ResumeState::new(resume_generation));
         Self {
             strategy: Arc::new(Resume {
@@ -693,10 +707,9 @@ impl RuntimeExecution {
         self.strategy.source_phase_for(stage)
     }
 
-    /// Read-only liveness for a hosted ingress bound to this source.
-    pub fn source_liveness(&self, stage: StageId) -> Box<dyn Fn() -> bool + Send + Sync> {
-        let strategy = Arc::clone(&self.strategy);
-        Box::new(move || strategy.source_phase_for(stage) == SourceExecutionPhase::Live)
+    /// The read-only view a host takes to follow its hosted sources' phases.
+    pub fn source_phases(&self) -> SourceExecutionPhases {
+        SourceExecutionPhases(Arc::clone(&self.strategy))
     }
 
     /// What a source does once its recorded input is exhausted.

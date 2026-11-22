@@ -50,6 +50,7 @@ use obzenflow_core::ingress::{
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::Port;
+use obzenflow_runtime::execution::SourceExecutionPhases;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::source::HostedIngress;
 use obzenflow_runtime::stages::HostedIngressSystem;
@@ -202,6 +203,7 @@ where
             )));
         }
         install_evidence_writer(&self.state, flow_handle.ingress_evidence(), "handle")?;
+        install_source_phases(&self.state, flow_handle.source_phases(), "handle")?;
         Ok(self
             .state
             .watch_pipeline_state(flow_handle.state_receiver()))
@@ -233,6 +235,24 @@ fn install_evidence_writer<T>(
         None => Err(ApplicationError::FlowBuildFailed(format!(
             "hosted ingress {kind} '{}' has evidence recording enabled but no system journal is \
              available; disable record_ingress_evidence or run with a system journal",
+            state.ingress_key()
+        ))),
+    }
+}
+
+fn install_source_phases<T>(
+    state: &IngestionState<T>,
+    phases: Option<SourceExecutionPhases>,
+    kind: &str,
+) -> Result<(), ApplicationError> {
+    match phases {
+        Some(phases) => {
+            state.install_source_phases(phases);
+            Ok(())
+        }
+        None => Err(ApplicationError::FlowBuildFailed(format!(
+            "hosted ingress {kind} '{}' can't read its source's execution phase because the flow \
+             was built without a runtime execution; build the flow with flow!",
             state.ingress_key()
         ))),
     }
@@ -422,6 +442,7 @@ where
             // has no system journal fails startup rather than silently dropping
             // replayable evidence.
             install_evidence_writer(&state_for_wiring, ctx.ingress_evidence, "surface")?;
+            install_source_phases(&state_for_wiring, ctx.source_phases, "surface")?;
             let task = state_for_wiring.watch_pipeline_state(ctx.pipeline_state);
             Ok(WebSurfaceWiring::new(vec![task]))
         })

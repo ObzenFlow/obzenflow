@@ -474,6 +474,10 @@ impl PipelineBuilder {
                     owner: publications,
                     writer: system_id.into(),
                 }),
+                source_phases: self
+                    .runtime_execution
+                    .as_ref()
+                    .map(crate::execution::RuntimeExecution::source_phases),
                 pipeline_writer_id: WriterId::from(system_id),
                 observations: self.observations.clone(),
                 host_observations: self.host_observations.clone(),
