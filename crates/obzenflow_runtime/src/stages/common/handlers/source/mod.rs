@@ -28,7 +28,9 @@ pub use erased::{
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
     UnifiedInfiniteSourceHandler,
 };
-pub use hosted::{HostedIngress, HostedIngressSource, HostedSubmission, IngressReceiptSender};
+pub use hosted::{
+    HostedIngress, HostedIngressSource, HostedIngressSystem, HostedSubmission, IngressReceiptSender,
+};
 pub use port::{AsyncFiniteSource, AsyncInfiniteSource, FiniteSource, InfiniteSource};
 #[doc(hidden)]
 pub use port::{

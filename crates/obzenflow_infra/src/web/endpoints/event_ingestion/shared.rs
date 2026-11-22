@@ -743,6 +743,15 @@ mod tests {
     #[tokio::test]
     async fn watch_pipeline_state_toggles_ready_on_running() {
         let (state, _) = IngestionState::<Probe>::new(IngestionConfig::default());
+        state
+            .ingress_slot()
+            .fill(obzenflow_core::ingress::FilledHostedIngress {
+                stage_id: obzenflow_core::StageId::new(),
+                stage_key: "probe".into(),
+                source_is_live: Box::new(|| true),
+                boundary: None,
+            })
+            .unwrap();
         assert!(!state.is_ready());
 
         let (tx, rx) = watch::channel(PipelineState::Created);

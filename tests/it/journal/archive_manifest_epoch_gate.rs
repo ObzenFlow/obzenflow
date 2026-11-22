@@ -273,7 +273,7 @@ async fn claimed_hosted_slot_fails_preflight() {
     use obzenflow_adapters::middleware::rate_limit;
     use obzenflow_core::ingress::{FilledHostedIngress, HostedIngressBindingSlot};
     use obzenflow_dsl::async_infinite_source;
-    use obzenflow_runtime::stages::common::handlers::HostedIngressSource;
+    use obzenflow_runtime::stages::common::handlers::{HostedIngressSource, HostedIngressSystem};
 
     for prefilled in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -289,6 +289,7 @@ async fn claimed_hosted_slot_fails_preflight() {
             slot.fill(FilledHostedIngress {
                 stage_id: previous_stage,
                 stage_key: "previous".into(),
+                source_is_live: Box::new(|| false),
                 boundary: None,
             })
             .unwrap();
@@ -298,9 +299,9 @@ async fn claimed_hosted_slot_fails_preflight() {
             let (_, first_rx) = tokio::sync::mpsc::channel(1);
             let (_, second_rx) = tokio::sync::mpsc::channel(1);
             let first = HostedIngressSource::<Input>::new(first_rx, shared_slot.clone())
-                .into_port(obzenflow_core::ingress::HostedIngressSystem::Ingress);
+                .into_port(HostedIngressSystem::Ingress);
             let second = HostedIngressSource::<Input>::new(second_rx, shared_slot)
-                .into_port(obzenflow_core::ingress::HostedIngressSystem::Ingress);
+                .into_port(HostedIngressSystem::Ingress);
             Ok(flow! {
                 name: "hosted_slot_ownership_preflight",
                 journals: disk_journals(journal_root),

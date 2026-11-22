@@ -19,11 +19,11 @@ pub use join::{
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
 pub use source::{
-    prove_journal_form, HostedIngressSource, HostedSubmission, IngressDecodeError, IngressDecoder,
-    IngressReceiptSender, IngressRecord, SourceError, SourceObservationSink,
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedInfiniteSourceHandler, UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
-    UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
+    prove_journal_form, HostedIngressSource, HostedIngressSystem, HostedSubmission,
+    IngressDecodeError, IngressDecoder, IngressReceiptSender, IngressRecord, SourceError,
+    SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler, UnifiedAsyncFiniteSourceHandler,
+    UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
 };
 pub use stateful::{
     EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, StatefulEmission,

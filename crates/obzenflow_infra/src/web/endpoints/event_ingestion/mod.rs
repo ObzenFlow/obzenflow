@@ -45,14 +45,14 @@ pub use obzenflow_adapters::sources::http::{
     HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord,
 };
 use obzenflow_core::ingress::{
-    HostedIngressBindingSlot, HostedIngressSystem, IngressAttemptContext, IngressRequestId,
-    OUTCOME_UNKNOWN_RETRY_AFTER,
+    HostedIngressBindingSlot, IngressAttemptContext, IngressRequestId, OUTCOME_UNKNOWN_RETRY_AFTER,
 };
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::source::HostedIngress;
+use obzenflow_runtime::stages::HostedIngressSystem;
 use settlement::EvidenceState;
 use shared::{admit_typed, AdmittedRequest, EdgeRefusal};
 use std::sync::Arc;

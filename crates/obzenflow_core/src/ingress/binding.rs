@@ -17,22 +17,6 @@ use crate::{StageId, StageKey};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-/// The two framework systems that accept hosted submissions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostedIngressSystem {
-    Ingress,
-    HttpIngress,
-}
-
-impl HostedIngressSystem {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Ingress => "ingress",
-            Self::HttpIngress => "http-ingress",
-        }
-    }
-}
-
 /// The boundary plus replay-stable identity the DSL fills into a hosted-ingress
 /// slot during source-stage materialization.
 ///

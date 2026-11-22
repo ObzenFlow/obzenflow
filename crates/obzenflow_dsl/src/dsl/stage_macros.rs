@@ -4299,7 +4299,7 @@ macro_rules! sink {
 /// #     FiniteSourceConnector, Refuse, SourceError, SourceReaderInitContext,
 /// #     TypedFiniteSourceHandler,
 /// # };
-/// # use obzenflow_runtime::stages::{HostedIngressSource, HostedSubmission};
+/// # use obzenflow_runtime::stages::{HostedIngressSource, HostedIngressSystem, HostedSubmission};
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
@@ -4330,7 +4330,7 @@ macro_rules! sink {
 /// #     submissions,
 /// #     obzenflow_core::ingress::HostedIngressBindingSlot::new("grammar.facts"),
 /// # )
-/// # .into_port(obzenflow_core::ingress::HostedIngressSystem::Ingress);
+/// # .into_port(HostedIngressSystem::Ingress);
 /// let handled = obzenflow_dsl::source!(Fact => facts);
 /// let read = obzenflow_dsl::source!(Fact => fact_file);
 /// let received = obzenflow_dsl::async_infinite_source!(Fact => posted);

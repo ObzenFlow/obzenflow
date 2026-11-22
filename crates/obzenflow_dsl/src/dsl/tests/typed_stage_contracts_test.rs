@@ -21,10 +21,10 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulTransformHandler, HostedIngressSource, JoinReferenceView, StatefulEmission,
-        TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
-        TypedStatefulHandler, TypedTransformHandler,
+        EffectfulTransformHandler, HostedIngressSource, HostedIngressSystem, JoinReferenceView,
+        StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::stages::source::{
         AsyncFiniteContinuation, AsyncFiniteSource, AsyncFiniteSourceConnector,
@@ -635,7 +635,7 @@ mod tests {
             queue,
             obzenflow_core::ingress::HostedIngressBindingSlot::new("test.input"),
         )
-        .into_port(obzenflow_core::ingress::HostedIngressSystem::Ingress);
+        .into_port(HostedIngressSystem::Ingress);
         let hosted = crate::async_infinite_source!(name: "hosted", InputEvent => hosted);
         assert_eq!(
             hosted.source_continuation(),

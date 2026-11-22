@@ -32,8 +32,8 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::ingress::{
-    HostedIngressBindingSlot, HostedIngressSystem, IngressContentDigest, IngressContext,
-    IngressReceipt, IngressRequestId,
+    HostedIngressBindingSlot, IngressContentDigest, IngressContext, IngressReceipt,
+    IngressRequestId,
 };
 use obzenflow_core::{ChainEvent, EventId, OneFactOutcome, WriterId};
 use ring::digest::{digest, SHA256};
@@ -85,6 +85,23 @@ impl<T> fmt::Debug for HostedIngressSource<T> {
             .field("ingress_key", self.slot.ingress_key())
             .field("max_batch_size", &self.max_batch_size)
             .finish_non_exhaustive()
+    }
+}
+
+/// The framework system a hosted port names, `ingress` for protocol-neutral
+/// ingress or `http-ingress` for framework-managed HTTP push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedIngressSystem {
+    Ingress,
+    HttpIngress,
+}
+
+impl HostedIngressSystem {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Ingress => "ingress",
+            Self::HttpIngress => "http-ingress",
+        }
     }
 }
 
