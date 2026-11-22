@@ -651,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_source_descriptors_carry_placeholder_system() {
+    fn placeholder_source_system_returns_placeholder() {
         let placeholders = [
             crate::source!(name: "source", InputEvent => placeholder!()),
             crate::async_source!(name: "async_source", InputEvent => placeholder!()),

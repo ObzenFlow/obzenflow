@@ -2,15 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Source rows that take a `Port`.
-//!
-//! Each source family has one port trait, the trait-object form of its
-//! connector trait, so a flow builder chooses between connectors with
-//! `Port::to` and `Port::deferred`. The port's type repeats the row's output
-//! and its connectors' continuation, and every system behind it shares both.
-//! A connector's reader crosses the port behind a box and keeps its own poll
-//! timeout, drain and observation hook.
-
 use super::continuation::{
     AsyncFiniteContinuation, AsyncInfiniteContinuation, FiniteContinuation, InfiniteContinuation,
     LiveGuarantee, Reattach, Refuse, Seek, SourceContinuation,
@@ -54,23 +45,22 @@ mod sealed {
     pub trait Owned<P: ?Sized> {}
 }
 
-/// The continuations a source port of one family can repeat, each with the
-/// boxed reader its connectors open.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is not a continuation this source family allows",
-    note = "a source port's type carries its connectors' continuation: `Refuse`, `Seek<P>` for a synchronous finite source, or `Reattach<G>` for an infinite one"
+    message = "this source family does not allow the continuation `{Self}`",
+    note = "the type of a source port carries the continuation of its connectors: `Refuse`, `Seek<P>` for a synchronous finite source, or `Reattach<G>` for an infinite source"
 )]
 pub trait PortContinuation<Family: ?Sized, Out>: Send + Sync + 'static {
     type Reader: Send + 'static;
 }
 
-/// The value a source row's handler slot takes, which is always a [`Port`].
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "this source row requires a named Port",
+    message = "this source stage takes only a `Port`",
     label = "`{Self}` is not a `Port`",
-    note = "bind a connector with Port::to(...), bind a direct handler with Port::owned(...), or pass the port returned by ingress registration"
+    note = "bind a connector with `Port::to(...)`",
+    note = "bind a direct handler with `Port::owned(...)`",
+    note = "for hosted ingress, use the port from ingress registration"
 )]
 pub trait SourceRowInput: sealed::RowInput {
     type Port;
@@ -88,13 +78,11 @@ impl<P: ?Sized + Send + Sync + 'static> SourceRowInput for Port<P> {
     }
 }
 
-/// Boxes a connector's own reader for the port its continuation declares.
 #[doc(hidden)]
 pub trait BoxesReader<Family: ?Sized, R, Out>: PortContinuation<Family, Out> {
     fn boxed(reader: R) -> Self::Reader;
 }
 
-/// A synchronous finite reader behind a port.
 #[doc(hidden)]
 pub struct PortFiniteReader<Out> {
     reader: Box<dyn TypedFiniteSourceHandler<Output = Out>>,
@@ -111,7 +99,6 @@ where
     }
 }
 
-/// A positioned synchronous finite reader behind a port.
 #[doc(hidden)]
 pub struct PortPositionedReader<Out, P> {
     reader: Box<dyn PositionedFiniteReader<Output = Out, Position = P>>,
@@ -149,7 +136,6 @@ where
     }
 }
 
-/// An asynchronous finite reader behind a port.
 #[doc(hidden)]
 pub struct PortAsyncFiniteReader<Out> {
     reader: Box<dyn TypedAsyncFiniteSourceHandler<Output = Out>>,
@@ -186,7 +172,6 @@ where
     }
 }
 
-/// A synchronous infinite reader behind a port.
 #[doc(hidden)]
 pub struct PortInfiniteReader<Out> {
     reader: Box<dyn TypedInfiniteSourceHandler<Output = Out>>,
@@ -203,7 +188,6 @@ where
     }
 }
 
-/// An asynchronous infinite reader behind a port.
 #[doc(hidden)]
 pub struct PortAsyncInfiniteReader<Out> {
     reader: Box<dyn TypedAsyncInfiniteSourceHandler<Output = Out>>,
@@ -372,13 +356,10 @@ where
     }
 }
 
-/// The port a `source!` row takes, behind which sits any synchronous finite
-/// connector with output `Out` and continuation `K`.
+/// `FiniteSource` is the port trait for `source!` stages. Each synchronous finite
+/// connector with the output `Out` and the continuation `K` implements it.
 ///
-/// A flow builder writes this type only in the signature of a helper that
-/// returns a source's port. `Port::to` and `Port::deferred` infer it from the
-/// connector everywhere else. Two connectors that share an output and a
-/// continuation meet in one port, and each binds alone:
+/// Connectors with the same output and the same continuation share one port type.
 ///
 /// ```
 /// # use obzenflow_runtime::effects::Port;
@@ -457,8 +438,8 @@ where
 /// let positioned: Port<dyn FiniteSource<Ticket, Seek<Offset>>> = Port::to(PositionedTickets);
 /// ```
 ///
-/// Two connectors whose continuations differ don't fit one port, so joining
-/// them does not compile:
+/// Connectors with different continuations have different port types, so the
+/// example below does not compile.
 ///
 /// ```compile_fail,E0308
 /// # use obzenflow_runtime::effects::Port;
@@ -534,8 +515,8 @@ where
     ) -> Result<PortReader<Finite, K, Out>, SourceError>;
 }
 
-/// The port an `async_source!` row takes, behind which sits any asynchronous
-/// finite connector with output `Out` and continuation `K`.
+/// `AsyncFiniteSource` is the port trait for `async_source!` stages. Each asynchronous
+/// finite connector with the output `Out` and the continuation `K` implements it.
 #[async_trait]
 pub trait AsyncFiniteSource<Out, K>: Send + Sync + 'static
 where
@@ -548,8 +529,8 @@ where
     ) -> Result<PortReader<AsyncFinite, K, Out>, SourceError>;
 }
 
-/// The port an `infinite_source!` row takes, behind which sits any
-/// synchronous infinite connector with output `Out` and continuation `K`.
+/// `InfiniteSource` is the port trait for `infinite_source!` stages. Each synchronous
+/// infinite connector with the output `Out` and the continuation `K` implements it.
 pub trait InfiniteSource<Out, K>: Send + Sync + 'static
 where
     K: PortContinuation<Infinite, Out>,
@@ -561,8 +542,9 @@ where
     ) -> Result<PortReader<Infinite, K, Out>, SourceError>;
 }
 
-/// The port an `async_infinite_source!` row takes, behind which sits any
-/// asynchronous infinite connector with output `Out` and continuation `K`.
+/// `AsyncInfiniteSource` is the port trait for `async_infinite_source!` stages. Each
+/// asynchronous infinite connector with the output `Out` and the continuation `K`
+/// implements it.
 #[async_trait]
 pub trait AsyncInfiniteSource<Out, K>: Send + Sync + 'static
 where
@@ -679,9 +661,6 @@ const HANDLER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
     by: RefusedBy::Handler,
 };
 
-/// The system behind a port that took a direct handler by value. The first
-/// live acquisition takes the handler, and a later one finds the input
-/// unavailable.
 #[doc(hidden)]
 pub struct OwnedHandler<H> {
     handler: Mutex<Option<H>>,
@@ -749,13 +728,13 @@ impl<H: TypedAsyncInfiniteSourceHandler + 'static> AsyncInfiniteSourceConnector
     }
 }
 
-/// A direct typed handler [`Port::owned`] takes by value, with the port of
-/// its source family.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is not a typed source handler this port can own",
+    message = "this port cannot own `{Self}` as a typed source handler",
     label = "`Port::owned` takes a handler of the port's source family by value",
-    note = "`Port::owned` binds a `TypedFiniteSourceHandler` to `FiniteSource<_, Refuse>`, a `TypedAsyncFiniteSourceHandler` to `AsyncFiniteSource<_, Refuse>`, a `TypedInfiniteSourceHandler` to `InfiniteSource<_, Refuse>` and a `TypedAsyncInfiniteSourceHandler` to `AsyncInfiniteSource<_, Refuse>`; bind a connector with `Port::to(...)`, and pass the handler itself, never an `Arc` of it"
+    note = "`Port::owned` binds a `TypedFiniteSourceHandler` to `FiniteSource<_, Refuse>`, a `TypedAsyncFiniteSourceHandler` to `AsyncFiniteSource<_, Refuse>`, a `TypedInfiniteSourceHandler` to `InfiniteSource<_, Refuse>` and a `TypedAsyncInfiniteSourceHandler` to `AsyncInfiniteSource<_, Refuse>`",
+    note = "bind a connector with `Port::to(...)`",
+    note = "pass the handler itself, not an `Arc` of the handler"
 )]
 pub trait OwnedSource<P: ?Sized>: sealed::Owned<P> + Send + 'static {
     fn into_system(self) -> Arc<P>;

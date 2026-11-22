@@ -607,7 +607,8 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     /// for the same reason: resume admission must see every source (FLOWIP-134i B8).
     fn source_continuation(&self) -> Option<SourceContinuation>;
 
-    /// The system a source row's port names, `None` for every other stage.
+    /// For a source stage, `source_system` returns the system of its port. For every other
+    /// stage, it returns `None`.
     fn source_system(&self) -> Option<SourceSystem> {
         None
     }

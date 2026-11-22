@@ -9,11 +9,6 @@
 //! committed identities and resolves receipts only after the member's own row
 //! commits. The index is a projection of the source's own rows, so resume
 //! rebuilds it by folding re-admitted rows before the slot goes live.
-//!
-//! FLOWIP-122i B3: because only that writer acknowledges after commit, hosted
-//! ingress is Runtime-owned. A row takes it through the sealed
-//! [`HostedIngress`] port, admitted with `SenderRedelivers`, a guarantee no
-//! connector can declare.
 
 use super::continuation::SourceContinuation;
 use super::erased::{
@@ -88,8 +83,8 @@ impl<T> fmt::Debug for HostedIngressSource<T> {
     }
 }
 
-/// The framework system a hosted port names, `ingress` for protocol-neutral
-/// ingress or `http-ingress` for framework-managed HTTP push.
+/// `HostedIngressSystem` gives the framework system of a hosted ingress port. The system
+/// is `ingress` for protocol-neutral ingress, or `http-ingress` for framework-managed HTTP push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostedIngressSystem {
     Ingress,
@@ -119,9 +114,6 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedIngressSource<T> {
         self
     }
 
-    /// The port an `async_infinite_source!` row takes for this queue, naming
-    /// the framework system that receives its submissions. Cloning the port
-    /// shares the one queue and binding slot.
     #[doc(hidden)]
     pub fn into_port(self, system: HostedIngressSystem) -> Port<dyn HostedIngress<T>> {
         let slot = self.slot.clone();
@@ -151,10 +143,9 @@ mod sealed {
     pub trait Hosted {}
 }
 
-/// The port an `async_infinite_source!` row takes for hosted ingress. Ingress
-/// registration returns it, and only Runtime implements it: the source's
-/// single writer settles each receipt after its row commits, so a resumed run
-/// reattaches with `SenderRedelivers`.
+/// `HostedIngress` is the port trait for hosted ingress. Only Runtime implements it.
+/// Ingress registration returns a `Port<dyn HostedIngress<_>>`. A resumed run reattaches
+/// with `SenderRedelivers`.
 pub trait HostedIngress<Out>: sealed::Hosted + Send + Sync + 'static {
     #[doc(hidden)]
     fn binding_slot(&self) -> HostedIngressBindingSlot;

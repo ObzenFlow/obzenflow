@@ -473,8 +473,8 @@ impl<T> IngestionState<T> {
         self.ready.load(Ordering::Acquire)
     }
 
-    /// The resume-live conjunct of readiness (health diagnostics): whether
-    /// Runtime reports the bound source's execution phase as live.
+    /// `resume_live` returns true while the runtime reports the hosted source as live.
+    /// Readiness needs both this value and `pipeline_running`.
     pub fn resume_live(&self) -> bool {
         matches!(self.source_phase(), Some(SourceExecutionPhase::Live))
     }
@@ -488,7 +488,7 @@ impl<T> IngestionState<T> {
         if self.source_phases.set(phases).is_err() {
             tracing::debug!(
                 ingress_key = %self.ingress_key(),
-                "ingress source phases already installed"
+                "the ingress already has its source phases"
             );
         }
     }

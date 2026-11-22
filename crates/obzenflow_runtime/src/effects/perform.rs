@@ -77,8 +77,8 @@ pub struct PerformRequest<F, In, R> {
 }
 
 impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
-    /// Supplies the port the request names, which makes this a command. Only a
-    /// port declared with `#[obzenflow::port]` answers a request:
+    /// `through` gives the request its port and returns the command. Only the port of a
+    /// `#[obzenflow::port]` trait answers a request:
     ///
     /// ```
     /// # use obzenflow_runtime::effects::{
@@ -111,7 +111,7 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     /// let read = perform(|_: &Ticket| Read).through(Port::to(Desk));
     /// ```
     ///
-    /// A source row's port declares no effect, so it answers none:
+    /// A source port declares no effect, so it does not answer a request:
     ///
     /// ```compile_fail,E0277
     /// # use obzenflow_runtime::effects::{

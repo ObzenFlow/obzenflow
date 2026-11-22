@@ -39,10 +39,6 @@ pub struct WebSurfaceWiringContext {
     /// journal, in which case a surface with evidence recording enabled fails
     /// startup.
     pub ingress_evidence: Option<obzenflow_runtime::pipeline::ingress::IngressEvidenceWriter>,
-    /// Each source's execution phase, so a hosted ingress surface refuses
-    /// input until its source is live. `None` when the flow was built without
-    /// a runtime execution, in which case a hosted ingress surface fails
-    /// startup.
     pub source_phases: Option<obzenflow_runtime::execution::SourceExecutionPhases>,
 }
 

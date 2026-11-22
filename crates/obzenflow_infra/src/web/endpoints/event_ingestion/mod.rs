@@ -5,9 +5,9 @@
 //! Handle-first ingress plus optional HTTP event ingestion endpoints
 //!
 //! Applications use [`crate::application::FlowApplicationBuilder::http_ingress`]
-//! to register HTTP ingress and receive its hosted port for the flow. The builder owns
-//! hosting and lifecycle wiring. For application-owned protocols, clone a handle
-//! from [`ingress_source`] and pass the bundle to
+//! to register HTTP ingress and receive its hosted port for the flow. The builder hosts
+//! the ingress and controls its lifecycle. For an application-owned protocol, clone a
+//! handle from [`ingress_source`]. Then give the bundle to
 //! [`crate::application::FlowApplicationBuilder::ingress`].
 //! HTTP ingress provides the hosted routes:
 //! - `POST {base_path}/events` (single event)
@@ -258,7 +258,7 @@ fn install_source_phases<T>(
     }
 }
 
-/// Hosted port plus ingress handle for developer-owned ingress protocols.
+/// `Ingress` holds a hosted port and an ingress handle for an application-owned protocol.
 pub struct Ingress<D>
 where
     D: IngressDecoder,
@@ -274,11 +274,9 @@ impl<D> Ingress<D>
 where
     D: IngressDecoder,
 {
-    /// Consume the bundle into its hosted port and cloneable submission handle.
-    ///
-    /// The receiver transfers once, to the one row that takes the port. Use
-    /// topology fan-out for multiple consumers. Splitting preserves the queue,
-    /// the ingress binding and the port's system name without starting execution.
+    /// `into_parts` splits the bundle into its hosted port and its submission handle.
+    /// One source stage receives the submissions of the port. The split does not start a
+    /// runtime execution.
     ///
     /// ```compile_fail,E0382
     /// use obzenflow_infra::web::endpoints::event_ingestion::{Ingress, IngressDecoder};
@@ -323,11 +321,9 @@ impl<D> HttpIngress<D>
 where
     D: IngressDecoder,
 {
-    /// Consume the bundle into its hosted port and HTTP hosting attachment.
-    ///
-    /// The receiver transfers once, to the one row that takes the port. Use
-    /// topology fan-out for multiple consumers. Splitting preserves the queue,
-    /// the ingress binding and the port's system name without starting execution.
+    /// `into_parts` splits the bundle into its hosted port and its HTTP hosting attachment.
+    /// One source stage receives the submissions of the port. The split does not start a
+    /// runtime execution.
     ///
     /// ```compile_fail,E0382
     /// use obzenflow_infra::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder};
@@ -371,12 +367,9 @@ where
     }
 }
 
-/// Create a hosted port plus protocol-neutral ingress handle.
-///
-/// The decoder value owns the source's output type. Clone the bundle's handle for
-/// submission, then pass the bundle to [`crate::application::FlowApplicationBuilder::ingress`]
-/// to register its lifecycle and receive the port. The port names the
-/// framework's `ingress` system.
+/// `ingress_source` creates a hosted port and a protocol-neutral ingress handle. The system
+/// name of the port is `ingress`. [`crate::application::FlowApplicationBuilder::ingress`]
+/// registers the bundle.
 pub fn ingress_source<D>(decoder: D, config: IngestionConfig) -> Ingress<D>
 where
     D: IngressDecoder,
@@ -397,13 +390,9 @@ where
     }
 }
 
-/// Create a zero-wiring HTTP ingress bundle.
-///
-/// Prefer [`crate::application::FlowApplicationBuilder::http_ingress`] for application
-/// hosting. This bundle supports explicit port/attachment composition. The
-/// decoder runs once per submission at admission; a configured validator adds
-/// to it and never replaces it. The port names the framework's `http-ingress`
-/// system.
+/// `http_ingress` creates an HTTP ingress bundle. Use it when you compose the port and the
+/// attachment yourself. The system name of the port is `http-ingress`. The decoder runs at
+/// admission, together with any configured validator.
 pub fn http_ingress<D>(decoder: D, config: IngestionConfig) -> HttpIngress<D>
 where
     D: IngressDecoder,

@@ -1003,7 +1003,7 @@ impl ReplayArchive for EmptyArchive {
 }
 
 #[tokio::test]
-async fn reader_acquired_port_row_names_system() {
+async fn reader_acquired_connector_port_names_system() {
     let fixture = Fixture::new(Opening::Ready, Reading::Eof);
     let counts = fixture.counts.clone();
     let port: Port<dyn AsyncFiniteSource<Row, Refuse>> = Port::to(fixture);

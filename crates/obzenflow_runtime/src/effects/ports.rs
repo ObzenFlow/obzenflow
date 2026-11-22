@@ -238,8 +238,6 @@ impl SystemPort {
     }
 }
 
-/// The system behind a source row's port: the name its stage records and the
-/// recipe the run's registry builds.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct SourceSystem {
@@ -263,7 +261,6 @@ impl SourceSystem {
         }
     }
 
-    /// The framework's own placeholder source, with nothing for a registry to build.
     pub(crate) fn placeholder() -> Self {
         Self::new(
             LogicalEffectBindingName::of_system("placeholder"),
@@ -271,7 +268,6 @@ impl SourceSystem {
         )
     }
 
-    /// The name the stage records on each acquisition.
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
@@ -886,8 +882,6 @@ impl EffectPortRegistry {
         }
     }
 
-    /// Add the system behind a source row's port, so a run builds a deferred
-    /// one at most once however many rows share the port.
     #[doc(hidden)]
     pub fn install_source_system(&mut self, source: &SourceSystem) {
         Arc::make_mut(&mut self.recipes)

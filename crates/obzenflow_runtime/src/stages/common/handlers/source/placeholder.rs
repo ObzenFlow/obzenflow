@@ -12,7 +12,6 @@ use crate::effects::SourceSystem;
 use async_trait::async_trait;
 use obzenflow_core::ChainEvent;
 
-/// A structural source row with no reader or authored facts.
 #[doc(hidden)]
 pub struct PlaceholderSource {
     message: Option<&'static str>,
@@ -31,8 +30,8 @@ impl PlaceholderSource {
         if !self.warned {
             self.warned = true;
             match self.message {
-                Some(message) => tracing::warn!("{kind} placeholder executed: {message}"),
-                None => tracing::warn!("{kind} placeholder executed"),
+                Some(message) => tracing::warn!("the {kind} placeholder ran: {message}"),
+                None => tracing::warn!("the {kind} placeholder ran"),
             }
         }
     }

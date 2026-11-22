@@ -966,8 +966,6 @@ async fn wait_until_ready(health: &dyn HttpEndpoint) {
     .expect("timed out waiting for ingress readiness");
 }
 
-/// The hosted port feeding a discarding sink, on disk when `journals_root`
-/// is set so a later run can replay it.
 async fn ingress_flow(
     source: Port<dyn HostedIngress<Order>>,
     journals_root: Option<PathBuf>,

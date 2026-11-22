@@ -22,10 +22,8 @@ use std::sync::Arc;
 /// port type, in a `#[port]` field or through `through`, and performs requests
 /// through `fx` without ever seeing the system.
 ///
-/// A source row takes one too. Its system is a source connector, its port
-/// type is the row's family of `FiniteSource`, `AsyncFiniteSource`,
-/// `InfiniteSource` or `AsyncInfiniteSource`, and the source's supervisor
-/// opens and polls the reader. No read is an effect call.
+/// A source stage also takes a `Port`, with a source trait such as `FiniteSource` as
+/// its port type. A read through a source port is never an effect call.
 ///
 /// A port trait is `Send` and `Sync`, so a system that isn't thread-safe is
 /// refused at its own `impl`:
@@ -160,10 +158,9 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         >>::coerce(system.shared())))
     }
 
-    /// A source row's port that takes a direct typed handler by value. The
-    /// stage's first live acquisition takes the handler, so every clone of the
-    /// port shares one handler and a later claimant finds the input unavailable.
-    /// The handler names itself above its typed handler impl.
+    /// `Port::owned` binds a typed source handler by value. All clones of the port share
+    /// the handler. The first live acquisition takes the handler, and later acquisitions
+    /// find no input.
     ///
     /// ```
     /// # use obzenflow_runtime::effects::Port;
@@ -187,7 +184,7 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// # let port: Port<dyn FiniteSource<Ticket, Refuse>> = tickets;
     /// ```
     ///
-    /// An `Arc` shares a handler without handing it over, so it does not compile:
+    /// Code that passes an `Arc` of the handler does not compile:
     ///
     /// ```compile_fail,E0277
     /// # use obzenflow_runtime::effects::Port;
@@ -412,7 +409,9 @@ const fn checked_system_name<T: SystemName>() -> &'static str {
 /// impl CaseSystemPort for Vendor {}
 /// ```
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, connector or source handler trait, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
+    message = "`{Self}` has no system name",
+    note = "put `#[obzenflow::system(\"…\")]` above its `impl` of the port, connector or source handler trait",
+    note = "if `{Self}` is its own port, put `system = \"…\"` on its `#[obzenflow::port]` block",
     label = "this system does not name itself",
     note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]
@@ -423,7 +422,9 @@ pub trait SystemName {
 /// A built system, by value or in an `Arc`, as [`Port::to`] takes it.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, connector or source handler trait, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
+    message = "`{Self}` has no system name",
+    note = "put `#[obzenflow::system(\"…\")]` above its `impl` of the port, connector or source handler trait",
+    note = "if `{Self}` is its own port, put `system = \"…\"` on its `#[obzenflow::port]` block",
     label = "this system does not name itself",
     note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]

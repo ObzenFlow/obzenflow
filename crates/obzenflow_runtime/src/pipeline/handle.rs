@@ -111,8 +111,8 @@ impl FlowHandle {
     pub fn ingress_evidence(&self) -> Option<super::ingress::IngressEvidenceWriter> {
         self.ingress_evidence.clone()
     }
-    /// Each source's execution phase, for a host that serves a hosted source.
-    /// `None` when the flow was built without a runtime execution.
+    /// `source_phases` returns the execution phase of each source stage. It returns `None`
+    /// if you built the flow without a runtime execution.
     pub fn source_phases(&self) -> Option<SourceExecutionPhases> {
         self.source_phases.clone()
     }

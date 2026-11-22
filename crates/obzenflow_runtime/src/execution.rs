@@ -467,14 +467,14 @@ fn replay_incomplete(status: ArchiveStatus, allow_incomplete: bool) -> bool {
     !archive_is_sealed(status) && allow_incomplete
 }
 
-/// Read-only view of each source stage's execution phase. A host that serves
-/// a hosted source takes it from the flow handle. Only Runtime builds one, and
-/// it can't move a stage to live.
+/// `SourceExecutionPhases` gives read-only access to the current execution phase of each
+/// source stage.
 #[derive(Clone, Debug)]
 pub struct SourceExecutionPhases(Arc<dyn ExecutionStrategy>);
 
 impl SourceExecutionPhases {
-    /// Whether the source is reconstructing or polling live.
+    /// `phase_for` returns the current execution phase of the source stage, `Replaying`
+    /// or `Live`.
     pub fn phase_for(&self, stage: StageId) -> SourceExecutionPhase {
         self.0.source_phase_for(stage)
     }
@@ -707,7 +707,6 @@ impl RuntimeExecution {
         self.strategy.source_phase_for(stage)
     }
 
-    /// The read-only view a host takes to follow its hosted sources' phases.
     pub fn source_phases(&self) -> SourceExecutionPhases {
         SourceExecutionPhases(Arc::clone(&self.strategy))
     }

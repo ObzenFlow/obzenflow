@@ -17,10 +17,6 @@ pub(super) mod sealed {
     pub trait Admitted<Family: ?Sized> {}
 }
 
-/// A source row's port after admission: its cold handler, the continuation
-/// registered before any open, and the system the port names. Only a source
-/// builder takes the handler, so only its supervisor acquires, polls and
-/// settles it.
 #[doc(hidden)]
 pub struct AdmittedSource<H> {
     pub(crate) handler: H,
@@ -44,12 +40,10 @@ impl<H: super::UnifiedAsyncInfiniteSourceHandler> AdmittedSource<H> {
     }
 }
 
-/// Admit the port a source row takes into the existing runtime adapter for
-/// `Family`, the row's erased source contract.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is not a port this source row takes",
-    note = "`source!` takes `Port<dyn FiniteSource<_, _>>`, `async_source!` takes `Port<dyn AsyncFiniteSource<_, _>>`, `infinite_source!` takes `Port<dyn InfiniteSource<_, _>>`, and `async_infinite_source!` takes `Port<dyn AsyncInfiniteSource<_, _>>` or the `Port<dyn HostedIngress<_>>` ingress registration returns"
+    message = "this source stage does not take `{Self}` as its port",
+    note = "`source!` takes `Port<dyn FiniteSource<_, _>>`, `async_source!` takes `Port<dyn AsyncFiniteSource<_, _>>`, `infinite_source!` takes `Port<dyn InfiniteSource<_, _>>`, and `async_infinite_source!` takes `Port<dyn AsyncInfiniteSource<_, _>>` or the `Port<dyn HostedIngress<_>>` from ingress registration"
 )]
 pub trait AdmitSource<Family: ?Sized>: sealed::Admitted<Family> + Send + Sync + 'static {
     type Output: OneFactOutcome + Send + Sync + 'static;

@@ -4288,10 +4288,8 @@ macro_rules! sink {
 /// let source = obzenflow_dsl::source!(Fact => placeholder!()  , ingress with rate_limit(10.0));
 /// ```
 ///
-/// Every executable source row takes a `Port` naming the system that supplies
-/// its input. A direct handler binds by value with `Port::owned`, a connector
-/// with `Port::to`, and hosted ingress through the port its registration
-/// returns:
+/// The handler slot of a source stage takes a `Port` or `placeholder!()`. `Port::owned` wraps
+/// a direct handler, and `Port::to` wraps a connector. Hosted ingress registration returns a port.
 ///
 /// ```
 /// # use obzenflow_runtime::effects::Port;
@@ -4336,8 +4334,7 @@ macro_rules! sink {
 /// let received = obzenflow_dsl::async_infinite_source!(Fact => posted);
 /// ```
 ///
-/// A named direct handler that is not bound reports "this source row requires a
-/// named Port" at the row's input:
+/// The compiler refuses a direct handler without a `Port`.
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_runtime::stages::source::{SourceError, TypedFiniteSourceHandler};
@@ -4356,7 +4353,7 @@ macro_rules! sink {
 /// let handled = obzenflow_dsl::source!(Fact => facts);
 /// ```
 ///
-/// So does a named connector:
+/// The compiler also refuses a connector without a `Port`.
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_runtime::stages::source::{
@@ -4387,7 +4384,7 @@ macro_rules! sink {
 /// let read = obzenflow_dsl::source!(Fact => fact_file);
 /// ```
 ///
-/// And so does a hosted receiver that was not registered:
+/// The compiler also refuses an unregistered `HostedIngressSource`.
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_runtime::stages::{HostedIngressSource, HostedSubmission};

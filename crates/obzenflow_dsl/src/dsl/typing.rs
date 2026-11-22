@@ -575,8 +575,6 @@ where
     .with_output_contract(output_contract)
 }
 
-/// The output and arrow a source row declares, passed by value so that a row
-/// without a port reports only the missing port.
 #[doc(hidden)]
 pub struct SourceRowArrow<PrimaryOutput, ArrowOutputSet>(
     PhantomData<fn() -> (PrimaryOutput, ArrowOutputSet)>,

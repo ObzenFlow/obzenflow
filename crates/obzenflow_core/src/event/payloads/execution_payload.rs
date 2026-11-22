@@ -566,7 +566,6 @@ pub struct SourceOpenFailedFact {
 pub struct SourceReaderAcquiredFact {
     pub source_type: SourcePollKind,
     pub intent: SourceOpenIntent,
-    /// The system the row's port names.
     pub system: String,
 }
 

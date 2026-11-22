@@ -311,12 +311,9 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Create and host HTTP ingress, returning its hosted port for the flow topology.
-    ///
-    /// The builder retains the HTTP surface and wires readiness, refusal recording
-    /// and shutdown. The application only places the returned port in an
-    /// `async_infinite_source!` row. The port names the framework's
-    /// `http-ingress` system.
+    /// `http_ingress` creates HTTP ingress and hosts it. It returns the hosted port for an
+    /// `async_infinite_source!` stage. The builder connects the ingress to the lifecycle of
+    /// the application. The system name of the port is `http-ingress`.
     pub fn http_ingress<D>(
         &mut self,
         decoder: D,
@@ -330,12 +327,9 @@ impl FlowApplicationBuilder {
         port
     }
 
-    /// Register ingress for an application-owned protocol and return its hosted port.
-    ///
-    /// Clone the bundle's submission handle before passing it here. The builder
-    /// wires its lifecycle; place the returned port in an
-    /// `async_infinite_source!` row. The port names the framework's `ingress`
-    /// system.
+    /// `ingress` registers ingress for an application-owned protocol. It returns the hosted
+    /// port for an `async_infinite_source!` stage. Before you give the bundle to `ingress`,
+    /// clone its submission handle with `Ingress::handle`.
     pub fn ingress<D>(&mut self, ingress: Ingress<D>) -> Port<dyn HostedIngress<D::Output>>
     where
         D: IngressDecoder,

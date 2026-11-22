@@ -37,9 +37,8 @@
 //! several handler traits, each matching a different stage role.
 //!
 //! **Sources** produce events. [`crate::stages::sources::ValuesSource`] is the easiest way
-//! to emit a `Vec<T>` (or any iterator) of typed payloads. A source row takes a
-//! [`crate::effects::Port`] naming the system that supplies its input, so the
-//! flow builder binds the values by value with `Port::owned`:
+//! to emit a `Vec<T>` (or any iterator) of typed payloads. A source stage takes a
+//! [`crate::effects::Port`]. `Port::owned` wraps the source by value:
 //!
 //! ```rust,ignore
 //! use obzenflow::effects::Port;
