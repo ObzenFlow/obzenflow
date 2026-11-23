@@ -4,6 +4,7 @@
 
 use super::*;
 use obzenflow_core::event::payloads::effect_payload::EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::CausalFrontier;
 use obzenflow_core::journal::ArchiveStatus;
@@ -214,6 +215,10 @@ pub trait EffectHistoryStore: Send + Sync {
 
 #[derive(Clone, Debug)]
 pub struct EffectHistory {
+    pub(super) source_observations:
+        HashMap<EventId, obzenflow_core::event::observability::ObservabilityContext>,
+    pub(crate) source_origin:
+        Option<Arc<obzenflow_core::event::JournalRecord<obzenflow_core::event::ChainPayload>>>,
     causal: Arc<HashMap<EffectCursor, CausalFrontier>>,
     recorded_flow_id: RecordedFlowId,
     records: Arc<Vec<EffectRecord>>,
@@ -351,6 +356,11 @@ impl EffectHistory {
             self.recorded_flow_id.clone()
         };
         let mut history = Self::from_cursor_histories(recorded_flow_id, histories);
+        history.source_observations = self.source_observations;
+        history
+            .source_observations
+            .extend(newer.source_observations.clone());
+        history.source_origin = self.source_origin.or_else(|| newer.source_origin.clone());
         let actions = actions.with_in_doubt(|cursor| !history.index.contains_key(cursor));
         history.actions = Arc::new(actions);
         Ok(history)
@@ -431,6 +441,8 @@ impl EffectHistory {
             }
         }
         Self {
+            source_observations: HashMap::new(),
+            source_origin: None,
             causal: Arc::new(causal),
             recorded_flow_id,
             records: Arc::new(records),
@@ -452,6 +464,8 @@ impl EffectHistory {
         pass_through: Option<&EventDescriptor>,
     ) -> Result<Self, EffectError> {
         let mut reader = archive.open_effect_history(stage_key).await?;
+        let mut source_observations = HashMap::new();
+        let mut source_origin = None;
         let mut causal = HashMap::<EffectCursor, CausalFrontier>::new();
         let mut records = Vec::new();
         let mut attempts: HashMap<EffectCursor, Vec<EffectAttemptStarted>> = HashMap::new();
@@ -470,6 +484,26 @@ impl EffectHistory {
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
+            if source_origin.is_none()
+                && matches!(
+                    envelope.payload,
+                    obzenflow_core::event::ChainPayload::Execution(
+                        ExecutionPayload::SourceBindingDeclared(_)
+                    )
+                )
+            {
+                source_origin = Some(Arc::new(envelope.clone()));
+            }
+            if source_origin.is_some()
+                && matches!(
+                    envelope.payload,
+                    obzenflow_core::event::ChainPayload::Fact(_)
+                )
+            {
+                if let Some(packet) = &envelope.envelope.observability {
+                    source_observations.insert(*envelope.id(), packet.clone());
+                }
+            }
             let event = envelope.authored();
             actions.observe(&event)?;
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
@@ -633,6 +667,8 @@ impl EffectHistory {
                     .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
             }
         }
+        history.source_observations = source_observations;
+        history.source_origin = source_origin;
         history.causal = Arc::new(causal);
         history.attempts = Arc::new(attempts);
         history.abandonments = Arc::new(abandonments);
@@ -782,6 +818,8 @@ impl EffectHistory {
         let terminal_attempts = index.keys().cloned().map(|cursor| (cursor, None)).collect();
 
         Ok(Self {
+            source_observations: HashMap::new(),
+            source_origin: None,
             causal: Arc::new(HashMap::new()),
             recorded_flow_id,
             records: Arc::new(records),

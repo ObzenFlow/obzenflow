@@ -18,13 +18,13 @@ use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactOutcome, Outcome, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
-    AdmitSource, AdmittedSource, JoinBinding, SourceRowInput, TypedJoinHandlerAdapter,
+    AdmitSource, AdmittedSource, JoinBinding, TypedJoinHandlerAdapter,
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
     UnifiedInfiniteSourceHandler,
 };
 use obzenflow_runtime::effects::{
     effectful_transform_effects, Command, DeclareEffects, DeclaredEffectSet, Effects,
-    EveryPortAnswers, Port, PortList, SinkHandler, SinkRole, StageCompletion,
+    EveryPortAnswers, PortList, SinkHandler, SinkRole, StageCompletion,
 };
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, OutcomeContract,
@@ -592,179 +592,160 @@ impl<PrimaryOutput, ArrowOutputSet> Default for SourceRowArrow<PrimaryOutput, Ar
     }
 }
 
-type RowOutputMembers<P, Family> = <<Port<P> as AdmitSource<Family>>::Output as Outcome>::Members;
-
-/// Canonical admission factory for a real synchronous finite source.
 #[doc(hidden)]
-pub fn typed_finite_source_descriptor<
-    T,
-    P,
-    PrimaryOutput,
-    ArrowOutputSet,
-    PrimaryOutputIndex,
-    ArrowToHandlerProof,
-    HandlerToArrowProof,
->(
+pub trait SourceStageFamily<H> {
+    fn stage(
+        name: String,
+        source: AdmittedSource<H>,
+        source_policies: Vec<Box<dyn MiddlewareFactory>>,
+        ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+        observers: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Box<dyn StageDescriptor>;
+}
+
+impl<H: UnifiedFiniteSourceHandler + 'static> SourceStageFamily<H>
+    for dyn UnifiedFiniteSourceHandler
+{
+    fn stage(
+        name: String,
+        source: AdmittedSource<H>,
+        source_policies: Vec<Box<dyn MiddlewareFactory>>,
+        ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+        observers: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Box<dyn StageDescriptor> {
+        let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
+            name,
+            source: source,
+            source_policies,
+            ingress_policy,
+            observers,
+        });
+        descriptor
+    }
+}
+
+impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> SourceStageFamily<H>
+    for obzenflow_runtime::stages::common::handlers::source::SyncInfiniteReads
+{
+    fn stage(
+        name: String,
+        source: AdmittedSource<H>,
+        source_policies: Vec<Box<dyn MiddlewareFactory>>,
+        ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+        observers: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Box<dyn StageDescriptor> {
+        let mut descriptor = AsyncInfiniteSourceDescriptor::new(name, source);
+        descriptor.source_policies = source_policies;
+        descriptor.ingress_policy = ingress_policy;
+        descriptor.observers = observers;
+        Box::new(descriptor)
+    }
+}
+
+impl<H: UnifiedAsyncFiniteSourceHandler + 'static> SourceStageFamily<H>
+    for obzenflow_runtime::stages::common::handlers::source::SyncFiniteReads
+{
+    fn stage(
+        name: String,
+        source: AdmittedSource<H>,
+        source_policies: Vec<Box<dyn MiddlewareFactory>>,
+        ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+        observers: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Box<dyn StageDescriptor> {
+        let mut descriptor = AsyncFiniteSourceDescriptor::new(name, source);
+        descriptor.source_policies = source_policies;
+        descriptor.ingress_policy = ingress_policy;
+        descriptor.observers = observers;
+        Box::new(descriptor)
+    }
+}
+
+impl<H: UnifiedAsyncFiniteSourceHandler + 'static> SourceStageFamily<H>
+    for dyn UnifiedAsyncFiniteSourceHandler
+{
+    fn stage(
+        name: String,
+        source: AdmittedSource<H>,
+        source_policies: Vec<Box<dyn MiddlewareFactory>>,
+        ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+        observers: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Box<dyn StageDescriptor> {
+        let mut descriptor = AsyncFiniteSourceDescriptor::new(name, source);
+        descriptor.source_policies = source_policies;
+        descriptor.ingress_policy = ingress_policy;
+        descriptor.observers = observers;
+        Box::new(descriptor)
+    }
+}
+
+impl<H: UnifiedInfiniteSourceHandler + 'static> SourceStageFamily<H>
+    for dyn UnifiedInfiniteSourceHandler
+{
+    fn stage(
+        name: String,
+        source: AdmittedSource<H>,
+        source_policies: Vec<Box<dyn MiddlewareFactory>>,
+        ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+        observers: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Box<dyn StageDescriptor> {
+        let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
+            name,
+            source: source,
+            source_policies,
+            ingress_policy,
+            observers,
+        });
+        descriptor
+    }
+}
+
+impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> SourceStageFamily<H>
+    for dyn UnifiedAsyncInfiniteSourceHandler
+{
+    fn stage(
+        name: String,
+        source: AdmittedSource<H>,
+        source_policies: Vec<Box<dyn MiddlewareFactory>>,
+        ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+        observers: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Box<dyn StageDescriptor> {
+        let mut descriptor = AsyncInfiniteSourceDescriptor::new(name, source);
+        descriptor.source_policies = source_policies;
+        descriptor.ingress_policy = ingress_policy;
+        descriptor.observers = observers;
+        Box::new(descriptor)
+    }
+}
+
+#[doc(hidden)]
+pub fn typed_source_descriptor<H, Family, Primary, Arrow, Index, Forward, Reverse>(
     name: impl Into<String>,
-    input: T,
-    _arrow: SourceRowArrow<PrimaryOutput, ArrowOutputSet>,
+    handler: H,
+    _arrow: SourceRowArrow<Primary, Arrow>,
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
-    T: SourceRowInput<Port = Port<P>>,
-    P: ?Sized + Send + Sync + 'static,
-    Port<P>: AdmitSource<dyn UnifiedFiniteSourceHandler>,
-    <Port<P> as AdmitSource<dyn UnifiedFiniteSourceHandler>>::Handler: UnifiedFiniteSourceHandler,
-    PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: Outcome,
-    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<
-            RowOutputMembers<P, dyn UnifiedFiniteSourceHandler>,
-            ArrowToHandlerProof,
-        >,
-    RowOutputMembers<P, dyn UnifiedFiniteSourceHandler>:
-        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
+    H: AdmitSource<Family>,
+    Family: ?Sized + SourceStageFamily<H::Handler>,
+    Primary: TypedPayload + Send + Sync + 'static,
+    Arrow: Outcome,
+    Arrow::Members: Member<Primary, Index>
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as Outcome>::Members, Forward>,
+    <H::Output as Outcome>::Members: HandlerOutputsAreDeclaredByArrow<Arrow::Members, Reverse>,
 {
-    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
-        name: name.into(),
-        source: input.into_port().admit(),
+    let source = Family::stage(
+        name.into(),
+        handler.admit(),
         source_policies,
         ingress_policy,
         observers,
-    });
-    wrap_typed_descriptor(descriptor, metadata)
-}
-
-/// Canonical admission factory for a real asynchronous finite source.
-#[doc(hidden)]
-pub fn typed_async_finite_source_descriptor<
-    T,
-    P,
-    PrimaryOutput,
-    ArrowOutputSet,
-    PrimaryOutputIndex,
-    ArrowToHandlerProof,
-    HandlerToArrowProof,
->(
-    name: impl Into<String>,
-    input: T,
-    _arrow: SourceRowArrow<PrimaryOutput, ArrowOutputSet>,
-    source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    observers: Vec<Box<dyn MiddlewareFactory>>,
-) -> Box<dyn StageDescriptor>
-where
-    T: SourceRowInput<Port = Port<P>>,
-    P: ?Sized + Send + Sync + 'static,
-    Port<P>: AdmitSource<dyn UnifiedAsyncFiniteSourceHandler>,
-    <Port<P> as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler>>::Handler:
-        UnifiedAsyncFiniteSourceHandler,
-    PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: Outcome,
-    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<
-            RowOutputMembers<P, dyn UnifiedAsyncFiniteSourceHandler>,
-            ArrowToHandlerProof,
-        >,
-    RowOutputMembers<P, dyn UnifiedAsyncFiniteSourceHandler>:
-        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
-{
-    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let mut descriptor = AsyncFiniteSourceDescriptor::new(name, input.into_port().admit());
-    descriptor.source_policies = source_policies;
-    descriptor.ingress_policy = ingress_policy;
-    descriptor.observers = observers;
-    wrap_typed_descriptor(Box::new(descriptor), metadata)
-}
-
-/// Canonical admission factory for a real synchronous infinite source.
-#[doc(hidden)]
-pub fn typed_infinite_source_descriptor<
-    T,
-    P,
-    PrimaryOutput,
-    ArrowOutputSet,
-    PrimaryOutputIndex,
-    ArrowToHandlerProof,
-    HandlerToArrowProof,
->(
-    name: impl Into<String>,
-    input: T,
-    _arrow: SourceRowArrow<PrimaryOutput, ArrowOutputSet>,
-    source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    observers: Vec<Box<dyn MiddlewareFactory>>,
-) -> Box<dyn StageDescriptor>
-where
-    T: SourceRowInput<Port = Port<P>>,
-    P: ?Sized + Send + Sync + 'static,
-    Port<P>: AdmitSource<dyn UnifiedInfiniteSourceHandler>,
-    <Port<P> as AdmitSource<dyn UnifiedInfiniteSourceHandler>>::Handler:
-        UnifiedInfiniteSourceHandler,
-    PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: Outcome,
-    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<
-            RowOutputMembers<P, dyn UnifiedInfiniteSourceHandler>,
-            ArrowToHandlerProof,
-        >,
-    RowOutputMembers<P, dyn UnifiedInfiniteSourceHandler>:
-        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
-{
-    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
-        name: name.into(),
-        source: input.into_port().admit(),
-        source_policies,
-        ingress_policy,
-        observers,
-    });
-    wrap_typed_descriptor(descriptor, metadata)
-}
-
-/// Canonical admission factory for a real asynchronous infinite source.
-#[doc(hidden)]
-pub fn typed_async_infinite_source_descriptor<
-    T,
-    P,
-    PrimaryOutput,
-    ArrowOutputSet,
-    PrimaryOutputIndex,
-    ArrowToHandlerProof,
-    HandlerToArrowProof,
->(
-    name: impl Into<String>,
-    input: T,
-    _arrow: SourceRowArrow<PrimaryOutput, ArrowOutputSet>,
-    source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    observers: Vec<Box<dyn MiddlewareFactory>>,
-) -> Box<dyn StageDescriptor>
-where
-    T: SourceRowInput<Port = Port<P>>,
-    P: ?Sized + Send + Sync + 'static,
-    Port<P>: AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler>,
-    <Port<P> as AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler>>::Handler:
-        UnifiedAsyncInfiniteSourceHandler,
-    PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: Outcome,
-    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
-        + ArrowOutputsAreDeclaredByHandler<
-            RowOutputMembers<P, dyn UnifiedAsyncInfiniteSourceHandler>,
-            ArrowToHandlerProof,
-        >,
-    RowOutputMembers<P, dyn UnifiedAsyncInfiniteSourceHandler>:
-        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
-{
-    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let mut descriptor = AsyncInfiniteSourceDescriptor::new(name, input.into_port().admit());
-    descriptor.source_policies = source_policies;
-    descriptor.ingress_policy = ingress_policy;
-    descriptor.observers = observers;
-    wrap_typed_descriptor(Box::new(descriptor), metadata)
+    );
+    wrap_typed_descriptor(
+        source,
+        source_metadata_from_contract::<Primary, Arrow>(false, None),
+    )
 }
 
 /// Structural placeholder admission for a synchronous finite source.
@@ -787,87 +768,8 @@ where
         true,
         message.map(str::to_string),
     );
-    let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
-        name: name.into(),
-        source: AdmittedSource::placeholder(message),
-        source_policies,
-        ingress_policy,
-        observers,
-    });
-    wrap_typed_descriptor(descriptor, metadata)
-}
-
-/// Structural placeholder admission for an asynchronous finite source.
-#[doc(hidden)]
-pub fn placeholder_async_finite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
-    name: impl Into<String>,
-    message: Option<&'static str>,
-    source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    observers: Vec<Box<dyn MiddlewareFactory>>,
-) -> Box<dyn StageDescriptor>
-where
-    PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: Outcome,
-{
-    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
-        true,
-        message.map(str::to_string),
-    );
     let mut descriptor =
-        AsyncFiniteSourceDescriptor::new(name, AdmittedSource::placeholder(message));
-    descriptor.source_policies = source_policies;
-    descriptor.ingress_policy = ingress_policy;
-    descriptor.observers = observers;
-    wrap_typed_descriptor(Box::new(descriptor), metadata)
-}
-
-/// Structural placeholder admission for a synchronous infinite source.
-#[doc(hidden)]
-pub fn placeholder_infinite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
-    name: impl Into<String>,
-    message: Option<&'static str>,
-    source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    observers: Vec<Box<dyn MiddlewareFactory>>,
-) -> Box<dyn StageDescriptor>
-where
-    PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: Outcome,
-{
-    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
-        true,
-        message.map(str::to_string),
-    );
-    let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
-        name: name.into(),
-        source: AdmittedSource::placeholder(message),
-        source_policies,
-        ingress_policy,
-        observers,
-    });
-    wrap_typed_descriptor(descriptor, metadata)
-}
-
-/// Structural placeholder admission for an asynchronous infinite source.
-#[doc(hidden)]
-pub fn placeholder_async_infinite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
-    name: impl Into<String>,
-    message: Option<&'static str>,
-    source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    observers: Vec<Box<dyn MiddlewareFactory>>,
-) -> Box<dyn StageDescriptor>
-where
-    PrimaryOutput: TypedPayload + Send + Sync + 'static,
-    ArrowOutputSet: Outcome,
-{
-    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
-        true,
-        message.map(str::to_string),
-    );
-    let mut descriptor =
-        AsyncInfiniteSourceDescriptor::new(name, AdmittedSource::placeholder(message));
+        AsyncFiniteSourceDescriptor::new(name, AdmittedSource::finite_placeholder(message));
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -2115,6 +2017,15 @@ pub(crate) fn flow_evidence_with_cycle(
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
 ) -> obzenflow_core::journal::archive_actions::FlowEvidence {
     cycle_members.sort();
+    let systems = descriptors
+        .values()
+        .filter_map(|descriptor| {
+            Some((
+                descriptor.name().to_owned(),
+                descriptor.source_system()?.binding().clone(),
+            ))
+        })
+        .collect();
     let mut sources = Vec::new();
     for descriptor in descriptors.values() {
         if let Some(continuation) = descriptor.source_continuation() {
@@ -2124,6 +2035,7 @@ pub(crate) fn flow_evidence_with_cycle(
     sources.sort_by(|(left, _), (right, _)| left.cmp(right));
     obzenflow_core::journal::archive_actions::FlowEvidence {
         cycle_members,
+        systems,
         sources,
     }
 }

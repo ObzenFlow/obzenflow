@@ -266,7 +266,7 @@ fn chat_and_embedding_flow(
         let embed = ai::infer(embed);
         let chat_breaker = circuit_breaker().consecutive_failures(5);
         let embedding_breaker = circuit_breaker().consecutive_failures(5);
-        let input = Port::owned(sources::ValuesSource::new(tickets));
+        let input = sources::ValuesSource::new(tickets);
         let collected =
             perform(|output: &TicketEmbedded| output.clone()).through(collect_into(outputs));
 
@@ -461,7 +461,7 @@ async fn a_stage_whose_roles_perform_two_effects_refuses_an_unscoped_breaker() {
         .with_config_file(ai_config(temp.path(), None))
         .with_ai_models(fake_ai::resolvers(&chat, &embed))
         .run_async(FlowDefinition::materialize(move |_| {
-            let tickets = Port::owned(sources::ValuesSource::new(two_tickets()));
+            let tickets = sources::ValuesSource::new(two_tickets());
             let digest = ai::map(SummarizeTickets)
                 .chunks(1)
                 .reduce(EmbedSummaries)
@@ -515,7 +515,7 @@ async fn a_stage_whose_roles_perform_two_effects_builds_one_breaker_per_effect()
         .run_async(FlowDefinition::materialize({
             let outputs = outputs.clone();
             move |_| {
-                let tickets = Port::owned(sources::ValuesSource::new(two_tickets()));
+                let tickets = sources::ValuesSource::new(two_tickets());
                 let digest = ai::map(SummarizeTickets)
                     .chunks(1)
                     .reduce(EmbedSummaries)

@@ -7,6 +7,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow::effects::Port;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
@@ -15,14 +16,15 @@ use obzenflow_adapters::middleware::{
     SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory, ChainPayload};
+use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalRecord, TypedPayload, WriterId};
-use obzenflow_dsl::{
-    async_infinite_source, async_source, infinite_source, sink, source, test_flow,
-};
+use obzenflow_dsl::{sink, source, test_flow};
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::{EffectContext, EffectError};
+use obzenflow_runtime::stages::common::handlers::source::{ContinuousRead, FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
@@ -30,13 +32,359 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::observer::{
     SourcePollObserver, SourcePollObserverContext, SourcePollObserverOutcome,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::future::pending;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
+
+type PollTimes = Arc<Mutex<Vec<tokio::time::Instant>>>;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PollRead(usize);
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PollTake;
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait PollInput {
+    #[effect(type = "polling_contract.input.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &PollRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<PollingEvent, PollRead>, EffectError>;
+
+    #[effect(type = "polling_contract.input.take", exactly_once, records = reply)]
+    async fn take(
+        &self,
+        from: &PollTake,
+        ctx: &EffectContext,
+    ) -> Result<ContinuousRead<PollingEvent, PollTake>, EffectError>;
+}
+
+/// What a scripted input does on each physical read or take.
+enum Script {
+    /// One event after `raw_delay`, then the end of input.
+    Once {
+        calls: Arc<AtomicUsize>,
+        raw_delay: Duration,
+        ordinal: usize,
+    },
+    /// The first read never answers; the next one ends the input.
+    PendingThenEof { calls: Arc<AtomicUsize> },
+    /// One step per read, each read's time recorded.
+    Steps {
+        steps: Vec<ScriptStep>,
+        poll_times: PollTimes,
+    },
+    /// The input ends at the first read.
+    Eof { calls: Arc<AtomicUsize> },
+    /// One live event after `raw_delay`, then empty takes, or takes that never
+    /// answer when `then_pending` is set.
+    LiveOnce {
+        calls: Arc<AtomicUsize>,
+        raw_delay: Duration,
+        then_pending: bool,
+    },
+    /// Empty live takes. The first take notifies `first_poll`.
+    Idle {
+        calls: Arc<AtomicUsize>,
+        first_poll: Arc<Notify>,
+    },
+}
+
+struct ScriptedInput(Script);
+
+#[obzenflow_runtime::effects::system("scripted-input")]
+#[async_trait]
+impl PollInput for ScriptedInput {
+    async fn read(
+        &self,
+        from: &PollRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<PollingEvent, PollRead>, EffectError> {
+        let next = PollRead(from.0 + 1);
+        match &self.0 {
+            Script::Once {
+                calls,
+                raw_delay,
+                ordinal,
+            } => {
+                if calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return Ok(FiniteRead::EndOfInput);
+                }
+                tokio::time::sleep(*raw_delay).await;
+                Ok(FiniteRead::Batch {
+                    records: vec![PollingEvent { ordinal: *ordinal }],
+                    next,
+                })
+            }
+            Script::PendingThenEof { calls } => {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    pending::<()>().await;
+                }
+                Ok(FiniteRead::EndOfInput)
+            }
+            Script::Steps { steps, poll_times } => {
+                poll_times
+                    .lock()
+                    .expect("poll-times lock poisoned")
+                    .push(tokio::time::Instant::now());
+                match steps[from.0] {
+                    ScriptStep::NonData => Ok(FiniteRead::Batch {
+                        records: Vec::new(),
+                        next,
+                    }),
+                    ScriptStep::Data => Ok(FiniteRead::Batch {
+                        records: vec![PollingEvent { ordinal: from.0 }],
+                        next,
+                    }),
+                    ScriptStep::Eof => Ok(FiniteRead::EndOfInput),
+                }
+            }
+            Script::Eof { calls } => {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(FiniteRead::EndOfInput)
+            }
+            Script::LiveOnce { .. } | Script::Idle { .. } => Err(EffectError::Validation(
+                "a live script answers takes".into(),
+            )),
+        }
+    }
+
+    async fn take(
+        &self,
+        _from: &PollTake,
+        _ctx: &EffectContext,
+    ) -> Result<ContinuousRead<PollingEvent, PollTake>, EffectError> {
+        let records = match &self.0 {
+            Script::LiveOnce {
+                calls,
+                raw_delay,
+                then_pending,
+            } => {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(*raw_delay).await;
+                    vec![PollingEvent { ordinal: 0 }]
+                } else if *then_pending {
+                    pending::<Vec<PollingEvent>>().await
+                } else {
+                    Vec::new()
+                }
+            }
+            Script::Idle { calls, first_poll } => {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    first_poll.notify_one();
+                }
+                Vec::new()
+            }
+            _ => {
+                return Err(EffectError::Validation(
+                    "a finite script answers reads".into(),
+                ))
+            }
+        };
+        Ok(ContinuousRead {
+            records,
+            next: PollTake,
+        })
+    }
+}
+
+fn scripted(script: Script) -> Port<dyn PollInput> {
+    Port::to(ScriptedInput(script))
+}
+
+fn finite(port: &Port<dyn PollInput>) -> SourceRead<PollingEvent> {
+    SourceRead::finite(port.clone(), PollRead(0), Ok)
+}
+
+fn live(port: &Port<dyn PollInput>) -> SourceRead<PollingEvent> {
+    SourceRead::continuous(
+        port.clone(),
+        PollTake,
+        || Box::pin(async { Ok(()) }),
+        ReattachGuarantee::AtMostOnce,
+        Ok,
+    )
+}
+
+struct AsyncFiniteOnce(Port<dyn PollInput>);
+
+impl AsyncFiniteOnce {
+    fn new(raw_delay: Duration) -> Self {
+        Self(scripted(Script::Once {
+            calls: Arc::default(),
+            raw_delay,
+            ordinal: 0,
+        }))
+    }
+}
+
+impl TypedAsyncFiniteSourceHandler for AsyncFiniteOnce {
+    type Output = PollingEvent;
+
+    fn read(&self) -> Option<SourceRead<PollingEvent>> {
+        Some(finite(&self.0))
+    }
+}
+
+struct SyncInfiniteOnce(Port<dyn PollInput>);
+
+impl SyncInfiniteOnce {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self(scripted(Script::LiveOnce {
+            calls,
+            raw_delay: Duration::ZERO,
+            then_pending: false,
+        }))
+    }
+}
+
+impl TypedInfiniteSourceHandler for SyncInfiniteOnce {
+    type Output = PollingEvent;
+
+    fn read(&self) -> Option<SourceRead<PollingEvent>> {
+        Some(live(&self.0))
+    }
+}
+
+struct AsyncInfiniteOnce(Port<dyn PollInput>);
+
+impl AsyncInfiniteOnce {
+    fn new(calls: Arc<AtomicUsize>, raw_delay: Duration) -> Self {
+        Self(scripted(Script::LiveOnce {
+            calls,
+            raw_delay,
+            then_pending: true,
+        }))
+    }
+}
+
+impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteOnce {
+    type Output = PollingEvent;
+
+    fn read(&self) -> Option<SourceRead<PollingEvent>> {
+        Some(live(&self.0))
+    }
+}
+
+struct TimeoutThenEof {
+    port: Port<dyn PollInput>,
+    timeout: Duration,
+}
+
+impl TimeoutThenEof {
+    fn new(calls: Arc<AtomicUsize>, timeout: Duration) -> Self {
+        Self {
+            port: scripted(Script::PendingThenEof { calls }),
+            timeout,
+        }
+    }
+}
+
+impl TypedAsyncFiniteSourceHandler for TimeoutThenEof {
+    type Output = PollingEvent;
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        Some(self.timeout)
+    }
+
+    fn read(&self) -> Option<SourceRead<PollingEvent>> {
+        Some(finite(&self.port))
+    }
+}
+
+struct DisabledTimeoutThenEof(Port<dyn PollInput>);
+
+impl DisabledTimeoutThenEof {
+    fn new(calls: Arc<AtomicUsize>, raw_delay: Duration) -> Self {
+        Self(scripted(Script::Once {
+            calls,
+            raw_delay,
+            ordinal: 1,
+        }))
+    }
+}
+
+impl TypedAsyncFiniteSourceHandler for DisabledTimeoutThenEof {
+    type Output = PollingEvent;
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    fn read(&self) -> Option<SourceRead<PollingEvent>> {
+        Some(finite(&self.0))
+    }
+}
+
+struct SyncScriptedSource(Port<dyn PollInput>);
+
+impl SyncScriptedSource {
+    fn new(steps: Vec<ScriptStep>, poll_times: PollTimes) -> Self {
+        Self(scripted(Script::Steps { steps, poll_times }))
+    }
+}
+
+impl TypedFiniteSourceHandler for SyncScriptedSource {
+    type Output = PollingEvent;
+
+    fn read(&self) -> Option<SourceRead<PollingEvent>> {
+        Some(finite(&self.0))
+    }
+}
+
+struct AsyncScriptedSource(Port<dyn PollInput>);
+
+impl AsyncScriptedSource {
+    fn new(steps: Vec<ScriptStep>, poll_times: PollTimes) -> Self {
+        Self(scripted(Script::Steps { steps, poll_times }))
+    }
+}
+
+impl TypedAsyncFiniteSourceHandler for AsyncScriptedSource {
+    type Output = PollingEvent;
+
+    fn read(&self) -> Option<SourceRead<PollingEvent>> {
+        Some(finite(&self.0))
+    }
+}
+
+struct AsyncIdleInfiniteSource(Port<dyn PollInput>);
+
+impl AsyncIdleInfiniteSource {
+    fn new(calls: Arc<AtomicUsize>, first_poll: Arc<Notify>) -> Self {
+        Self(scripted(Script::Idle { calls, first_poll }))
+    }
+}
+
+impl TypedAsyncInfiniteSourceHandler for AsyncIdleInfiniteSource {
+    type Output = PollingEvent;
+
+    fn read(&self) -> Option<SourceRead<PollingEvent>> {
+        Some(live(&self.0))
+    }
+}
+
+struct ImmediateEof(Port<dyn PollInput>);
+
+impl ImmediateEof {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self(scripted(Script::Eof { calls }))
+    }
+}
+
+impl TypedFiniteSourceHandler for ImmediateEof {
+    type Output = PollingEvent;
+
+    fn read(&self) -> Option<SourceRead<PollingEvent>> {
+        Some(finite(&self.0))
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PollingEvent {
@@ -349,92 +697,6 @@ impl MiddlewareFactory for SourceContractObserverFactory {
     }
 }
 
-#[derive(Clone, Debug)]
-struct SyncFiniteOnce {
-    emitted: bool,
-}
-
-impl SyncFiniteOnce {
-    fn new() -> Self {
-        Self { emitted: false }
-    }
-}
-
-#[obzenflow::system("sync-finite-once")]
-impl TypedFiniteSourceHandler for SyncFiniteOnce {
-    type Output = PollingEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![PollingEvent { ordinal: 0 }]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct AsyncFiniteOnce {
-    emitted: bool,
-    raw_delay: Duration,
-}
-
-#[obzenflow::system("async-finite-once")]
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for AsyncFiniteOnce {
-    type Output = PollingEvent;
-
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        tokio::time::sleep(self.raw_delay).await;
-        Ok(Some(vec![PollingEvent { ordinal: 0 }]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SyncInfiniteOnce {
-    calls: Arc<AtomicUsize>,
-}
-
-#[obzenflow::system("sync-infinite-once")]
-impl TypedInfiniteSourceHandler for SyncInfiniteOnce {
-    type Output = PollingEvent;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call == 0 {
-            Ok(vec![PollingEvent { ordinal: 0 }])
-        } else {
-            Ok(Vec::new())
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct AsyncInfiniteOnce {
-    calls: Arc<AtomicUsize>,
-    raw_delay: Duration,
-}
-
-#[obzenflow::system("async-infinite-once")]
-#[async_trait]
-impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteOnce {
-    type Output = PollingEvent;
-
-    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call == 0 {
-            tokio::time::sleep(self.raw_delay).await;
-            Ok(vec![PollingEvent { ordinal: 0 }])
-        } else {
-            pending::<Result<Vec<Self::Output>, SourceError>>().await
-        }
-    }
-}
-
 async fn stop_after_first_poll(
     handle: obzenflow_runtime::pipeline::FlowHandle,
     observer_log: &ObserverLog,
@@ -463,7 +725,7 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let sync_finite_observer_for_flow = sync_finite_observer_log.clone();
     let sync_finite_policy_log = Arc::new(PolicyLog::default());
     let sync_finite_policy_for_flow = sync_finite_policy_log.clone();
-    let source = Port::owned(SyncFiniteOnce::new());
+    let source = ValuesSource::new([PollingEvent { ordinal: 0 }]);
     let sink = NoopSink::new();
     let sync_finite = test_flow! {
         name: "flowip_115g_sync_finite_timing",
@@ -501,17 +763,14 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let async_finite_observer_for_flow = async_finite_observer_log.clone();
     let async_finite_policy_log = Arc::new(PolicyLog::default());
     let async_finite_policy_for_flow = async_finite_policy_log.clone();
-    let source = Port::owned(AsyncFiniteOnce {
-        emitted: false,
-        raw_delay: async_raw_delay,
-    });
+    let source = AsyncFiniteOnce::new(async_raw_delay);
     let sink = NoopSink::new();
     let async_finite = test_flow! {
         name: "flowip_115g_async_finite_timing",
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent with { SourceContractPolicyFactory::new(
+            src = source!(PollingEvent with { SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
@@ -543,16 +802,14 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let sync_infinite_policy_log = Arc::new(PolicyLog::default());
     let sync_infinite_policy_for_flow = sync_infinite_policy_log.clone();
     let sync_infinite_calls = Arc::new(AtomicUsize::new(0));
-    let source = Port::owned(SyncInfiniteOnce {
-        calls: sync_infinite_calls,
-    });
+    let source = SyncInfiniteOnce::new(sync_infinite_calls);
     let sink = NoopSink::new();
     let sync_infinite = test_flow! {
         name: "flowip_115g_sync_infinite_timing",
         journals: memory_journals(),
 
         stages: {
-            src = infinite_source!(PollingEvent with { SourceContractPolicyFactory::new(
+            src = source!(PollingEvent with { SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
@@ -580,17 +837,14 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     let async_infinite_policy_log = Arc::new(PolicyLog::default());
     let async_infinite_policy_for_flow = async_infinite_policy_log.clone();
     let async_infinite_calls = Arc::new(AtomicUsize::new(0));
-    let source = Port::owned(AsyncInfiniteOnce {
-        calls: async_infinite_calls,
-        raw_delay: async_raw_delay,
-    });
+    let source = AsyncInfiniteOnce::new(async_infinite_calls, async_raw_delay);
     let sink = NoopSink::new();
     let async_infinite = test_flow! {
         name: "flowip_115g_async_infinite_timing",
         journals: memory_journals(),
 
         stages: {
-            src = async_infinite_source!(PollingEvent with { SourceContractPolicyFactory::new(
+            src = source!(PollingEvent with { SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
@@ -616,30 +870,6 @@ async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisor
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct TimeoutThenEof {
-    calls: Arc<AtomicUsize>,
-    timeout: Duration,
-}
-
-#[obzenflow::system("timeout-then-eof")]
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for TimeoutThenEof {
-    type Output = PollingEvent;
-
-    fn poll_timeout(&self) -> Option<Duration> {
-        Some(self.timeout)
-    }
-
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            pending::<Result<Option<Vec<Self::Output>>, SourceError>>().await
-        } else {
-            Ok(None)
-        }
-    }
-}
-
 #[test]
 fn test_flow_handler_construction_stays_cold_inside_its_enclosing_async_future() {
     let constructor_calls = Arc::new(AtomicUsize::new(0));
@@ -647,10 +877,7 @@ fn test_flow_handler_construction_stays_cold_inside_its_enclosing_async_future()
 
     let build = async move {
         observed_calls.fetch_add(1, Ordering::SeqCst);
-        let source = Port::owned(TimeoutThenEof {
-            calls: Arc::new(AtomicUsize::new(0)),
-            timeout: Duration::from_secs(1),
-        });
+        let source = TimeoutThenEof::new(Arc::new(AtomicUsize::new(0)), Duration::from_secs(1));
         let sink = NoopSink::new();
 
         test_flow! {
@@ -658,7 +885,7 @@ fn test_flow_handler_construction_stays_cold_inside_its_enclosing_async_future()
             journals: memory_journals(),
 
             stages: {
-                src = async_source!(PollingEvent => source);
+                src = source!(PollingEvent => source);
                 snk = sink!(PollingEvent => sink);
             },
 
@@ -684,17 +911,14 @@ async fn timeout_duration_precedes_boundary_settlement_and_error_normalisation()
     let policy_log_for_flow = policy_log.clone();
     let observer_log_for_flow = observer_log.clone();
     let calls_for_flow = calls.clone();
-    let source = Port::owned(TimeoutThenEof {
-        calls: calls_for_flow,
-        timeout,
-    });
+    let source = TimeoutThenEof::new(calls_for_flow, timeout);
     let sink = NoopSink::new();
     let harness = test_flow! {
         name: "flowip_115g_timeout_normalisation",
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent with { SourceContractPolicyFactory::new(
+            src = source!(PollingEvent with { SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
@@ -750,31 +974,6 @@ async fn timeout_duration_precedes_boundary_settlement_and_error_normalisation()
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct DisabledTimeoutThenEof {
-    calls: Arc<AtomicUsize>,
-    raw_delay: Duration,
-}
-
-#[obzenflow::system("disabled-timeout-then-eof")]
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for DisabledTimeoutThenEof {
-    type Output = PollingEvent;
-
-    fn poll_timeout(&self) -> Option<Duration> {
-        None
-    }
-
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            tokio::time::sleep(self.raw_delay).await;
-            Ok(Some(vec![PollingEvent { ordinal: 1 }]))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()> {
     let raw_delay = Duration::from_secs(31);
@@ -783,17 +982,14 @@ async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()>
     let policy_log_for_flow = Arc::clone(&policy_log);
     let observer_log_for_flow = Arc::clone(&observer_log);
     let calls = Arc::new(AtomicUsize::new(0));
-    let source = Port::owned(DisabledTimeoutThenEof {
-        calls: Arc::clone(&calls),
-        raw_delay,
-    });
+    let source = DisabledTimeoutThenEof::new(Arc::clone(&calls), raw_delay);
     let sink = NoopSink::new();
     let harness = test_flow! {
         name: "flowip_133a_disabled_poll_timeout",
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent with { SourceContractPolicyFactory::new(
+            src = source!(PollingEvent with { SourceContractPolicyFactory::new(
                     PolicySettings::default(),
                     policy_log_for_flow,
                 ), SourceContractObserverFactory { log: observer_log_for_flow } } => source);
@@ -836,61 +1032,6 @@ enum ScriptStep {
     Eof,
 }
 
-fn scripted_result(step: ScriptStep, ordinal: usize) -> Option<Vec<PollingEvent>> {
-    match step {
-        ScriptStep::NonData => Some(Vec::new()),
-        ScriptStep::Data => Some(vec![PollingEvent { ordinal }]),
-        ScriptStep::Eof => None,
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SyncScriptedSource {
-    steps: Vec<ScriptStep>,
-    index: usize,
-    poll_times: Arc<Mutex<Vec<tokio::time::Instant>>>,
-}
-
-#[obzenflow::system("sync-scripted")]
-impl TypedFiniteSourceHandler for SyncScriptedSource {
-    type Output = PollingEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.poll_times
-            .lock()
-            .expect("sync poll-times lock poisoned")
-            .push(tokio::time::Instant::now());
-        let ordinal = self.index;
-        let step = self.steps[self.index];
-        self.index += 1;
-        Ok(scripted_result(step, ordinal))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct AsyncScriptedSource {
-    steps: Vec<ScriptStep>,
-    index: usize,
-    poll_times: Arc<Mutex<Vec<tokio::time::Instant>>>,
-}
-
-#[obzenflow::system("async-scripted")]
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for AsyncScriptedSource {
-    type Output = PollingEvent;
-
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.poll_times
-            .lock()
-            .expect("async poll-times lock poisoned")
-            .push(tokio::time::Instant::now());
-        let ordinal = self.index;
-        let step = self.steps[self.index];
-        self.index += 1;
-        Ok(scripted_result(step, ordinal))
-    }
-}
-
 fn offsets(times: &[tokio::time::Instant]) -> Vec<Duration> {
     let start = times[0];
     times.iter().map(|instant| *instant - start).collect()
@@ -919,8 +1060,8 @@ fn policy_report_names(events: &[JournalRecord<ChainPayload>]) -> Vec<String> {
 async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Result<()> {
     let sync_poll_times = Arc::new(Mutex::new(Vec::new()));
     let sync_poll_times_for_flow = sync_poll_times.clone();
-    let source = Port::owned(SyncScriptedSource {
-        steps: vec![
+    let source = SyncScriptedSource::new(
+        vec![
             ScriptStep::NonData,
             ScriptStep::NonData,
             ScriptStep::NonData,
@@ -930,9 +1071,8 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
             ScriptStep::NonData,
             ScriptStep::Eof,
         ],
-        index: 0,
-        poll_times: sync_poll_times_for_flow,
-    });
+        sync_poll_times_for_flow,
+    );
     let sink = NoopSink::new();
     let sync_harness = test_flow! {
         name: "flowip_115g_sync_backoff",
@@ -981,8 +1121,8 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
 
     let async_poll_times = Arc::new(Mutex::new(Vec::new()));
     let async_poll_times_for_flow = async_poll_times.clone();
-    let source = Port::owned(AsyncScriptedSource {
-        steps: vec![
+    let source = AsyncScriptedSource::new(
+        vec![
             ScriptStep::NonData,
             ScriptStep::NonData,
             ScriptStep::NonData,
@@ -994,16 +1134,15 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
             ScriptStep::NonData,
             ScriptStep::Eof,
         ],
-        index: 0,
-        poll_times: async_poll_times_for_flow,
-    });
+        async_poll_times_for_flow,
+    );
     let sink = NoopSink::new();
     let async_harness = test_flow! {
         name: "flowip_115g_async_backoff",
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent with { SourceContractPolicyFactory::new(
+            src = source!(PollingEvent with { SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
                         ..PolicySettings::default()
@@ -1063,25 +1202,6 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct AsyncIdleInfiniteSource {
-    calls: Arc<AtomicUsize>,
-    first_poll: Arc<Notify>,
-}
-
-#[obzenflow::system("async-idle-infinite")]
-#[async_trait]
-impl TypedAsyncInfiniteSourceHandler for AsyncIdleInfiniteSource {
-    type Output = PollingEvent;
-
-    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            self.first_poll.notify_one();
-        }
-        Ok(Vec::new())
-    }
-}
-
 async fn wait_for_counter(counter: &AtomicUsize, expected: usize) {
     for _ in 0..1_000 {
         if counter.load(Ordering::SeqCst) >= expected {
@@ -1117,17 +1237,14 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_flow = calls.clone();
     let first_poll = Arc::new(Notify::new());
-    let source = Port::owned(AsyncIdleInfiniteSource {
-        calls: calls_for_flow,
-        first_poll: first_poll.clone(),
-    });
+    let source = AsyncIdleInfiniteSource::new(calls_for_flow, first_poll.clone());
     let sink = NoopSink::new();
     let harness = test_flow! {
         name: "flowip_115g_async_idle_interrupt",
         journals: memory_journals(),
 
         stages: {
-            src = async_infinite_source!(PollingEvent with { SourceContractPolicyFactory::new(
+            src = source!(PollingEvent with { SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_on_observe: true,
                         ..PolicySettings::default()
@@ -1211,30 +1328,13 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct ImmediateEof {
-    calls: Arc<AtomicUsize>,
-}
-
-#[obzenflow::system("immediate-eof")]
-impl TypedFiniteSourceHandler for ImmediateEof {
-    type Output = PollingEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(None)
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> {
     let eof_calls = Arc::new(AtomicUsize::new(0));
     let eof_policy_log = Arc::new(PolicyLog::default());
     let eof_calls_for_flow = eof_calls.clone();
     let eof_policy_log_for_flow = eof_policy_log.clone();
-    let source = Port::owned(ImmediateEof {
-        calls: eof_calls_for_flow,
-    });
+    let source = ImmediateEof::new(eof_calls_for_flow);
     let sink = NoopSink::new();
     let eof_harness = test_flow! {
         name: "flowip_115g_eof_no_delay",
@@ -1275,9 +1375,7 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
     let rejected_observer_log = Arc::new(ObserverLog::default());
     let rejected_calls_for_flow = rejected_calls.clone();
     let rejected_observer_log_for_flow = rejected_observer_log.clone();
-    let source = Port::owned(ImmediateEof {
-        calls: rejected_calls_for_flow,
-    });
+    let source = ImmediateEof::new(rejected_calls_for_flow);
     let sink = NoopSink::new();
     let rejected_harness = test_flow! {
         name: "flowip_115g_rejection_no_delay",

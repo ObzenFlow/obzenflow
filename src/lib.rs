@@ -48,7 +48,7 @@
 //!     TemperatureReading { sensor_id: "A1".into(), celsius: 22.5 },
 //!     TemperatureReading { sensor_id: "B2".into(), celsius: 35.1 },
 //! ];
-//! let source = Port::owned(sources::ValuesSource::new(readings));
+//! let source = sources::ValuesSource::new(readings);
 //! ```
 //!
 //! **Transforms** process typed payloads one at a time. Implement
@@ -77,10 +77,8 @@
 //!
 //! ### `stages:`
 //! Let-bindings that produce stage descriptors via macros:
-//! - `source!(Out => handler)` for a finite source.
-//! - `async_source!(Out => handler)` for an async finite source.
-//! - `infinite_source!(Out => handler)` for an infinite source.
-//! - `async_infinite_source!(Out => handler)` for an async infinite source.
+//! - `source!(Out => handler)` for a source. The handler declares whether
+//!   its input ends and the port it reads through.
 //! - `transform!(In -> Out => handler)` for a synchronous transform.
 //! - `effectful_transform!(In -> Out => handler)` for a transform that
 //!   performs the external work its handler's effect set declares.
@@ -167,7 +165,7 @@
 //!     ];
 //!
 //!     let flow = FlowDefinition::materialize(move |_runtime_config| {
-//!         let readings_source = Port::owned(sources::ValuesSource::new(readings));
+//!         let readings_source = sources::ValuesSource::new(readings);
 //!         let check_temperature = transforms::map(|m: Measurement| {
 //!                 Alert {
 //!                     sensor: m.sensor.clone(),

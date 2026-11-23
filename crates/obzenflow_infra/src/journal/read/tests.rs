@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::journal::DiskJournal;
+use obzenflow_core::effect_binding::{SystemBindingEvidence, SystemLocation};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::{
     SourceInputPinnedFact, SourceRecordRejectedFact, SourceResumeFact,
@@ -169,6 +170,24 @@ impl Run {
                 ChainEventFactory::execution_event(
                     self.stage.into(),
                     ExecutionPayload::SourceInputPinned(pin),
+                ),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn bind(&self, file: &str) {
+        let binding =
+            SystemBindingEvidence::located("file-system", SystemLocation::Csv(file.into()))
+                .unwrap()
+                .binding()
+                .clone();
+        self.data
+            .append(
+                ChainEventFactory::execution_event(
+                    self.stage.into(),
+                    ExecutionPayload::SourceBindingDeclared(binding),
                 ),
                 Default::default(),
             )
@@ -885,6 +904,17 @@ async fn a_run_that_rejected_rows_out_of_order_still_names_the_first() {
     let shown = Run::new();
     shown.reject(Some(3)).await;
     assert_eq!(shown_repeats(&shown, &[&killed]).await, [Some(1)]);
+}
+
+#[tokio::test]
+async fn rejected_row_same_binding_repeats() {
+    let killed = Run::new();
+    killed.bind("night.csv").await;
+    killed.reject(Some(5)).await;
+    let shown = Run::new();
+    shown.bind("night.csv").await;
+    shown.reject(Some(5)).await;
+    assert_eq!(shown_repeats(&shown, &[&killed]).await, [Some(0)]);
 }
 
 #[tokio::test]

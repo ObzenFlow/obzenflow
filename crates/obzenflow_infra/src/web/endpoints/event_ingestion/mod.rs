@@ -42,18 +42,15 @@ pub use validation::{
 };
 
 pub use obzenflow_adapters::sources::http::{
-    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord,
+    HostedSource, IngressDecodeError, IngressDecoder, IngressRecord,
 };
 use obzenflow_core::ingress::{
     HostedIngressBindingSlot, IngressAttemptContext, IngressRequestId, OUTCOME_UNKNOWN_RETRY_AFTER,
 };
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::execution::SourceExecutionPhases;
 use obzenflow_runtime::prelude::FlowHandle;
-use obzenflow_runtime::stages::source::HostedIngress;
-use obzenflow_runtime::stages::HostedIngressSystem;
 use settlement::EvidenceState;
 use shared::{admit_typed, AdmittedRequest, EdgeRefusal};
 use std::sync::Arc;
@@ -258,15 +255,14 @@ fn install_source_phases<T>(
     }
 }
 
-/// `Ingress` holds a hosted port and an ingress handle for an application-owned protocol.
+/// `Ingress` holds a hosted source and an ingress handle for an application-owned
+/// protocol.
 pub struct Ingress<D>
 where
     D: IngressDecoder,
 {
-    port: Port<dyn HostedIngress<D::Output>>,
+    source: HostedSource<D::Output>,
     handle: IngressHandle<D::Output>,
-    /// Maps protocol bodies for a hosted HTTP wrapper; typed handle
-    /// submissions bypass it.
     decoder: D,
 }
 
@@ -274,9 +270,9 @@ impl<D> Ingress<D>
 where
     D: IngressDecoder,
 {
-    /// `into_parts` splits the bundle into its hosted port and its submission handle.
-    /// One source stage receives the submissions of the port. The split does not start a
-    /// runtime execution.
+    /// `into_parts` splits the bundle into its hosted source and its submission handle.
+    /// One source stage reads the submissions. The split does not start a runtime
+    /// execution.
     ///
     /// ```compile_fail,E0382
     /// use obzenflow_infra::web::endpoints::event_ingestion::{Ingress, IngressDecoder};
@@ -286,8 +282,8 @@ where
     ///     let (another_source, _) = ingress.into_parts(); // ingress was consumed
     /// }
     /// ```
-    pub fn into_parts(self) -> (Port<dyn HostedIngress<D::Output>>, IngressHandle<D::Output>) {
-        (self.port, self.handle)
+    pub fn into_parts(self) -> (HostedSource<D::Output>, IngressHandle<D::Output>) {
+        (self.source, self.handle)
     }
 
     pub fn handle(&self) -> IngressHandle<D::Output> {
@@ -300,7 +296,7 @@ pub struct HttpIngress<D>
 where
     D: IngressDecoder,
 {
-    port: Port<dyn HostedIngress<D::Output>>,
+    source: HostedSource<D::Output>,
     attachment: HttpIngressAttachment<D::Output>,
 }
 
@@ -321,8 +317,8 @@ impl<D> HttpIngress<D>
 where
     D: IngressDecoder,
 {
-    /// `into_parts` splits the bundle into its hosted port and its HTTP hosting attachment.
-    /// One source stage receives the submissions of the port. The split does not start a
+    /// `into_parts` splits the bundle into its hosted source and its HTTP hosting
+    /// attachment. One source stage reads the submissions. The split does not start a
     /// runtime execution.
     ///
     /// ```compile_fail,E0382
@@ -333,13 +329,8 @@ where
     ///     let (another_source, _) = ingress.into_parts(); // ingress was consumed
     /// }
     /// ```
-    pub fn into_parts(
-        self,
-    ) -> (
-        Port<dyn HostedIngress<D::Output>>,
-        HttpIngressAttachment<D::Output>,
-    ) {
-        (self.port, self.attachment)
+    pub fn into_parts(self) -> (HostedSource<D::Output>, HttpIngressAttachment<D::Output>) {
+        (self.source, self.attachment)
     }
 
     /// Clone the underlying handle used by the hosted HTTP adaptor.
@@ -367,44 +358,52 @@ where
     }
 }
 
-/// `ingress_source` creates a hosted port and a protocol-neutral ingress handle. The system
-/// name of the port is `ingress`. [`crate::application::FlowApplicationBuilder::ingress`]
+/// `ingress_source` creates a hosted source and a protocol-neutral ingress handle. The
+/// source's system is `ingress`. [`crate::application::FlowApplicationBuilder::ingress`]
 /// registers the bundle.
 pub fn ingress_source<D>(decoder: D, config: IngestionConfig) -> Ingress<D>
 where
     D: IngressDecoder,
 {
-    hosted_ingress(decoder, config, HostedIngressSystem::Ingress)
+    hosted_ingress(decoder, config, HostedSource::ingress)
 }
 
-fn hosted_ingress<D>(decoder: D, config: IngestionConfig, system: HostedIngressSystem) -> Ingress<D>
+type HostedSystem<T> = fn(
+    tokio::sync::mpsc::Receiver<obzenflow_runtime::stages::HostedSubmission<T>>,
+    HostedIngressBindingSlot,
+) -> HostedSource<T>;
+
+fn hosted_ingress<D>(
+    decoder: D,
+    config: IngestionConfig,
+    system: HostedSystem<D::Output>,
+) -> Ingress<D>
 where
     D: IngressDecoder,
 {
     let (state, rx) = IngestionState::new(config);
-    let port = HostedIngressSource::new(rx, state.ingress_slot()).into_port(system);
     Ingress {
-        port,
+        source: system(rx, state.ingress_slot()),
         handle: IngressHandle { state },
         decoder,
     }
 }
 
-/// `http_ingress` creates an HTTP ingress bundle. Use it when you compose the port and the
-/// attachment yourself. The system name of the port is `http-ingress`. The decoder runs at
+/// `http_ingress` creates an HTTP ingress bundle. Use it when you compose the source and
+/// the attachment yourself. The source's system is `http-ingress`. The decoder runs at
 /// admission, together with any configured validator.
 pub fn http_ingress<D>(decoder: D, config: IngestionConfig) -> HttpIngress<D>
 where
     D: IngressDecoder,
 {
     let Ingress {
-        port,
+        source,
         handle,
         decoder,
-    } = hosted_ingress(decoder, config, HostedIngressSystem::HttpIngress);
+    } = hosted_ingress(decoder, config, HostedSource::http);
     let surface = create_ingestion_surface(handle.state(), decoder);
     HttpIngress {
-        port,
+        source,
         attachment: HttpIngressAttachment { surface, handle },
     }
 }

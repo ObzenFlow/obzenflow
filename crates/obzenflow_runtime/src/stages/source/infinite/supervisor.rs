@@ -77,7 +77,7 @@ pub(crate) struct InfiniteSourceSupervisor<H: UnifiedInfiniteSourceHandler + Sen
     /// The continuation admitted with the source (FLOWIP-134i B8).
     pub(crate) continuation: SourceContinuation,
 
-    pub(crate) system: Arc<str>,
+    pub(crate) system: obzenflow_core::effect_binding::SystemBinding,
 
     /// Adaptive backoff for synchronous idle polls (FLOWIP-086i).
     pub(crate) idle_backoff: IdleBackoff,
@@ -579,6 +579,12 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                     StageType::InfiniteSource,
                 );
                 let resuming = ctx.runtime_execution.resume_control().is_some();
+                crate::stages::source::supervision::commit_source_binding(
+                    &self.data_journal,
+                    &stage_flow_context,
+                    &self.system,
+                )
+                .await?;
                 let init = SourceReaderInitContext {
                     stage_id: self.stage_id,
                     stage_name: ctx.stage_name.clone(),
@@ -615,7 +621,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                     &stage_flow_context,
                     SourcePollKind::Infinite,
                     resuming,
-                    &self.system,
+                    self.system.name(),
                 )
                 .await?;
                 Ok(EventLoopDirective::Transition(

@@ -20,15 +20,35 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
+use obzenflow_benchmarks::numbers::{NextNumber, NumberFeed, Numbers};
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
+
+/// A source whose input never arrives, so the pipeline stays idle.
+struct IdleSource(Port<dyn NumberFeed>);
+
+impl IdleSource {
+    fn new() -> Self {
+        Self(Numbers::idle().port())
+    }
+}
+
+impl TypedFiniteSourceHandler for IdleSource {
+    type Output = BenchEvent;
+
+    fn read(&self) -> Option<SourceRead<BenchEvent>> {
+        Some(SourceRead::finite(self.0.clone(), NextNumber(0), |_| {
+            Err(obzenflow_runtime::stages::SourceError::Other(
+                obzenflow_core::event::SourceDiagnosticReason::Unclassified.into(),
+            ))
+        }))
+    }
+}
 
 /// File-local payload type for the idle-CPU bench. The source is idle and
 /// emits nothing in normal operation; the type satisfies FLOWIP-114c's
@@ -40,32 +60,6 @@ struct BenchEvent {
 
 impl TypedPayload for BenchEvent {
     const EVENT_TYPE: &'static str = "bench.idle_event";
-}
-
-/// Idle source that doesn't emit any events
-#[derive(Clone, Debug)]
-struct IdleSource {
-    completed: Arc<AtomicU64>,
-}
-
-impl IdleSource {
-    fn new() -> Self {
-        Self {
-            completed: Arc::new(AtomicU64::new(0)),
-        }
-    }
-}
-
-#[obzenflow_runtime::effects::system("idle")]
-impl TypedFiniteSourceHandler for IdleSource {
-    type Output = BenchEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        // Intentionally emit nothing but also never complete (idle pipeline).
-        // This is the runtime "idle spin" scenario that FLOWIP-086i targets.
-        self.completed.fetch_add(1, Ordering::Relaxed);
-        Ok(Some(vec![]))
-    }
 }
 
 type TimestampedSink = obzenflow_adapters::sinks::DiscardSink<BenchEvent>;
@@ -102,7 +96,6 @@ async fn build_pipeline(
         return Err(anyhow::anyhow!("Unsupported stage count: {stage_count}"));
     }
 
-    let source = Port::owned(source);
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let definition = match stage_count {
             1 => flow! {

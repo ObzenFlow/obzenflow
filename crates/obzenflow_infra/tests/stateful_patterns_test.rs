@@ -7,21 +7,17 @@ use std::sync::Arc;
 
 use obzenflow_adapters::middleware::stateful_observer;
 use obzenflow_adapters::sinks::RecordingSink;
+use obzenflow_adapters::sources::ValuesSource;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::stages::common::handlers::{
     StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::observer::{StatefulObserver, StatefulObserverContext};
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
-/// File-local payload for the stateful-patterns test. The JSON shape
-/// matches what `NumberSource` emits; the type fingerprints the stage
-/// contract per FLOWIP-114c.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct NumberEvent {
     value: u64,
@@ -67,49 +63,12 @@ impl TypedPayload for ProgressUpdate {
     const EVENT_TYPE: &'static str = "stateful_patterns.progress_update";
 }
 
-#[derive(Clone, Debug)]
-struct NumberSource {
-    current: u64,
-    max: u64,
-}
-
-impl NumberSource {
-    fn new(max: u64) -> Self {
-        Self { current: 1, max }
-    }
-}
-
-#[obzenflow_runtime::effects::system("numbers")]
-impl TypedFiniteSourceHandler for NumberSource {
-    type Output = NumberEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.current <= self.max {
-            let num = self.current;
-            self.current += 1;
-            Ok(Some(vec![NumberEvent { value: num }]))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct EmptySource;
-
-impl EmptySource {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[obzenflow_runtime::effects::system("empty")]
-impl TypedFiniteSourceHandler for EmptySource {
-    type Output = NumberEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Ok(None)
-    }
+fn numbers(max: u64) -> impl TypedFiniteSourceHandler<Output = NumberEvent> {
+    ValuesSource::new(
+        (1..=max)
+            .map(|value| NumberEvent { value })
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[derive(Clone, Debug, Default)]
@@ -278,7 +237,7 @@ async fn counter_emits_single_event_on_drain() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = Port::owned(NumberSource::new(5));
+            let source_handler = numbers(5);
             let counter_handler = CounterHandler::new();
 
             Ok(flow! {
@@ -311,7 +270,7 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = Port::owned(NumberSource::new(5));
+            let source_handler = numbers(5);
             let accumulator_handler = AccumulatorHandler::new();
 
             Ok(flow! {
@@ -342,7 +301,7 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = Port::owned(NumberSource::new(10));
+            let source_handler = numbers(10);
             let sum_handler = SumHandler::new();
 
             Ok(flow! {
@@ -377,7 +336,7 @@ async fn immediate_emitter_emits_during_accumulating() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = Port::owned(NumberSource::new(5));
+            let source_handler = numbers(5);
             let emitter_handler = ImmediateEmitter::new();
 
             Ok(flow! {
@@ -418,7 +377,7 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
     crate::replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let source_handler = Port::owned(EmptySource::new());
+            let source_handler = numbers(0);
             let counter_handler = CounterHandler::new();
 
             Ok(flow! {

@@ -14,19 +14,16 @@
 //! 4. The three inbound edges into the aggregator all carry the same
 //!    `IngestedEvent` `TypeId` (homogeneous fan-in).
 //!
-use obzenflow::effects::Port;
 use std::collections::HashMap;
 
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::id::StageId;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::stage_descriptor::StageDescriptor;
 use obzenflow_dsl::dsl::typing::{validate_edge_typing, validate_stage_typing_metadata, TypeHint};
 use obzenflow_dsl::{sink, source, stateful, transform};
 use obzenflow_runtime::id_conversions::StageIdExt;
-use obzenflow_runtime::stages::common::handlers::source::SourceError;
-use obzenflow_runtime::stages::common::handlers::{
-    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
-};
+use obzenflow_runtime::stages::common::handlers::{StatefulEmission, TypedStatefulHandler};
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 use serde::{Deserialize, Serialize};
@@ -69,38 +66,6 @@ struct IngestSummary {
 }
 impl TypedPayload for IngestSummary {
     const EVENT_TYPE: &'static str = "ingest.summary";
-}
-
-#[derive(Clone, Debug)]
-struct OneShotSource<P>(std::marker::PhantomData<P>);
-impl<P> OneShotSource<P> {
-    fn new() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-#[obzenflow::system("kafka-raw")]
-impl TypedFiniteSourceHandler for OneShotSource<KafkaRawEvent> {
-    type Output = KafkaRawEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Ok(None)
-    }
-}
-#[obzenflow::system("webhooks")]
-impl TypedFiniteSourceHandler for OneShotSource<WebhookEnvelope> {
-    type Output = WebhookEnvelope;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Ok(None)
-    }
-}
-#[obzenflow::system("file-lines")]
-impl TypedFiniteSourceHandler for OneShotSource<FileLine> {
-    type Output = FileLine;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Ok(None)
-    }
 }
 
 fn align_to_ingested<P>(
@@ -147,9 +112,9 @@ fn aligned_inputs_satisfy_typed_fan_in_invariants() {
     let align_file_id = StageId::new();
     let aggregator_id = StageId::new();
     let sink_id = StageId::new();
-    let kafka_source_handler = Port::owned(OneShotSource::<KafkaRawEvent>::new());
-    let webhook_source_handler = Port::owned(OneShotSource::<WebhookEnvelope>::new());
-    let file_source_handler = Port::owned(OneShotSource::<FileLine>::new());
+    let kafka_source_handler = ValuesSource::new(Vec::<KafkaRawEvent>::new());
+    let webhook_source_handler = ValuesSource::new(Vec::<WebhookEnvelope>::new());
+    let file_source_handler = ValuesSource::new(Vec::<FileLine>::new());
     let align_kafka_handler = align_to_ingested::<KafkaRawEvent>();
     let align_webhook_handler = align_to_ingested::<WebhookEnvelope>();
     let align_file_handler = align_to_ingested::<FileLine>();

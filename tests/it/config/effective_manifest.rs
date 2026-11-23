@@ -22,9 +22,7 @@ use obzenflow_runtime::runtime_config::{
     CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use obzenflow_topology::{
     MiddlewareAttachmentInfo, MiddlewareAuthoredSite, MiddlewareFamily, MiddlewareInfo,
     MiddlewareOperation, MiddlewareSettingInfo, ResolvedSettingInfo, SettingProvenanceInfo,
@@ -32,6 +30,7 @@ use obzenflow_topology::{
 };
 
 use async_trait::async_trait;
+use obzenflow::stages::sources::ValuesSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -44,30 +43,6 @@ struct Item {
 
 impl TypedPayload for Item {
     const EVENT_TYPE: &'static str = "effective_config_manifest.item";
-}
-
-#[derive(Clone, Debug)]
-struct OneShotSource {
-    emitted: bool,
-}
-
-#[obzenflow::system("one-shot")]
-impl TypedFiniteSourceHandler for OneShotSource {
-    type Output = Item;
-
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<Self::Output>>,
-        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.emitted {
-            Ok(None)
-        } else {
-            self.emitted = true;
-            Ok(Some(vec![Item { index: 0 }]))
-        }
-    }
 }
 
 type NullSink<T> = obzenflow::stages::sinks::DiscardSink<T>;
@@ -284,7 +259,7 @@ fn build_flow_future(
     Output = Result<obzenflow_runtime::prelude::FlowHandle, obzenflow_dsl::dsl::FlowBuildFailure>,
 > {
     FlowDefinition::materialize(move |_runtime_config| {
-        let one_shot_source = Port::owned(OneShotSource { emitted: false });
+        let one_shot_source = ValuesSource::new([Item { index: 0 }]);
         let null_sink = NullSink::<Item>::new();
 
         Ok(flow! {
@@ -312,7 +287,7 @@ fn build_rate_limited_flow_future(
 > {
     FlowDefinition::materialize(move |_runtime_config| {
         let limiter = rate_limit(10.0);
-        let one_shot_source = Port::owned(OneShotSource { emitted: false });
+        let one_shot_source = ValuesSource::new([Item { index: 0 }]);
         let null_sink = NullSink::<Item>::new();
 
         Ok(flow! {
@@ -352,7 +327,7 @@ fn build_two_effect_flow_future(
     FlowDefinition::materialize(move |_runtime_config| {
         let authorize_resilience = payment_resilience().for_effect::<Authorize>();
         let refund_resilience = payment_resilience().for_effect::<Refund>();
-        let one_shot_source = Port::owned(OneShotSource { emitted: false });
+        let one_shot_source = ValuesSource::new([Item { index: 0 }]);
         let payment_effects = PaymentEffectsHandler::new();
         let null_sink = NullSink::<PaymentEffectFact>::new();
 

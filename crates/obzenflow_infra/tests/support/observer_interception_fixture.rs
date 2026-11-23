@@ -11,8 +11,10 @@ use obzenflow_adapters::middleware::{
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::EffectContext;
 use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
@@ -20,7 +22,6 @@ use obzenflow_runtime::stages::observer::{
     EffectObserver, EffectObserverContext, ObserverResult, StageLifecycleObserver,
     StageLifecycleObserverContext,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -115,24 +116,53 @@ impl TypedPayload for ShippingReady {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-#[derive(Clone, Debug)]
-struct OrderSource {
-    next: usize,
-    polls: Arc<AtomicUsize>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OrderRead(usize);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait OrderInput {
+    #[effect(type = "observer_interception.orders.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &OrderRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<OrderAccepted, OrderRead>, EffectError>;
+}
+
+/// Supplies `ORDER_COUNT` orders and counts each physical read.
+struct Orders {
+    reads: Arc<AtomicUsize>,
 }
 
 #[obzenflow_runtime::effects::system("orders")]
+#[async_trait]
+impl OrderInput for Orders {
+    async fn read(
+        &self,
+        from: &OrderRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<OrderAccepted, OrderRead>, EffectError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if from.0 == ORDER_COUNT {
+            return Ok(FiniteRead::EndOfInput);
+        }
+        Ok(FiniteRead::Batch {
+            records: vec![OrderAccepted {
+                order_id: 1001 + from.0 as u64,
+            }],
+            next: OrderRead(from.0 + 1),
+        })
+    }
+}
+
+struct OrderSource(Port<dyn OrderInput>);
+
 impl TypedFiniteSourceHandler for OrderSource {
     type Output = OrderAccepted;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.polls.fetch_add(1, Ordering::SeqCst);
-        if self.next == ORDER_COUNT {
-            return Ok(None);
-        }
-        let order_id = 1001 + self.next as u64;
-        self.next += 1;
-        Ok(Some(vec![OrderAccepted { order_id }]))
+    fn read(&self) -> Option<SourceRead<OrderAccepted>> {
+        Some(SourceRead::finite(self.0.clone(), OrderRead(0), Ok))
     }
 }
 
@@ -288,10 +318,9 @@ pub(crate) fn build_flow(
     probe: Probe,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let orders = Port::owned(OrderSource {
-            next: 0,
-            polls: probe.source_polls.clone(),
-        });
+        let orders = OrderSource(Port::to(Orders {
+            reads: probe.source_polls.clone(),
+        }));
         let shipping_handoff = perform(|order: &ShippingReady| HandOffRequest {
             order_id: order.order_id,
         })

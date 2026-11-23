@@ -15,7 +15,7 @@ pub(crate) const DEFAULT_HN_MAX_STORIES: usize = 60;
 pub(crate) const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
 const DEFAULT_HN_POLL_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_HN_GROUP_MAX_STORIES: usize = 10;
-pub(crate) const HN_LIVE_BASE_URL: &str = "https://hacker-news.firebaseio.com/";
+pub(crate) const HN_API_URL: &str = "https://hacker-news.firebaseio.com/";
 const DEFAULT_HN_DIGEST_POSTGRES_SCHEMA: &str = "obzenflow_example";
 
 #[derive(Clone, Debug)]
@@ -40,20 +40,11 @@ impl HnDigestPostgresConfig {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum HnSource {
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Stories {
     #[default]
-    Mock,
-    Live,
-}
-
-impl HnSource {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Mock => "mock",
-            Self::Live => "live",
-        }
-    }
+    Scripted,
+    HackerNews,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -68,7 +59,7 @@ pub(crate) enum DigestOutput {
 #[serde(deny_unknown_fields)]
 pub(crate) struct HnSettings {
     #[serde(default)]
-    source: HnSource,
+    stories: Stories,
     #[serde(default = "default_max_stories")]
     max_stories: usize,
     #[serde(default = "default_poll_timeout_secs")]
@@ -111,8 +102,8 @@ impl HnSettings {
             source_rate_limit: DEFAULT_HN_SOURCE_RATE_LIMIT,
             max_stories_per_group: self.digest.group_max_stories,
             interests: self.interests,
-            source: self.source,
-            base_url: Url::parse(HN_LIVE_BASE_URL).expect("the HN API URL is valid"),
+            stories: self.stories,
+            base_url: Url::parse(HN_API_URL).expect("the HN API URL is valid"),
             output: self.output,
         }
     }
@@ -125,7 +116,7 @@ pub struct HnRunInputs {
     pub source_rate_limit: f64,
     pub max_stories_per_group: usize,
     pub interests: Option<String>,
-    pub(crate) source: HnSource,
+    pub(crate) stories: Stories,
     pub base_url: Url,
     pub(crate) output: DigestOutput,
 }

@@ -40,6 +40,7 @@ impl std::fmt::Debug for EffectPortMetadataContext {
 
 #[derive(Clone)]
 pub struct EffectContext {
+    pub(super) recorder: Option<Arc<dyn obzenflow_core::event::observability::ObservationRecorder>>,
     pub(super) is_replaying: bool,
     pub(super) flow_id: FlowId,
     pub(super) stage_key: String,
@@ -57,6 +58,13 @@ pub(super) struct RecordedAnswers {
 }
 
 impl EffectContext {
+    /// Offer a measurement from the live system to the stage's observation recorder.
+    pub fn observe(&self, observation: obzenflow_core::event::observability::ObservationRecord) {
+        if let Some(recorder) = &self.recorder {
+            recorder.observe(observation);
+        }
+    }
+
     /// A context for a test that calls a port method directly. It holds no
     /// ports and no commit handle, so a slot read or a transaction fails as
     /// under a binding the runtime never made.
@@ -71,6 +79,7 @@ impl EffectContext {
     /// ```
     pub fn for_test(flow_id: FlowId, stage_key: &str, input_seq: u64) -> Self {
         Self {
+            recorder: None,
             is_replaying: false,
             flow_id,
             stage_key: stage_key.to_string(),
@@ -279,6 +288,7 @@ pub struct StageConstants {
     pub catch_up: Option<crate::stages::common::supervision::catch_up::CatchUpHandle>,
 }
 
+#[derive(Clone)]
 pub struct EffectInvocationContext {
     pub stage: Arc<StageConstants>,
     pub input_seq: StageInputPosition,

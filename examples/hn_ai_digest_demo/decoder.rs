@@ -3,22 +3,109 @@
 // https://obzenflow.dev
 
 use super::domain::{HnStory, HnStoryId};
-use obzenflow::stages::sources::{ListDetailDecoder, Url};
+use async_trait::async_trait;
+use obzenflow::effects::{EffectContext, EffectError, Port};
+use obzenflow::stages::sources::{
+    FiniteRead, HttpApi, SourceDiagnosticReason, SourceError, SourceRead,
+    TypedAsyncFiniteSourceHandler,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::time::Duration;
 
-/// Build the decoder for the HN Firebase API:
-/// `topstories.json` → many `item/{id}.json`.
-pub fn hn_story_decoder(
-    base_url: Url,
-    max_stories: usize,
-) -> ListDetailDecoder<HnStoryId, HnStory> {
-    ListDetailDecoder::builder()
-        .base_url(base_url)
-        .list_path("v0/topstories.json")
-        .parse_list(|response| Ok(response.json()?))
-        .detail_path(|id| format!("v0/item/{id}.json"))
-        .parse_item(|response| Ok(response.json()?))
-        .max_list_items(max_stories)
-        .on_skip(|id| tracing::info!(id = %id, "HN item deleted, skipping"))
-        .build()
-        .expect("HN decoder builder should be fully configured")
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum StoryPosition {
+    Start {
+        limit: usize,
+    },
+    Selected {
+        ids: Vec<HnStoryId>,
+        next_index: usize,
+    },
+}
+
+pub type StoryReply = FiniteRead<Value, StoryPosition>;
+
+#[obzenflow::port]
+#[async_trait]
+pub trait StoriesPort {
+    #[effect(type = "hn.stories.read", at_least_once, records = reply)]
+    async fn read(
+        &self,
+        from: &StoryPosition,
+        ctx: &EffectContext,
+    ) -> Result<StoryReply, EffectError>;
+}
+
+pub fn selection(ids: Vec<HnStoryId>) -> StoryReply {
+    FiniteRead::Batch {
+        records: Vec::new(),
+        next: StoryPosition::Selected { ids, next_index: 0 },
+    }
+}
+
+pub fn item(ids: &[HnStoryId], index: usize, record: Option<Value>) -> StoryReply {
+    FiniteRead::Batch {
+        records: record.into_iter().collect(),
+        next: StoryPosition::Selected {
+            ids: ids.to_vec(),
+            next_index: index + 1,
+        },
+    }
+}
+
+pub fn decode_item(record: Value) -> Result<HnStory, SourceError> {
+    serde_json::from_value(record)
+        .map_err(|_| SourceError::Deserialization(SourceDiagnosticReason::MalformedInput.into()))
+}
+
+#[async_trait]
+impl StoriesPort for HttpApi {
+    async fn read(
+        &self,
+        from: &StoryPosition,
+        ctx: &EffectContext,
+    ) -> Result<StoryReply, EffectError> {
+        match from {
+            StoryPosition::Start { limit } => {
+                let mut ids: Vec<HnStoryId> = self.get_json("v0/topstories.json", ctx).await?;
+                ids.truncate(*limit);
+                Ok(selection(ids))
+            }
+            StoryPosition::Selected { ids, next_index } => match ids.get(*next_index) {
+                Some(id) => {
+                    let record = self.get_json(&format!("v0/item/{id}.json"), ctx).await?;
+                    Ok(item(ids, *next_index, record))
+                }
+                None => Ok(FiniteRead::EndOfInput),
+            },
+        }
+    }
+}
+
+/// The HN stories source. It selects up to `max_stories` stories through its
+/// port and maps each recorded item to an `HnStory`.
+pub struct HnStories {
+    pub port: Port<dyn StoriesPort>,
+    pub max_stories: usize,
+    pub poll_timeout: Duration,
+}
+
+#[async_trait]
+impl TypedAsyncFiniteSourceHandler for HnStories {
+    type Output = HnStory;
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        Some(self.poll_timeout)
+    }
+
+    fn read(&self) -> Option<SourceRead<HnStory>> {
+        Some(SourceRead::finite(
+            self.port.clone(),
+            StoryPosition::Start {
+                limit: self.max_stories,
+            },
+            decode_item,
+        ))
+    }
 }

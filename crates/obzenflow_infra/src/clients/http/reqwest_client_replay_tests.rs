@@ -20,7 +20,7 @@ use obzenflow_core::event::{
 use obzenflow_core::http_client::Url;
 use obzenflow_core::journal::read::{RunJournalKind, RunRecordData};
 use obzenflow_core::{StageId, TypedPayload};
-use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
@@ -273,7 +273,7 @@ fn pull_flow(
             journals: crate::journal::disk_journals(journal_base),
 
             stages: {
-                src = async_source!(HttpFixtureEvent => source);
+                src = source!(HttpFixtureEvent => source);
                 collected = sink!(HttpFixtureEvent => collected);
             },
 
@@ -311,7 +311,7 @@ fn poll_flow(
             journals: crate::journal::disk_journals(journal_base),
 
             stages: {
-                src = async_infinite_source!(HttpFixtureEvent => source);
+                src = source!(HttpFixtureEvent => source);
                 collected = sink!(HttpFixtureEvent => collected);
             },
 

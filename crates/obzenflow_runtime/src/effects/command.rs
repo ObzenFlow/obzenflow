@@ -22,8 +22,7 @@ use std::sync::Arc;
 /// port type, in a `#[port]` field or through `through`, and performs requests
 /// through `fx` without ever seeing the system.
 ///
-/// A source stage also takes a `Port`, with a source trait such as `FiniteSource` as
-/// its port type. A read through a source port is never an effect call.
+/// A source handler declares the read supplied by its bound port.
 ///
 /// A port trait is `Send` and `Sync`, so a system that isn't thread-safe is
 /// refused at its own `impl`:
@@ -309,18 +308,48 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         self.refused_by
     }
 
-    pub(crate) fn built_system(&self) -> Option<Arc<P>> {
-        self.port.built()
-    }
-
     /// The name of the system behind this port, as its evidence and diagnostics
     /// record it.
     pub fn system_name(&self) -> &str {
-        self.name.as_str()
+        if self.binding().location().is_some() {
+            self.binding().name()
+        } else {
+            self.name.as_str()
+        }
+    }
+
+    /// The supplier this port records when it answers a call.
+    pub fn binding(&self) -> &obzenflow_core::effect_binding::SystemBinding {
+        self.evidence.binding()
+    }
+
+    #[doc(hidden)]
+    pub fn with_system_location(
+        mut self,
+        location: obzenflow_core::effect_binding::SystemLocation,
+    ) -> Result<Self, obzenflow_core::BindingEvidenceError> {
+        self.evidence = SystemBindingEvidence::located(self.evidence.binding().name(), location)?;
+        self.name = LogicalEffectBindingName::for_resource(&self.evidence);
+        Ok(self)
     }
 
     pub(crate) fn source_system(&self) -> SourceSystem {
-        SourceSystem::new(self.name.clone(), Arc::clone(&self.port))
+        SourceSystem::new(self.binding().clone(), Arc::clone(&self.port))
+    }
+
+    /// The same port bound under an instance of its own, for a source read
+    /// port. Each source handler holds its own read port, even when two
+    /// handlers bind one location.
+    #[doc(hidden)]
+    pub fn own_instance(self) -> Self
+    where
+        P: PortEffects,
+    {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let instance = NEXT
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_string();
+        self.instance(&instance)
     }
 
     /// The same port bound under `system.instance`, for a framework system

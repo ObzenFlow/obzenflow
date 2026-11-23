@@ -5,19 +5,20 @@
 //! The demo's flow and its typed events, shared with the journal integration
 //! test that runs the same flow under `cargo test`.
 
-use obzenflow::effects::Port;
+use async_trait::async_trait;
+use obzenflow::effects::{EffectContext, EffectError, Port};
 use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit};
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::ConsoleSink;
-use obzenflow::stages::sources::TypedFiniteSourceHandler;
-use obzenflow::stages::sources::{SourceDiagnosticReason, SourceError};
+use obzenflow::stages::sources::{FiniteRead, SourceError, SourceRead, TypedFiniteSourceHandler};
 use obzenflow::stages::stateful::emit;
 use obzenflow::stages::transforms::TryMapTyped;
 use obzenflow::stages::{stateful, transforms};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 pub(crate) const SOURCE_OUTAGE_INTERVAL: usize = 20_000;
@@ -39,57 +40,93 @@ impl TypedPayload for DataRequest {
 /// Simulates an input service that periodically becomes unavailable. A failed
 /// poll does not consume an input: the breaker waits, probes once unsuccessfully,
 /// then recovers on its next probe and emits the same pending input.
-#[derive(Clone, Debug)]
-struct HighVolumeSource {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SequencePosition {
     next_id: usize,
+}
+
+#[obzenflow::port]
+#[async_trait]
+trait RequestSequence {
+    #[effect(type = "prometheus_demo.requests.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &SequencePosition,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<usize, SequencePosition>, EffectError>;
+}
+
+/// Generates the request sequence and simulates a source outage at each
+/// `outage_interval`.
+struct HighVolumeGenerator {
     total_events: usize,
     outage_interval: usize,
-    outage_failures: u8,
+    outage_failures: AtomicU8,
 }
 
 #[obzenflow::system("high-volume-requests")]
-impl TypedFiniteSourceHandler for HighVolumeSource {
-    type Output = DataRequest;
-
-    fn next(&mut self) -> Result<Option<Vec<DataRequest>>, SourceError> {
-        if self.next_id >= self.total_events {
-            println!(
-                "🏁 Source complete: Generated {} total events",
-                self.next_id
-            );
-            return Ok(None);
+#[async_trait]
+impl RequestSequence for HighVolumeGenerator {
+    async fn read(
+        &self,
+        from: &SequencePosition,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<usize, SequencePosition>, EffectError> {
+        let id = from.next_id;
+        if id >= self.total_events {
+            println!("🏁 Source complete: Generated {id} total events");
+            return Ok(FiniteRead::EndOfInput);
         }
 
-        if self.next_id > 0
-            && self.next_id.is_multiple_of(self.outage_interval)
-            && self.outage_failures < 2
+        if id > 0
+            && id.is_multiple_of(self.outage_interval)
+            && self.outage_failures.load(Ordering::SeqCst) < 2
         {
-            self.outage_failures += 1;
+            let attempt = self.outage_failures.fetch_add(1, Ordering::SeqCst) + 1;
             tracing::warn!(
-                next_id = self.next_id,
-                attempt = self.outage_failures,
+                next_id = id,
+                attempt,
                 "Simulated source outage: circuit breaker will wait five seconds before probing"
             );
-            return Err(SourceError::Timeout(
-                SourceDiagnosticReason::TimedOut.into(),
-            ));
+            return Err(EffectError::Timeout("simulated source outage".into()));
         }
 
-        self.outage_failures = 0;
-        let current_id = self.next_id;
-        self.next_id += 1;
-        if self.next_id.is_multiple_of(10_000) {
-            println!("📊 Generated {} events...", self.next_id);
+        self.outage_failures.store(0, Ordering::SeqCst);
+        if (id + 1).is_multiple_of(10_000) {
+            println!("📊 Generated {} events...", id + 1);
         }
-        Ok(Some(vec![DataRequest {
-            id: current_id,
-            should_fail: current_id.is_multiple_of(100),
-            batch: current_id / 100,
-        }]))
+        Ok(FiniteRead::Batch {
+            records: vec![id],
+            next: SequencePosition { next_id: id + 1 },
+        })
     }
 }
 
-/// Successfully processed event from the error-prone transform
+/// Reads the request sequence and maps each recorded position to a request.
+struct HighVolumeSource {
+    port: Port<dyn RequestSequence>,
+}
+
+impl TypedFiniteSourceHandler for HighVolumeSource {
+    type Output = DataRequest;
+
+    fn read(&self) -> Option<SourceRead<DataRequest>> {
+        Some(SourceRead::finite(
+            self.port.clone(),
+            SequencePosition { next_id: 0 },
+            data_request,
+        ))
+    }
+}
+
+fn data_request(id: usize) -> Result<DataRequest, SourceError> {
+    Ok(DataRequest {
+        id,
+        should_fail: id.is_multiple_of(100),
+        batch: id / 100,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProcessedEvent {
     id: usize,
@@ -168,12 +205,13 @@ pub(crate) fn flow_definition_with_options(
         "source outage interval must be positive"
     );
     FlowDefinition::materialize(move |_runtime_config| {
-        let high_volume_source_handler = Port::owned(HighVolumeSource {
-            next_id: 0,
-            total_events,
-            outage_interval,
-            outage_failures: 0,
-        });
+        let high_volume_source_handler = HighVolumeSource {
+            port: Port::to(HighVolumeGenerator {
+                total_events,
+                outage_interval,
+                outage_failures: AtomicU8::new(0),
+            }),
+        };
         let error_processor_handler = error_prone_transform();
         let event_counter_handler = stateful::reduce(
             EventCountState::default(),

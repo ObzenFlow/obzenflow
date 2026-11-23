@@ -1035,7 +1035,8 @@ pub(crate) mod tests {
     // existing journal fixture. FSM acceptance is checked before any action runs.
     macro_rules! source_state_projection_test {
         ($test:ident, $context:ident, $init:ident, $state:ident, $event:ident,
-         $sync:ident, $async:ident, $finite:literal, {$($extra:ident: $value:expr),* $(,)?}) => {
+         $sync:ident, $async:ident, $finite:literal, {$($extra:ident: $value:expr),* $(,)?},
+         [$($async_extra:ident: $async_value:expr),* $(,)?]) => {
             #[tokio::test]
             async fn $test() {
                 use crate::supervised_base::base::Supervisor;
@@ -1049,6 +1050,7 @@ pub(crate) mod tests {
                     let data_journal: Arc<dyn Journal<ChainEvent>> =
                         Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
                     let build_async = |external_events, state_watcher| $async {
+                        $($async_extra: $async_value,)*
                         name: "source_projection".into(),
                         handler: Some(DummySource),
                         data_journal: data_journal.clone(),
@@ -1067,7 +1069,7 @@ pub(crate) mod tests {
                         pending_failure: None,
                         reader_acquired: false,
                         exit: None,
-                        system: "projection".into(),
+                        system: obzenflow_core::SystemBindingEvidence::named("projection").unwrap().binding().clone(),
                         $($extra: $value,)*
                     };
                     let build_sync = || $sync {
@@ -1086,7 +1088,7 @@ pub(crate) mod tests {
                         pending_failure: None,
                         reader_acquired: false,
                         exit: None,
-                        system: "projection".into(),
+                        system: obzenflow_core::SystemBindingEvidence::named("projection").unwrap().binding().clone(),
                         $($extra: $value,)*
                     };
                     let build_fsm = |initial_state| {
@@ -1212,13 +1214,15 @@ pub(crate) mod tests {
         FiniteSourceSupervisor, AsyncFiniteSourceSupervisor, true,
         { pending_boundary_eof: false, pending_boundary_rejected: false,
           continuation: crate::stages::source::SourceContinuation::Refuse {
-              by: crate::stages::source::RefusedBy::Connector } });
+              by: crate::stages::source::RefusedBy::Connector } },
+        [reads: None, kind: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::AsyncFiniteSource]);
     source_state_projection_test!(infinite_source_states_precede_actions,
         InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceState, InfiniteSourceEvent,
         InfiniteSourceSupervisor, AsyncInfiniteSourceSupervisor, false,
         { pending_boundary_begin_drain: false,
           continuation: crate::stages::source::SourceContinuation::Reattach {
-              guarantee: obzenflow_core::event::payloads::execution_payload::ReattachGuarantee::AtMostOnce } });
+              guarantee: obzenflow_core::event::payloads::execution_payload::ReattachGuarantee::AtMostOnce } },
+        [reads: None, kind: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::AsyncInfiniteSource]);
 
     #[tokio::test]
     async fn send_eof_uses_poison_flag_when_breaker_open() {

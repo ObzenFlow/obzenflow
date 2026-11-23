@@ -19,8 +19,8 @@ use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::runtime_config::JournalSync;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -38,32 +38,28 @@ struct Tick {
 impl TypedPayload for Tick {
     const EVENT_TYPE: &'static str = "validation_benchmark.tick";
 }
-#[derive(Clone)]
-struct Ticks {
-    next: u64,
-    count: u64,
-}
-#[obzenflow_runtime::effects::system("ticks")]
+struct Ticks(Port<dyn crate::numbers::NumberFeed>);
+
 impl TypedFiniteSourceHandler for Ticks {
     type Output = Tick;
-    fn next(&mut self) -> Result<Option<Vec<Tick>>, SourceError> {
-        if self.next == self.count {
-            return Ok(None);
-        }
-        let end = (self.next + 500).min(self.count);
-        let rows = (self.next..end)
-            .map(|n| Tick {
-                n,
-                body: "x".repeat(256),
-            })
-            .collect();
-        self.next = end;
-        Ok(Some(rows))
+
+    fn read(&self) -> Option<SourceRead<Tick>> {
+        Some(SourceRead::finite(
+            self.0.clone(),
+            crate::numbers::NextNumber(0),
+            |n| {
+                Ok(Tick {
+                    n,
+                    body: "x".repeat(256),
+                })
+            },
+        ))
     }
 }
+
 fn definition(base: PathBuf, count: u64) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let input = Port::owned(Ticks { next: 0, count });
+        let input = Ticks(crate::numbers::Numbers::counting(count, 500).port());
         let output = DiscardTicks::new();
         Ok(flow! {
             name: "validation_benchmark",

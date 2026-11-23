@@ -15,17 +15,13 @@ use obzenflow_core::event::{
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, Outcomes, TransportContract};
-use obzenflow_dsl::{
-    async_infinite_source, async_source, flow, sink, source, test_flow, transform, FlowDefinition,
-};
+use obzenflow_dsl::{flow, sink, source, test_flow, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedTransformHandler,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::{BackpressureAckGate, JournalProbe};
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +42,9 @@ impl TypedPayload for SeedEvent {
 const KIND_SEED: &str = "seed";
 const KIND_ITER: &str = "iter";
 const KIND_DONE: &str = "done";
+use obzenflow::stages::sources::{ChannelSource, ValuesSource};
+use obzenflow_runtime::effects::EffectContext;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,6 +52,72 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Notify;
+
+fn seed(target: u64) -> SeedEvent {
+    SeedEvent {
+        kind: KIND_SEED.to_string(),
+        depth: 0,
+        target,
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SeedRead(u8);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait SeedInput {
+    #[effect(type = "cycle_convergence.seed.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &SeedRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<SeedEvent, SeedRead>, EffectError>;
+}
+
+/// Supplies one seed. Its input ends once the first iteration starts.
+struct SeedThenEof {
+    target: u64,
+    iteration_started: Arc<Notify>,
+}
+
+#[obzenflow_runtime::effects::system("seed-then-eof")]
+#[async_trait]
+impl SeedInput for SeedThenEof {
+    async fn read(
+        &self,
+        from: &SeedRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<SeedEvent, SeedRead>, EffectError> {
+        if from.0 == 0 {
+            return Ok(FiniteRead::Batch {
+                records: vec![seed(self.target)],
+                next: SeedRead(1),
+            });
+        }
+        self.iteration_started.notified().await;
+        Ok(FiniteRead::EndOfInput)
+    }
+}
+
+struct SeedThenEofSource(Port<dyn SeedInput>);
+
+impl SeedThenEofSource {
+    fn new(target: u64, iteration_started: Arc<Notify>) -> Self {
+        Self(Port::to(SeedThenEof {
+            target,
+            iteration_started,
+        }))
+    }
+}
+
+impl TypedFiniteSourceHandler for SeedThenEofSource {
+    type Output = SeedEvent;
+
+    fn read(&self) -> Option<SourceRead<SeedEvent>> {
+        Some(SourceRead::finite(self.0.clone(), SeedRead(0), Ok))
+    }
+}
 
 fn enforced_backpressure(
     window: u64,
@@ -231,81 +296,6 @@ async fn assert_entry_closes_its_cycle_before_completing(
 }
 
 #[derive(Clone, Debug)]
-struct SingleSeedSource {
-    emitted: bool,
-    target: u64,
-}
-
-impl SingleSeedSource {
-    fn new(target: u64) -> Self {
-        Self {
-            emitted: false,
-            target,
-        }
-    }
-}
-
-#[obzenflow::system("single-seed")]
-impl TypedFiniteSourceHandler for SingleSeedSource {
-    type Output = SeedEvent;
-
-    fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-
-        Ok(Some(vec![SeedEvent {
-            kind: KIND_SEED.to_string(),
-            depth: 0,
-            target: self.target,
-        }]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SeedThenEofSource {
-    state: u8,
-    target: u64,
-    iteration_started: Arc<Notify>,
-}
-
-impl SeedThenEofSource {
-    fn new(target: u64, iteration_started: Arc<Notify>) -> Self {
-        Self {
-            state: 0,
-            target,
-            iteration_started,
-        }
-    }
-}
-
-#[obzenflow::system("seed-then-eof")]
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for SeedThenEofSource {
-    type Output = SeedEvent;
-
-    async fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
-        match self.state {
-            0 => {
-                self.state = 1;
-                Ok(Some(vec![SeedEvent {
-                    kind: KIND_SEED.to_string(),
-                    depth: 0,
-                    target: self.target,
-                }]))
-            }
-            1 => {
-                self.iteration_started.notified().await;
-                self.state = 2;
-                Ok(None)
-            }
-            _ => Ok(None),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 struct EntryConvergeTransform {
     processed_data: Arc<AtomicU64>,
 }
@@ -423,10 +413,7 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
         done_events: done_count.clone(),
     }));
     let iteration_started = Arc::new(Notify::new());
-    let source = Port::owned(SeedThenEofSource::new(
-        target_iterations,
-        iteration_started.clone(),
-    ));
+    let source = SeedThenEofSource::new(target_iterations, iteration_started.clone());
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
     let iter = IterationTransform::new(iter_processed_for_flow, Some(iteration_started));
 
@@ -436,7 +423,7 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
         journals: disk_journals(journal_root_for_flow.clone()),
 
         stages: {
-            src = async_source!(SeedEvent => source);
+            src = source!(SeedEvent => source);
             eof_entry = transform!(SeedEvent -> SeedEvent => entry);
             eof_iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
@@ -552,75 +539,6 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct SeedThenDrainSource {
-    state: u8,
-    target: u64,
-}
-
-impl SeedThenDrainSource {
-    fn new(target: u64) -> Self {
-        Self { state: 0, target }
-    }
-}
-
-#[obzenflow::system("seed-then-drain")]
-#[async_trait]
-impl TypedAsyncInfiniteSourceHandler for SeedThenDrainSource {
-    type Output = SeedEvent;
-
-    async fn next(&mut self) -> std::result::Result<Vec<Self::Output>, SourceError> {
-        match self.state {
-            0 => {
-                self.state = 1;
-                Ok(vec![SeedEvent {
-                    kind: KIND_SEED.to_string(),
-                    depth: 0,
-                    target: self.target,
-                }])
-            }
-            _ => std::future::pending::<Result<Vec<Self::Output>, SourceError>>().await,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DualSeedSource {
-    emitted: u8,
-    converge_target: u64,
-    diverge_target: u64,
-}
-
-impl DualSeedSource {
-    fn new(converge_target: u64, diverge_target: u64) -> Self {
-        Self {
-            emitted: 0,
-            converge_target,
-            diverge_target,
-        }
-    }
-}
-
-#[obzenflow::system("dual-seed")]
-impl TypedFiniteSourceHandler for DualSeedSource {
-    type Output = SeedEvent;
-
-    fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
-        let target = match self.emitted {
-            0 => self.converge_target,
-            1 => self.diverge_target,
-            _ => return Ok(None),
-        };
-        self.emitted = self.emitted.saturating_add(1);
-
-        Ok(Some(vec![SeedEvent {
-            kind: KIND_SEED.to_string(),
-            depth: 0,
-            target,
-        }]))
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let journal_root = unique_journal_dir("cycle_buffers_drain");
@@ -639,7 +557,11 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let sink = perform(seed_kind).through(Port::to(DoneCounter {
         done_events: done_count.clone(),
     }));
-    let source = Port::owned(SeedThenDrainSource::new(target_iterations));
+    let (seed_input, seeds) = tokio::sync::mpsc::channel(1);
+    seed_input
+        .try_send(seed(target_iterations))
+        .expect("the channel holds the seed");
+    let source = ChannelSource::new(seeds);
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
     let iter = IterationTransform::new(iter_processed_for_flow, None);
 
@@ -649,7 +571,7 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
         journals: disk_journals(journal_root),
 
         stages: {
-            src = async_infinite_source!(SeedEvent => source);
+            src = source!(SeedEvent => source);
             drain_entry = transform!(SeedEvent -> SeedEvent => entry);
             drain_iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
@@ -787,7 +709,7 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
     let diverge_target = 1_000u64;
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = Port::owned(DualSeedSource::new(converge_target, diverge_target));
+        let source = ValuesSource::new([seed(converge_target), seed(diverge_target)]);
         let entry = EntryConvergeTransform::new(entry_processed_for_flow);
         let iter = IterationTransform::new(iter_processed_for_flow, None);
 
@@ -848,8 +770,8 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
 #[tokio::test]
 async fn cycle_rejects_sccs_with_multiple_entry_points() {
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = Port::owned(SingleSeedSource::new(1));
-        let source_b = Port::owned(SingleSeedSource::new(1));
+        let source_a = ValuesSource::new([seed(1)]);
+        let source_b = ValuesSource::new([seed(1)]);
         let transform_a = EntryConvergeTransform::new(Arc::new(AtomicU64::new(0)));
         let transform_b = EntryConvergeTransform::new(Arc::new(AtomicU64::new(0)));
         let sink = perform(seed_kind).through(Port::to(DoneCounter {

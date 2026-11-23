@@ -12,7 +12,7 @@ mod replay_testkit {
     mod manifest;
     mod ordered_stage_journal;
     mod prefix_stable;
-    mod reattaching_source;
+    mod preloaded_input;
     mod run_dir;
     mod stage_journal;
     mod unsynced_application;
@@ -21,7 +21,7 @@ mod replay_testkit {
     mod unsynced_context;
     pub use self::{
         bootstrap::*, count_deliveries::*, discard::*, journal::*, manifest::*, prefix_stable::*,
-        reattaching_source::*, run_dir::*, stage_journal::*, unsynced_application::*,
+        preloaded_input::*, run_dir::*, stage_journal::*, unsynced_application::*,
         unsynced_candidate::*, unsynced_context::*,
     };
 }

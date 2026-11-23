@@ -21,11 +21,11 @@ use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
     ChainPayload, Departure, DepartureAction, StageFatalReason, StageFatalRecorded,
 };
-use obzenflow_core::journal::archive_actions::FailureEvidence;
+use obzenflow_core::journal::archive_actions::{ArchiveRefusal, FailureEvidence};
 use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::{EventType, TypedPayload};
 use obzenflow_dsl::dsl::FlowBuildError;
-use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, source, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::journal::read::{
@@ -37,11 +37,7 @@ use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{AppTable, CandidateSet, ResolvedRuntimeConfig};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedInfiniteSourceHandler,
-};
-use obzenflow_runtime::stages::SourceError;
-use replay_testkit::ReattachingSource;
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -145,26 +141,6 @@ const RECORDED: App = App {
     quiet: None,
     failing: None,
 };
-
-#[derive(Clone, Debug)]
-struct BoundedReader {
-    next_value: u64,
-    remaining: u64,
-}
-
-impl TypedInfiniteSourceHandler for BoundedReader {
-    type Output = Reading;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(Vec::new());
-        }
-        self.remaining -= 1;
-        let value = self.next_value;
-        self.next_value += 1;
-        Ok(vec![Reading { value }])
-    }
-}
 
 type Executed = Arc<Mutex<Vec<u64>>>;
 
@@ -299,10 +275,9 @@ async fn build(
         journal_base.to_path_buf(),
     );
     let handle = FlowDefinition::materialize_with(move |_, settings: Settings| {
-        let reader = Port::to(ReattachingSource(BoundedReader {
-            next_value: first_value,
-            remaining: count,
-        }));
+        let reader = replay_testkit::preloaded_input(
+            (first_value..first_value + count).map(|value| Reading { value }),
+        );
         let score_transform = ScoreTransform {
             app: App {
                 threshold: settings.affinity.threshold,
@@ -320,7 +295,7 @@ async fn build(
             journals: disk_journals(base),
 
             stages: {
-                src = infinite_source!(Reading => reader);
+                src = source!(Reading => reader);
                 score = effectful_transform!(
                     Reading -> { Scored, Score, Unscored, Noted, Capped }
                         => score_transform);
@@ -1060,16 +1035,26 @@ async fn build_accounts(
     burst: f64,
     delivered: Arc<AtomicUsize>,
 ) -> Result<FlowHandle> {
+    accounts_flow(journal_base, rate, burst, delivered)
+        .build(context(json!({ "accounts_file": accounts_file })))
+        .await
+        .map_err(|e| anyhow!("flow failed to build: {e:?}"))
+}
+
+fn accounts_flow(
+    journal_base: &Path,
+    rate: f64,
+    burst: f64,
+    delivered: Arc<AtomicUsize>,
+) -> FlowDefinition {
     let base = journal_base.to_path_buf();
     FlowDefinition::materialize_with(move |_, settings: AccountsSettings| {
-        let accounts_source = Port::to(
-            YamlSource::builder(AccountYaml)
-                .path(&settings.accounts_file)
-                .selection(YamlSelection::SequenceAt("/accounts".into()))
-                .batch_size(1)
-                .build()
-                .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?,
-        );
+        let accounts_source = YamlSource::builder(AccountYaml)
+            .path(&settings.accounts_file)
+            .selection(YamlSelection::SequenceAt("/accounts".into()))
+            .batch_size(1)
+            .build()
+            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
         let collect_handler = replay_testkit::CountDeliveries::<Account>::new(delivered);
         Ok(flow! {
             name: "app_accounts",
@@ -1087,15 +1072,10 @@ async fn build_accounts(
             }
         })
     })
-    .build(context(json!({ "accounts_file": accounts_file })))
-    .await
-    .map_err(|e| anyhow!("flow failed to build: {e:?}"))
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_changed_app_path_refuses_an_interrupted_source_and_reaches_the_footer() -> Result<()> {
-    const KEY: &str = "app.accounts_file";
-
+async fn changed_app_path_resume_refused() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
     let recorded_file = temp.path().join("accounts.yaml");
@@ -1122,47 +1102,35 @@ async fn a_changed_app_path_refuses_an_interrupted_source_and_reaches_the_footer
     }
     let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
 
-    let outcome = {
+    let refused = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
         );
-        let handle = build_accounts(
-            &journal_base,
-            &staging_file,
-            0.5,
-            3.0,
-            Arc::new(AtomicUsize::new(0)),
-        )
-        .await?;
-        tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
+        accounts_flow(&journal_base, 0.5, 3.0, Arc::new(AtomicUsize::new(0)))
+            .build(context(json!({ "accounts_file": staging_file })))
             .await
-            .map_err(|_| anyhow!("timeout waiting for the refused resume to end"))?
+            .err()
+            .ok_or_else(|| anyhow!("a changed accounts path must refuse the resume"))?
     };
-    assert!(outcome.is_err(), "a changed input refuses the resume");
-    let r1 = replay_testkit::latest_run_dir(&journal_base);
+    match &refused.error {
+        FlowBuildError::ArchiveVerbRefused(ArchiveRefusal::SourceSystems {
+            verb, changed, ..
+        }) => {
+            assert_eq!(*verb, ReplayVerb::Resume);
+            let stages: Vec<&str> = changed.iter().map(|system| system.stage.as_str()).collect();
+            assert_eq!(stages, ["accounts"]);
+        }
+        other => panic!("expected the changed binding refusal, got: {other}"),
+    }
     assert_eq!(
-        source_refusals(&r1).await?,
-        [(
-            "accounts".to_string(),
-            SourceContinuationRefusal::InputChanged {
-                part: "file".to_string()
-            }
-        )]
-    );
-    assert_eq!(
-        read_configuration_refusals(&r1).await?,
-        stages(&["accounts"])
-    );
-    assert_eq!(changed_keys(&r1)?, [(r0, vec![KEY.to_string()])]);
-    assert_eq!(
-        failure(&r1, ReplayVerb::Resume).await?,
-        FailureEvidence::DepartedFromArchive
+        std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?,
+        r0,
+        "the refused resume starts no run"
     );
 
-    let r1 = std::fs::canonicalize(r1)?;
     {
         let _bootstrap = install_bootstrap_config(
-            replay_testkit::bootstrap_with_archive(archive(r1.clone(), ReplayVerb::Resume)).await,
+            replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
         );
         let handle = build_accounts(
             &journal_base,

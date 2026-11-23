@@ -45,12 +45,6 @@ enum HostFault {
     Panic,
 }
 
-#[derive(Clone, Debug)]
-struct PendingLifetimeSource {
-    started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    cancelled: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-}
-
 struct PendingPollDrop(Option<oneshot::Sender<()>>);
 
 impl Drop for PendingPollDrop {
@@ -63,37 +57,27 @@ impl Drop for PendingPollDrop {
     }
 }
 
-#[obzenflow_runtime::effects::system("pending-lifetime")]
-#[async_trait::async_trait]
-impl obzenflow_runtime::stages::common::handlers::TypedAsyncInfiniteSourceHandler
-    for PendingLifetimeSource
-{
-    type Output = IdlePayload;
-
-    async fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
-        let _drop = PendingPollDrop(self.cancelled.lock().unwrap().take());
-        if let Some(started) = self.started.lock().unwrap().take() {
-            started.send(()).unwrap();
-        }
-        std::future::pending().await
-    }
-}
-
 fn pending_lifetime_source() -> (
-    PendingLifetimeSource,
+    IdleInfiniteSource,
     oneshot::Receiver<()>,
     oneshot::Receiver<()>,
 ) {
     let (started_tx, started_rx) = oneshot::channel();
     let (cancelled_tx, cancelled_rx) = oneshot::channel();
-    (
-        PendingLifetimeSource {
-            started: Arc::new(Mutex::new(Some(started_tx))),
-            cancelled: Arc::new(Mutex::new(Some(cancelled_tx))),
-        },
-        started_rx,
-        cancelled_rx,
-    )
+    let started = Arc::new(Mutex::new(Some(started_tx)));
+    let cancelled = Arc::new(Mutex::new(Some(cancelled_tx)));
+    let source = IdleInfiniteSource::waiting(move || {
+        let started = started.lock().unwrap().take();
+        let dropped = PendingPollDrop(cancelled.lock().unwrap().take());
+        Box::pin(async move {
+            let _dropped = dropped;
+            if let Some(started) = started {
+                started.send(()).unwrap();
+            }
+            std::future::pending().await
+        })
+    });
+    (source, started_rx, cancelled_rx)
 }
 
 // Dropping the application requests task cancellation; the listener is freed
@@ -122,8 +106,6 @@ async fn dropped_standalone_application_cancels_runtime_and_pending_stage_work()
 }
 
 async fn application_drop(hosted: bool) {
-    use obzenflow_dsl::async_infinite_source;
-
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("obzenflow.toml");
     let (bound_tx, bound_rx) = oneshot::channel();
@@ -132,7 +114,6 @@ async fn application_drop(hosted: bool) {
         )).unwrap();
     let (left, left_started, left_cancelled) = pending_lifetime_source();
     let (right, right_started, right_cancelled) = pending_lifetime_source();
-    let (left, right) = (Port::owned(left), Port::owned(right));
     let (flow_tx, flow_rx) = oneshot::channel();
     let flow_tx = Mutex::new(Some(flow_tx));
     let application = tokio::spawn(FlowApplication::launch(
@@ -141,8 +122,8 @@ async fn application_drop(hosted: bool) {
             Ok(flow! {
                 name: "application_drop", journals: crate::journal::memory_journals(),
                 stages: {
-                    left = async_infinite_source!(IdlePayload => left);
-                    right = async_infinite_source!(IdlePayload => right);
+                    left = source!(IdlePayload => left);
+                    right = source!(IdlePayload => right);
                     sink = sink!(IdlePayload => sink);
                 },
                 topology: { left |> sink; right |> sink; }
@@ -259,11 +240,11 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
     let (preparing_tx, preparing_rx) = oneshot::channel();
     let application = tokio::spawn(FlowApplication::launch(
         FlowDefinition::materialize(move |_| {
-            let source = Port::owned(IdleInfiniteSource);
+            let source = IdleInfiniteSource::new();
             let sink = noop_sink();
             Ok(flow! {
                 name: "application_drop_preparation", journals: crate::journal::memory_journals(),
-                stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
                 topology: { src |> sink; }
             })
         }),
@@ -368,11 +349,11 @@ async fn hosted_start_observes_runtime_exit_before_readiness() {
         )).unwrap();
         let result = tokio::time::timeout(Duration::from_secs(2), FlowApplication::launch(
             FlowDefinition::new(move |context| async move {
-                let source = Port::owned(IdleInfiniteSource);
+                let source = IdleInfiniteSource::new();
                 let sink = noop_sink();
                 let flow = flow! {
                     name: "startup_runtime_exit", journals: crate::journal::memory_journals(),
-                    stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                    stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
                     topology: { src |> sink; }
                 }.build(context).await?;
                 assert!(!flow.current_state().is_terminal());
@@ -403,16 +384,6 @@ async fn hosted_start_observes_runtime_exit_before_readiness() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ready_startup_signals_withhold_automatic_run() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    #[derive(Clone, Debug)]
-    struct CountingSource(Arc<AtomicUsize>);
-    #[obzenflow_runtime::effects::system("counting")]
-    impl TypedInfiniteSourceHandler for CountingSource {
-        type Output = IdlePayload;
-        fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Vec::new())
-        }
-    }
     for signal in [ShutdownSignal::Sigint, ShutdownSignal::Sigterm] {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("obzenflow.toml");
@@ -434,11 +405,11 @@ enabled = false
         let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
         let hook_observed = observed.clone();
         let definition = FlowDefinition::materialize(move |_| {
-            let source = Port::owned(CountingSource(source_calls));
+            let source = counting_source(source_calls);
             let sink = noop_sink();
             Ok(flow! {
                 name: "startup_signal", journals: crate::journal::memory_journals(),
-                stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
                 topology: { src |> sink; }
             })
         });
@@ -528,11 +499,11 @@ enabled = false
     let (flow_tx, flow_rx) = oneshot::channel();
     let flow_tx = Mutex::new(Some(flow_tx));
     let definition = FlowDefinition::materialize(move |_| {
-        let source = Port::owned(IdleInfiniteSource);
+        let source = IdleInfiniteSource::new();
         let sink = noop_sink();
         Ok(flow! {
             name: "startup_cleanup_join", journals: crate::journal::memory_journals(),
-            stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+            stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
             topology: { src |> sink; }
         })
     });
@@ -615,24 +586,6 @@ async fn host_completion_and_panic_remain_primary_across_application_phases() {
     use futures::FutureExt;
     use obzenflow_core::event::{PipelineLifecycleEvent, PipelineStopAdmission, SystemPayload};
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Clone, Debug)]
-    struct TestSource {
-        terminal: bool,
-        calls: Arc<AtomicUsize>,
-    }
-    #[obzenflow_runtime::effects::system("test-source")]
-    impl TypedFiniteSourceHandler for TestSource {
-        type Output = IdlePayload;
-        fn next(&mut self) -> Result<Option<Vec<IdlePayload>>, SourceError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(if self.terminal {
-                None
-            } else {
-                Some(Vec::new())
-            })
-        }
-    }
 
     for phase in [
         FaultPhase::BeforeRun,
@@ -740,10 +693,7 @@ enabled = false
             }
             .boxed();
             let definition = FlowDefinition::materialize(move |_| {
-                let source = Port::owned(TestSource {
-                    terminal: matches!(phase, FaultPhase::Terminal),
-                    calls: source_calls,
-                });
+                let source = FiniteInput::new(matches!(phase, FaultPhase::Terminal), source_calls);
                 let sink = noop_sink();
                 Ok(flow! {
                     name: "managed_host_fault",
@@ -956,11 +906,11 @@ enabled = false
                 tokio::spawn(async {})
             });
         let definition = FlowDefinition::materialize(move |_| {
-            let source = Port::owned(IdleInfiniteSource);
+            let source = IdleInfiniteSource::new();
             let sink = noop_sink();
             Ok(flow! {
                 name: "embedded_host_scope", journals: crate::journal::memory_journals(),
-                stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
                 topology: { src |> sink; }
             })
         });
@@ -1064,11 +1014,11 @@ enabled = false
                 let admitted_tx = Mutex::new(Some(admitted_tx));
                 let application = FlowApplication::launch(
                     FlowDefinition::materialize(move |_| {
-                        let source = Port::owned(IdleInfiniteSource);
+                        let source = IdleInfiniteSource::new();
                         let sink = noop_sink();
                         Ok(flow! {
                             name: "failed_exit_signal", journals: crate::journal::memory_journals(),
-                            stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                            stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
                             topology: { src |> sink; }
                         })
                     }),
@@ -1170,20 +1120,11 @@ enabled = false
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graceful_finite_completion_and_infinite_cancellation_match_application_results() {
-    #[derive(Clone, Debug)]
-    struct WaitingFiniteSource;
-    #[obzenflow_runtime::effects::system("waiting-finite")]
-    impl TypedFiniteSourceHandler for WaitingFiniteSource {
-        type Output = IdlePayload;
-        fn next(&mut self) -> Result<Option<Vec<IdlePayload>>, SourceError> {
-            Ok(Some(Vec::new()))
-        }
-    }
     for finite in [false, true] {
         for cancel in [false, true] {
             let definition = if finite {
                 FlowDefinition::materialize(move |_| {
-                    let source = Port::owned(WaitingFiniteSource);
+                    let source = FiniteInput::waiting();
                     let sink = noop_sink();
                     Ok(flow! {
                         name: "finite_stop_outcome", journals: crate::journal::memory_journals(),
@@ -1193,11 +1134,11 @@ async fn graceful_finite_completion_and_infinite_cancellation_match_application_
                 })
             } else {
                 FlowDefinition::materialize(move |_| {
-                    let source = Port::owned(IdleInfiniteSource);
+                    let source = IdleInfiniteSource::new();
                     let sink = noop_sink();
                     Ok(flow! {
                         name: "infinite_stop_outcome", journals: crate::journal::memory_journals(),
-                        stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                        stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
                         topology: { src |> sink; }
                     })
                 })

@@ -20,6 +20,7 @@ use crate::replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow::stages::joins;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -28,12 +29,37 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+fn reference_rows() -> impl TypedFiniteSourceHandler<Output = RefItem> {
+    ValuesSource::new(
+        (1..=3)
+            .map(|index| RefItem {
+                key: format!("r{index}"),
+                label: format!("label-{index}"),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Stream source: five rows whose keys cycle the three catalog keys in an
+/// order that keeps every key's catalog row ahead of its first stream use
+/// under the canonical alternation (reference first on the ordinal tie), so
+/// the live inner join emits all five.
+fn stream_rows() -> impl TypedFiniteSourceHandler<Output = StreamItem> {
+    ValuesSource::new(
+        (1..=5_u64)
+            .map(|index| StreamItem {
+                key: format!("r{}", ((index - 1) % 3) + 1),
+                value: index,
+            })
+            .collect::<Vec<_>>(),
+    )
+}
 
 static JOIN_REPLAY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -86,66 +112,6 @@ struct FinalOutput {
 
 impl TypedPayload for FinalOutput {
     const EVENT_TYPE: &'static str = "join_replay.output";
-}
-
-/// Reference source: three catalog rows, keys r1..r3.
-#[derive(Clone, Debug)]
-struct RefSource {
-    next_index: usize,
-}
-
-impl RefSource {
-    fn new() -> Self {
-        Self { next_index: 0 }
-    }
-}
-
-#[obzenflow::system("references")]
-impl TypedFiniteSourceHandler for RefSource {
-    type Output = RefItem;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next_index >= 3 {
-            return Ok(None);
-        }
-        self.next_index += 1;
-        Ok(Some(vec![RefItem {
-            key: format!("r{}", self.next_index),
-            label: format!("label-{}", self.next_index),
-        }]))
-    }
-}
-
-/// Stream source: five rows whose keys cycle the three catalog keys in an
-/// order that keeps every key's catalog row ahead of its first stream use
-/// under the canonical alternation (reference first on the ordinal tie), so
-/// the live inner join emits all five.
-#[derive(Clone, Debug)]
-struct StreamSource {
-    next_index: usize,
-}
-
-impl StreamSource {
-    fn new() -> Self {
-        Self { next_index: 0 }
-    }
-}
-
-#[obzenflow::system("streams")]
-impl TypedFiniteSourceHandler for StreamSource {
-    type Output = StreamItem;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next_index >= 5 {
-            return Ok(None);
-        }
-        self.next_index += 1;
-        let key = format!("r{}", ((self.next_index - 1) % 3) + 1);
-        Ok(Some(vec![StreamItem {
-            key,
-            value: self.next_index as u64,
-        }]))
-    }
 }
 
 struct CallCounter {
@@ -225,8 +191,8 @@ fn join_fn(reference: RefItem, stream: StreamItem) -> JoinedItem {
 /// Hydrating join (FiniteEof): the structural orderer, no merge machinery.
 fn build_hydrating_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = Port::owned(RefSource::new());
-        let stream_source = Port::owned(StreamSource::new());
+        let reference_source = reference_rows();
+        let stream_source = stream_rows();
         let joined = joins::inner(
             |r: &RefItem| r.key.clone(),
             |s: &StreamItem| s.key.clone(),
@@ -257,8 +223,8 @@ fn build_hydrating_flow(journal_base: PathBuf) -> FlowDefinition {
 /// and it runs the canonical cross-side merge.
 fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = Port::owned(RefSource::new());
-        let stream_source = Port::owned(StreamSource::new());
+        let reference_source = reference_rows();
+        let stream_source = stream_rows();
         let joined = joins::inner_live(
             |r: &RefItem| r.key.clone(),
             |s: &StreamItem| s.key.clone(),
@@ -445,8 +411,8 @@ async fn live_join_canonical_merge_reproduces_under_replay() {
 /// interleaving, so it runs the canonical cross-side dispatch.
 fn build_live_flow_no_effect(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = Port::owned(RefSource::new());
-        let stream_source = Port::owned(StreamSource::new());
+        let reference_source = reference_rows();
+        let stream_source = stream_rows();
         let joined = joins::inner_live(
             |r: &RefItem| r.key.clone(),
             |s: &StreamItem| s.key.clone(),

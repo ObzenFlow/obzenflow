@@ -7,17 +7,15 @@ use async_trait::async_trait;
 use obzenflow::effects::Port;
 use obzenflow::testing::CountingSink;
 use obzenflow_adapters::middleware::rate_limit;
-use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, TypedPayload};
-use obzenflow_dsl::{async_source, join, sink, source, stateful, test_flow, transform};
+use obzenflow_dsl::{join, sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, StatefulEmission, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler,
     TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the rate-limiter integration test. The JSON
@@ -31,6 +29,9 @@ struct RateLimiterTestEvent {
 impl TypedPayload for RateLimiterTestEvent {
     const EVENT_TYPE: &'static str = "rate_limiter.event";
 }
+use obzenflow::stages::sources::ValuesSource;
+use obzenflow_runtime::effects::{EffectContext, EffectError};
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -68,75 +69,6 @@ async fn rate_limiter_delayed_total_from_runtime_context(
             Ok(None) => return Ok(delayed_total),
             Err(e) => return Err(anyhow!("failed to read stage journal: {e}")),
         }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SequenceSource {
-    total: usize,
-    emitted: usize,
-}
-
-impl SequenceSource {
-    fn new(total: usize) -> Self {
-        Self { total, emitted: 0 }
-    }
-}
-
-#[obzenflow::system("sequence")]
-impl TypedFiniteSourceHandler for SequenceSource {
-    type Output = RateLimiterTestEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted >= self.total {
-            return Ok(None);
-        }
-
-        let event = RateLimiterTestEvent {
-            index: self.emitted as u64,
-        };
-        self.emitted += 1;
-        Ok(Some(vec![event]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct BatchedSource {
-    batches: Vec<usize>,
-    batch_index: usize,
-    next_event_id: usize,
-}
-
-impl BatchedSource {
-    fn new(batches: Vec<usize>) -> Self {
-        Self {
-            batches,
-            batch_index: 0,
-            next_event_id: 0,
-        }
-    }
-}
-
-#[obzenflow::system("batched")]
-impl TypedFiniteSourceHandler for BatchedSource {
-    type Output = RateLimiterTestEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let Some(batch_size) = self.batches.get(self.batch_index).copied() else {
-            return Ok(None);
-        };
-
-        self.batch_index += 1;
-        let start = self.next_event_id;
-        self.next_event_id += batch_size;
-
-        let events = (start..start + batch_size)
-            .map(|index| RateLimiterTestEvent {
-                index: index as u64,
-            })
-            .collect();
-
-        Ok(Some(events))
     }
 }
 
@@ -183,7 +115,7 @@ fn counting_sink<T>() -> (CountingSink<T>, Arc<AtomicUsize>) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
     let (sink, count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(SequenceSource::new(2));
+    let source = sequence(2);
     let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
@@ -228,7 +160,7 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
     let (sink, count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(SequenceSource::new(1));
+    let source = sequence(1);
     let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
@@ -263,7 +195,7 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
-    let source = Port::owned(SequenceSource::new(1));
+    let source = sequence(1);
     let passthrough = PassthroughTransform;
     let (sink, _count) = counting_sink::<RateLimiterTestEvent>();
     let result = test_flow! {
@@ -301,6 +233,82 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
 }
 
 /// Source step in the FLOWIP-114m no-charge tests. `Done` ends the source.
+fn sequence(total: u64) -> impl TypedFiniteSourceHandler<Output = RateLimiterTestEvent> {
+    ValuesSource::new(
+        (0..total)
+            .map(|index| RateLimiterTestEvent { index })
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BatchRead {
+    batch: usize,
+    next_id: u64,
+}
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait BatchInput {
+    #[effect(type = "rate_limiter.batches.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &BatchRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<RateLimiterTestEvent, BatchRead>, EffectError>;
+}
+
+/// Supplies one batch of the given size per read.
+struct Batches {
+    sizes: Vec<u64>,
+}
+
+#[obzenflow_runtime::effects::system("batches")]
+#[async_trait]
+impl BatchInput for Batches {
+    async fn read(
+        &self,
+        from: &BatchRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<RateLimiterTestEvent, BatchRead>, EffectError> {
+        let Some(size) = self.sizes.get(from.batch).copied() else {
+            return Ok(FiniteRead::EndOfInput);
+        };
+        Ok(FiniteRead::Batch {
+            records: (from.next_id..from.next_id + size)
+                .map(|index| RateLimiterTestEvent { index })
+                .collect(),
+            next: BatchRead {
+                batch: from.batch + 1,
+                next_id: from.next_id + size,
+            },
+        })
+    }
+}
+
+struct BatchedSource(Port<dyn BatchInput>);
+
+impl BatchedSource {
+    fn new(sizes: Vec<u64>) -> Self {
+        Self(Port::to(Batches { sizes }))
+    }
+}
+
+impl TypedFiniteSourceHandler for BatchedSource {
+    type Output = RateLimiterTestEvent;
+
+    fn read(&self) -> Option<SourceRead<RateLimiterTestEvent>> {
+        Some(SourceRead::finite(
+            self.0.clone(),
+            BatchRead {
+                batch: 0,
+                next_id: 0,
+            },
+            Ok,
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum SourceStep {
     Data,
@@ -309,105 +317,110 @@ enum SourceStep {
     Done,
 }
 
-/// Sync finite source that scripts a sequence of polls so tests can exercise
-/// empty-batch and error outcomes alongside data batches.
-#[derive(Clone, Debug)]
-struct ScriptedSyncSource {
-    steps: Vec<SourceStep>,
-    index: usize,
-    next_event_id: usize,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ScriptRead {
+    next_id: u64,
 }
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait ScriptedInput {
+    #[effect(type = "rate_limiter.scripted.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &ScriptRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<RateLimiterTestEvent, ScriptRead>, EffectError>;
+}
+
+/// Plays one scripted step per physical read: data, an empty reply, a
+/// failed read or the end of input.
+struct Script {
+    steps: Vec<SourceStep>,
+    played: AtomicUsize,
+}
+
+#[obzenflow_runtime::effects::system("scripted")]
+#[async_trait]
+impl ScriptedInput for Script {
+    async fn read(
+        &self,
+        from: &ScriptRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<RateLimiterTestEvent, ScriptRead>, EffectError> {
+        let step = self
+            .steps
+            .get(self.played.fetch_add(1, Ordering::SeqCst))
+            .copied()
+            .unwrap_or(SourceStep::Done);
+        match step {
+            SourceStep::Data => Ok(FiniteRead::Batch {
+                records: vec![RateLimiterTestEvent {
+                    index: from.next_id,
+                }],
+                next: ScriptRead {
+                    next_id: from.next_id + 1,
+                },
+            }),
+            SourceStep::Empty => Ok(FiniteRead::Batch {
+                records: Vec::new(),
+                next: from.clone(),
+            }),
+            SourceStep::Err => Err(EffectError::Transport("scripted source error".into())),
+            SourceStep::Done => Ok(FiniteRead::EndOfInput),
+        }
+    }
+}
+
+fn script(steps: Vec<SourceStep>) -> SourceRead<RateLimiterTestEvent> {
+    SourceRead::finite(
+        Port::to(Script {
+            steps,
+            played: AtomicUsize::new(0),
+        }),
+        ScriptRead { next_id: 0 },
+        Ok,
+    )
+}
+
+/// Synchronous finite source that plays a scripted read sequence.
+struct ScriptedSyncSource(Vec<SourceStep>);
 
 impl ScriptedSyncSource {
     fn new(steps: Vec<SourceStep>) -> Self {
-        Self {
-            steps,
-            index: 0,
-            next_event_id: 0,
-        }
+        Self(steps)
     }
 }
 
-#[obzenflow::system("scripted-sync")]
 impl TypedFiniteSourceHandler for ScriptedSyncSource {
     type Output = RateLimiterTestEvent;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let step = self
-            .steps
-            .get(self.index)
-            .copied()
-            .unwrap_or(SourceStep::Done);
-        self.index += 1;
-        match step {
-            SourceStep::Data => {
-                let id = self.next_event_id;
-                self.next_event_id += 1;
-                Ok(Some(vec![RateLimiterTestEvent { index: id as u64 }]))
-            }
-            SourceStep::Empty => Ok(Some(Vec::new())),
-            SourceStep::Err => Err(SourceError::Other(
-                SourceDiagnosticReason::Unclassified.into(),
-            )),
-            SourceStep::Done => Ok(None),
-        }
+    fn read(&self) -> Option<SourceRead<RateLimiterTestEvent>> {
+        Some(script(self.0.clone()))
     }
 }
 
-/// Async counterpart of `ScriptedSyncSource`.
-#[derive(Clone, Debug)]
-struct ScriptedAsyncSource {
-    steps: Vec<SourceStep>,
-    index: usize,
-    next_event_id: usize,
-}
+/// Asynchronous finite source that plays a scripted read sequence.
+struct ScriptedAsyncSource(Vec<SourceStep>);
 
 impl ScriptedAsyncSource {
     fn new(steps: Vec<SourceStep>) -> Self {
-        Self {
-            steps,
-            index: 0,
-            next_event_id: 0,
-        }
+        Self(steps)
     }
 }
 
-#[obzenflow::system("scripted-async")]
-#[async_trait]
 impl TypedAsyncFiniteSourceHandler for ScriptedAsyncSource {
     type Output = RateLimiterTestEvent;
 
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let step = self
-            .steps
-            .get(self.index)
-            .copied()
-            .unwrap_or(SourceStep::Done);
-        self.index += 1;
-        tokio::task::yield_now().await;
-        match step {
-            SourceStep::Data => {
-                let id = self.next_event_id;
-                self.next_event_id += 1;
-                Ok(Some(vec![RateLimiterTestEvent { index: id as u64 }]))
-            }
-            SourceStep::Empty => Ok(Some(Vec::new())),
-            SourceStep::Err => Err(SourceError::Other(
-                SourceDiagnosticReason::Unclassified.into(),
-            )),
-            SourceStep::Done => Ok(None),
-        }
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        Ok(())
+    fn read(&self) -> Option<SourceRead<RateLimiterTestEvent>> {
+        Some(script(self.0.clone()))
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> Result<()> {
     let (sink, count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(BatchedSource::new(vec![2, 2]));
+    let source = BatchedSource::new(vec![2, 2]);
     let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
@@ -467,18 +480,15 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
     let (sink, count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(ScriptedAsyncSource::new(vec![
-        SourceStep::Data,
-        SourceStep::Data,
-        SourceStep::Done,
-    ]));
+    let source =
+        ScriptedAsyncSource::new(vec![SourceStep::Data, SourceStep::Data, SourceStep::Done]);
     let test_handle = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_async_finite_eof_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_finite_eof_no_charge")),
 
         stages: {
-            src = async_source!(RateLimiterTestEvent with {
+            src = source!(RateLimiterTestEvent with {
                 rate_limit(1.0).burst_capacity(2.0)
             } => source);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -513,11 +523,8 @@ async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
     let (sink, count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(ScriptedSyncSource::new(vec![
-        SourceStep::Data,
-        SourceStep::Data,
-        SourceStep::Done,
-    ]));
+    let source =
+        ScriptedSyncSource::new(vec![SourceStep::Data, SourceStep::Data, SourceStep::Done]);
     let test_handle = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_sync_finite_eof_no_charge",
@@ -559,19 +566,19 @@ async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
     let (sink, count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(ScriptedAsyncSource::new(vec![
+    let source = ScriptedAsyncSource::new(vec![
         SourceStep::Data,
         SourceStep::Empty,
         SourceStep::Data,
         SourceStep::Done,
-    ]));
+    ]);
     let test_handle = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_async_empty_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_empty_no_charge")),
 
         stages: {
-            src = async_source!(RateLimiterTestEvent with {
+            src = source!(RateLimiterTestEvent with {
                 rate_limit(1.0).burst_capacity(2.0)
             } => source);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -606,12 +613,12 @@ async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
     let (sink, count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(ScriptedSyncSource::new(vec![
+    let source = ScriptedSyncSource::new(vec![
         SourceStep::Data,
         SourceStep::Empty,
         SourceStep::Data,
         SourceStep::Done,
-    ]));
+    ]);
     let test_handle = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_sync_empty_no_charge",
@@ -653,19 +660,19 @@ async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> {
     let (sink, count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(ScriptedAsyncSource::new(vec![
+    let source = ScriptedAsyncSource::new(vec![
         SourceStep::Data,
         SourceStep::Err,
         SourceStep::Data,
         SourceStep::Done,
-    ]));
+    ]);
     let test_handle = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_async_error_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_error_no_charge")),
 
         stages: {
-            src = async_source!(RateLimiterTestEvent with {
+            src = source!(RateLimiterTestEvent with {
                 rate_limit(1.0).burst_capacity(2.0)
             } => source);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -700,12 +707,12 @@ async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_sync_finite_does_not_charge_source_error() -> Result<()> {
     let (sink, count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(ScriptedSyncSource::new(vec![
+    let source = ScriptedSyncSource::new(vec![
         SourceStep::Data,
         SourceStep::Err,
         SourceStep::Data,
         SourceStep::Done,
-    ]));
+    ]);
     let test_handle = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
         name: "rate_limiter_sync_error_no_charge",
@@ -775,57 +782,6 @@ impl TypedPayload for EnrichedPayload {
 }
 
 #[derive(Clone, Debug)]
-struct SingleRefSource {
-    emitted: bool,
-}
-
-impl SingleRefSource {
-    fn new() -> Self {
-        Self { emitted: false }
-    }
-}
-
-#[obzenflow::system("single-ref")]
-impl TypedFiniteSourceHandler for SingleRefSource {
-    type Output = RefPayload;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![RefPayload { id: 1 }]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct TwoStreamEventsSource {
-    emitted: usize,
-}
-
-impl TwoStreamEventsSource {
-    fn new() -> Self {
-        Self { emitted: 0 }
-    }
-}
-
-#[obzenflow::system("two-stream-events")]
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for TwoStreamEventsSource {
-    type Output = StreamPayload;
-
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted >= 2 {
-            return Ok(None);
-        }
-        let id = self.emitted as u64;
-        self.emitted += 1;
-        tokio::task::yield_now().await;
-        Ok(Some(vec![StreamPayload { id }]))
-    }
-}
-
-#[derive(Clone, Debug)]
 struct PassthroughJoin;
 
 impl TypedJoinHandler for PassthroughJoin {
@@ -857,8 +813,8 @@ impl TypedJoinHandler for PassthroughJoin {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
     let (sink, _count) = counting_sink::<EnrichedPayload>();
-    let reference_source = Port::owned(SingleRefSource::new());
-    let stream_source = Port::owned(TwoStreamEventsSource::new());
+    let reference_source = ValuesSource::new([RefPayload { id: 1 }]);
+    let stream_source = ValuesSource::new([StreamPayload { id: 0 }, StreamPayload { id: 1 }]);
     let joiner = PassthroughJoin;
     let result = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
@@ -867,7 +823,7 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
 
         stages: {
             ref_src = source!(RefPayload => reference_source);
-            stream_src = async_source!(StreamPayload => stream_source);
+            stream_src = source!(StreamPayload => stream_source);
             joiner = join!(catalog ref_src: RefPayload, StreamPayload -> EnrichedPayload
                 with rate_limit(1.0).burst_capacity(3.0) => joiner);
             snk = sink!(EnrichedPayload => sink);
@@ -898,7 +854,7 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<()> {
     let (sink, _count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(SequenceSource::new(2));
+    let source = sequence(2);
     let passthrough = PassthroughTransform;
     let result = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),
@@ -935,7 +891,7 @@ async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_stateful_stage_rejects_rate_limit_middleware() -> Result<()> {
     let (sink, _count) = counting_sink::<RateLimiterTestEvent>();
-    let source = Port::owned(SequenceSource::new(2));
+    let source = sequence(2);
     let passthrough = PassthroughStateful;
     let result = test_flow! {
         build_context: crate::replay_testkit::unsynced_context(),

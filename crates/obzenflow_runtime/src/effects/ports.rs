@@ -185,16 +185,6 @@ impl SystemPort {
         }
     }
 
-    pub(super) fn built<P>(&self) -> Option<Arc<P>>
-    where
-        P: ?Sized + Send + Sync + 'static,
-    {
-        match &self.recipe {
-            PortRecipe::Eager(resolved) => resolved.port.downcast_ref::<Arc<P>>().cloned(),
-            PortRecipe::Deferred(_) => None,
-        }
-    }
-
     pub(super) fn grouped<P, R, S, F>(resolver: F) -> Self
     where
         P: ?Sized + Send + Sync + 'static,
@@ -241,7 +231,7 @@ impl SystemPort {
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct SourceSystem {
-    name: LogicalEffectBindingName,
+    binding: obzenflow_core::effect_binding::SystemBinding,
     system: Arc<SystemPort>,
     registry: Arc<Mutex<Option<EffectPortRegistry>>>,
 }
@@ -253,9 +243,12 @@ pub(crate) enum SourceSystemFault {
 }
 
 impl SourceSystem {
-    pub(super) fn new(name: LogicalEffectBindingName, system: Arc<SystemPort>) -> Self {
+    pub(super) fn new(
+        binding: obzenflow_core::effect_binding::SystemBinding,
+        system: Arc<SystemPort>,
+    ) -> Self {
         Self {
-            name,
+            binding,
             system,
             registry: Arc::new(Mutex::new(None)),
         }
@@ -263,13 +256,20 @@ impl SourceSystem {
 
     pub(crate) fn placeholder() -> Self {
         Self::new(
-            LogicalEffectBindingName::of_system("placeholder"),
+            obzenflow_core::SystemBindingEvidence::named("placeholder")
+                .expect("static binding")
+                .binding()
+                .clone(),
             Arc::new(SystemPort::eager(Arc::new(()))),
         )
     }
 
     pub fn name(&self) -> &str {
-        self.name.as_str()
+        self.binding.name()
+    }
+
+    pub fn binding(&self) -> &obzenflow_core::effect_binding::SystemBinding {
+        &self.binding
     }
 
     pub(crate) fn attach(&self, registry: &EffectPortRegistry) {
@@ -313,7 +313,7 @@ impl std::fmt::Debug for SourceSystem {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SourceSystem")
-            .field("system", &self.name.as_str())
+            .field("system", &self.binding)
             .field("recipe", &"<not disclosed>")
             .finish()
     }

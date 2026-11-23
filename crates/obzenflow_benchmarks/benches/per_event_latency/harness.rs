@@ -5,16 +5,16 @@
 //! Shared latency workload: monotonic process-local stamps, exactly-once
 //! delivery by source-assigned ID and fail-closed completion.
 
+use obzenflow_benchmarks::numbers::{NextNumber, NumberFeed, Numbers};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{perform, EffectError, Perform, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,26 +39,26 @@ impl TypedPayload for Event {
     const EVENT_TYPE: &'static str = "bench.timestamped_event";
 }
 
-#[derive(Clone, Debug)]
 pub struct Source {
-    inputs: u64,
-    next: Arc<AtomicU64>,
+    port: Port<dyn NumberFeed>,
     origin: Instant,
 }
 
-#[obzenflow_runtime::effects::system("bench-events")]
 impl TypedFiniteSourceHandler for Source {
     type Output = Event;
 
-    fn next(&mut self) -> Result<Option<Vec<Event>>, SourceError> {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        if id >= self.inputs {
-            return Ok(None);
-        }
-        Ok(Some(vec![Event {
-            id,
-            emitted_ns: self.origin.elapsed().as_nanos() as u64,
-        }]))
+    fn read(&self) -> Option<SourceRead<Event>> {
+        let origin = self.origin;
+        Some(SourceRead::finite(
+            self.port.clone(),
+            NextNumber(0),
+            move |id| {
+                Ok(Event {
+                    id,
+                    emitted_ns: origin.elapsed().as_nanos() as u64,
+                })
+            },
+        ))
     }
 }
 
@@ -115,8 +115,7 @@ impl Delivery {
 
     pub fn source(&self) -> Source {
         Source {
-            inputs: self.workload.inputs,
-            next: Arc::new(AtomicU64::new(0)),
+            port: Numbers::counting(self.workload.inputs, 1).port(),
             origin: self.origin,
         }
     }

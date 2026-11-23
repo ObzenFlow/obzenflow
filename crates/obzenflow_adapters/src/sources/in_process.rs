@@ -5,29 +5,29 @@
 //! In-process sources with uniquely owned values or a channel receiver.
 
 use async_trait::async_trait;
+use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::effects::{EffectContext, EffectError, Port, SystemName};
+use obzenflow_runtime::stages::common::handlers::source::{ContinuousRead, FiniteRead, SourceRead};
 use obzenflow_runtime::stages::source::{
-    AsyncInfiniteSourceConnector, AtMostOnce, Reattach, SourceError, SourceReaderInitContext,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    SourceError, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::typing::SourceTyping;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::iter::Fuse;
-use std::sync::{Mutex, PoisonError};
+use std::marker::PhantomData;
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::mpsc;
 
-/// A finite source that transfers its values into one live execution.
-/// Construction does not create or poll the iterator. Each live poll emits
-/// one item; exhaustion is fused. Neither the input nor its items need Clone.
+/// A finite source that transfers its values into one live execution. Its
+/// `in-memory` system creates the iterator at the first live read and answers
+/// each read with one item. Exhaustion is fused. Neither the input nor its
+/// items need Clone.
 pub struct ValuesSource<I: IntoIterator> {
-    state: ValuesState<I>,
-}
-
-enum ValuesState<I: IntoIterator> {
-    Ready(I),
-    Reading(Fuse<I::IntoIter>),
-    Exhausted,
+    port: Port<dyn ValueFeed>,
+    values: PhantomData<fn() -> I>,
 }
 
 impl<I> ValuesSource<I>
@@ -37,9 +37,114 @@ where
     I::Item: TypedPayload + Send + Sync + 'static,
 {
     pub fn new(values: I) -> Self {
+        let system = InMemory {
+            feed: Mutex::new(Feed {
+                values: ValuesState::Ready(values),
+                taken: 0,
+            }),
+        };
         Self {
-            state: ValuesState::Ready(values),
+            port: Port::to(system).own_instance(),
+            values: PhantomData,
         }
+    }
+}
+
+impl<I: IntoIterator> Clone for ValuesSource<I> {
+    fn clone(&self) -> Self {
+        Self {
+            port: self.port.clone(),
+            values: PhantomData,
+        }
+    }
+}
+
+/// The port of an in-memory value feed.
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+pub trait ValueFeed: Send + Sync {
+    #[effect(type = "obzenflow.in_memory.values_read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &ValuesRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<serde_json::Value, ValuesRead>, EffectError>;
+}
+
+/// The argument of one read of an in-memory value feed: the position of the
+/// next item.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValuesRead {
+    at: u64,
+}
+
+struct InMemory<I: IntoIterator> {
+    feed: Mutex<Feed<I>>,
+}
+
+struct Feed<I: IntoIterator> {
+    values: ValuesState<I>,
+    taken: u64,
+}
+
+enum ValuesState<I: IntoIterator> {
+    Ready(I),
+    Reading(Fuse<I::IntoIter>),
+    Exhausted,
+}
+
+impl<I: IntoIterator> SystemName for InMemory<I> {
+    const NAME: &'static str = "in-memory";
+}
+
+impl<I> InMemory<I>
+where
+    I: IntoIterator,
+    I::Item: TypedPayload,
+{
+    fn take(
+        &self,
+        from: &ValuesRead,
+    ) -> Result<FiniteRead<serde_json::Value, ValuesRead>, EffectError> {
+        let mut feed = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut iter = match std::mem::replace(&mut feed.values, ValuesState::Exhausted) {
+            ValuesState::Ready(values) => values.into_iter().fuse(),
+            ValuesState::Reading(iter) => iter,
+            ValuesState::Exhausted => return Ok(FiniteRead::EndOfInput),
+        };
+        while feed.taken < from.at {
+            if iter.next().is_none() {
+                return Ok(FiniteRead::EndOfInput);
+            }
+            feed.taken += 1;
+        }
+        let Some(item) = iter.next() else {
+            return Ok(FiniteRead::EndOfInput);
+        };
+        feed.taken += 1;
+        feed.values = ValuesState::Reading(iter);
+        let value = serde_json::to_value(&item)
+            .map_err(|error| EffectError::Serialization(error.to_string()))?;
+        Ok(FiniteRead::Batch {
+            records: vec![value],
+            next: ValuesRead { at: from.at + 1 },
+        })
+    }
+}
+
+#[async_trait]
+impl<I> ValueFeed for InMemory<I>
+where
+    I: IntoIterator + Send + Sync + 'static,
+    I::IntoIter: Send + Sync,
+    I::Item: TypedPayload + Send + Sync + 'static,
+{
+    async fn read(
+        &self,
+        from: &ValuesRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<serde_json::Value, ValuesRead>, EffectError> {
+        self.take(from)
     }
 }
 
@@ -56,7 +161,6 @@ where
     type Output = I::Item;
 }
 
-#[obzenflow_runtime::effects::system("values")]
 impl<I> TypedFiniteSourceHandler for ValuesSource<I>
 where
     I: IntoIterator + Send + Sync + 'static,
@@ -65,32 +169,26 @@ where
 {
     type Output = I::Item;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let mut iter = match std::mem::replace(&mut self.state, ValuesState::Exhausted) {
-            ValuesState::Ready(values) => values.into_iter().fuse(),
-            ValuesState::Reading(iter) => iter,
-            ValuesState::Exhausted => return Ok(None),
-        };
-        let item = iter.next();
-        if item.is_some() {
-            self.state = ValuesState::Reading(iter);
-        }
-        Ok(item.map(|item| vec![item]))
+    fn read(&self) -> Option<SourceRead<Self::Output>> {
+        Some(
+            SourceRead::finite(self.port.clone(), ValuesRead { at: 0 }, |value| {
+                serde_json::from_value(value).map_err(|_| {
+                    SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into())
+                })
+            })
+            .in_process(),
+        )
     }
 }
 
-/// An infinite connector owning one Tokio channel receiver until its first
-/// open. Input still buffered in the channel when a run stops is lost, so a
-/// resumed run reattaches with `AtMostOnce` (FLOWIP-122i). A closed channel is
-/// a source error. Orderly drain closes the receiver; use topology fan-out to
+/// An infinite source that reads one Tokio channel receiver through its
+/// `channel` system. Input still buffered in the channel when a run stops is
+/// lost, so a resumed run reattaches with `AtMostOnce`. A closed channel is a
+/// source error. Orderly drain closes the receiver; use topology fan-out to
 /// distribute facts to multiple downstream stages.
 pub struct ChannelSource<T> {
-    receiver: Mutex<Option<mpsc::Receiver<T>>>,
-}
-
-/// The reader a [`ChannelSource`] transfers its receiver into.
-pub struct ChannelReader<T> {
-    receiver: mpsc::Receiver<T>,
+    port: Port<dyn ChannelFeed>,
+    state: Arc<ChannelState<T>>,
 }
 
 impl<T> fmt::Debug for ChannelSource<T> {
@@ -99,17 +197,119 @@ impl<T> fmt::Debug for ChannelSource<T> {
     }
 }
 
-impl<T> fmt::Debug for ChannelReader<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ChannelReader").finish_non_exhaustive()
+impl<T: TypedPayload + Send + Sync + 'static> ChannelSource<T> {
+    pub fn new(receiver: mpsc::Receiver<T>) -> Self {
+        let state = Arc::new(ChannelState {
+            receiver: tokio::sync::Mutex::new(receiver),
+            front: Mutex::new(None),
+        });
+        Self {
+            port: Port::to(Channel {
+                state: state.clone(),
+            })
+            .own_instance(),
+            state,
+        }
     }
 }
 
-impl<T: TypedPayload + Send + Sync + 'static> ChannelSource<T> {
-    pub fn new(receiver: mpsc::Receiver<T>) -> Self {
-        Self {
-            receiver: Mutex::new(Some(receiver)),
+/// The port of a channel feed. A read takes the items the channel holds.
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+pub trait ChannelFeed: Send + Sync {
+    #[effect(type = "obzenflow.channel.take", at_most_once, records = reply)]
+    async fn read(
+        &self,
+        from: &ChannelRead,
+        ctx: &EffectContext,
+    ) -> Result<ContinuousRead<serde_json::Value, ChannelRead>, EffectError>;
+}
+
+/// The argument of one read of a channel feed: at most `batch` items.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelRead {
+    batch: usize,
+}
+
+struct ChannelState<T> {
+    receiver: tokio::sync::Mutex<mpsc::Receiver<T>>,
+    front: Mutex<Option<T>>,
+}
+
+impl<T> ChannelState<T> {
+    async fn ready(&self) -> Result<(), SourceError> {
+        if self
+            .front
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+        {
+            return Ok(());
         }
+        let first = self
+            .receiver
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or(SourceError::Other(
+                SourceDiagnosticReason::InputClosed.into(),
+            ))?;
+        *self.front.lock().unwrap_or_else(PoisonError::into_inner) = Some(first);
+        Ok(())
+    }
+}
+
+struct Channel<T> {
+    state: Arc<ChannelState<T>>,
+}
+
+impl<T> SystemName for Channel<T> {
+    const NAME: &'static str = "channel";
+}
+
+impl<T: TypedPayload> Channel<T> {
+    async fn take(
+        &self,
+        from: &ChannelRead,
+    ) -> Result<ContinuousRead<serde_json::Value, ChannelRead>, EffectError> {
+        let mut items: Vec<T> = self
+            .state
+            .front
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .into_iter()
+            .collect();
+        {
+            let mut receiver = self.state.receiver.lock().await;
+            while items.len() < from.batch {
+                match receiver.try_recv() {
+                    Ok(item) => items.push(item),
+                    Err(_) => break,
+                }
+            }
+        }
+        let records = items
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| EffectError::Serialization(error.to_string()))?;
+        Ok(ContinuousRead {
+            records,
+            next: from.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl<T: TypedPayload + Send + Sync + 'static> ChannelFeed for Channel<T> {
+    async fn read(
+        &self,
+        from: &ChannelRead,
+        _ctx: &EffectContext,
+    ) -> Result<ContinuousRead<serde_json::Value, ChannelRead>, EffectError> {
+        self.take(from).await
     }
 }
 
@@ -117,42 +317,30 @@ impl<T: TypedPayload> SourceTyping for ChannelSource<T> {
     type Output = T;
 }
 
-#[obzenflow_runtime::effects::system("channel")]
 #[async_trait]
-impl<T: TypedPayload + Send + Sync + 'static> AsyncInfiniteSourceConnector for ChannelSource<T> {
-    type Output = T;
-    type Reader = ChannelReader<T>;
-    type Continuation = Reattach<AtMostOnce>;
-
-    /// The receiver transfers once; a second open finds the input unavailable.
-    async fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
-        self.receiver
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            .map(|receiver| ChannelReader { receiver })
-            .ok_or(SourceError::Other(
-                SourceDiagnosticReason::InputUnavailable.into(),
-            ))
-    }
-}
-
-#[async_trait]
-impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler for ChannelReader<T> {
+impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler for ChannelSource<T> {
     type Output = T;
 
-    async fn next(&mut self) -> Result<Vec<T>, SourceError> {
-        self.receiver
-            .recv()
-            .await
-            .map(|item| vec![item])
-            .ok_or(SourceError::Other(
-                SourceDiagnosticReason::InputClosed.into(),
-            ))
+    fn read(&self) -> Option<SourceRead<T>> {
+        let state = self.state.clone();
+        Some(SourceRead::continuous(
+            self.port.clone(),
+            ChannelRead { batch: 1000 },
+            move || {
+                let state = state.clone();
+                Box::pin(async move { state.ready().await })
+            },
+            ReattachGuarantee::AtMostOnce,
+            |value| {
+                serde_json::from_value(value).map_err(|_| {
+                    SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into())
+                })
+            },
+        ))
     }
 
     async fn drain(&mut self) -> Result<(), SourceError> {
-        self.receiver.close();
+        self.state.receiver.lock().await.close();
         Ok(())
     }
 }
@@ -171,11 +359,33 @@ mod tests {
         const EVENT_TYPE: &'static str = "adapters.sources.once.item";
     }
 
+    fn feed<I>(values: I) -> InMemory<I>
+    where
+        I: IntoIterator,
+    {
+        InMemory {
+            feed: Mutex::new(Feed {
+                values: ValuesState::Ready(values),
+                taken: 0,
+            }),
+        }
+    }
+
+    fn items(
+        read: FiniteRead<serde_json::Value, ValuesRead>,
+    ) -> Option<(Vec<serde_json::Value>, u64)> {
+        match read {
+            FiniteRead::Batch { records, next } => Some((records, next.at)),
+            FiniteRead::EndOfInput => None,
+        }
+    }
+
     #[test]
     fn once_emits_one_item_then_eof() {
-        let mut source = ValuesSource::new([Item(7)]);
-        assert_eq!(source.next().unwrap(), Some(vec![Item(7)]));
-        assert_eq!(source.next().unwrap(), None);
+        let feed = feed([Item(7)]);
+        let (records, next) = items(feed.take(&ValuesRead { at: 0 }).unwrap()).unwrap();
+        assert_eq!(records, [serde_json::json!(7)]);
+        assert!(items(feed.take(&ValuesRead { at: next }).unwrap()).is_none());
     }
 
     #[test]
@@ -208,58 +418,53 @@ mod tests {
 
         let starts = Arc::new(AtomicUsize::new(0));
         let polls = Arc::new(AtomicUsize::new(0));
-        let mut source = ValuesSource::new(Input {
+        let source = ValuesSource::new(Input {
             starts: starts.clone(),
             polls: polls.clone(),
         });
         assert!(format!("{source:?}").contains("ValuesSource"));
+        let feed = feed(Input {
+            starts: starts.clone(),
+            polls: polls.clone(),
+        });
         assert_eq!(starts.load(Ordering::SeqCst), 0);
         assert_eq!(polls.load(Ordering::SeqCst), 0);
 
-        assert_eq!(source.next().unwrap(), Some(vec![Item(0)]));
+        let (first, next) = items(feed.take(&ValuesRead { at: 0 }).unwrap()).unwrap();
+        assert_eq!(first, [serde_json::json!(0)]);
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert_eq!(polls.load(Ordering::SeqCst), 1);
-        assert_eq!(source.next().unwrap(), Some(vec![Item(1)]));
+        let (second, next) = items(feed.take(&ValuesRead { at: next }).unwrap()).unwrap();
+        assert_eq!(second, [serde_json::json!(1)]);
         assert_eq!(polls.load(Ordering::SeqCst), 2);
-        assert_eq!(source.next().unwrap(), None);
-        assert_eq!(source.next().unwrap(), None);
+        assert!(items(feed.take(&ValuesRead { at: next }).unwrap()).is_none());
+        assert!(items(feed.take(&ValuesRead { at: next }).unwrap()).is_none());
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert_eq!(polls.load(Ordering::SeqCst), 3);
     }
-    fn context() -> SourceReaderInitContext {
-        SourceReaderInitContext {
-            stage_id: obzenflow_core::StageId::new(),
-            stage_name: "channel".into(),
-            flow_name: "in_process".into(),
-        }
-    }
-
     #[tokio::test]
-    async fn channel_source_transfers_its_receiver_to_one_reader() {
-        let (_tx, rx) = mpsc::channel::<Item>(1);
-        let source = ChannelSource::new(rx);
-        assert!(source.open(context()).await.is_ok());
-        assert!(matches!(
-            source.open(context()).await,
-            Err(SourceError::Other(diagnostic))
-                if diagnostic.reason() == SourceDiagnosticReason::InputUnavailable
-        ));
-    }
-
-    #[tokio::test]
-    async fn channel_source_drains_pending_items_and_errors_on_close() {
+    async fn channel_read_takes_buffered_items() {
         let (tx, rx) = mpsc::channel(16);
         tx.send(Item(1)).await.unwrap();
         tx.send(Item(2)).await.unwrap();
-        let mut source = ChannelSource::new(rx).open(context()).await.unwrap();
-        assert_eq!(source.next().await.unwrap(), vec![Item(1)]);
-        source.drain().await.unwrap();
-        assert!(tx.send(Item(3)).await.is_err());
-        assert_eq!(source.next().await.unwrap(), vec![Item(2)]);
+        let source = ChannelSource::new(rx);
+        source.state.ready().await.unwrap();
+        let system = Channel {
+            state: source.state.clone(),
+        };
+        let read = system.take(&ChannelRead { batch: 10 }).await.unwrap();
+        assert_eq!(read.records, [serde_json::json!(1), serde_json::json!(2)]);
+    }
+
+    #[tokio::test]
+    async fn closed_channel_readiness_returns_input_closed() {
+        let (tx, rx) = mpsc::channel::<Item>(1);
+        drop(tx);
+        let source = ChannelSource::new(rx);
         assert!(matches!(
-            source.next().await,
+            source.state.ready().await,
             Err(SourceError::Other(diagnostic))
-                if diagnostic.reason() == obzenflow_core::event::SourceDiagnosticReason::InputClosed
+                if diagnostic.reason() == SourceDiagnosticReason::InputClosed
         ));
     }
 }

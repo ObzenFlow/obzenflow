@@ -38,9 +38,8 @@ use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
-use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::prelude::FlowHandle;
-use obzenflow_runtime::stages::source::HostedIngress;
+use obzenflow_runtime::stages::HostedSource;
 use obzenflow_runtime::stages::LivenessSnapshots;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -311,32 +310,32 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// `http_ingress` creates HTTP ingress and hosts it. It returns the hosted port for an
-    /// `async_infinite_source!` stage. The builder connects the ingress to the lifecycle of
-    /// the application. The system name of the port is `http-ingress`.
+    /// `http_ingress` creates HTTP ingress and hosts it. It returns the hosted source handler
+    /// for a `source!` stage. The builder connects the ingress to the
+    /// lifecycle of the application. The source's system is `http-ingress`.
     pub fn http_ingress<D>(
         &mut self,
         decoder: D,
         config: IngestionConfig,
-    ) -> Port<dyn HostedIngress<D::Output>>
+    ) -> HostedSource<D::Output>
     where
         D: IngressDecoder,
     {
-        let (port, http) = http_ingress(decoder, config).into_parts();
+        let (source, http) = http_ingress(decoder, config).into_parts();
         self.attach_http_ingress(http);
-        port
+        source
     }
 
     /// `ingress` registers ingress for an application-owned protocol. It returns the hosted
-    /// port for an `async_infinite_source!` stage. Before you give the bundle to `ingress`,
-    /// clone its submission handle with `Ingress::handle`.
-    pub fn ingress<D>(&mut self, ingress: Ingress<D>) -> Port<dyn HostedIngress<D::Output>>
+    /// source handler for a `source!` stage. Before you give the bundle to
+    /// `ingress`, clone its submission handle with `Ingress::handle`.
+    pub fn ingress<D>(&mut self, ingress: Ingress<D>) -> HostedSource<D::Output>
     where
         D: IngressDecoder,
     {
-        let (port, handle) = ingress.into_parts();
+        let (source, handle) = ingress.into_parts();
         self.attach_ingress_handle(handle);
-        port
+        source
     }
 
     /// Register an HTTP attachment obtained by explicitly splitting an ingress bundle.

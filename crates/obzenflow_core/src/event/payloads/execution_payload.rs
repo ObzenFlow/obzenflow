@@ -82,6 +82,7 @@ pub enum ExecutionPayload {
     SourceRecordRejected(SourceRecordRejectedFact),
     SourcePollFailed(SourcePollFailedFact),
     SourceOpenFailed(SourceOpenFailedFact),
+    SourceBindingDeclared(crate::effect_binding::SystemBinding),
     SourceReaderAcquired(SourceReaderAcquiredFact),
     SourceCleanupSucceeded(SourceCleanupSucceededFact),
     SourceCleanupFailed(SourceCleanupFailedFact),
@@ -732,6 +733,7 @@ impl ExecutionPayload {
             Self::SourceRecordRejected(_) => vocabulary::source::RECORD_REJECTED,
             Self::SourcePollFailed(_) => vocabulary::source::POLL_FAILED,
             Self::SourceOpenFailed(_) => vocabulary::source::OPEN_FAILED,
+            Self::SourceBindingDeclared(_) => vocabulary::source::BINDING_DECLARED,
             Self::SourceReaderAcquired(_) => vocabulary::source::READER_ACQUIRED,
             Self::SourceCleanupSucceeded(_) => vocabulary::source::CLEANUP_SUCCEEDED,
             Self::SourceCleanupFailed(_) => vocabulary::source::CLEANUP_FAILED,
@@ -781,6 +783,7 @@ impl ExecutionPayload {
             | Self::SourceRecordRejected(_)
             | Self::SourcePollFailed(_)
             | Self::SourceOpenFailed(_)
+            | Self::SourceBindingDeclared(_)
             | Self::SourceReaderAcquired(_)
             | Self::SourceCleanupSucceeded(_)
             | Self::SourceCleanupFailed(_)

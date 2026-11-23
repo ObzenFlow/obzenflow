@@ -21,6 +21,9 @@ use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{web::SseFrame, EventId, FlowId, JournalOwner, StageId};
+use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -1423,8 +1426,6 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
     use obzenflow_core::TypedPayload;
     use obzenflow_dsl::{flow, sink, source, FlowDefinition};
-    use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-    use obzenflow_runtime::stages::SourceError;
 
     let started = std::time::Instant::now();
 
@@ -1434,29 +1435,17 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         const EVENT_TYPE: &'static str = "studio.source_middleware";
     }
 
-    #[derive(Clone, Debug)]
-    struct RecoveringSource(usize);
-    #[obzenflow_runtime::effects::system("recovering")]
-    impl TypedFiniteSourceHandler for RecoveringSource {
-        type Output = Item;
-
-        fn next(&mut self) -> Result<Option<Vec<Item>>, SourceError> {
-            let attempt = self.0;
-            self.0 += 1;
-            match attempt {
-                1 => Err(SourceError::Timeout(
-                    obzenflow_core::event::SourceDiagnosticReason::TimedOut.into(),
-                )),
-                0..=1000 => Ok(Some(vec![Item(attempt)])),
-                _ => Ok(None),
-            }
-        }
-    }
-
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().to_path_buf();
     let definition = FlowDefinition::materialize(move |_| {
-        let input_handler = obzenflow_runtime::effects::Port::owned(RecoveringSource(0));
+        let input_handler = CountedSource {
+            port: Port::to(FlakyCount {
+                end: 1000,
+                fails_at: 1,
+                failed: std::sync::atomic::AtomicBool::new(false),
+            }),
+            item: Item,
+        };
         let output_handler = obzenflow_adapters::sinks::DiscardSink::<Item>::new();
         Ok(flow! {
             name: "source_middleware_studio",
@@ -1671,9 +1660,8 @@ async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
     for enabled in enabled_modes {
         let model = enabled.then(|| Arc::new(MetricsReadModel::default()));
         let definition = FlowDefinition::materialize(move |_| {
-            let input = obzenflow_runtime::effects::Port::owned(
-                obzenflow_adapters::sources::ValuesSource::new(vec![Item(1), Item(2), Item(3)]),
-            );
+            let input =
+                obzenflow_adapters::sources::ValuesSource::new(vec![Item(1), Item(2), Item(3)]);
             let output = obzenflow_adapters::sinks::DiscardSink::<Item>::new();
             Ok(flow! {
                 name: "terminal_reporting_proof",
@@ -1765,6 +1753,99 @@ impl Drop for ComposedEvidence {
                 retained.display()
             );
         }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Position(usize);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait CountedInput {
+    #[effect(type = "studio_stream.counted.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &Position,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<usize, Position>, EffectError>;
+}
+
+/// Counts up to `end`. The read at `fails_at` times out once.
+struct FlakyCount {
+    end: usize,
+    fails_at: usize,
+    failed: std::sync::atomic::AtomicBool,
+}
+
+#[obzenflow_runtime::effects::system("flaky-count")]
+#[async_trait::async_trait]
+impl CountedInput for FlakyCount {
+    async fn read(
+        &self,
+        from: &Position,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<usize, Position>, EffectError> {
+        if from.0 >= self.end {
+            return Ok(FiniteRead::EndOfInput);
+        }
+        if from.0 == self.fails_at && !self.failed.swap(true, Ordering::SeqCst) {
+            return Err(EffectError::Timeout("scripted timeout".into()));
+        }
+        Ok(FiniteRead::Batch {
+            records: vec![from.0],
+            next: Position(from.0 + 1),
+        })
+    }
+}
+
+/// Supplies one record when its gate opens and reports its progress.
+struct GatedInput {
+    gate: Arc<tokio::sync::Semaphore>,
+    index: usize,
+    progress: Arc<ComposedProgress>,
+}
+
+#[obzenflow_runtime::effects::system("gated")]
+#[async_trait::async_trait]
+impl CountedInput for GatedInput {
+    async fn read(
+        &self,
+        from: &Position,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<usize, Position>, EffectError> {
+        if from.0 > 0 {
+            self.progress.sources[self.index].store(3, Ordering::Relaxed);
+            return Ok(FiniteRead::EndOfInput);
+        }
+        self.progress.sources[self.index].store(1, Ordering::Relaxed);
+        self.progress.waiting.notify_one();
+        self.gate.acquire().await.unwrap().forget();
+        self.progress.sources[self.index].store(2, Ordering::Relaxed);
+        Ok(FiniteRead::Batch {
+            records: vec![0],
+            next: Position(1),
+        })
+    }
+}
+
+struct CountedSource<T> {
+    port: Port<dyn CountedInput>,
+    item: fn(usize) -> T,
+}
+
+impl<T> TypedFiniteSourceHandler for CountedSource<T>
+where
+    T: obzenflow_core::TypedPayload + Send + Sync + 'static,
+{
+    type Output = T;
+
+    fn read(&self) -> Option<SourceRead<T>> {
+        let item = self.item;
+        Some(SourceRead::finite(
+            self.port.clone(),
+            Position(0),
+            move |count| Ok(item(count)),
+        ))
     }
 }
 
@@ -1860,10 +1941,8 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
     use obzenflow_adapters::monitoring::MetricsReadModel;
     use obzenflow_core::event::CausalCoordinate;
     use obzenflow_dsl::dsl::{composition::IntoFlowMember, topology::AuthoredConnection};
-    use obzenflow_dsl::{async_source, sink};
+    use obzenflow_dsl::{sink, source};
     use obzenflow_runtime::run_context::FlowBuildContext;
-    use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
-    use obzenflow_runtime::stages::SourceError;
     use std::collections::HashMap;
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1871,31 +1950,6 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
     impl obzenflow_core::TypedPayload for Item {
         const EVENT_TYPE: &'static str = "supervision.scale";
     }
-    #[derive(Clone, Debug)]
-    struct GatedSource {
-        gate: Arc<tokio::sync::Semaphore>,
-        emitted: bool,
-        index: usize,
-        progress: Arc<ComposedProgress>,
-    }
-    #[obzenflow_runtime::effects::system("gated")]
-    #[async_trait::async_trait]
-    impl TypedAsyncFiniteSourceHandler for GatedSource {
-        type Output = Item;
-        async fn next(&mut self) -> Result<Option<Vec<Item>>, SourceError> {
-            if self.emitted {
-                self.progress.sources[self.index].store(3, Ordering::Relaxed);
-                return Ok(None);
-            }
-            self.progress.sources[self.index].store(1, Ordering::Relaxed);
-            self.progress.waiting.notify_one();
-            self.gate.acquire().await.unwrap().forget();
-            self.emitted = true;
-            self.progress.sources[self.index].store(2, Ordering::Relaxed);
-            Ok(Some(vec![Item]))
-        }
-    }
-
     // Exercise the ordinary lowering/materialisation path with a generated
     // fan-in, retaining both memory and disk cases and their journal oracles.
     {
@@ -1907,13 +1961,16 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
         let mut connections = Vec::new();
         for index in 0..stages - 1 {
             let name = format!("source_{index:03}");
-            let handler = obzenflow_runtime::effects::Port::owned(GatedSource {
-                gate: gate.clone(),
-                emitted: false,
-                index,
-                progress: progress.clone(),
-            });
-            let mut descriptor = async_source!(Item => handler);
+            let handler = CountedSource {
+                port: Port::to(GatedInput {
+                    gate: gate.clone(),
+                    index,
+                    progress: progress.clone(),
+                })
+                .own_instance(),
+                item: |_| Item,
+            };
+            let mut descriptor = source!(Item => handler);
             descriptor.set_name(name.clone());
             members.insert(name.clone(), descriptor.into_flow_member());
             connections.push(AuthoredConnection::edge(

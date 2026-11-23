@@ -11,7 +11,9 @@ pub(crate) mod placeholder;
 mod port;
 mod positioned;
 pub(crate) mod prepared;
+pub(crate) mod read;
 mod record_de;
+pub use read::{ContinuousRead, FiniteRead, SourceRead};
 #[doc(hidden)]
 pub mod traits;
 pub(crate) mod typed;
@@ -28,9 +30,7 @@ pub use erased::{
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
     UnifiedInfiniteSourceHandler,
 };
-pub use hosted::{
-    HostedIngress, HostedIngressSource, HostedIngressSystem, HostedSubmission, IngressReceiptSender,
-};
+pub use hosted::{HostedSource, HostedSubmission, IngressReceiptSender};
 pub use port::{AsyncFiniteSource, AsyncInfiniteSource, FiniteSource, InfiniteSource};
 #[doc(hidden)]
 pub use port::{
@@ -45,3 +45,5 @@ pub use typed::{
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
 };
+#[doc(hidden)]
+pub use typed::{FiniteReadAdapter, InfiniteReadAdapter, SyncFiniteReads, SyncInfiniteReads};

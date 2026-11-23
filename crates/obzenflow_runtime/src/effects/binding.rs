@@ -63,6 +63,11 @@ impl<B: EffectBindingEvidence> private::Sealed for Configured<B> {}
 pub struct LogicalEffectBindingName(String);
 
 impl LogicalEffectBindingName {
+    pub(super) fn for_resource(evidence: &SystemBindingEvidence) -> Self {
+        let hash = digest(&SHA256, evidence.canonical_bytes().as_bytes());
+        Self(format!("r{}", &hex_digest(hash.as_ref())[..63]))
+    }
+
     pub fn new(value: impl Into<String>) -> Result<Self, BindingIdentifierError> {
         let value = value.into();
         if !is_binding_name(&value) {

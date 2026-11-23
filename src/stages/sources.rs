@@ -31,7 +31,7 @@
 //! | YAML document | [`YamlSource::builder`] | `Port::to` | `files` |
 //! | HTTP pull | [`HttpPullSource::new`] | `Port::to` | `http` |
 //! | HTTP polling | [`HttpPollSource::new`] | `Port::to` | `http` |
-//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` | the returned port | `http-ingress` |
+//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` | the returned [`HostedSource`] | `http-ingress` |
 //!
 //! New source behaviour implements [`TypedFiniteSourceHandler`],
 //! [`TypedAsyncFiniteSourceHandler`], [`TypedInfiniteSourceHandler`] or
@@ -206,7 +206,8 @@
 //!
 //! Register the decoder through `FlowApplication::builder().http_ingress(decoder,
 //! config)`, or through `.ingress` for another transport. Each call returns the
-//! [`HostedIngress`] port for an `async_infinite_source!` stage. For custom hosting,
+//! [`HostedSource`] handler for a `source!` stage. The handler reads
+//! the endpoint's queue, and the journal records each read. For custom hosting,
 //! compose the bundles with
 //! [`crate::application::ingress::ingress_source`] or
 //! [`crate::application::ingress::http_ingress`]. Hosted ingress acknowledges a
@@ -241,22 +242,28 @@
 
 /// CSV file source, decoder contract, and string-preserving row support.
 pub use obzenflow_adapters::sources::{
-    CsvDecodeError, CsvDecoder, CsvPosition, CsvReader, CsvRecord, CsvRow, CsvRowDecoder,
-    CsvSource, CsvSourceBuilder,
+    CsvDecodeError, CsvDecoder, CsvPosition, CsvRecord, CsvRow, CsvRowDecoder, CsvSource,
+    CsvSourceBuilder,
 };
 
+/// The framework file system and its CSV read.
+pub use obzenflow_adapters::sources::{CsvFile, CsvLine, CsvRead, FileSystem, YamlFile};
+
 /// In-process sources owning values or a channel receiver.
-pub use obzenflow_adapters::sources::{ChannelReader, ChannelSource, ValuesSource};
+pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 
 /// Finite YAML source and its application decoder contract.
 pub use obzenflow_adapters::sources::{
-    YamlDecodeError, YamlDecoder, YamlPosition, YamlReader, YamlRecord, YamlSelection, YamlSource,
-    YamlSourceBuilder,
+    YamlDecodeError, YamlDecoder, YamlLine, YamlNode, YamlRead, YamlRecord, YamlSelection,
+    YamlSource, YamlSourceBuilder,
 };
 
 pub use obzenflow_adapters::sources::http_pull::{HttpRetryConfig, ListDetailState};
-/// These items are the application-owned decoder contract for hosted ingress.
-pub use obzenflow_adapters::sources::{IngressDecodeError, IngressDecoder, IngressRecord};
+/// These items are the hosted source handler and the application-owned decoder contract
+/// for hosted ingress.
+pub use obzenflow_adapters::sources::{
+    HostedSource, IngressDecodeError, IngressDecoder, IngressRecord,
+};
 
 /// HTTP pull and poll sources, decoders, and configuration types.
 pub use obzenflow_adapters::sources::{
@@ -273,9 +280,13 @@ pub use obzenflow_core::http_client::{
 
 /// Default HTTP pull and poll configuration composed by the infra layer.
 pub use obzenflow_infra::clients::http::{
-    http_poll_config, http_pull_config, HttpClientFactoryError,
+    http_poll_config, http_pull_config, HttpApi, HttpClientFactoryError,
 };
 
+pub use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
+pub use obzenflow_runtime::stages::common::handlers::source::{
+    ContinuousRead, FiniteRead, SourceRead,
+};
 pub use obzenflow_runtime::stages::common::handlers::{
     SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
@@ -293,10 +304,10 @@ pub use obzenflow_runtime::stages::source::{
     InfiniteSourceConnector, SourceReaderInitContext,
 };
 
-/// These items are the port traits for each source family and for hosted ingress, as in
+/// These items are the port traits for each source family, as in
 /// `Port<dyn FiniteSource<_, _>>`.
 pub use obzenflow_runtime::stages::source::{
-    AsyncFiniteSource, AsyncInfiniteSource, FiniteSource, HostedIngress, InfiniteSource,
+    AsyncFiniteSource, AsyncInfiniteSource, FiniteSource, InfiniteSource,
 };
 
 /// Connector continuation declarations, their reattachment guarantees and the

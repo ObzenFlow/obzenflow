@@ -13,13 +13,13 @@
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_runtime::stages::source::SourceError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 
 /// One `fstat` of an open file. On Unix the change time, which users cannot
 /// set, moves on every content or metadata change; other platforms fall back
 /// to the modification and creation times and are unsupported for stability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileVersion {
     inode: u64,
     size: u64,

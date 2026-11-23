@@ -109,10 +109,26 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081).
         let mut handler = self.source.handler;
+        let idle_cap = handler.idle_backoff_cap();
+        let kind = handler.supervisor_kind();
         handler.install_writer_id(WriterId::from(self.config.stage_id));
         handler.install_observation_recorder(context.instrumentation.observation_recorder());
 
+        let reads = if self.resources.effect_declarations.is_empty() {
+            None
+        } else {
+            Some(
+                crate::stages::common::handlers::source::read::read_stage(
+                    &self.resources,
+                    context.instrumentation.clone(),
+                )
+                .await
+                .map_err(|error| BuilderError::Other(error.to_string()))?,
+            )
+        };
         let supervisor = AsyncFiniteSourceSupervisor {
+            reads,
+            kind,
             name: self.config.stage_name.clone(),
             handler: Some(handler),
             data_journal: self.resources.data_journal.clone(),
@@ -120,10 +136,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
             stage_id: self.config.stage_id,
             continuation: self.source.continuation,
             system: bind_source_system(&self.source.system, &self.resources.effect_ports),
-            idle_backoff: IdleBackoff::exponential_with_cap(
-                Duration::from_millis(1),
-                Duration::from_millis(50),
-            ),
+            idle_backoff: IdleBackoff::exponential_with_cap(Duration::from_millis(1), idle_cap),
             pending_idle_delay: None,
             external_events: event_receiver.into(),
             state_watcher: state_watcher.clone(),

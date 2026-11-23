@@ -7,23 +7,22 @@
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{handler_observer, join_observer, stage_lifecycle_observer};
 use obzenflow_adapters::sinks::{CountingSink, DiscardSink};
+use obzenflow_adapters::sources::ValuesSource;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{Outcomes, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{Effects, Port, StageCompletion};
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler,
-    TypedTransformHandler,
+    EffectfulTransformHandler, JoinReferenceView, TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::observer::{
     HandlerObserver, HandlerObserverContext, JoinObserver, JoinObserverContext,
     JoinObserverOccurrence, JoinSide, JoinSignalKind, StageInputPosition, StageLifecycleObserver,
     StageLifecycleObserverContext, StageLifecyclePhase,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -55,35 +54,6 @@ struct Joined {
 
 impl TypedPayload for Joined {
     const EVENT_TYPE: &'static str = "observer.join.output";
-}
-
-#[derive(Clone, Debug)]
-struct OneEventSource<T> {
-    event: Option<T>,
-}
-
-impl<T> OneEventSource<T> {
-    fn new(event: T) -> Self {
-        Self { event: Some(event) }
-    }
-}
-
-#[obzenflow_runtime::effects::system("one-reference")]
-impl TypedFiniteSourceHandler for OneEventSource<Reference> {
-    type Output = Reference;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Ok(self.event.take().map(|event| vec![event]))
-    }
-}
-
-#[obzenflow_runtime::effects::system("one-stream-input")]
-impl TypedFiniteSourceHandler for OneEventSource<StreamInput> {
-    type Output = StreamInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Ok(self.event.take().map(|event| vec![event]))
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -195,8 +165,8 @@ async fn join_observer_distinguishes_deliveries_from_signals_without_synthetic_p
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let reference_source = Port::owned(OneEventSource::new(Reference { key: 7 }));
-            let stream_source = Port::owned(OneEventSource::new(StreamInput { key: 7 }));
+            let reference_source = ValuesSource::new([Reference { key: 7 }]);
+            let stream_source = ValuesSource::new([StreamInput { key: 7 }]);
             let join_handler = LookupJoin;
             let sink_handler = NoopSink::new();
 
@@ -305,45 +275,6 @@ impl TypedPayload for HandlerOutput {
 }
 
 #[derive(Clone, Debug)]
-struct TwoHandlerInputs {
-    emitted: bool,
-}
-
-#[obzenflow_runtime::effects::system("two-handler-inputs")]
-impl TypedFiniteSourceHandler for TwoHandlerInputs {
-    type Output = HandlerInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![
-            HandlerInput { value: 0 },
-            HandlerInput { value: 1 },
-        ]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct OneHandlerInput {
-    emitted: bool,
-}
-
-#[obzenflow_runtime::effects::system("one-handler-input")]
-impl TypedFiniteSourceHandler for OneHandlerInput {
-    type Output = HandlerInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![HandlerInput { value: 7 }]))
-    }
-}
-
-#[derive(Clone, Debug)]
 struct ZeroThenFanOut;
 
 impl TypedTransformHandler for ZeroThenFanOut {
@@ -446,7 +377,7 @@ async fn handler_observer_runs_once_for_zero_output_and_reports_the_whole_fan_ou
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let inputs = Port::owned(TwoHandlerInputs { emitted: false });
+            let inputs = ValuesSource::new([HandlerInput { value: 0 }, HandlerInput { value: 1 }]);
             let handler = ZeroThenFanOut;
             let output = CountingSink::<HandlerOutput>::new(deliveries_for_flow);
 
@@ -535,24 +466,6 @@ impl TypedPayload for ConcurrentOutput {
     const EVENT_TYPE: &'static str = "observer.concurrent.output";
 }
 
-#[derive(Clone, Debug)]
-struct OneConcurrentInput {
-    emitted: bool,
-}
-
-#[obzenflow_runtime::effects::system("one-concurrent-input")]
-impl TypedFiniteSourceHandler for OneConcurrentInput {
-    type Output = ConcurrentInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![ConcurrentInput { value: 11 }]))
-    }
-}
-
 #[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
 struct ConcurrentTransform {
@@ -602,7 +515,7 @@ async fn graph_fan_out_dispatches_once_per_concurrent_stage_occurrence() {
     let run = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let input = Port::owned(OneConcurrentInput { emitted: false });
+            let input = ValuesSource::new([ConcurrentInput { value: 11 }]);
             let left = ConcurrentTransform {
                 branch: "left",
                 barrier: barrier_for_flow.clone(),
@@ -717,7 +630,7 @@ async fn fatal_handler_return_has_before_without_after_and_one_failed_lifecycle(
     let result = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let input = Port::owned(OneHandlerInput { emitted: false });
+            let input = ValuesSource::new([HandlerInput { value: 7 }]);
             let fatal = FatalTransform;
             let output = CountingSink::<HandlerOutput>::new(deliveries_for_flow);
 

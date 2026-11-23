@@ -20,7 +20,7 @@ use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{HttpMethod, ManagedResponse, Request, Response};
 use obzenflow_core::{ChainEvent, EventId, JournalRecord, ReaderGeneration, StageId};
-use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::pipeline::ingress::IngressEvidenceWriter;
@@ -967,7 +967,7 @@ async fn wait_until_ready(health: &dyn HttpEndpoint) {
 }
 
 async fn ingress_flow(
-    source: Port<dyn HostedIngress<Order>>,
+    source: HostedSource<Order>,
     journals_root: Option<PathBuf>,
     hold: Option<Hold>,
 ) -> FlowHandle {
@@ -984,7 +984,7 @@ async fn ingress_flow(
                 name: "flowip_084l_running_ingress",
                 journals: disk_journals(root),
                 stages: {
-                    source = async_infinite_source!(Order => source);
+                    source = source!(Order => source);
                     sink = sink!(Order => sink);
                 },
                 topology: {
@@ -995,7 +995,7 @@ async fn ingress_flow(
                 name: "flowip_084l_running_ingress",
                 journals: memory_journals(),
                 stages: {
-                    source = async_infinite_source!(Order => source);
+                    source = source!(Order => source);
                     sink = sink!(Order => sink);
                 },
                 topology: {
@@ -1390,7 +1390,7 @@ async fn duplicate_limiters_resolving_to_hosted_ingress_are_rejected() {
             journals: memory_journals(),
 
             stages: {
-                source = async_infinite_source!(
+                source = source!(
                     PlacementPayload with { rate_limit(10.0), rate_limit(10.0) } => hosted_source
                 );
                 sink = sink!(PlacementPayload => placeholder!());
@@ -1445,7 +1445,7 @@ async fn a_hosted_rate_limiter_refuses_through_a_running_flow() {
             stages: {
                 // One burst token: the first POST is admitted, the second is
                 // rate-limited fail-fast at the hosted edge.
-                source = async_infinite_source!(
+                source = source!(
                     Order with rate_limit(0.001).burst_capacity(1.0) => source
                 );
                 sink = sink!(Order => sink);

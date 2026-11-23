@@ -5,11 +5,11 @@ mode = "enforce"
 window = 3
 stall_timeout_ms = 300000
 
-# With `source = "live"`, the flow reads the Hacker News API. With `source = "mock"`, it reads scripted stories.
+# With `stories = "hacker_news"`, the flow reads the Hacker News API. With `stories = "scripted"`, it reads scripted stories.
 # Pacing is `events_per_second` under [middleware.stages.hn_stories.rate_limiter].
 # `output` publishes the digest to the console or, with "postgres", to PostgreSQL.
 [app]
-source = "live"
+stories = "hacker_news"
 output = "console"
 max_stories = 60
 poll_timeout_secs = 120

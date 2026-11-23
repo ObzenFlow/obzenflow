@@ -10,13 +10,13 @@ mod replay_testkit {
     mod manifest;
     mod ordered_stage_journal;
     mod prefix_stable;
-    mod reattaching_source;
+    mod preloaded_input;
     mod run_dir;
     mod stage_journal;
     mod unsynced_candidate;
     mod unsynced_context;
     pub use self::{
-        bootstrap::*, manifest::*, prefix_stable::*, reattaching_source::*, run_dir::*,
+        bootstrap::*, manifest::*, prefix_stable::*, preloaded_input::*, run_dir::*,
         stage_journal::*, unsynced_context::*,
     };
 }

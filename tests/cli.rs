@@ -23,12 +23,13 @@ mod replay_testkit {
     pub use self::{discard::*, stage_journal::*, unsynced_application::*, unsynced_context::*};
 }
 
-use obzenflow::effects::Port;
+use obzenflow::effects::{EffectContext, EffectError, Port};
 use obzenflow::flow::{flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sources::{
-    SourceDiagnostic, SourceDiagnosticReason, SourceError, TypedFiniteSourceHandler,
+    FiniteRead, SourceDiagnostic, SourceDiagnosticReason, SourceError, SourceRead,
+    TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler, ValuesSource,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -110,34 +111,103 @@ impl TypedPayload for Tick {
     const EVENT_TYPE: &'static str = "cli_verify.tick";
 }
 
-#[derive(Clone, Debug)]
-struct Ticks {
-    next: u64,
+fn ticks() -> impl TypedFiniteSourceHandler<Output = Tick> {
+    ValuesSource::new((1..=3).map(|n| Tick { n }).collect::<Vec<_>>())
 }
 
-impl Ticks {
-    fn new() -> Self {
-        Self { next: 1 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TickRead(u64);
+
+#[obzenflow::port]
+#[async_trait::async_trait]
+trait TickNumbers {
+    #[effect(type = "cli_verify.tick_numbers.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &TickRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<u64, TickRead>, EffectError>;
+}
+
+/// Supplies tick numbers up to `last`, waiting `pace` before each one. With
+/// no `last`, the input never ends.
+struct Numbers {
+    last: Option<u64>,
+    pace: Duration,
+}
+
+#[obzenflow::system("tick-numbers")]
+#[async_trait::async_trait]
+impl TickNumbers for Numbers {
+    async fn read(
+        &self,
+        from: &TickRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<u64, TickRead>, EffectError> {
+        let n = from.0 + 1;
+        if self.last.is_some_and(|last| n > last) {
+            return Ok(FiniteRead::EndOfInput);
+        }
+        tokio::time::sleep(self.pace).await;
+        Ok(FiniteRead::Batch {
+            records: vec![n],
+            next: TickRead(n),
+        })
     }
 }
 
-#[obzenflow::system("ticks")]
-impl TypedFiniteSourceHandler for Ticks {
+/// Ticks 1 to 503. Rows after the third are invalid records.
+struct RejectingTicks(Port<dyn TickNumbers>);
+
+impl RejectingTicks {
+    fn new() -> Self {
+        Self(Port::to(Numbers {
+            last: Some(503),
+            pace: Duration::ZERO,
+        }))
+    }
+}
+
+impl TypedFiniteSourceHandler for RejectingTicks {
     type Output = Tick;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next > 3 {
-            return Ok(None);
-        }
-        let n = self.next;
-        self.next += 1;
-        Ok(Some(vec![Tick { n }]))
+    fn read(&self) -> Option<SourceRead<Tick>> {
+        Some(SourceRead::finite(self.0.clone(), TickRead(0), |n| {
+            if n > 3 {
+                return Err(SourceError::Validation(
+                    SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord).record(n - 1),
+                ));
+            }
+            Ok(Tick { n })
+        }))
+    }
+}
+
+/// One tick every 30 milliseconds, without end.
+struct PacedTicks(Port<dyn TickNumbers>);
+
+impl PacedTicks {
+    fn new() -> Self {
+        Self(Port::to(Numbers {
+            last: None,
+            pace: Duration::from_millis(30),
+        }))
+    }
+}
+
+impl TypedAsyncFiniteSourceHandler for PacedTicks {
+    type Output = Tick;
+
+    fn read(&self) -> Option<SourceRead<Tick>> {
+        Some(SourceRead::finite(self.0.clone(), TickRead(0), |n| {
+            Ok(Tick { n: n - 1 })
+        }))
     }
 }
 
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticks_handler = Port::owned(Ticks::new());
+        let ticks_handler = ticks();
         let out_handler = replay_testkit::Discard::<Tick>::default();
 
         Ok(flow! {
@@ -156,30 +226,6 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     })
 }
 
-#[derive(Clone, Debug)]
-struct RejectingTicks {
-    next: u64,
-}
-
-#[obzenflow::system("rejecting-ticks")]
-impl TypedFiniteSourceHandler for RejectingTicks {
-    type Output = Tick;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next > 503 {
-            return Ok(None);
-        }
-        let n = self.next;
-        self.next += 1;
-        if n > 3 {
-            return Err(SourceError::Validation(
-                SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord).record(n - 1),
-            ));
-        }
-        Ok(Some(vec![Tick { n }]))
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_rejects_500_rows_completes_and_show_lists_them_all() {
     let temp = tempfile::tempdir().unwrap();
@@ -187,7 +233,7 @@ async fn a_run_that_rejects_500_rows_completes_and_show_lists_them_all() {
     replay_testkit::unsynced_application()
         .with_cli_args(["rejecting-ticks"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let ticks_handler = Port::owned(RejectingTicks { next: 1 });
+            let ticks_handler = RejectingTicks::new();
             let out_handler = replay_testkit::Discard::<Tick>::default();
             Ok(flow! {
                 name: "cli_rejections",
@@ -2099,30 +2145,12 @@ mod hosted {
         let root = PathBuf::from(std::env::var_os(HOST_ROOT).expect("parent fixture root"));
         let port = std::env::var(HOST_PORT).unwrap();
         let definition = FlowDefinition::materialize(move |_| {
-            #[derive(Debug)]
-            struct PacedTicks {
-                emitted: u64,
-            }
-            #[obzenflow::system("paced-ticks")]
-            #[async_trait::async_trait]
-            impl obzenflow::stages::sources::TypedAsyncFiniteSourceHandler for PacedTicks {
-                type Output = Tick;
-                async fn next(
-                    &mut self,
-                ) -> Result<Option<Vec<Tick>>, obzenflow::stages::sources::SourceError>
-                {
-                    tokio::time::sleep(Duration::from_millis(30)).await;
-                    let tick = Tick { n: self.emitted };
-                    self.emitted += 1;
-                    Ok(Some(vec![tick]))
-                }
-            }
-            let source = Port::owned(PacedTicks { emitted: 0 });
+            let source = PacedTicks::new();
             let sink = replay_testkit::Discard::<Tick>::default();
             Ok(flow! {
                 name: "cli_process_lifetime", journals: disk_journals(root),
                 stages: {
-                    ticks = obzenflow::flow::async_source!(Tick => source);
+                    ticks = obzenflow::flow::source!(Tick => source);
                     out = sink!(Tick => sink);
                 },
                 topology: { ticks |> out; }
@@ -2511,7 +2539,7 @@ impl SlowDiscard {
 
 fn lagging_sink_flow(root: PathBuf, delay: Duration) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticks_handler = Port::owned(Ticks::new());
+        let ticks_handler = ticks();
         let out_handler = obzenflow::effects::perform(|_: &Tick| Discard)
             .through(obzenflow::effects::Port::to(SlowDiscard { delay }));
         Ok(flow! {

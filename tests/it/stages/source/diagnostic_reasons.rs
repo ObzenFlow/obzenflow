@@ -2,27 +2,23 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-084n B6 acceptance: every closed diagnostic reason except
-//! `Unclassified` is produced by a real connector from real input.
+//! Every closed diagnostic reason except `Unclassified` is produced from real
+//! input. The adapters crate proves the reasons that the CSV, YAML and channel
+//! handlers produce. The other reasons come from the sources below.
 
 use async_trait::async_trait;
 use obzenflow::stages::sources::{
-    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
-    PositionedFiniteReader, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler,
+    AsyncFiniteSourceConnector, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
 };
 use obzenflow::stages::sources::{
-    ChannelSource, CsvDecoder, CsvSource, CursorlessPullDecoder, DecodeError, HttpPullConfig,
-    HttpPullSource, HttpResponse, HttpRetryConfig, SourceDiagnosticReason, SourceError,
-    SourcePollErrorKind, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
+    CursorlessPullDecoder, DecodeError, HttpPullConfig, HttpPullSource, HttpResponse,
+    HttpRetryConfig, SourceDiagnosticReason, SourceError, SourcePollErrorKind,
 };
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, HttpRequest};
 use obzenflow_core::{StageId, TypedPayload};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::NamedTempFile;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,112 +31,12 @@ impl TypedPayload for Order {
     const EVENT_TYPE: &'static str = "flowip_084n.reason_order";
 }
 
-#[derive(Clone)]
-struct OrderYaml;
-
-impl YamlDecoder for OrderYaml {
-    type Output = Order;
-
-    fn decode(&self, record: YamlRecord<'_>) -> Result<Order, YamlDecodeError> {
-        record.deserialize()
-    }
-}
-
 fn context() -> SourceReaderInitContext {
     SourceReaderInitContext {
         stage_id: StageId::new(),
         stage_name: "orders".into(),
         flow_name: "reasons".into(),
     }
-}
-
-fn input(text: &[u8]) -> NamedTempFile {
-    let mut file = NamedTempFile::new().unwrap();
-    file.write_all(text).unwrap();
-    file
-}
-
-fn yaml_open(text: &[u8], selection: YamlSelection, max_bytes: usize) -> SourceError {
-    let file = input(text);
-    YamlSource::builder(OrderYaml)
-        .path(file.path())
-        .selection(selection)
-        .max_bytes(max_bytes)
-        .build()
-        .unwrap()
-        .open(context())
-        .expect_err("opening fails")
-}
-
-fn yaml_record(text: &[u8]) -> SourceError {
-    let file = input(text);
-    let mut reader = YamlSource::builder(OrderYaml)
-        .path(file.path())
-        .selection(YamlSelection::Sequence)
-        .build()
-        .unwrap()
-        .open(context())
-        .unwrap();
-    reader.next().expect_err("the record is rejected")
-}
-
-fn orders() -> YamlSelection {
-    YamlSelection::SequenceAt("/orders".into())
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum Tier {
-    Gold,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct TierRow {
-    tier: Tier,
-}
-
-impl TypedPayload for TierRow {
-    const EVENT_TYPE: &'static str = "flowip_084n.reason_tier";
-}
-
-#[derive(Clone)]
-struct TierCsv;
-
-impl CsvDecoder for TierCsv {
-    type Output = TierRow;
-}
-
-fn csv_missing() -> SourceError {
-    CsvSource::builder(TierCsv)
-        .path("/nonexistent/flowip-084n/input.csv")
-        .build()
-        .unwrap()
-        .open(context())
-        .expect_err("missing file")
-}
-
-fn csv_unknown_variant() -> SourceError {
-    let file = input(b"tier\nPlatinum\n");
-    let mut reader = CsvSource::builder(TierCsv)
-        .path(file.path())
-        .build()
-        .unwrap()
-        .open(context())
-        .unwrap();
-    reader.next().expect_err("unknown variant is rejected")
-}
-
-fn csv_appended_between_polls() -> SourceError {
-    let mut file = input(b"tier\nGold\nGold\n");
-    let mut reader = CsvSource::builder(TierCsv)
-        .path(file.path())
-        .chunk_size(1)
-        .build()
-        .unwrap()
-        .open(context())
-        .unwrap();
-    reader.next().expect("the first row reads");
-    file.write_all(b"Gold\n").unwrap();
-    reader.next().expect_err("the input changed")
 }
 
 #[derive(Clone, Debug)]
@@ -206,17 +102,6 @@ async fn http(reply: Reply) -> SourceError {
         .expect_err("the fetch fails")
 }
 
-async fn closed_channel() -> SourceError {
-    let (sender, receiver) = tokio::sync::mpsc::channel::<Order>(1);
-    drop(sender);
-    let mut reader = AsyncInfiniteSourceConnector::open(&ChannelSource::new(receiver), context())
-        .await
-        .unwrap();
-    TypedAsyncInfiniteSourceHandler::next(&mut reader)
-        .await
-        .expect_err("a closed channel cannot continue")
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SkipsEmptyTags {
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -240,25 +125,14 @@ fn unrepresentable_value() -> SourceError {
 async fn produce(reason: SourceDiagnosticReason) -> Option<SourceError> {
     use SourceDiagnosticReason::*;
     Some(match reason {
-        InputUnavailable => csv_missing(),
-        InputClosed => closed_channel().await,
-        InputChanged => csv_appended_between_polls(),
         TimedOut => http(Reply::TimedOut).await,
         RateLimited => http(Reply::Status(429, Some("3600"))).await,
         RemoteRejected => http(Reply::Status(401, None)).await,
         RemoteFailed => http(Reply::Status(503, None)).await,
-        MalformedInput => yaml_open(b"orders: [\n", orders(), 1024),
-        UnsupportedConstruct => yaml_open(b"a: &x 1\nb: *x\n", orders(), 1024),
-        DuplicateKey => yaml_open(b"orders: []\norders: []\n", orders(), 1024),
-        SizeLimitExceeded => yaml_open(b"orders: []\n", orders(), 4),
-        SelectionNotFound => yaml_open(b"returns: []\n", orders(), 1024),
-        UnexpectedShape => yaml_open(b"orders: 3\n", orders(), 1024),
-        MissingField => yaml_record(b"- {order_id: \"a\"}\n"),
-        UnknownField => yaml_record(b"- {order_id: \"a\", amount_cents: 1, extra: 2}\n"),
-        InvalidValue => yaml_record(b"- {order_id: \"a\", amount_cents: lots}\n"),
-        InvalidRecord => csv_unknown_variant(),
         UnrepresentableValue => unrepresentable_value(),
-        Unclassified => return None,
+        InputUnavailable | InputClosed | InputChanged | MalformedInput | UnsupportedConstruct
+        | DuplicateKey | SizeLimitExceeded | SelectionNotFound | UnexpectedShape | MissingField
+        | UnknownField | InvalidValue | InvalidRecord | Unclassified => return None,
     })
 }
 
@@ -300,7 +174,7 @@ async fn every_reason_has_a_real_producer() {
             "no filesystem path: {rendered}"
         );
     }
-    assert_eq!(produced, reasons.len() - 1);
+    assert_eq!(produced, 5);
 }
 
 #[tokio::test]

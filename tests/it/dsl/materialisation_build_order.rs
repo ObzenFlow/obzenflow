@@ -9,7 +9,6 @@
 use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
 };
-use obzenflow::effects::Port;
 use obzenflow::stages::sinks;
 use obzenflow::stages::sources;
 use obzenflow_core::TypedPayload;
@@ -110,7 +109,7 @@ fn materialised_failure_probe(
         let bootstrap = bootstrap_config();
         assert_eq!(bootstrap.shutdown_timeout, Duration::from_secs(marker));
 
-        let input = Port::owned(sources::ValuesSource::new(Vec::<ProbeEvent>::new()));
+        let input = sources::ValuesSource::new(Vec::<ProbeEvent>::new());
         let brief = ai::infer(Echo);
         let output = sinks::ConsoleSink::<ProbeEvent, _>::new(sinks::DebugFormatter);
 

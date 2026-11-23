@@ -44,22 +44,134 @@ impl std::fmt::Debug for BoundedBindingEvidence {
 pub enum BindingEvidenceError {
     #[error("binding evidence exceeds the framework byte bound")]
     TooLarge,
+    #[error("the configured system location cannot be represented in binding evidence")]
+    InvalidLocation,
 }
 
-/// Credential-free evidence naming the system that answers a request.
-///
-/// Its canonical bytes are the one-key JSON object `{"system":"<name>"}`.
+/// The configured supplier recorded at a source and in the descriptor of its read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemBinding {
+    system: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<SystemLocation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "format", content = "location", rename_all = "lowercase")]
+pub enum SystemLocation {
+    Csv(std::path::PathBuf),
+    Tsv(std::path::PathBuf),
+    Yaml(std::path::PathBuf),
+    Json(HttpEndpoint),
+}
+
+/// An HTTP API base URL suitable for durable, operator-readable evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HttpEndpoint(String);
+
+impl HttpEndpoint {
+    pub fn from_url(url: &url::Url) -> Result<Self, BindingEvidenceError> {
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host().is_none()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(BindingEvidenceError::InvalidLocation);
+        }
+        let mut endpoint = url.clone();
+        endpoint
+            .set_password(None)
+            .map_err(|_| BindingEvidenceError::InvalidLocation)?;
+        endpoint
+            .set_username("")
+            .map_err(|_| BindingEvidenceError::InvalidLocation)?;
+        Ok(Self(endpoint.into()))
+    }
+}
+
+impl SystemBinding {
+    pub fn name(&self) -> &str {
+        &self.system
+    }
+
+    pub fn location(&self) -> Option<&SystemLocation> {
+        self.location.as_ref()
+    }
+
+    /// The binding as a refusal quotes it.
+    pub fn quoted(&self) -> String {
+        match &self.location {
+            None => format!("'{}'", self.system),
+            Some(location) => format!("'{}' at '{}'", self.system, location.place()),
+        }
+    }
+
+    /// The format the system reads at its location.
+    pub fn format(&self) -> Option<&'static str> {
+        self.location.as_ref().map(SystemLocation::format)
+    }
+}
+
+impl SystemLocation {
+    fn place(&self) -> String {
+        match self {
+            Self::Csv(path) | Self::Tsv(path) | Self::Yaml(path) => path.display().to_string(),
+            Self::Json(endpoint) => endpoint.0.clone(),
+        }
+    }
+
+    fn format(&self) -> &'static str {
+        match self {
+            Self::Csv(_) => "CSV",
+            Self::Tsv(_) => "TSV",
+            Self::Yaml(_) => "YAML",
+            Self::Json(_) => "JSON",
+        }
+    }
+}
+
+impl std::fmt::Display for SystemBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.system)?;
+        match &self.location {
+            None => Ok(()),
+            Some(location) => write!(f, " at {}", location.place()),
+        }
+    }
+}
+
+/// Bounded canonical evidence for an effect binding.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SystemBindingEvidence {
+    binding: SystemBinding,
     canonical: BoundedBindingEvidence,
 }
 
 impl SystemBindingEvidence {
     pub fn named(system: &str) -> Result<Self, BindingEvidenceError> {
-        let canonical = serde_json::json!({ "system": system }).to_string();
+        Self::new(system, None)
+    }
+
+    pub fn located(system: &str, location: SystemLocation) -> Result<Self, BindingEvidenceError> {
+        Self::new(system, Some(location))
+    }
+
+    fn new(system: &str, location: Option<SystemLocation>) -> Result<Self, BindingEvidenceError> {
+        let binding = SystemBinding {
+            system: system.to_owned(),
+            location,
+        };
+        let canonical =
+            serde_json::to_vec(&binding).map_err(|_| BindingEvidenceError::InvalidLocation)?;
         Ok(Self {
-            canonical: BoundedBindingEvidence::try_new(canonical.into_bytes())?,
+            binding,
+            canonical: BoundedBindingEvidence::try_new(canonical)?,
         })
+    }
+
+    pub fn binding(&self) -> &SystemBinding {
+        &self.binding
     }
 
     pub fn canonical_bytes(&self) -> &BoundedBindingEvidence {

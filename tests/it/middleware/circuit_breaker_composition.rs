@@ -16,13 +16,14 @@ use obzenflow_core::{
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::EffectContext;
 use obzenflow_runtime::effects::{perform, EffectCursor, EffectError, Effects, Port};
 use obzenflow_runtime::runtime_config::RETRY_MAX_ATTEMPTS_KEY;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -30,6 +31,60 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CompRead(u64);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait CompFeed {
+    #[effect(type = "circuit_breaker_composition.inputs.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &CompRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<CompInput, CompRead>, EffectError>;
+}
+
+/// Supplies inputs 1 to 3 and counts each physical read.
+struct CompInputs {
+    calls: Arc<AtomicUsize>,
+}
+
+#[obzenflow_runtime::effects::system("comp-inputs")]
+#[async_trait]
+impl CompFeed for CompInputs {
+    async fn read(
+        &self,
+        from: &CompRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<CompInput, CompRead>, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if from.0 >= 3 {
+            return Ok(FiniteRead::EndOfInput);
+        }
+        Ok(FiniteRead::Batch {
+            records: vec![CompInput { value: from.0 + 1 }],
+            next: CompRead(from.0 + 1),
+        })
+    }
+}
+
+struct CompSource(Port<dyn CompFeed>);
+
+impl CompSource {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self(Port::to(CompInputs { calls }))
+    }
+}
+
+impl TypedFiniteSourceHandler for CompSource {
+    type Output = CompInput;
+
+    fn read(&self) -> Option<SourceRead<CompInput>> {
+        Some(SourceRead::finite(self.0.clone(), CompRead(0), Ok))
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CompInput {
@@ -57,37 +112,6 @@ struct CompEffectValue {
 
 impl TypedPayload for CompEffectValue {
     const EVENT_TYPE: &'static str = "cb_composition.effect_value";
-}
-
-/// Finite source emitting values 1..=3, one event per poll.
-#[derive(Clone, Debug)]
-struct CompSource {
-    next_value: u64,
-    calls: Arc<AtomicUsize>,
-}
-
-impl CompSource {
-    fn new(calls: Arc<AtomicUsize>) -> Self {
-        Self {
-            next_value: 1,
-            calls,
-        }
-    }
-}
-
-#[obzenflow::system("composite")]
-impl TypedFiniteSourceHandler for CompSource {
-    type Output = CompInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if self.next_value > 3 {
-            return Ok(None);
-        }
-        let value = self.next_value;
-        self.next_value += 1;
-        Ok(Some(vec![CompInput { value }]))
-    }
 }
 
 /// One input fans out to two derived inputs, so each source event produces two
@@ -233,7 +257,7 @@ fn build_retry_flow(
                 .max_attempts(2),
         );
         let sink_breaker = circuit_breaker().consecutive_failures(5);
-        let source_handler = Port::owned(CompSource::new(source_calls));
+        let source_handler = CompSource::new(source_calls);
         let fan_out_handler = FanOutTransform::new();
         let effectful_handler = RetryTransform::new(calls);
         let collector_handler = perform(|output: &CompOutput| output.clone())

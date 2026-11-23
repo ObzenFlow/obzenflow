@@ -187,6 +187,13 @@ impl CatchUpContext {
             .map(|control| control.resume_generation())
     }
 
+    fn recorded_marker(&self, generation: ReaderGeneration) -> Option<ChainEvent> {
+        let Recorded::Actions(history) = &self.recorded else {
+            return None;
+        };
+        history.actions().recorded_marker(generation).cloned()
+    }
+
     fn unreproduced(&self) -> Option<StageFatal> {
         let Recorded::Actions(history) = &self.recorded else {
             return None;
@@ -412,11 +419,15 @@ impl FsmAction for CatchUpAction {
                     return Ok(());
                 };
                 for generation in after.0.saturating_add(1)..=through.0 {
-                    let mut marker = ChainEventFactory::catch_up_complete_event(
-                        writer.writer_id,
-                        ReaderGeneration(generation),
-                        ctx.stage_key.clone(),
-                    );
+                    let mut marker = ctx
+                        .recorded_marker(ReaderGeneration(generation))
+                        .unwrap_or_else(|| {
+                            ChainEventFactory::catch_up_complete_event(
+                                writer.writer_id,
+                                ReaderGeneration(generation),
+                                ctx.stage_key.clone(),
+                            )
+                        });
                     marker.flow_context = writer.flow_context.clone();
                     super::output_committer::commit_control_output(
                         &writer.data_journal,

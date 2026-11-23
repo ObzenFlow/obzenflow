@@ -17,7 +17,6 @@ use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
 };
 use obzenflow::application::FlowApplication;
-use obzenflow::effects::Port;
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{ai, flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
@@ -83,7 +82,7 @@ impl AiRole<ReducedEvidence> for GenerateBrief {
 
 fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let evidence = Port::owned(sources::ValuesSource::new([input]));
+        let evidence = sources::ValuesSource::new([input]);
         let generate_brief = ai::infer(GenerateBrief);
         let ai_breaker = circuit_breaker().consecutive_failures(5);
         let display = sinks::ConsoleSink::new(|brief: &DecisionBrief| {

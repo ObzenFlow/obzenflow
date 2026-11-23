@@ -166,6 +166,7 @@ impl From<SourceFrontierRefusal> for SourceContinuationRefusal {
 /// apply [`Self::handoff`] to it (B22).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RecordedSourceFrontier {
+    binding: Option<crate::effect_binding::SystemBinding>,
     pin: Option<SourceInputPinnedFact>,
     after: Option<EncodedSourcePosition>,
     admitted: u64,
@@ -173,10 +174,17 @@ pub struct RecordedSourceFrontier {
 }
 
 impl RecordedSourceFrontier {
+    pub fn binding(&self) -> Option<&crate::effect_binding::SystemBinding> {
+        self.binding.as_ref()
+    }
+
     /// Fold one record a replay re-admits or preserves: its payload and the
     /// position its provenance carries.
     pub fn observe(&mut self, payload: &ChainPayload, progress: Option<&SourceProgress>) {
         match payload {
+            ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(binding)) => {
+                self.binding = Some(binding.clone());
+            }
             ChainPayload::Execution(ExecutionPayload::SourceInputPinned(pin)) => {
                 self.pin = Some(pin.clone());
                 self.after = None;
@@ -224,6 +232,7 @@ impl RecordedSourceFrontier {
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceContinuation {
+    RecordedRead,
     Refuse {
         by: RefusedBy,
     },
@@ -280,7 +289,7 @@ impl SourceContinuation {
                         }
                     })
             }
-            Self::Reattach { .. } => None,
+            Self::RecordedRead | Self::Reattach { .. } => None,
         }
     }
 }

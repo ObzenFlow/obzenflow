@@ -18,7 +18,7 @@ request_timeout_ms = 150000
 
 # The demo's own settings, as in obzenflow.toml.
 [app]
-source = "mock"
+stories = "scripted"
 output = "postgres"
 max_stories = 60
 poll_timeout_secs = 120

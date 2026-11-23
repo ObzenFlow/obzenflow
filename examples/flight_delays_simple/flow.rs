@@ -14,7 +14,6 @@ use super::fixtures;
 use super::handlers::*;
 use anyhow::Result;
 use obzenflow::application::FlowApplication;
-use obzenflow::effects::Port;
 use obzenflow::flow::{flow, join, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::stages::sources;
@@ -45,8 +44,8 @@ pub fn run_example() -> Result<()> {
 
     FlowApplication::builder().run_blocking(FlowDefinition::materialize(
         move |_runtime_config| {
-            let carriers_handler = Port::owned(sources::ValuesSource::new(fixtures::carriers()));
-            let flights_handler = Port::owned(sources::ValuesSource::new(fixtures::flights()));
+            let carriers_handler = sources::ValuesSource::new(fixtures::carriers());
+            let flights_handler = sources::ValuesSource::new(fixtures::flights());
             let validator_handler = FlightValidator;
             let calculator_handler = DelayCalculator;
             let enricher_handler = joins::inner(

@@ -7,17 +7,14 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload, EdgeLivenessState};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload};
-use obzenflow_dsl::{async_source, flow, join, sink, source, FlowDefinition};
+use obzenflow_dsl::{flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, TypedAsyncFiniteSourceHandler, TypedJoinHandler,
-};
-use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::stages::common::handlers::{JoinReferenceView, TypedJoinHandler};
 use serde::{Deserialize, Serialize};
 
 /// File-local payloads for the join-fan-in test. The two legs (reference
@@ -59,61 +56,58 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-#[derive(Clone, Debug)]
-struct OneRefEventSource {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StreamRead {
     emitted: bool,
 }
 
-impl OneRefEventSource {
-    fn new() -> Self {
-        Self { emitted: false }
-    }
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait StreamInput {
+    #[effect(type = "liveness_join.stream.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &StreamRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<LiveEvent, StreamRead>, EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("one-ref-event")]
-impl obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler for OneRefEventSource {
-    type Output = CatalogRecord;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![CatalogRecord {
-            kind: "ref".to_string(),
-            value: 1,
-        }]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DelayedStreamSource {
-    emitted: bool,
-}
-
-impl DelayedStreamSource {
-    fn new() -> Self {
-        Self { emitted: false }
-    }
-}
+/// Supplies one stream event after one second.
+struct DelayedStream;
 
 #[obzenflow_runtime::effects::system("delayed-stream")]
 #[async_trait]
-impl TypedAsyncFiniteSourceHandler for DelayedStreamSource {
+impl StreamInput for DelayedStream {
+    async fn read(
+        &self,
+        from: &StreamRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<LiveEvent, StreamRead>, EffectError> {
+        if from.emitted {
+            return Ok(FiniteRead::EndOfInput);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(FiniteRead::Batch {
+            records: vec![LiveEvent {
+                kind: "stream".to_string(),
+                value: 2,
+            }],
+            next: StreamRead { emitted: true },
+        })
+    }
+}
+
+struct DelayedStreamSource(Port<dyn StreamInput>);
+
+impl TypedFiniteSourceHandler for DelayedStreamSource {
     type Output = LiveEvent;
 
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-
-        self.emitted = true;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        Ok(Some(vec![LiveEvent {
-            kind: "stream".to_string(),
-            value: 2,
-        }]))
+    fn read(&self) -> Option<SourceRead<LiveEvent>> {
+        Some(SourceRead::finite(
+            self.0.clone(),
+            StreamRead { emitted: false },
+            Ok,
+        ))
     }
 }
 
@@ -188,8 +182,11 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = Port::owned(OneRefEventSource::new());
-        let stream_source = Port::owned(DelayedStreamSource::new());
+        let reference_source = ValuesSource::new([CatalogRecord {
+            kind: "ref".to_string(),
+            value: 1,
+        }]);
+        let stream_source = DelayedStreamSource(Port::to(DelayedStream));
         let slow_join = SlowJoin {
             release: join_release,
         };
@@ -201,7 +198,7 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
 
             stages: {
                 ref_src = source!(CatalogRecord => reference_source);
-                stream_src = async_source!(LiveEvent => stream_source);
+                stream_src = source!(LiveEvent => stream_source);
                 joiner = join!(catalog ref_src: CatalogRecord, LiveEvent -> EnrichedRecord => slow_join);
                 snk = sink!(EnrichedRecord => noop_sink);
             },
@@ -312,3 +309,7 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
 }
 
 use crate::liveness_observations;
+use obzenflow_adapters::sources::ValuesSource;
+use obzenflow_runtime::effects::{EffectContext, EffectError};
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;

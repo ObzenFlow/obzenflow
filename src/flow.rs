@@ -30,9 +30,9 @@
 //! # impl TypedPayload for OrderPlaced { const EVENT_TYPE: &'static str = "order.placed"; }
 //!
 //! let definition = FlowDefinition::materialize(|_| {
-//! # let queue = obzenflow::effects::Port::owned(sources::ValuesSource::new(Vec::<QueueOrder>::new()));
-//! # let web = obzenflow::effects::Port::owned(sources::ValuesSource::new(Vec::<WebOrder>::new()));
-//! # let csv = obzenflow::effects::Port::owned(sources::ValuesSource::new(Vec::<CsvOrder>::new()));
+//! # let queue = sources::ValuesSource::new(Vec::<QueueOrder>::new());
+//! # let web = sources::ValuesSource::new(Vec::<WebOrder>::new());
+//! # let csv = sources::ValuesSource::new(Vec::<CsvOrder>::new());
 //! # let output = sinks::ConsoleSink::new(|order: &OrderPlaced| order.id.to_string());
 //!     let from_queue = transforms::map(|order: QueueOrder| OrderPlaced { id: order.id });
 //!     let from_web = transforms::map(|order: WebOrder| OrderPlaced { id: order.order_id });
@@ -66,8 +66,7 @@
 //! keeps its own schema, and the conversions remain visible in the topology.
 
 pub use obzenflow_dsl::{
-    ai, ai_map_reduce, async_infinite_source, async_source, effectful_stateful,
-    effectful_transform, flow, inference, infinite_source, join, merge, placeholder, sink, source,
-    stateful, transform, FlowBuildError, FlowBuildFailure, FlowDefinition, StageCreationError,
-    StageCreationResult,
+    ai, ai_map_reduce, effectful_stateful, effectful_transform, flow, inference, join, merge,
+    placeholder, sink, source, stateful, transform, FlowBuildError, FlowBuildFailure,
+    FlowDefinition, StageCreationError, StageCreationResult,
 };

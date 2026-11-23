@@ -44,16 +44,7 @@ const ALLOWLIST: &[(&str, &str)] = &[(
 )];
 
 /// DSL macros whose type slots are subject to the lint.
-const DSL_MACROS: &[&str] = &[
-    "source!",
-    "async_source!",
-    "infinite_source!",
-    "async_infinite_source!",
-    "transform!",
-    "stateful!",
-    "sink!",
-    "join!",
-];
+const DSL_MACROS: &[&str] = &["source!", "transform!", "stateful!", "sink!", "join!"];
 
 #[test]
 fn no_serde_json_value_in_dsl_type_slots() {

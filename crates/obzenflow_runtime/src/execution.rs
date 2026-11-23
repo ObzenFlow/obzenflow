@@ -362,12 +362,14 @@ impl ResumeControl {
     ) {
         let exhaustion = match continuation {
             SourceContinuation::Reattach { .. } => SourceReplayExhaustion::ContinueLive,
-            SourceContinuation::Seek { .. } if recorded_eof != Some(EofKind::Natural) => {
+            SourceContinuation::RecordedRead | SourceContinuation::Seek { .. }
+                if recorded_eof != Some(EofKind::Natural) =>
+            {
                 SourceReplayExhaustion::ContinueLive
             }
-            SourceContinuation::Seek { .. } | SourceContinuation::Refuse { .. } => {
-                SourceReplayExhaustion::Terminate
-            }
+            SourceContinuation::RecordedRead
+            | SourceContinuation::Seek { .. }
+            | SourceContinuation::Refuse { .. } => SourceReplayExhaustion::Terminate,
         };
         self.0
             .source_exhaustion

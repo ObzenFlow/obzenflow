@@ -10,16 +10,13 @@ use obzenflow::ai::{
     TriggeredMapReduce, Unkeyed,
 };
 use obzenflow::stages::sinks::DiscardSink;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::SourceError;
-use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler,
-};
-use obzenflow_runtime::typing::SourceTyping;
+use obzenflow_runtime::stages::common::handlers::{JoinReferenceView, TypedJoinHandler};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -110,50 +107,6 @@ fn models() -> FakeChatModels {
     FakeChatModels::replying(|_| "ok".to_string())
 }
 
-#[derive(Clone, Debug)]
-struct NoEventSource;
-impl SourceTyping for NoEventSource {
-    type Output = BuildOnlyItem;
-}
-#[obzenflow::system("no-events")]
-impl TypedFiniteSourceHandler for NoEventSource {
-    type Output = BuildOnlyItem;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Ok(None)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ItemSource {
-    next: u64,
-    last: u64,
-}
-
-impl ItemSource {
-    fn one_to(last: u64) -> Self {
-        Self { next: 1, last }
-    }
-}
-
-impl SourceTyping for ItemSource {
-    type Output = BuildOnlyItem;
-}
-
-#[obzenflow::system("items")]
-impl TypedFiniteSourceHandler for ItemSource {
-    type Output = BuildOnlyItem;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next > self.last {
-            return Ok(None);
-        }
-        let value = self.next;
-        self.next += 1;
-        Ok(Some(vec![BuildOnlyItem { value }]))
-    }
-}
-
 #[obzenflow_runtime::effects::port]
 trait CollectOutPort: Send + Sync {
     #[effect(type = "regression.amr.collect", at_least_once, records = reply)]
@@ -175,7 +128,7 @@ impl CollectOutPort for Collect {
 #[tokio::test]
 async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
     let result = FlowDefinition::materialize(|_| {
-        let items = Port::owned(NoEventSource);
+        let items = ValuesSource::new(Vec::<BuildOnlyItem>::new());
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
@@ -212,7 +165,11 @@ async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of
     let out =
         perform(|out: &BuildOnlyOut| out.clone()).through(Port::to(Collect { rows: rows.clone() }));
     let handle = FlowDefinition::materialize(move |_| {
-        let items = Port::owned(ItemSource::one_to(5));
+        let items = ValuesSource::new(
+            (1..=5)
+                .map(|value| BuildOnlyItem { value })
+                .collect::<Vec<_>>(),
+        );
         let digest = ai::map(SumMap)
             .chunks(1)
             .reduce(SumReduce)
@@ -255,7 +212,7 @@ async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of
 #[tokio::test]
 async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
     let result = FlowDefinition::materialize(|_| {
-        let items = Port::owned(NoEventSource);
+        let items = ValuesSource::new(Vec::<BuildOnlyItem>::new());
         let wrong = DiscardSink::<BuildOnlyItem>::new();
         let digest = digest();
 
@@ -334,25 +291,11 @@ impl TypedJoinHandler for LocalNoopJoin {
     }
 }
 
-#[derive(Clone, Debug)]
-struct NoStreamSource;
-impl SourceTyping for NoStreamSource {
-    type Output = JoinStreamP;
-}
-#[obzenflow::system("no-streams")]
-impl TypedFiniteSourceHandler for NoStreamSource {
-    type Output = JoinStreamP;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Ok(None)
-    }
-}
-
 #[tokio::test]
 async fn join_reference_resolves_through_composite_boundary_port() {
     let result = FlowDefinition::materialize(|_| {
-        let items = Port::owned(NoEventSource);
-        let stream_handler = Port::owned(NoStreamSource);
+        let items = ValuesSource::new(Vec::<BuildOnlyItem>::new());
+        let stream_handler = ValuesSource::new(Vec::<JoinStreamP>::new());
         let join_handler = LocalNoopJoin;
         let joined = DiscardSink::<JoinedP>::new();
         let digest = digest();
@@ -390,7 +333,7 @@ async fn join_reference_resolves_through_composite_boundary_port() {
 async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
     let fake = models();
     let result = async {
-        let items = Port::owned(NoEventSource);
+        let items = ValuesSource::new(Vec::<BuildOnlyItem>::new());
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
@@ -419,7 +362,7 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
 #[tokio::test]
 async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
     let handle = FlowDefinition::materialize(|_| {
-        let items = Port::owned(NoEventSource);
+        let items = ValuesSource::new(Vec::<BuildOnlyItem>::new());
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 
@@ -504,7 +447,7 @@ impl AiRole<BuildOnlyItem> for TagOne {
 #[tokio::test]
 async fn infer_map_and_map_reduce_lower_to_one_two_and_four_members() {
     let handle = FlowDefinition::materialize(|_| {
-        let items = Port::owned(NoEventSource);
+        let items = ValuesSource::new(Vec::<BuildOnlyItem>::new());
         let brief = ai::infer(TagOne);
         let tag = ai::map(SumMap).chunks(2);
         let digest = digest();
@@ -583,7 +526,7 @@ async fn infer_map_and_map_reduce_lower_to_one_two_and_four_members() {
 #[tokio::test]
 async fn a_zero_reduce_trigger_fails_the_build_naming_the_stage() {
     let result = FlowDefinition::materialize(|_| {
-        let items = Port::owned(NoEventSource);
+        let items = ValuesSource::new(Vec::<BuildOnlyItem>::new());
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = ai::map(SumMap)
             .chunks(1)
@@ -621,7 +564,7 @@ async fn a_zero_reduce_trigger_fails_the_build_naming_the_stage() {
 #[tokio::test]
 async fn a_build_without_a_chat_provider_fails_naming_the_stage() {
     let result = FlowDefinition::materialize(|_| {
-        let items = Port::owned(NoEventSource);
+        let items = ValuesSource::new(Vec::<BuildOnlyItem>::new());
         let out = DiscardSink::<BuildOnlyOut>::new();
         let digest = digest();
 

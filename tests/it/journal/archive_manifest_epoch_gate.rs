@@ -60,7 +60,7 @@ fn guarded_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         materialisations.fetch_add(1, Ordering::SeqCst);
-        let inputs = Port::owned(sources::ValuesSource::new([Input(1)]));
+        let inputs = sources::ValuesSource::new([Input(1)]);
         let output = counting_destination(opens);
         Ok(flow! {
             name: "archive_manifest_epoch_gate",
@@ -185,7 +185,7 @@ async fn invalid_later_plan_prevents_materialization() {
     let observer = CountingObserverFactory(materialisations.clone());
     let output = counting_destination(opens.clone());
     let definition = FlowDefinition::materialize(move |_| {
-        let inputs = Port::owned(sources::ValuesSource::new([Input(1)]));
+        let inputs = sources::ValuesSource::new([Input(1)]);
         Ok(flow! {
             name: "whole_flow_middleware_preflight",
             journals: disk_journals(journal_root),
@@ -229,7 +229,7 @@ async fn empty_observer_label_fails_preflight() {
         let observer = CountingObserverFactory(materialisations.clone());
         let output = counting_destination(opens.clone());
         let definition = FlowDefinition::materialize(move |_| {
-            let inputs = Port::owned(sources::ValuesSource::new([Input(1)]));
+            let inputs = sources::ValuesSource::new([Input(1)]);
             Ok(flow! {
                 name: "empty_observer_label_preflight",
                 journals: disk_journals(journal_root),
@@ -272,8 +272,8 @@ async fn empty_observer_label_fails_preflight() {
 async fn claimed_hosted_slot_fails_preflight() {
     use obzenflow_adapters::middleware::rate_limit;
     use obzenflow_core::ingress::{FilledHostedIngress, HostedIngressBindingSlot};
-    use obzenflow_dsl::async_infinite_source;
-    use obzenflow_runtime::stages::common::handlers::{HostedIngressSource, HostedIngressSystem};
+    use obzenflow_dsl::source;
+    use obzenflow_runtime::stages::common::handlers::HostedSource;
 
     for prefilled in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -297,16 +297,14 @@ async fn claimed_hosted_slot_fails_preflight() {
         let definition = FlowDefinition::materialize(move |_| {
             let (_, first_rx) = tokio::sync::mpsc::channel(1);
             let (_, second_rx) = tokio::sync::mpsc::channel(1);
-            let first = HostedIngressSource::<Input>::new(first_rx, shared_slot.clone())
-                .into_port(HostedIngressSystem::Ingress);
-            let second = HostedIngressSource::<Input>::new(second_rx, shared_slot)
-                .into_port(HostedIngressSystem::Ingress);
+            let first = HostedSource::<Input>::ingress(first_rx, shared_slot.clone());
+            let second = HostedSource::<Input>::ingress(second_rx, shared_slot);
             Ok(flow! {
                 name: "hosted_slot_ownership_preflight",
                 journals: disk_journals(journal_root),
                 stages: {
-                    left = async_infinite_source!(Input with { rate_limit(10.0), observer } => first);
-                    right = async_infinite_source!(Input with rate_limit(10.0) => second);
+                    left = source!(Input with { rate_limit(10.0), observer } => first);
+                    right = source!(Input with rate_limit(10.0) => second);
                     output = sink!(Input => output);
                 },
                 topology: {

@@ -733,6 +733,24 @@ impl EffectsCore {
         Err(self.refuse(ReconstructionRefusal::Departed(departure)))
     }
 
+    pub(crate) async fn cross_to_live(&mut self) -> Result<(), EffectError> {
+        self.cross_before_live_action().await
+    }
+
+    pub(crate) async fn reproduce_trailing_crossing(&mut self) -> Result<(), EffectError> {
+        let Some(generation) = self
+            .ctx
+            .stage
+            .effect_history
+            .as_ref()
+            .and_then(|history| history.actions().trailing_crossing())
+        else {
+            return Ok(());
+        };
+        self.send_catch_up(CatchUpEvent::RecordedCrossingReached { generation })
+            .await
+    }
+
     async fn cross_before_live_action(&mut self) -> Result<(), EffectError> {
         if self.ctx.stage.runtime_execution.resume_control().is_none() {
             return Ok(());
@@ -1112,6 +1130,44 @@ impl EffectsCore {
         fact: obzenflow_core::event::schema::TypedFact,
         pre_effect: bool,
     ) -> Result<(), EffectError> {
+        let (event, routed_fact) = self.prepare_typed_fact(fact, pre_effect).await?;
+        let committed_event = event.clone();
+        let committer = OutputCommitter {
+            data_journal: &self.ctx.stage.data_journal,
+            flow_context: self.ctx.stage.flow_context.as_ref(),
+
+            instrumentation: self.ctx.stage.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.stage.heartbeat_state.as_ref(),
+            output_contract: Some(&self.ctx.stage.output_contract),
+            backpressure_writer: Some(&self.ctx.backpressure_writer),
+            observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
+        };
+        crate::supervised_base::publication::with_snapshot(
+            self.causal.clone(),
+            committer.commit_prebuilt(
+                event,
+                Some(&self.ctx.parent),
+                CommitOptions {
+                    count_output: true,
+                    validate_output_contract: true,
+                },
+            ),
+        )
+        .await
+        .map_err(|e| EffectError::Journal(e.to_string()))?;
+        self.routed_output_fact_count = self
+            .routed_output_fact_count
+            .checked_add(routed_fact)
+            .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
+        self.committed_facts.push(committed_event);
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_typed_fact(
+        &mut self,
+        fact: obzenflow_core::event::schema::TypedFact,
+        pre_effect: bool,
+    ) -> Result<(ChainEvent, usize), EffectError> {
         self.gate_authoring()?;
         if !self.ctx.emit_enabled {
             return Err(EffectError::EmitUnsupported {
@@ -1170,6 +1226,9 @@ impl EffectsCore {
             ActionPlan::Unchecked => None,
         };
         if matches!(lineage, Some(RowLineage::Reproduced(_))) {
+            if let Some(history) = &self.ctx.stage.effect_history {
+                event.envelope.observability = history.source_observations.get(&event.id).cloned();
+            }
             self.reauthor_recorded_crossing(super::ActionRow::Fact(event.id))
                 .await?;
         }
@@ -1179,36 +1238,7 @@ impl EffectsCore {
         if let Some(lineage) = lineage {
             self.mark_lineage(&mut event, lineage);
         }
-        let committed_event = event.clone();
-        let committer = OutputCommitter {
-            data_journal: &self.ctx.stage.data_journal,
-            flow_context: self.ctx.stage.flow_context.as_ref(),
-
-            instrumentation: self.ctx.stage.instrumentation.as_ref(),
-            heartbeat_state: self.ctx.stage.heartbeat_state.as_ref(),
-            output_contract: Some(&self.ctx.stage.output_contract),
-            backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
-        };
-        crate::supervised_base::publication::with_snapshot(
-            self.causal.clone(),
-            committer.commit_prebuilt(
-                event,
-                Some(&self.ctx.parent),
-                CommitOptions {
-                    count_output: true,
-                    validate_output_contract: true,
-                },
-            ),
-        )
-        .await
-        .map_err(|e| EffectError::Journal(e.to_string()))?;
-        self.routed_output_fact_count = self
-            .routed_output_fact_count
-            .checked_add(routed_fact)
-            .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
-        self.committed_facts.push(committed_event);
-        Ok(())
+        Ok((event, routed_fact))
     }
 
     pub(crate) async fn perform<E>(&mut self, effect: E) -> Result<E::Outcome, EffectError>
@@ -3111,6 +3141,12 @@ impl EffectsCore {
                     cursor: cursor.clone(),
                 });
         let binding_context = EffectContext {
+            recorder: self
+                .ctx
+                .stage
+                .instrumentation
+                .as_ref()
+                .map(|i| i.observation_recorder()),
             is_replaying: false,
             flow_id: self.ctx.stage.flow_id,
             stage_key: self.ctx.stage.stage_key.clone(),
@@ -3179,6 +3215,7 @@ impl EffectsCore {
             self.causal.clone(),
             append_effect_record(
                 &self.ctx.stage.data_journal,
+                self.ctx.stage.flow_context.as_ref(),
                 event,
                 &self.ctx.parent,
                 &self.ctx.backpressure_writer,

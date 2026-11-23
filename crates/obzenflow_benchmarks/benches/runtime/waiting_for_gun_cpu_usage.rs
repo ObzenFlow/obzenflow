@@ -10,6 +10,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
 use obzenflow_benchmarks::case::{declare, Category};
+use obzenflow_benchmarks::numbers::{NextNumber, NumberFeed, Numbers};
 use obzenflow_benchmarks::process_cpu_time;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
@@ -17,14 +18,33 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, BootstrapConfig, StartupMode};
 use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::pipeline::PipelineState;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
+
+/// A source whose input never arrives, so the pipeline stays idle.
+struct IdleSource(Port<dyn NumberFeed>);
+
+impl IdleSource {
+    fn new() -> Self {
+        Self(Numbers::idle().port())
+    }
+}
+
+impl TypedFiniteSourceHandler for IdleSource {
+    type Output = BenchEvent;
+
+    fn read(&self) -> Option<SourceRead<BenchEvent>> {
+        Some(SourceRead::finite(self.0.clone(), NextNumber(0), |_| {
+            Err(obzenflow_runtime::stages::SourceError::Other(
+                obzenflow_core::event::SourceDiagnosticReason::Unclassified.into(),
+            ))
+        }))
+    }
+}
 
 /// File-local payload type for the waiting-for-gun bench. The idle source
 /// never emits; the type satisfies FLOWIP-114c's requirement that every
@@ -36,30 +56,6 @@ struct BenchEvent {
 
 impl TypedPayload for BenchEvent {
     const EVENT_TYPE: &'static str = "bench.waiting_for_gun_event";
-}
-
-/// Source that never emits and never completes.
-#[derive(Clone, Debug)]
-struct IdleSource {
-    polls: Arc<AtomicU64>,
-}
-
-impl IdleSource {
-    fn new() -> Self {
-        Self {
-            polls: Arc::new(AtomicU64::new(0)),
-        }
-    }
-}
-
-#[obzenflow_runtime::effects::system("idle")]
-impl TypedFiniteSourceHandler for IdleSource {
-    type Output = BenchEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.polls.fetch_add(1, Ordering::Relaxed);
-        Ok(Some(vec![]))
-    }
 }
 
 type NoopSink = obzenflow_adapters::sinks::DiscardSink<BenchEvent>;
@@ -85,7 +81,7 @@ async fn waiting_window() -> anyhow::Result<Duration> {
     let (journals_base_path, _temp_dir) = create_temp_journals_base("waiting_for_gun_cpu")?;
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let idle_source = Port::owned(IdleSource::new());
+        let idle_source = IdleSource::new();
         let noop_sink = NoopSink::new();
 
         Ok(flow! {

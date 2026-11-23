@@ -2,25 +2,28 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Finite YAML source (FLOWIP-084n).
+//! Finite YAML source.
 //!
-//! [`YamlSource`] is cold configuration: building and cloning it do no I/O, so
-//! strict replay never needs the file. Opening reads at most `max_bytes`,
-//! parses one immutable document and resolves the [`YamlSelection`]. Each
-//! selected record goes to an application [`YamlDecoder`]; a rejected record
-//! is journalled as `Validation` and reading continues with the next one.
+//! A [`YamlSource`] handler reads through a `file-system` port. Each read
+//! reads at most `max_bytes`, parses the document, resolves the
+//! [`YamlSelection`] and returns the next selected records. The port records
+//! each reply, and the handler maps each recorded record with its
+//! [`YamlDecoder`]. A rejected record is reported and the read continues.
 
 mod de;
 mod document;
 
-use super::file_version::FileVersion;
+use super::file_system::{FileSystem, YamlFile};
+use super::file_version::{input_changed, FileVersion};
 use document::Node;
+use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::OneFactOutcome;
-use obzenflow_runtime::stages::source::{
-    FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceError,
-    SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
+use obzenflow_runtime::effects::Port;
+use obzenflow_runtime::stages::common::handlers::source::{
+    FiniteRead, SourceRead, TypedFiniteSourceHandler,
 };
+use obzenflow_runtime::stages::source::SourceError;
 use obzenflow_runtime::typing::SourceTyping;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -32,7 +35,7 @@ const DEFAULT_BATCH_SIZE: usize = 64;
 const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
 
 /// Which part of the document holds the records.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum YamlSelection {
     /// Pass the complete root value to the decoder once.
     Document,
@@ -175,7 +178,7 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
             );
         }
         Ok(YamlSource {
-            path,
+            port: FileSystem::yaml_port(path)?,
             decoder: self.decoder,
             selection: self.selection,
             batch_size: self.batch_size,
@@ -184,10 +187,11 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
     }
 }
 
-/// Cold, reusable YAML configuration. File I/O happens only in `open`.
+/// A YAML source handler. It reads through a cold `file-system` port and maps
+/// each recorded record with its decoder.
 #[derive(Clone)]
 pub struct YamlSource<D> {
-    path: PathBuf,
+    port: Port<dyn YamlFile>,
     decoder: D,
     selection: YamlSelection,
     batch_size: usize,
@@ -219,66 +223,125 @@ impl<D: YamlDecoder> SourceTyping for YamlSource<D> {
     type Output = D::Output;
 }
 
-#[obzenflow_runtime::effects::system("files")]
-impl<D: YamlDecoder> FiniteSourceConnector for YamlSource<D> {
+impl<D: YamlDecoder> TypedFiniteSourceHandler for YamlSource<D> {
     type Output = D::Output;
-    type Reader = YamlReader<D>;
-    type Continuation = Seek<YamlPosition>;
 
-    fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
-        let (bytes, version) = read_bounded(&self.path, self.max_bytes)?;
-        let identity = SourceInputIdentity::new(
-            "yaml",
-            &YamlIdentityParts {
-                file: version,
-                selection: YamlSelectionPart::from(&self.selection),
+    fn read(&self) -> Option<SourceRead<D::Output>> {
+        let decoder = self.decoder.clone();
+        Some(SourceRead::finite_in(
+            self.port.clone(),
+            YamlRead {
+                batch: self.batch_size,
+                selection: self.selection.clone(),
+                max_bytes: self.max_bytes,
+                at: None,
             },
-        )
-        .map_err(|_| SourceError::Other(SourceDiagnosticReason::Unclassified.into()))?;
-        let root = document::parse(&bytes)?;
-        let records = document::select(root, &self.selection)?;
-        Ok(YamlReader {
-            records,
-            next_index: 0,
-            batch_size: self.batch_size,
-            pending: None,
-            decoder: self.decoder.clone(),
-            identity,
-        })
+            move |_: &YamlRead, line: YamlLine| decode_line(&decoder, line),
+        ))
     }
 }
 
-/// The next selected-record index within the pinned selection
-/// (FLOWIP-134i B1).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct YamlPosition {
+fn decode_line<D: YamlDecoder>(decoder: &D, line: YamlLine) -> Result<D::Output, SourceError> {
+    match line {
+        YamlLine::Record { index, node } => decoder
+            .decode(YamlRecord {
+                node: &node.0,
+                index,
+            })
+            .map_err(|error| SourceError::Validation(error.locate(index, &node.0))),
+        YamlLine::Refused { kind, diagnostic } => Err(SourceError::Terminal { kind, diagnostic }),
+        YamlLine::Changed => Err(input_changed()),
+    }
+}
+
+/// The argument of one YAML read: the read settings and, after the first
+/// read, the next record index and the file version.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct YamlRead {
+    batch: usize,
+    selection: YamlSelection,
+    max_bytes: usize,
+    at: Option<YamlAt>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct YamlAt {
     index: u64,
+    version: FileVersion,
 }
 
-impl SourcePosition for YamlPosition {}
-
-/// What decides a YAML source's records and their order (FLOWIP-134i B9).
-#[derive(Serialize)]
-struct YamlIdentityParts<'a> {
-    file: FileVersion,
-    selection: YamlSelectionPart<'a>,
+/// One selected record, a document the read refused, or a file that changed
+/// after a recorded read.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum YamlLine {
+    Record {
+        index: u64,
+        node: YamlNode,
+    },
+    Refused {
+        kind: SourcePollErrorKind,
+        diagnostic: SourceDiagnostic,
+    },
+    Changed,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-enum YamlSelectionPart<'a> {
-    Document,
-    Sequence,
-    SequenceAt(&'a str),
-}
+/// One parsed YAML value as the reply records it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct YamlNode(Node);
 
-impl<'a> From<&'a YamlSelection> for YamlSelectionPart<'a> {
-    fn from(selection: &'a YamlSelection) -> Self {
-        match selection {
-            YamlSelection::Document => Self::Document,
-            YamlSelection::Sequence => Self::Sequence,
-            YamlSelection::SequenceAt(pointer) => Self::SequenceAt(pointer),
-        }
+/// Read the next selected records of the file at `path`. A failure becomes a
+/// recorded refusal, so a replay gives the same answer.
+pub(crate) fn read_yaml(path: &Path, from: YamlRead) -> FiniteRead<YamlLine, YamlRead> {
+    let refused = |error: SourceError| FiniteRead::Batch {
+        records: vec![YamlLine::Refused {
+            kind: error.kind(),
+            diagnostic: error.diagnostic().clone(),
+        }],
+        next: from.clone(),
+    };
+    let (bytes, version) = match read_bounded(path, from.max_bytes) {
+        Ok(read) => read,
+        Err(error) => return refused(error),
+    };
+    if from.at.as_ref().is_some_and(|at| at.version != version) {
+        return FiniteRead::Batch {
+            records: vec![YamlLine::Changed],
+            next: from.clone(),
+        };
+    }
+    let records =
+        match document::parse(&bytes).and_then(|root| document::select(root, &from.selection)) {
+            Ok(records) => records,
+            Err(error) => return refused(error),
+        };
+    let start = from
+        .at
+        .as_ref()
+        .map_or(0, |at| usize::try_from(at.index).unwrap_or(usize::MAX));
+    if start >= records.len() {
+        return FiniteRead::EndOfInput;
+    }
+    let end = start.saturating_add(from.batch).min(records.len());
+    let lines = records
+        .into_iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+        .map(|(index, node)| YamlLine::Record {
+            index: u64::try_from(index).unwrap_or(u64::MAX),
+            node: YamlNode(node),
+        })
+        .collect();
+    FiniteRead::Batch {
+        records: lines,
+        next: YamlRead {
+            at: Some(YamlAt {
+                index: u64::try_from(end).unwrap_or(u64::MAX),
+                version,
+            }),
+            ..from
+        },
     }
 }
 
@@ -306,111 +369,16 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<(Vec<u8>, FileVersion),
     Ok((bytes, version))
 }
 
-/// One independently owned cursor over an immutable snapshot.
-pub struct YamlReader<D> {
-    records: Vec<Node>,
-    next_index: usize,
-    batch_size: usize,
-    pending: Option<SourceError>,
-    decoder: D,
-    identity: SourceInputIdentity,
-}
-
-impl<D: YamlDecoder> std::fmt::Debug for YamlReader<D> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("YamlReader")
-            .field("decoder", &std::any::type_name::<D>())
-            .field("next_index", &self.next_index)
-            .field(
-                "remaining",
-                &self.records.len().saturating_sub(self.next_index),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
-impl<D: YamlDecoder> SeekableSource for YamlReader<D> {
-    type Position = YamlPosition;
-
-    fn input_identity(&self) -> &SourceInputIdentity {
-        &self.identity
-    }
-
-    fn beginning(&self) -> YamlPosition {
-        YamlPosition { index: 0 }
-    }
-
-    /// A position past the pinned selection is corrupt evidence, not a record.
-    fn seek(&mut self, position: YamlPosition) -> Result<(), SourceError> {
-        let index = usize::try_from(position.index)
-            .ok()
-            .filter(|index| *index <= self.records.len())
-            .ok_or_else(|| SourceError::Other(SourceDiagnosticReason::UnexpectedShape.into()))?;
-        self.next_index = index;
-        self.pending = None;
-        Ok(())
-    }
-}
-
-/// One poll's records, each with the selected-record index after it.
-type YamlPoll<T> = Result<Option<Vec<SourceRecord<T, YamlPosition>>>, SourceError>;
-
-impl<D: YamlDecoder> PositionedFiniteReader for YamlReader<D> {
-    type Output = D::Output;
-
-    /// A rejection behind a valid prefix is reported on the next poll, so batch
-    /// size never changes which records are admitted.
-    fn next(&mut self) -> YamlPoll<Self::Output> {
-        if let Some(rejection) = self.pending.take() {
-            return Err(rejection);
-        }
-        let remaining = self.records.len().saturating_sub(self.next_index);
-        let mut batch = Vec::with_capacity(self.batch_size.min(remaining));
-        while batch.len() < self.batch_size {
-            let Some(node) = self.records.get(self.next_index) else {
-                break;
-            };
-            let index = u64::try_from(self.next_index).unwrap_or(u64::MAX);
-            self.next_index = self.next_index.saturating_add(1);
-            match self.decoder.decode(YamlRecord { node, index }) {
-                Ok(value) => batch.push(SourceRecord {
-                    value,
-                    after: YamlPosition {
-                        index: index.saturating_add(1),
-                    },
-                }),
-                Err(error) => {
-                    let rejection = SourceError::Validation(error.locate(index, node));
-                    if batch.is_empty() {
-                        return Err(rejection);
-                    }
-                    self.pending = Some(rejection);
-                    break;
-                }
-            }
-        }
-        Ok((!batch.is_empty()).then_some(batch))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
     use obzenflow_core::TypedPayload;
     use serde::{Deserialize, Serialize};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    fn context() -> SourceReaderInitContext {
-        SourceReaderInitContext {
-            stage_id: obzenflow_core::StageId::new(),
-            stage_name: "orders".into(),
-            flow_name: "test".into(),
-        }
-    }
-
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct Order {
         order_id: String,
         amount_cents: i64,
@@ -420,7 +388,6 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.yaml_order";
     }
 
-    /// Serde decoding plus one domain rule, as an application decoder would.
     #[derive(Clone)]
     struct OrderYaml;
 
@@ -442,334 +409,133 @@ mod tests {
         file
     }
 
-    fn source(
-        file: &NamedTempFile,
-        selection: YamlSelection,
-        batch: usize,
-    ) -> YamlSource<OrderYaml> {
-        YamlSource::builder(OrderYaml)
-            .path(file.path())
-            .selection(selection)
-            .batch_size(batch)
-            .build()
-            .unwrap()
-    }
-
-    fn drain(reader: &mut YamlReader<OrderYaml>) -> (Vec<String>, Vec<SourceError>) {
-        let mut ids = Vec::new();
-        let mut errors = Vec::new();
-        loop {
-            match reader.next() {
-                Ok(Some(batch)) => {
-                    ids.extend(batch.into_iter().map(|record| record.value.order_id));
-                }
-                Ok(None) => return (ids, errors),
-                Err(error) => errors.push(error),
-            }
+    fn first(selection: YamlSelection, batch: usize, max_bytes: usize) -> YamlRead {
+        YamlRead {
+            batch,
+            selection,
+            max_bytes,
+            at: None,
         }
     }
 
-    fn order(id: &str, amount: i64) -> String {
-        format!("  - {{order_id: \"{id}\", amount_cents: {amount}}}\n")
+    fn orders() -> YamlSelection {
+        YamlSelection::SequenceAt("/orders".into())
+    }
+
+    fn lines(read: FiniteRead<YamlLine, YamlRead>) -> (Vec<YamlLine>, YamlRead) {
+        match read {
+            FiniteRead::Batch { records, next } => (records, next),
+            FiniteRead::EndOfInput => panic!("end of input"),
+        }
+    }
+
+    fn produce(text: &str, selection: YamlSelection, max_bytes: usize) -> SourceError {
+        let input = file(text);
+        let (records, _) = lines(read_yaml(input.path(), first(selection, 64, max_bytes)));
+        records
+            .into_iter()
+            .find_map(|line| decode_line(&OrderYaml, line).err())
+            .expect("the input is refused")
     }
 
     #[test]
-    fn selections_emit_records_in_document_order() {
-        #[derive(Clone)]
-        struct Catalog;
-
-        #[derive(Debug, PartialEq, Serialize, Deserialize)]
-        struct Companies {
-            companies: Vec<String>,
-            aggregators: Vec<String>,
-        }
-
-        impl TypedPayload for Companies {
-            const EVENT_TYPE: &'static str = "test.yaml_catalog";
-        }
-
-        impl YamlDecoder for Catalog {
-            type Output = Companies;
-
-            fn decode(&self, record: YamlRecord<'_>) -> Result<Companies, YamlDecodeError> {
-                record.deserialize()
-            }
-        }
-
-        let catalog = file("companies: [a, b]\naggregators: [c]\n");
-        let mut whole = YamlSource::builder(Catalog)
-            .path(catalog.path())
-            .build()
-            .unwrap()
-            .open(context())
-            .unwrap();
-        assert_eq!(
-            whole.next().unwrap(),
-            Some(vec![SourceRecord {
-                value: Companies {
-                    companies: vec!["a".into(), "b".into()],
-                    aggregators: vec!["c".into()],
-                },
-                after: YamlPosition { index: 1 },
-            }])
-        );
-        assert_eq!(whole.next().unwrap(), None);
-
-        let root_sequence =
-            file(&format!("{}{}", order("a", 1), order("b", 2)).replace("  - ", "- "));
-        let (ids, errors) = drain(
-            &mut source(&root_sequence, YamlSelection::Sequence, 64)
-                .open(context())
-                .unwrap(),
-        );
-        assert_eq!((ids, errors.len()), (vec!["a".into(), "b".into()], 0));
-
-        let nested = file(&format!(
-            "web_orders:\n{}{}store_orders: []\n",
-            order("w1", 1),
-            order("w2", 2)
-        ));
-        let at = |pointer: &str| YamlSelection::SequenceAt(pointer.into());
-        let (ids, _) = drain(
-            &mut source(&nested, at("/web_orders"), 1)
-                .open(context())
-                .unwrap(),
-        );
-        assert_eq!(ids, ["w1", "w2"]);
-        let (ids, errors) = drain(
-            &mut source(&nested, at("/store_orders"), 1)
-                .open(context())
-                .unwrap(),
-        );
-        assert!(
-            ids.is_empty() && errors.is_empty(),
-            "empty selection completes"
-        );
-        let missing = source(&nested, at("/returns"), 1)
-            .open(context())
-            .unwrap_err();
-        assert_eq!(
-            missing.diagnostic().reason(),
-            SourceDiagnosticReason::SelectionNotFound
-        );
-    }
-
-    #[test]
-    fn construction_and_clone_are_cold_and_opens_are_independent() {
-        let configured = YamlSource::builder(OrderYaml)
-            .path("/nonexistent/secret-dir/orders.yaml")
-            .selection(YamlSelection::SequenceAt("/secret_pointer".into()))
-            .build()
-            .expect("building does no I/O");
-        let copy = configured.clone();
-        let missing = copy.open(context()).unwrap_err();
-        assert_eq!(missing.kind(), SourcePollErrorKind::Transport);
-        assert_eq!(
-            missing.diagnostic().reason(),
-            SourceDiagnosticReason::InputUnavailable
-        );
-        let rendered = format!("{missing} {missing:?} {configured:?}");
-        assert!(!rendered.contains("secret"), "{rendered}");
-
-        let input = file(&format!("{}{}", order("a", 1), order("b", 2)).replace("  - ", "- "));
-        let configured = source(&input, YamlSelection::Sequence, 1);
-        let mut first = configured.open(context()).unwrap();
-        let mut second = configured.open(context()).unwrap();
-        assert_eq!(first.next().unwrap().unwrap()[0].value.order_id, "a");
-        assert_eq!(first.next().unwrap().unwrap()[0].value.order_id, "b");
-        assert_eq!(second.next().unwrap().unwrap()[0].value.order_id, "a");
-
-        assert!(YamlSource::builder(OrderYaml).build().is_err());
-        assert!(YamlSource::builder(OrderYaml)
-            .path("x")
-            .batch_size(0)
-            .build()
-            .is_err());
-        assert!(YamlSource::builder(OrderYaml)
-            .path("x")
-            .max_bytes(0)
-            .build()
-            .is_err());
-        assert!(YamlSource::builder(OrderYaml)
-            .path("x")
-            .selection(YamlSelection::SequenceAt("orders".into()))
-            .build()
-            .is_err());
-    }
-
-    #[test]
-    fn rejections_preserve_neighbours_independently_of_batch_size() {
-        // Middle, first, last, consecutive and all-rejected inputs.
-        let cases = [
-            (vec![("a", 1), ("b", 0), ("c", 1)], vec!["a", "c"], vec![1]),
-            (vec![("a", 0), ("b", 1)], vec!["b"], vec![0]),
-            (vec![("a", 1), ("b", 0)], vec!["a"], vec![1]),
-            (
-                vec![("a", 1), ("b", 0), ("c", -1), ("d", 1)],
-                vec!["a", "d"],
-                vec![1, 2],
-            ),
-            (vec![("a", 0), ("b", -2)], vec![], vec![0, 1]),
-        ];
-        for (records, expected_ids, expected_rejections) in cases {
-            let text: String = std::iter::once("orders:\n".to_string())
-                .chain(records.iter().map(|(id, amount)| order(id, *amount)))
-                .collect();
-            let input = file(&text);
-            for batch in [1, 64] {
-                let mut reader = source(&input, YamlSelection::SequenceAt("/orders".into()), batch)
-                    .open(context())
-                    .unwrap();
-                let (ids, errors) = drain(&mut reader);
-                assert_eq!(ids, expected_ids, "batch {batch}: {text}");
-                let rejected: Vec<_> = errors
-                    .iter()
-                    .map(|error| {
-                        assert_eq!(error.kind(), SourcePollErrorKind::Validation);
-                        assert!(!error.is_terminal());
-                        let diagnostic = error.diagnostic();
-                        assert_eq!(diagnostic.reason(), SourceDiagnosticReason::InvalidValue);
-                        diagnostic.location().record_index().unwrap()
-                    })
-                    .collect();
-                assert_eq!(rejected, expected_rejections, "batch {batch}: {text}");
-            }
-        }
-    }
-
-    #[test]
-    fn document_failures_fail_opening_before_any_record() {
-        let cases = [
-            (
-                "orders:\n  - &a {order_id: x, amount_cents: 1}\n  - *a\n",
-                SourceDiagnosticReason::UnsupportedConstruct,
-            ),
-            (
-                "orders: []\norders: []\n",
-                SourceDiagnosticReason::DuplicateKey,
-            ),
-            ("orders: [\n", SourceDiagnosticReason::MalformedInput),
-            ("orders: 3\n", SourceDiagnosticReason::UnexpectedShape),
-        ];
-        for (text, reason) in cases {
-            let input = file(text);
-            let error = source(&input, YamlSelection::SequenceAt("/orders".into()), 1)
-                .open(context())
-                .unwrap_err();
-            assert_eq!(error.diagnostic().reason(), reason, "{text}");
-        }
-
-        let input = file(&format!("orders:\n{}", order("a", 1)));
-        let oversize = YamlSource::builder(OrderYaml)
-            .path(input.path())
-            .max_bytes(8)
-            .build()
-            .unwrap()
-            .open(context())
-            .unwrap_err();
-        assert_eq!(
-            oversize.diagnostic().reason(),
-            SourceDiagnosticReason::SizeLimitExceeded
-        );
-        assert_eq!(
-            oversize.diagnostic().to_string(),
-            "the input exceeds its configured size limit"
-        );
-    }
-
-    #[test]
-    fn rejections_carry_location_without_rejected_values() {
+    fn yaml_read_selection_returns_records_in_order() {
         let input = file(
-            "orders:\n  - {order_id: \"a\", amount_cents: 1}\n  - {order_id: \"SECRET_ID\", amount_cents: SECRET_AMOUNT}\n  - {order_id: \"b\", amount_cents: 1, SECRET_KEY: 1}\n",
+            "orders:\n  - {order_id: a, amount_cents: 1}\n  - {order_id: b, amount_cents: 2}\n  - {order_id: c, amount_cents: 3}\n",
         );
-        let mut reader = source(&input, YamlSelection::SequenceAt("/orders".into()), 64)
-            .open(context())
-            .unwrap();
-        let (ids, errors) = drain(&mut reader);
-        assert_eq!(ids, ["a", "b"], "Order does not deny unknown fields");
-        assert_eq!(errors.len(), 1);
-        let diagnostic = errors[0].diagnostic();
-        assert_eq!(diagnostic.location().record_index(), Some(1));
-        let at = diagnostic.location().position().unwrap();
-        assert_eq!(at.line.get(), 3);
-        let rendered = format!("{} {:?}", errors[0], errors[0]);
-        assert!(!rendered.contains("SECRET"), "{rendered}");
+        let (batch, next) = lines(read_yaml(input.path(), first(orders(), 2, 1024)));
+        let ids: Vec<String> = batch
+            .into_iter()
+            .map(|line| decode_line(&OrderYaml, line).unwrap().order_id)
+            .collect();
+        assert_eq!(ids, ["a", "b"]);
+        let (batch, next) = lines(read_yaml(input.path(), next));
         assert_eq!(
-            diagnostic.to_string(),
-            format!(
-                "invalid value in field amount_cents (line 3, column {})",
-                at.column.unwrap()
-            )
+            decode_line(&OrderYaml, batch.into_iter().next().unwrap())
+                .unwrap()
+                .order_id,
+            "c"
         );
-    }
-
-    #[test]
-    fn seeking_continues_at_the_next_selected_record() {
-        let input = file(&format!(
-            "orders:\n{}{}{}",
-            order("a", 1),
-            order("b", 0),
-            order("c", 1)
+        assert!(matches!(
+            read_yaml(input.path(), next),
+            FiniteRead::EndOfInput
         ));
-        let configured = source(&input, YamlSelection::SequenceAt("/orders".into()), 64);
-        let accepted = configured.open(context()).unwrap().next().unwrap().unwrap();
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0].after, YamlPosition { index: 1 });
-
-        // A rejection beyond the last accepted record is reported again.
-        let mut resumed = configured.open(context()).unwrap();
-        resumed.seek(accepted[0].after.clone()).unwrap();
-        let (ids, errors) = drain(&mut resumed);
-        assert_eq!(ids, ["c"]);
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].diagnostic().location().record_index(), Some(1));
-
-        let mut whole = configured.open(context()).unwrap();
-        let beginning = whole.beginning();
-        assert_eq!(drain(&mut whole).0, ["a", "c"]);
-        whole.seek(beginning).unwrap();
-        assert_eq!(drain(&mut whole).0, ["a", "c"]);
-
-        let mut exhausted = configured.open(context()).unwrap();
-        exhausted.seek(YamlPosition { index: 3 }).unwrap();
-        assert_eq!(exhausted.next().unwrap(), None);
-        let beyond = configured
-            .open(context())
-            .unwrap()
-            .seek(YamlPosition { index: 4 })
-            .unwrap_err();
-        // A seek failure is never record-local.
-        assert_eq!(beyond.kind(), SourcePollErrorKind::Other);
     }
 
     #[test]
-    fn identity_covers_the_file_and_selection_but_not_batch_size() {
-        let mut input = file(&format!("orders:\n{}", order("a", 1)));
-        let at = || YamlSelection::SequenceAt("/orders".into());
-        let pinned = source(&input, at(), 64).open(context()).unwrap();
-        let changed = |reader: YamlReader<OrderYaml>| {
-            reader
-                .input_identity()
-                .changed_part(pinned.input_identity())
-        };
+    fn yaml_read_changed_file_records_change() {
+        let mut input =
+            file("- {order_id: a, amount_cents: 1}\n- {order_id: b, amount_cents: 2}\n");
+        let (_, next) = lines(read_yaml(
+            input.path(),
+            first(YamlSelection::Sequence, 1, 1024),
+        ));
+        input
+            .write_all(b"- {order_id: c, amount_cents: 3}\n")
+            .unwrap();
+        input.flush().unwrap();
+        let (records, _) = lines(read_yaml(input.path(), next));
+        assert!(
+            matches!(records.as_slice(), [YamlLine::Changed]),
+            "{records:?}"
+        );
+    }
 
-        assert_eq!(
-            changed(source(&input, at(), 1).open(context()).unwrap()),
-            None
-        );
-        assert_eq!(
-            changed(
-                source(&input, YamlSelection::Document, 64)
-                    .open(context())
-                    .unwrap()
-            )
-            .as_deref(),
-            Some("selection")
-        );
-        input.write_all(order("b", 1).as_bytes()).unwrap();
-        assert_eq!(
-            changed(source(&input, at(), 64).open(context()).unwrap()).as_deref(),
-            Some("file")
-        );
+    #[test]
+    fn file_source_reasons_come_from_input() {
+        use SourceDiagnosticReason::*;
+        let missing = {
+            let (records, _) = lines(read_yaml(
+                Path::new("/nonexistent/obzenflow/input.yaml"),
+                first(YamlSelection::Sequence, 64, 1024),
+            ));
+            decode_line(&OrderYaml, records.into_iter().next().unwrap()).unwrap_err()
+        };
+        let cases = [
+            (InputUnavailable, missing),
+            (MalformedInput, produce("orders: [\n", orders(), 1024)),
+            (
+                UnsupportedConstruct,
+                produce("a: &x 1\nb: *x\n", orders(), 1024),
+            ),
+            (
+                DuplicateKey,
+                produce("orders: []\norders: []\n", orders(), 1024),
+            ),
+            (SizeLimitExceeded, produce("orders: []\n", orders(), 4)),
+            (SelectionNotFound, produce("returns: []\n", orders(), 1024)),
+            (UnexpectedShape, produce("orders: 3\n", orders(), 1024)),
+            (
+                MissingField,
+                produce("- {order_id: a}\n", YamlSelection::Sequence, 1024),
+            ),
+            (
+                UnknownField,
+                produce(
+                    "- {order_id: a, amount_cents: 1, extra: 2}\n",
+                    YamlSelection::Sequence,
+                    1024,
+                ),
+            ),
+            (
+                InvalidValue,
+                produce(
+                    "- {order_id: a, amount_cents: lots}\n",
+                    YamlSelection::Sequence,
+                    1024,
+                ),
+            ),
+            (
+                InputChanged,
+                decode_line(&OrderYaml, YamlLine::Changed).unwrap_err(),
+            ),
+        ];
+        for (reason, error) in cases {
+            assert_eq!(error.diagnostic().reason(), reason, "{error:?}");
+            assert!(
+                !format!("{error} {error:?}").contains("nonexistent"),
+                "{error:?}"
+            );
+        }
     }
 }

@@ -13,7 +13,6 @@ use super::domain::{
 use super::warehouse::{
     warehouse_port, Reservations, StockReservation, WarehouseConfig, WarehouseId,
 };
-use obzenflow::effects::Port;
 use obzenflow::flow::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, MiddlewareFactory};
@@ -130,8 +129,8 @@ fn allocation_flow(
         .probes(1);
     let reserve_resilience = reserve_breaker.for_effect::<StockReservation>();
 
-    let allocation_feed = Port::owned(sources::ValuesSource::new(inputs));
-    let phone_feed = Port::owned(sources::ValuesSource::new(phone_reservations()));
+    let allocation_feed = sources::ValuesSource::new(inputs);
+    let phone_feed = sources::ValuesSource::new(phone_reservations());
     let allocator = Allocator::new(warehouse, 1).with_reservation_pace(reservation_pace);
     let desk = ReservationDesk;
     let record_confirmation = TracingSink::new(|confirmed: &ReservationConfirmed| {

@@ -12,6 +12,7 @@ use super::erased::{
 };
 use super::positioned::{PositionedFiniteReader, SourceRecord};
 use super::prepared::{AsyncSourceReader, SourceReader, SyncSourceReader};
+use super::read::{read_failure, ReadEnd, SourceRead};
 use super::record_de::deserialize_json;
 use super::SourceError;
 use crate::stages::common::handler_error::StageFatal;
@@ -19,6 +20,7 @@ use crate::stages::source::SourceReaderInitContext;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
 use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 
 use obzenflow_core::event::payloads::execution_payload::{
     SourceContinuationRefusal, SourceInputPinnedFact,
@@ -260,19 +262,28 @@ impl Drop for SourceObservationPoll {
 #[diagnostic::on_unimplemented(
     message = "this source handler does not witness its arrow contract",
     label = "this handler does not implement the typed synchronous finite source contract",
-    note = "implement TypedFiniteSourceHandler with Output matching the source! arrow (FLOWIP-134g)"
+    note = "implement TypedFiniteSourceHandler with Output matching the source! arrow"
 )]
 pub trait TypedFiniteSourceHandler: Send + Sync {
     type Output: OneFactOutcome + Send + Sync + 'static;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError>;
+    /// The read that this handler makes through its bound port.
+    fn read(&self) -> Option<SourceRead<Self::Output>> {
+        None
+    }
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        Err(SourceError::Other(
+            SourceDiagnosticReason::Unclassified.into(),
+        ))
+    }
 }
 
 /// Pure asynchronous finite source contract.
 #[diagnostic::on_unimplemented(
     message = "this source handler does not witness its arrow contract",
     label = "this handler does not implement the typed asynchronous finite source contract",
-    note = "implement TypedAsyncFiniteSourceHandler with Output matching the async_source! arrow (FLOWIP-134g)"
+    note = "implement TypedAsyncFiniteSourceHandler with Output matching the source! arrow"
 )]
 #[async_trait]
 pub trait TypedAsyncFiniteSourceHandler: Send + Sync {
@@ -282,7 +293,16 @@ pub trait TypedAsyncFiniteSourceHandler: Send + Sync {
         Some(Duration::from_secs(30))
     }
 
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError>;
+    /// The read that this handler makes through its bound port.
+    fn read(&self) -> Option<SourceRead<Self::Output>> {
+        None
+    }
+
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        Err(SourceError::Other(
+            SourceDiagnosticReason::Unclassified.into(),
+        ))
+    }
 
     async fn drain(&mut self) -> Result<(), SourceError> {
         Ok(())
@@ -297,19 +317,29 @@ pub trait TypedAsyncFiniteSourceHandler: Send + Sync {
 #[diagnostic::on_unimplemented(
     message = "this source handler does not witness its arrow contract",
     label = "this handler does not implement the typed synchronous infinite source contract",
-    note = "implement TypedInfiniteSourceHandler with Output matching the infinite_source! arrow (FLOWIP-134g)"
+    note = "implement TypedInfiniteSourceHandler with Output matching the source! arrow"
 )]
 pub trait TypedInfiniteSourceHandler: Send + Sync {
     type Output: OneFactOutcome + Send + Sync + 'static;
 
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError>;
+    /// The read this handler declares. The framework performs each read
+    /// through the bound port.
+    fn read(&self) -> Option<SourceRead<Self::Output>> {
+        None
+    }
+
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
+        Err(SourceError::Other(
+            SourceDiagnosticReason::Unclassified.into(),
+        ))
+    }
 }
 
 /// Pure asynchronous infinite source contract.
 #[diagnostic::on_unimplemented(
     message = "this source handler does not witness its arrow contract",
     label = "this handler does not implement the typed asynchronous infinite source contract",
-    note = "implement TypedAsyncInfiniteSourceHandler with Output matching the async_infinite_source! arrow (FLOWIP-134g)"
+    note = "implement TypedAsyncInfiniteSourceHandler with Output matching the source! arrow"
 )]
 #[async_trait]
 pub trait TypedAsyncInfiniteSourceHandler: Send + Sync {
@@ -319,7 +349,17 @@ pub trait TypedAsyncInfiniteSourceHandler: Send + Sync {
         None
     }
 
-    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError>;
+    /// The read this handler declares. The framework performs each read
+    /// through the bound port.
+    fn read(&self) -> Option<SourceRead<Self::Output>> {
+        None
+    }
+
+    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
+        Err(SourceError::Other(
+            SourceDiagnosticReason::Unclassified.into(),
+        ))
+    }
 
     async fn drain(&mut self) -> Result<(), SourceError> {
         Ok(())
@@ -645,16 +685,20 @@ where
 
 /// Runtime adapter for an asynchronous typed finite source.
 #[doc(hidden)]
-pub struct TypedAsyncFiniteSourceHandlerAdapter<H> {
+pub struct TypedAsyncFiniteSourceHandlerAdapter<H: TypedAsyncFiniteSourceHandler> {
     reader: AsyncSourceReader<H>,
     writer_id: Option<WriterId>,
     observation_sink: SourceObservationSink,
     recorder: Arc<dyn ObservationRecorder>,
+    reads: Option<DrivenReads<H::Output>>,
 }
 
 impl<H: TypedAsyncFiniteSourceHandler> TypedAsyncFiniteSourceHandlerAdapter<H> {
     pub fn new(handler: H) -> Self {
-        Self::with_reader(SourceReader::acquired(handler))
+        let reads = handler.read().map(DrivenReads::new);
+        let mut adapter = Self::with_reader(SourceReader::acquired(handler));
+        adapter.reads = reads;
+        adapter
     }
 
     pub(super) fn cold(open: AsyncReaderOpener<H>) -> Self {
@@ -668,7 +712,338 @@ impl<H: TypedAsyncFiniteSourceHandler> TypedAsyncFiniteSourceHandlerAdapter<H> {
             writer_id: None,
             observation_sink,
             recorder: Arc::new(NoObservations),
+            reads: None,
         }
+    }
+}
+
+const SYNC_IDLE_BACKOFF_CAP: Duration = Duration::from_millis(10);
+
+struct DrivenReads<Output> {
+    read: SourceRead<Output>,
+    context: Option<crate::effects::EffectInvocationContext>,
+    number: u64,
+    effects: Option<crate::effects::EffectsCore>,
+    reproduced: bool,
+    replayed: u64,
+    committed_rejections: Option<u64>,
+    reproduced_rejections: u64,
+    recorded: Option<crate::replay::ReplayDriver>,
+    emitted: Option<ChainEvent>,
+    held: Option<ChainEvent>,
+}
+
+impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
+    fn new(read: SourceRead<Output>) -> Self {
+        Self {
+            read,
+            context: None,
+            number: 0,
+            effects: None,
+            reproduced: false,
+            replayed: 0,
+            committed_rejections: None,
+            reproduced_rejections: 0,
+            recorded: None,
+            emitted: None,
+            held: None,
+        }
+    }
+
+    fn has_pending(&self) -> bool {
+        self.held.is_some() || self.read.has_pending()
+    }
+
+    fn poll_cancelled(&mut self) {
+        if let Some(event) = self.emitted.take() {
+            self.held = Some(event);
+        }
+    }
+
+    async fn cross_to_live(&mut self) -> Result<bool, StageFatal> {
+        if !self.read.is_continuous() || self.has_pending() {
+            return Ok(false);
+        }
+        let Some(context) = self.context.clone() else {
+            return Ok(false);
+        };
+        if context
+            .stage
+            .effect_history
+            .as_ref()
+            .is_some_and(|history| history.actions().next_unreproduced().is_some())
+        {
+            return Ok(false);
+        }
+        let execution = context.stage.runtime_execution.clone();
+        let stage_id = context.stage.stage_id;
+        let mut effects = crate::effects::EffectsCore::new(context);
+        match effects.cross_to_live().await {
+            Ok(()) => Ok(!matches!(
+                execution.source_phase_for(stage_id),
+                crate::execution::SourceExecutionPhase::Replaying
+            )),
+            Err(error) => Err(effects
+                .authoring_halt_fatal()
+                .unwrap_or_else(|| protocol_fatal(error.to_string()))),
+        }
+    }
+
+    async fn records(&mut self, error: &SourceError) -> Result<bool, StageFatal> {
+        let Some(context) = self.context.as_ref().filter(|_| self.reproduced) else {
+            return Ok(true);
+        };
+        if context.stage.runtime_execution.resume_control().is_none() {
+            return Ok(error.is_terminal());
+        }
+        if matches!(error, SourceError::Validation(_)) {
+            let committed = match self.committed_rejections {
+                Some(committed) => committed,
+                None => {
+                    let committed = committed_rejections(context);
+                    self.committed_rejections = Some(committed);
+                    committed
+                }
+            };
+            self.reproduced_rejections += 1;
+            return Ok(self.reproduced_rejections > committed);
+        }
+        Ok(!error.is_terminal()
+            && context
+                .stage
+                .effect_history
+                .as_ref()
+                .is_none_or(|history| history.actions().next_unreproduced().is_none()))
+    }
+
+    async fn invocation(&mut self) -> ErasedSourceInvocation {
+        self.emitted = None;
+        if let Some(event) = self.held.take() {
+            self.emitted = Some(event.clone());
+            return ErasedSourceInvocation::completed(
+                ErasedSourceCompletion::Batch(vec![event]),
+                Vec::new(),
+            );
+        }
+        loop {
+            if let Some(end) = self.next_read().await {
+                return end;
+            }
+            match self.read.next_output() {
+                None => {
+                    return ErasedSourceInvocation::completed(
+                        ErasedSourceCompletion::Batch(Vec::new()),
+                        Vec::new(),
+                    )
+                }
+                Some(Err(error)) => match self.records(&error).await {
+                    Ok(true) => return ErasedSourceInvocation::handler_error(error, Vec::new()),
+                    Ok(false) => {}
+                    Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
+                },
+                Some(Ok(output)) => return self.output(output).await,
+            }
+        }
+    }
+
+    async fn next_read(&mut self) -> Option<ErasedSourceInvocation> {
+        while !self.read.has_pending() {
+            let Some(mut context) = self.context.clone() else {
+                return Some(ErasedSourceInvocation::fatal(configuration_fatal(
+                    "source read invoked before the runtime installed its stage context",
+                )));
+            };
+            let Some(number) = self.number.checked_add(1) else {
+                return Some(ErasedSourceInvocation::fatal(protocol_fatal(
+                    "source read number exhausted",
+                )));
+            };
+            context.input_seq = crate::messaging::upstream_subscription::StageInputPosition(number);
+            let ready = self.read.ready();
+            if super::read::recording_ends(&context, number) {
+                let mut effects = crate::effects::EffectsCore::new(context);
+                if let Err(error) = effects.reproduce_trailing_crossing().await {
+                    return Some(ErasedSourceInvocation::fatal(
+                        effects
+                            .authoring_halt_fatal()
+                            .unwrap_or_else(|| protocol_fatal(error.to_string())),
+                    ));
+                }
+                return Some(ErasedSourceInvocation::completed(
+                    ErasedSourceCompletion::Eof,
+                    Vec::new(),
+                ));
+            }
+            let mut effects = crate::effects::EffectsCore::new(context);
+            let reproduced = effects.is_replaying();
+            if let (Some(ready), false) = (ready, reproduced) {
+                if let Err(error) = effects.cross_to_live().await {
+                    return Some(ErasedSourceInvocation::fatal(
+                        effects
+                            .authoring_halt_fatal()
+                            .unwrap_or_else(|| protocol_fatal(error.to_string())),
+                    ));
+                }
+                if let Err(error) = ready.await {
+                    return Some(ErasedSourceInvocation::handler_error(error, Vec::new()));
+                }
+            }
+            let outcome = self.read.read(&mut effects).await;
+            self.number = number;
+            self.reproduced = reproduced;
+            match outcome {
+                Ok(ReadEnd::EndOfInput) => {
+                    return Some(ErasedSourceInvocation::completed(
+                        ErasedSourceCompletion::Eof,
+                        Vec::new(),
+                    ))
+                }
+                Ok(ReadEnd::Batch) => {
+                    self.effects = Some(effects);
+                    return None;
+                }
+                Err(error) => {
+                    if let Some(fatal) = effects.authoring_halt_fatal() {
+                        return Some(ErasedSourceInvocation::fatal(fatal));
+                    }
+                    match read_failure(&error) {
+                        Some(failure) => match self.records(&failure).await {
+                            Ok(true) => {
+                                return Some(ErasedSourceInvocation::handler_error(
+                                    failure,
+                                    Vec::new(),
+                                ))
+                            }
+                            Ok(false) => {}
+                            Err(fatal) => return Some(ErasedSourceInvocation::fatal(fatal)),
+                        },
+                        None => {
+                            return Some(ErasedSourceInvocation::fatal(protocol_fatal(
+                                error.to_string(),
+                            )))
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    async fn output(&mut self, output: Output) -> ErasedSourceInvocation {
+        let effects = self
+            .effects
+            .as_mut()
+            .expect("a committed read supplied the pending records");
+        let fact = match output.into_facts() {
+            Ok(mut facts) if facts.len() == 1 => facts.pop().expect("one source fact"),
+            Ok(_) => {
+                return ErasedSourceInvocation::fatal(protocol_fatal(
+                    "a source output must produce one fact",
+                ))
+            }
+            Err(error) => return ErasedSourceInvocation::fatal(protocol_fatal(error.to_string())),
+        };
+        let event = match effects.prepare_typed_fact(fact, false).await {
+            Ok((event, _)) => event,
+            Err(error) => {
+                return ErasedSourceInvocation::fatal(
+                    effects
+                        .authoring_halt_fatal()
+                        .unwrap_or_else(|| protocol_fatal(error.to_string())),
+                )
+            }
+        };
+        match self.preserved(event).await {
+            Ok(event) => {
+                if self.reproduced {
+                    self.replayed += 1;
+                }
+                self.emitted = Some(event.clone());
+                ErasedSourceInvocation::completed(
+                    ErasedSourceCompletion::Batch(vec![event]),
+                    Vec::new(),
+                )
+            }
+            Err(fatal) => ErasedSourceInvocation::fatal(fatal),
+        }
+    }
+
+    async fn preserved(&mut self, event: ChainEvent) -> Result<ChainEvent, StageFatal> {
+        preserve_recorded(&mut self.recorded, self.context.as_ref(), event).await
+    }
+}
+
+// Each run keeps the rejections of the records it read, so a resume repeats
+// none of the rejections its recorded runs committed.
+fn committed_rejections(context: &crate::effects::EffectInvocationContext) -> u64 {
+    let (Some(archive), Some(flow)) = (
+        context.stage.runtime_execution.archive_for_io(),
+        context.stage.flow_context.as_ref(),
+    ) else {
+        return 0;
+    };
+    std::iter::once(archive.clone())
+        .chain(archive.ancestors())
+        .map(|member| member.recorded_source_rejections(&flow.stage_name))
+        .sum()
+}
+
+pub(super) async fn preserve_recorded(
+    recorded: &mut Option<crate::replay::ReplayDriver>,
+    context: Option<&crate::effects::EffectInvocationContext>,
+    event: ChainEvent,
+) -> Result<ChainEvent, StageFatal> {
+    let Some(context) = context else {
+        return Ok(event);
+    };
+    let execution = &context.stage.runtime_execution;
+    if event.replay_context.is_none() || execution.resume_control().is_none() {
+        return Ok(event);
+    }
+    if recorded.is_none() {
+        let (Some(archive), Some(flow)) = (
+            execution.archive_for_io(),
+            context.stage.flow_context.as_ref(),
+        ) else {
+            return Err(protocol_fatal("a resumed source read has no archive"));
+        };
+        let opened = crate::stages::source::supervision::recorded_input(
+            archive,
+            &flow.stage_name,
+            flow.stage_type,
+        )
+        .await
+        .map_err(|error| protocol_fatal(error.to_string()))?;
+        *recorded = Some(opened);
+    }
+    let recorded = recorded.as_mut().expect("the recorded input is open");
+    loop {
+        let Some(replayed) = recorded
+            .next_replayed_event(event.flow_context.clone())
+            .await
+            .map_err(|error| protocol_fatal(error.to_string()))?
+        else {
+            return Err(protocol_fatal(format!(
+                "the recording holds no fact {} for the resumed read",
+                event.id
+            )));
+        };
+        if !matches!(
+            replayed.event.payload,
+            obzenflow_core::event::ChainPayload::Fact(_)
+                | obzenflow_core::event::ChainPayload::CompositeData(_)
+        ) {
+            continue;
+        }
+        if replayed.event.id != event.id {
+            return Err(protocol_fatal(format!(
+                "the recording holds fact {} where the resumed read reproduced {}",
+                replayed.event.id, event.id
+            )));
+        }
+        return replayed
+            .admit()
+            .map_err(|error| protocol_fatal(error.to_string()));
     }
 }
 
@@ -679,6 +1054,32 @@ impl<H> UnifiedAsyncFiniteSourceHandler for TypedAsyncFiniteSourceHandlerAdapter
 where
     H: TypedAsyncFiniteSourceHandler + Send + Sync,
 {
+    fn has_pending_records(&self) -> bool {
+        self.reads.as_ref().is_some_and(DrivenReads::has_pending)
+    }
+
+    fn replayed_facts(&self) -> u64 {
+        self.reads.as_ref().map_or(0, |reads| reads.replayed)
+    }
+
+    fn read_declaration(
+        &self,
+    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
+        self.reads.as_ref().map(|reads| reads.read.declaration())
+    }
+
+    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
+        if let Some(reads) = &mut self.reads {
+            reads.context = Some(context);
+        }
+    }
+
+    fn poll_cancelled(&mut self) {
+        if let Some(reads) = &mut self.reads {
+            reads.poll_cancelled();
+        }
+    }
+
     async fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
         if let Some(handler) = self.reader.acquire(context).await? {
             if self.writer_id.is_some() {
@@ -708,6 +1109,9 @@ where
     }
 
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
+        if let Some(reads) = &mut self.reads {
+            return reads.invocation().await;
+        }
         let Some(writer_id) = self.writer_id else {
             return ErasedSourceInvocation::fatal(configuration_fatal(
                 "typed async source adapter invoked before runtime writer identity installation",
@@ -764,16 +1168,21 @@ where
 
 /// Runtime adapter for an asynchronous typed infinite source.
 #[doc(hidden)]
-pub struct TypedAsyncInfiniteSourceHandlerAdapter<H> {
+pub struct TypedAsyncInfiniteSourceHandlerAdapter<H: TypedAsyncInfiniteSourceHandler> {
     reader: AsyncSourceReader<H>,
     writer_id: Option<WriterId>,
     observation_sink: SourceObservationSink,
     recorder: Arc<dyn ObservationRecorder>,
+    reads: Option<DrivenReads<H::Output>>,
 }
 
 impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<H> {
     pub fn new(handler: H) -> Self {
-        Self::with_reader(SourceReader::acquired(handler))
+        let reads = handler.read().map(DrivenReads::new);
+        Self {
+            reads,
+            ..Self::with_reader(SourceReader::acquired(handler))
+        }
     }
 
     pub(super) fn cold(open: AsyncReaderOpener<H>) -> Self {
@@ -787,6 +1196,7 @@ impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<
             writer_id: None,
             observation_sink,
             recorder: Arc::new(NoObservations),
+            reads: None,
         }
     }
 }
@@ -801,6 +1211,39 @@ impl<H> UnifiedAsyncInfiniteSourceHandler for TypedAsyncInfiniteSourceHandlerAda
 where
     H: TypedAsyncInfiniteSourceHandler + Send + Sync,
 {
+    fn has_pending_records(&self) -> bool {
+        self.reads.as_ref().is_some_and(DrivenReads::has_pending)
+    }
+
+    fn read_declaration(
+        &self,
+    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
+        self.reads.as_ref().map(|reads| reads.read.declaration())
+    }
+
+    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
+        if let Some(reads) = &mut self.reads {
+            reads.context = Some(context);
+        }
+    }
+
+    fn poll_cancelled(&mut self) {
+        if let Some(reads) = &mut self.reads {
+            reads.poll_cancelled();
+        }
+    }
+
+    async fn cross_to_live(&mut self) -> Result<bool, StageFatal> {
+        match &mut self.reads {
+            Some(reads) => reads.cross_to_live().await,
+            None => Ok(false),
+        }
+    }
+
+    fn replayed_facts(&self) -> u64 {
+        self.reads.as_ref().map_or(0, |reads| reads.replayed)
+    }
+
     async fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
         if let Some(handler) = self.reader.acquire(context).await? {
             if self.writer_id.is_some() {
@@ -826,6 +1269,9 @@ where
     }
 
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
+        if let Some(reads) = &mut self.reads {
+            return reads.invocation().await;
+        }
         let Some(writer_id) = self.writer_id else {
             return ErasedSourceInvocation::fatal(configuration_fatal(
                 "typed async source adapter invoked before runtime writer identity installation",
@@ -1279,5 +1725,239 @@ mod tests {
             non_finite.reason(),
             SourceDiagnosticReason::UnrepresentableValue
         );
+    }
+}
+
+impl<H: TypedAsyncFiniteSourceHandler + 'static>
+    super::prepared::sealed::Admitted<dyn UnifiedAsyncFiniteSourceHandler> for H
+{
+}
+
+impl<H: TypedAsyncFiniteSourceHandler + 'static>
+    super::prepared::AdmitSource<dyn UnifiedAsyncFiniteSourceHandler> for H
+{
+    type Output = H::Output;
+    type Handler = TypedAsyncFiniteSourceHandlerAdapter<H>;
+
+    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
+        let handler = TypedAsyncFiniteSourceHandlerAdapter::new(self);
+        let (system, continuation) = handler
+            .reads
+            .as_ref()
+            .map(|reads| (reads.read.source_system(), reads.read.continuation()))
+            .expect("a source handler in a row reads through a bound port");
+        super::prepared::AdmittedSource {
+            handler,
+            continuation,
+            system,
+        }
+    }
+}
+
+impl<H: TypedAsyncInfiniteSourceHandler + 'static>
+    super::prepared::sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler> for H
+{
+}
+
+impl<H: TypedAsyncInfiniteSourceHandler + 'static>
+    super::prepared::AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler> for H
+{
+    type Output = H::Output;
+    type Handler = TypedAsyncInfiniteSourceHandlerAdapter<H>;
+
+    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
+        let handler = TypedAsyncInfiniteSourceHandlerAdapter::new(self);
+        let (system, continuation) = handler
+            .reads
+            .as_ref()
+            .map(|reads| (reads.read.source_system(), reads.read.continuation()))
+            .expect("a source handler in a row reads through a bound port");
+        super::prepared::AdmittedSource {
+            handler,
+            continuation,
+            system,
+        }
+    }
+}
+
+/// The stage family of a synchronous typed infinite handler that reads
+/// through a bound port. Its reads run on the asynchronous supervisor.
+#[doc(hidden)]
+pub enum SyncInfiniteReads {}
+
+/// Runtime adapter that drives the declared read of a synchronous typed
+/// infinite source.
+#[doc(hidden)]
+pub struct InfiniteReadAdapter<Output> {
+    reads: DrivenReads<Output>,
+}
+
+impl<Output> SealAsyncInfinite for InfiniteReadAdapter<Output> {}
+
+#[async_trait]
+impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandler
+    for InfiniteReadAdapter<Output>
+{
+    fn has_pending_records(&self) -> bool {
+        self.reads.has_pending()
+    }
+
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::InfiniteSource
+    }
+
+    fn idle_backoff_cap(&self) -> Duration {
+        SYNC_IDLE_BACKOFF_CAP
+    }
+
+    fn read_declaration(
+        &self,
+    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
+        Some(self.reads.read.declaration())
+    }
+
+    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
+        self.reads.context = Some(context);
+    }
+
+    fn poll_cancelled(&mut self) {
+        self.reads.poll_cancelled();
+    }
+
+    async fn cross_to_live(&mut self) -> Result<bool, StageFatal> {
+        self.reads.cross_to_live().await
+    }
+
+    fn replayed_facts(&self) -> u64 {
+        self.reads.replayed
+    }
+
+    fn install_writer_id(&mut self, _writer_id: WriterId) {}
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
+        self.reads.invocation().await
+    }
+
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        Ok(())
+    }
+}
+
+impl<H: TypedInfiniteSourceHandler + 'static> super::prepared::sealed::Admitted<SyncInfiniteReads>
+    for H
+{
+}
+
+impl<H: TypedInfiniteSourceHandler + 'static> super::prepared::AdmitSource<SyncInfiniteReads>
+    for H
+{
+    type Output = H::Output;
+    type Handler = InfiniteReadAdapter<H::Output>;
+
+    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
+        let read = self
+            .read()
+            .expect("a source handler in a row reads through a bound port");
+        let system = read.source_system();
+        let continuation = read.continuation();
+        super::prepared::AdmittedSource {
+            handler: InfiniteReadAdapter {
+                reads: DrivenReads::new(read),
+            },
+            continuation,
+            system,
+        }
+    }
+}
+
+/// The stage family of a synchronous typed handler that reads through a bound
+/// port. Its reads run on the asynchronous supervisor.
+#[doc(hidden)]
+pub enum SyncFiniteReads {}
+
+/// Runtime adapter that drives the declared read of a synchronous typed
+/// finite source.
+#[doc(hidden)]
+pub struct FiniteReadAdapter<Output> {
+    reads: DrivenReads<Output>,
+}
+
+impl<Output> SealAsyncFinite for FiniteReadAdapter<Output> {}
+
+#[async_trait]
+impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncFiniteSourceHandler
+    for FiniteReadAdapter<Output>
+{
+    fn has_pending_records(&self) -> bool {
+        self.reads.has_pending()
+    }
+
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::FiniteSource
+    }
+
+    fn replayed_facts(&self) -> u64 {
+        self.reads.replayed
+    }
+
+    fn idle_backoff_cap(&self) -> Duration {
+        SYNC_IDLE_BACKOFF_CAP
+    }
+
+    fn read_declaration(
+        &self,
+    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
+        Some(self.reads.read.declaration())
+    }
+
+    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
+        self.reads.context = Some(context);
+    }
+
+    fn poll_cancelled(&mut self) {
+        self.reads.poll_cancelled();
+    }
+
+    fn install_writer_id(&mut self, _writer_id: WriterId) {}
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
+        self.reads.invocation().await
+    }
+
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        Ok(())
+    }
+}
+
+impl<H: TypedFiniteSourceHandler + 'static> super::prepared::sealed::Admitted<SyncFiniteReads>
+    for H
+{
+}
+
+impl<H: TypedFiniteSourceHandler + 'static> super::prepared::AdmitSource<SyncFiniteReads> for H {
+    type Output = H::Output;
+    type Handler = FiniteReadAdapter<H::Output>;
+
+    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
+        let read = self
+            .read()
+            .expect("a source handler in a row reads through a bound port");
+        let system = read.source_system();
+        let continuation = read.continuation();
+        super::prepared::AdmittedSource {
+            handler: FiniteReadAdapter {
+                reads: DrivenReads::new(read),
+            },
+            continuation,
+            system,
+        }
     }
 }

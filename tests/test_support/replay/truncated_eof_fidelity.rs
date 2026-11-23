@@ -16,13 +16,12 @@ use obzenflow::effects::Port;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::{TypedPayload, WriterId};
-use obzenflow_dsl::{flow, infinite_source, sink, source, stateful, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handlers::{
-    StatefulEmission, TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedStatefulHandler,
+    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::Path;
@@ -31,6 +30,71 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::replay_testkit;
+use obzenflow_runtime::effects::{EffectContext, EffectError};
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TickRead(u64);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait TickInput {
+    #[effect(type = "truncated_fidelity.ticks.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &TickRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<Tick, TickRead>, EffectError>;
+}
+
+/// Supplies ticks 1 to `emit`. A sealing input then ends; a stalling input
+/// waits without ending.
+struct TickFeed {
+    emit: u64,
+    seal: bool,
+}
+
+#[obzenflow_runtime::effects::system("ticks")]
+#[async_trait::async_trait]
+impl TickInput for TickFeed {
+    async fn read(
+        &self,
+        from: &TickRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<Tick, TickRead>, EffectError> {
+        if from.0 < self.emit {
+            return Ok(FiniteRead::Batch {
+                records: vec![Tick { n: from.0 + 1 }],
+                next: TickRead(from.0 + 1),
+            });
+        }
+        if self.seal {
+            return Ok(FiniteRead::EndOfInput);
+        }
+        std::future::pending().await
+    }
+}
+
+/// An in-process finite tick source, so an unfinished run refuses its resume.
+struct Ticks(Port<dyn TickInput>);
+
+impl Ticks {
+    fn stalling(emit: u64) -> Self {
+        Self(Port::to(TickFeed { emit, seal: false }).own_instance())
+    }
+
+    fn sealing(emit: u64) -> Self {
+        Self(Port::to(TickFeed { emit, seal: true }).own_instance())
+    }
+}
+
+impl TypedFiniteSourceHandler for Ticks {
+    type Output = Tick;
+
+    fn read(&self) -> Option<SourceRead<Tick>> {
+        Some(SourceRead::finite(self.0.clone(), TickRead(0), Ok).in_process())
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Tick {
@@ -48,50 +112,6 @@ struct SumResult {
 
 impl TypedPayload for SumResult {
     const EVENT_TYPE: &'static str = "truncated_fidelity.sum";
-}
-
-/// Emits `emit` ticks, then idles without sealing (the run only ends when the
-/// test cancels it) or seals by returning `None` when `seal` is set.
-#[derive(Clone, Debug)]
-struct Ticks {
-    next: u64,
-    emit: u64,
-    seal: bool,
-}
-
-impl Ticks {
-    fn stalling(emit: u64) -> Self {
-        Self {
-            next: 1,
-            emit,
-            seal: false,
-        }
-    }
-
-    fn sealing(emit: u64) -> Self {
-        Self {
-            seal: true,
-            ..Self::stalling(emit)
-        }
-    }
-}
-
-#[obzenflow::system("ticks")]
-impl TypedFiniteSourceHandler for Ticks {
-    type Output = Tick;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next > self.emit {
-            if self.seal {
-                return Ok(None);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-            return Ok(Some(vec![]));
-        }
-        let n = self.next;
-        self.next += 1;
-        Ok(Some(vec![Tick { n }]))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -221,7 +241,7 @@ async fn synthesized_kinds(run_dir: &Path) -> Vec<Option<EofKind>> {
 macro_rules! linear_flow {
     ($journal_base:expr, $delivered:expr, $source:expr) => {
         FlowDefinition::materialize(move |_runtime_config| {
-            let ticks = Port::owned($source);
+            let ticks = $source;
             let summer = SumHandler::new();
             let out = replay_testkit::CountDeliveries::<SumResult>::new($delivered);
 
@@ -478,8 +498,8 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     macro_rules! fan_in_flow {
         ($base:expr, $delivered:expr) => {
             FlowDefinition::materialize(move |_runtime_config| {
-                let fast = Port::owned(Ticks::sealing(3));
-                let slow = Port::owned(Ticks::stalling(4));
+                let fast = Ticks::sealing(3);
+                let slow = Ticks::stalling(4);
                 let summer = SumHandler::new();
                 let out = replay_testkit::CountDeliveries::<SumResult>::new($delivered);
 
@@ -622,28 +642,6 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     assert_eq!(replay_delivered.load(Ordering::SeqCst), 0);
 }
 
-/// Emits `emit` ticks, then idles; only a stop ends it.
-#[derive(Clone, Debug)]
-struct Pulse {
-    next: u64,
-    emit: u64,
-}
-
-#[obzenflow::system("pulse")]
-impl TypedInfiniteSourceHandler for Pulse {
-    type Output = Tick;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.next > self.emit {
-            std::thread::sleep(Duration::from_millis(10));
-            return Ok(Vec::new());
-        }
-        let n = 100 + self.next;
-        self.next += 1;
-        Ok(vec![Tick { n }])
-    }
-}
-
 /// FLOWIP-134i B5 (AC7): a graceful stop with finite input unread writes
 /// `Truncated` from every unfinished source, finite or infinite, so a stateful
 /// fan-in over them publishes no end-of-input finalization.
@@ -655,8 +653,8 @@ async fn graceful_stop_truncates_finite_and_infinite_inputs_of_a_stateful_fan_in
     let base = journal_base.clone();
     let counter = delivered.clone();
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let unread = Port::owned(Ticks::stalling(4));
-        let live = Port::owned(Pulse { next: 1, emit: 4 });
+        let unread = Ticks::stalling(4);
+        let live = replay_testkit::preloaded_input((1..=4).map(|n| Tick { n: 100 + n }));
         let summer = SumHandler::new();
         let out = replay_testkit::CountDeliveries::<SumResult>::new(counter);
         Ok(flow! {
@@ -665,7 +663,7 @@ async fn graceful_stop_truncates_finite_and_infinite_inputs_of_a_stateful_fan_in
 
             stages: {
                 unread = source!(Tick => unread);
-                live = infinite_source!(Tick => live);
+                live = source!(Tick => live);
                 summer = stateful!(Tick -> SumResult => summer);
                 out = sink!(SumResult => out);
             },

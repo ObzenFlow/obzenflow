@@ -8,16 +8,13 @@
 //! sync stateful, or join) is a flow build error: a handler shell has no typed
 //! live-I/O unit to protect.
 
-use obzenflow::effects::Port;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_adapters::middleware::{circuit_breaker, CircuitBreaker};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    TypedFiniteSourceHandler, TypedTransformHandler,
-};
-use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
 use serde::{Deserialize, Serialize};
 
 fn breaker(failures: u32) -> CircuitBreaker {
@@ -31,24 +28,6 @@ struct GuardEvent {
 
 impl TypedPayload for GuardEvent {
     const EVENT_TYPE: &'static str = "policy_guard.event";
-}
-
-#[derive(Clone, Debug)]
-struct OneShotSource {
-    emitted: bool,
-}
-
-#[obzenflow::system("one-shot")]
-impl TypedFiniteSourceHandler for OneShotSource {
-    type Output = GuardEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![GuardEvent { sequence: 1 }]))
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -66,7 +45,7 @@ impl TypedTransformHandler for SyncPassthrough {
 #[tokio::test]
 async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
     let result = FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = Port::owned(OneShotSource { emitted: false });
+        let source_handler = ValuesSource::new([GuardEvent { sequence: 1 }]);
         let transform_handler = SyncPassthrough;
         let sink_handler = obzenflow::stages::sinks::DiscardSink::<GuardEvent>::new();
 

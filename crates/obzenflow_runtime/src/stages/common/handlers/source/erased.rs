@@ -15,6 +15,7 @@ use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::payloads::execution_payload::{
     SourceContinuationRefusal, SourceInputPinnedFact,
 };
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::source::{EncodedSourcePosition, SourcePositionError};
 use obzenflow_core::{ChainEvent, EventId, WriterId};
@@ -123,6 +124,25 @@ pub enum SourceResumeError {
 #[doc(hidden)]
 #[async_trait]
 pub trait UnifiedAsyncFiniteSourceHandler: sealed::AsyncFinite + Send + Sync {
+    fn has_pending_records(&self) -> bool {
+        false
+    }
+    fn replayed_facts(&self) -> u64 {
+        0
+    }
+    fn idle_backoff_cap(&self) -> Duration {
+        Duration::from_millis(50)
+    }
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::AsyncFiniteSource
+    }
+    fn read_declaration(
+        &self,
+    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
+        None
+    }
+    fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
+    fn poll_cancelled(&mut self) {}
     async fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
         Ok(())
     }
@@ -148,6 +168,30 @@ pub trait UnifiedInfiniteSourceHandler: sealed::Infinite + Send + Sync {
 #[doc(hidden)]
 #[async_trait]
 pub trait UnifiedAsyncInfiniteSourceHandler: sealed::AsyncInfinite + Send + Sync {
+    fn has_pending_records(&self) -> bool {
+        false
+    }
+    fn idle_backoff_cap(&self) -> Duration {
+        Duration::from_millis(50)
+    }
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::AsyncInfiniteSource
+    }
+    fn read_declaration(
+        &self,
+    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
+        None
+    }
+    fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
+    fn poll_cancelled(&mut self) {}
+    async fn cross_to_live(
+        &mut self,
+    ) -> Result<bool, crate::stages::common::handler_error::StageFatal> {
+        Ok(false)
+    }
+    fn replayed_facts(&self) -> u64 {
+        0
+    }
     async fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
         Ok(())
     }
@@ -162,8 +206,6 @@ pub trait UnifiedAsyncInfiniteSourceHandler: sealed::AsyncInfinite + Send + Sync
     async fn drain(&mut self) -> Result<(), SourceError>;
     /// Rows the journal committed, so hosted receipts can resolve (FLOWIP-084l).
     fn settle_committed(&mut self, _committed: &[EventId]) {}
-    /// One re-admitted row of this source, folded before the slot goes live.
-    fn fold_recorded_admission(&mut self, _event: &ChainEvent) {}
 }
 
 impl<T: FiniteSourceHandler + Send + Sync> sealed::Finite for T {}

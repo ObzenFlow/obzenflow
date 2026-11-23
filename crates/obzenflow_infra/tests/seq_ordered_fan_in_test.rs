@@ -6,24 +6,24 @@ use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use obzenflow_adapters::sources::ChannelSource;
+use obzenflow_adapters::sources::ValuesSource;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord, WriterId};
 use obzenflow_core::{EventId, TypedPayload};
-use obzenflow_dsl::{
-    async_infinite_source, flow, join, sink, source, stateful, transform, FlowDefinition,
-};
+use obzenflow_dsl::{flow, join, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::Port;
+use obzenflow_runtime::effects::{EffectContext, EffectError};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler,
     TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::join::JoinReferenceMode;
 use obzenflow_runtime::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -173,23 +173,6 @@ impl TypedStatefulHandler for Checkbook {
     fn post_emit(&self, _: &mut Self::State) {}
 }
 
-#[derive(Clone, Debug)]
-struct BatchAccounts {
-    rows: Vec<AccountRow>,
-}
-
-#[obzenflow_runtime::effects::system("batch-accounts")]
-impl TypedFiniteSourceHandler for BatchAccounts {
-    type Output = AccountRow;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.rows.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(vec![self.rows.remove(0)]))
-    }
-}
-
 struct LiveInputs<A, B> {
     first: mpsc::Sender<A>,
     second: mpsc::Sender<B>,
@@ -209,8 +192,8 @@ fn live_join_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let accounts_source = Port::to(ChannelSource::new(accounts_rx));
-        let tx_source = Port::to(ChannelSource::new(tx_rx));
+        let accounts_source = ChannelSource::new(accounts_rx);
+        let tx_source = ChannelSource::new(tx_rx);
         let post_live = PostEntries {
             mode: JoinReferenceMode::Live,
         };
@@ -223,8 +206,8 @@ fn live_join_flow(
                 journals: disk_journals(journal_base),
 
                 stages: {
-                    accounts = async_infinite_source!(AccountRow => accounts_source);
-                    tx = async_infinite_source!(TxRow => tx_source);
+                    accounts = source!(AccountRow => accounts_source);
+                    tx = source!(TxRow => tx_source);
                     account_book = transform!(AccountRow -> AccountRow => book);
                     posted = join!(catalog account_book: AccountRow, TxRow -> PostedRow => post_live);
                     checkbook = stateful!(PostedRow -> Snapshot => checkbook);
@@ -244,8 +227,8 @@ fn live_join_flow(
                 journals: disk_journals(journal_base),
 
                 stages: {
-                    accounts = async_infinite_source!(AccountRow => accounts_source);
-                    tx = async_infinite_source!(TxRow => tx_source);
+                    accounts = source!(AccountRow => accounts_source);
+                    tx = source!(TxRow => tx_source);
                     posted = join!(catalog accounts: AccountRow, TxRow -> PostedRow => post_live);
                     checkbook = stateful!(PostedRow -> Snapshot => checkbook);
                     collect = sink!(Snapshot => collect);
@@ -269,9 +252,9 @@ fn mixed_fold_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let accounts_source = Port::to(ChannelSource::new(accounts_rx));
-        let tx_source = Port::to(ChannelSource::new(tx_rx));
-        let adjustments_source = Port::to(ChannelSource::new(adjustments_rx));
+        let accounts_source = ChannelSource::new(accounts_rx);
+        let tx_source = ChannelSource::new(tx_rx);
+        let adjustments_source = ChannelSource::new(adjustments_rx);
         let post_live = PostEntries {
             mode: JoinReferenceMode::Live,
         };
@@ -283,9 +266,9 @@ fn mixed_fold_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                accounts = async_infinite_source!(AccountRow => accounts_source);
-                tx = async_infinite_source!(TxRow => tx_source);
-                adjustments = async_infinite_source!(PostedRow => adjustments_source);
+                accounts = source!(AccountRow => accounts_source);
+                tx = source!(TxRow => tx_source);
+                adjustments = source!(PostedRow => adjustments_source);
                 account_book = transform!(AccountRow -> AccountRow => book);
                 posted = join!(catalog account_book: AccountRow, TxRow -> PostedRow => post_live);
                 checkbook = stateful!(PostedRow -> Snapshot => checkbook);
@@ -310,11 +293,9 @@ fn hydrating_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let accounts_source = Port::owned(BatchAccounts {
-            rows: vec![account("acct-1"), account("acct-2")],
-        });
-        let quiet_source = Port::to(ChannelSource::new(quiet_rx));
-        let active_source = Port::to(ChannelSource::new(active_rx));
+        let accounts_source = ValuesSource::new(vec![account("acct-1"), account("acct-2")]);
+        let quiet_source = ChannelSource::new(quiet_rx);
+        let active_source = ChannelSource::new(active_rx);
         let post_batch = PostEntries {
             mode: JoinReferenceMode::FiniteEof,
         };
@@ -326,8 +307,8 @@ fn hydrating_flow(
 
             stages: {
                 accounts = source!(AccountRow => accounts_source);
-                tx_quiet = async_infinite_source!(TxRow => quiet_source);
-                tx_active = async_infinite_source!(TxRow => active_source);
+                tx_quiet = source!(TxRow => quiet_source);
+                tx_active = source!(TxRow => active_source);
                 posted = join!(catalog accounts: AccountRow, TxRow -> PostedRow => post_batch);
                 checkbook = stateful!(PostedRow -> Snapshot => checkbook);
                 collect = sink!(Snapshot => collect);
@@ -343,25 +324,54 @@ fn hydrating_flow(
     })
 }
 
-#[derive(Clone, Debug)]
-struct PausingBatch {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BatchRead(usize);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait BatchInput {
+    #[effect(type = "seq_ordered_fan_in.batch.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &BatchRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<TxRow, BatchRead>, EffectError>;
+}
+
+/// Supplies its rows, then waits for the release before the input ends.
+struct Pausing {
     rows: Vec<TxRow>,
     release: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[obzenflow_runtime::effects::system("pausing-batch")]
+#[async_trait::async_trait]
+impl BatchInput for Pausing {
+    async fn read(
+        &self,
+        from: &BatchRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<TxRow, BatchRead>, EffectError> {
+        if let Some(row) = self.rows.get(from.0) {
+            return Ok(FiniteRead::Batch {
+                records: vec![row.clone()],
+                next: BatchRead(from.0 + 1),
+            });
+        }
+        while !self.release.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(FiniteRead::EndOfInput)
+    }
+}
+
+struct PausingBatch(Port<dyn BatchInput>);
+
 impl TypedFiniteSourceHandler for PausingBatch {
     type Output = TxRow;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if !self.rows.is_empty() {
-            return Ok(Some(vec![self.rows.remove(0)]));
-        }
-        if self.release.load(Ordering::SeqCst) {
-            Ok(None)
-        } else {
-            Ok(Some(Vec::new()))
-        }
+    fn read(&self) -> Option<SourceRead<TxRow>> {
+        Some(SourceRead::finite(self.0.clone(), BatchRead(0), Ok))
     }
 }
 
@@ -439,11 +449,11 @@ fn end_of_input_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let batch_source = Port::owned(PausingBatch {
+        let batch_source = PausingBatch(Port::to(Pausing {
             rows: vec![tx("acct-1", 5), tx("acct-1", 7)],
             release,
-        });
-        let live_source = Port::to(ChannelSource::new(live_rx));
+        }));
+        let live_source = ChannelSource::new(live_rx);
         let total = StatefulWithEmission::new(BatchTotal, OnEOF);
         let forward = Forward;
         let tally = Tally;
@@ -454,7 +464,7 @@ fn end_of_input_flow(
 
             stages: {
                 batch = source!(TxRow => batch_source);
-                live = async_infinite_source!(Snapshot => live_source);
+                live = source!(Snapshot => live_source);
                 total = stateful!(TxRow -> Snapshot => total);
                 merged = transform!(Snapshot -> Snapshot => forward);
                 tally = stateful!(Snapshot -> Snapshot => tally);

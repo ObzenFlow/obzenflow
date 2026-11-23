@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use obzenflow::stages::sinks::DiscardSink;
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
 use obzenflow_adapters::monitoring::MetricsReadModel;
-use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{Outcomes, StageId};
 use obzenflow_dsl::{sink, source, test_flow, transform};
@@ -27,12 +26,11 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the metrics exporter integration test. The JSON
-/// shape matches what `BurstSource` emits; the type fingerprints the
+/// shape matches what `burst` emits; the type fingerprints the
 /// stage contract per FLOWIP-114c.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct MetricEvent {
@@ -42,67 +40,76 @@ struct MetricEvent {
 impl TypedPayload for MetricEvent {
     const EVENT_TYPE: &'static str = "metric.sample";
 }
+use obzenflow::stages::sources::ValuesSource;
+use obzenflow_runtime::effects::EffectContext;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::time::{sleep, Duration};
 
-#[derive(Clone, Debug)]
-struct BurstSource {
-    total: usize,
-    current: usize,
+fn burst(total: usize) -> impl TypedFiniteSourceHandler<Output = MetricEvent> {
+    ValuesSource::new(
+        (0..total as u64)
+            .map(|index| MetricEvent { index })
+            .collect::<Vec<_>>(),
+    )
 }
 
-impl BurstSource {
-    fn new(total: usize) -> Self {
-        Self { total, current: 0 }
-    }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MetricRead(u8);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait MetricInput {
+    #[effect(type = "metrics_exporter.input.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &MetricRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<MetricEvent, MetricRead>, EffectError>;
 }
 
-#[obzenflow::system("burst")]
-impl TypedFiniteSourceHandler for BurstSource {
-    type Output = MetricEvent;
+/// Supplies one event, then times out once before its input ends.
+struct ErrorAfterFirst {
+    failed: std::sync::atomic::AtomicBool,
+}
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.current >= self.total {
-            return Ok(None);
+#[obzenflow_runtime::effects::system("error-after-first")]
+#[async_trait]
+impl MetricInput for ErrorAfterFirst {
+    async fn read(
+        &self,
+        from: &MetricRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<MetricEvent, MetricRead>, EffectError> {
+        match from.0 {
+            0 => Ok(FiniteRead::Batch {
+                records: vec![MetricEvent { index: 0 }],
+                next: MetricRead(1),
+            }),
+            _ if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+                Err(EffectError::Timeout("scripted timeout".into()))
+            }
+            _ => Ok(FiniteRead::EndOfInput),
         }
-
-        let idx = self.current;
-        self.current += 1;
-
-        Ok(Some(vec![MetricEvent { index: idx as u64 }]))
     }
 }
 
-#[derive(Clone, Debug)]
-struct ErrorAfterFirstSource {
-    current: usize,
-}
+struct ErrorAfterFirstSource(Port<dyn MetricInput>);
 
 impl ErrorAfterFirstSource {
     fn new() -> Self {
-        Self { current: 0 }
+        Self(Port::to(ErrorAfterFirst {
+            failed: std::sync::atomic::AtomicBool::new(false),
+        }))
     }
 }
 
-#[obzenflow::system("error-after-first")]
 impl TypedFiniteSourceHandler for ErrorAfterFirstSource {
     type Output = MetricEvent;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        match self.current {
-            0 => {
-                self.current = 1;
-                Ok(Some(vec![MetricEvent { index: 0 }]))
-            }
-            1 => {
-                self.current = 2;
-                Err(SourceError::Timeout(
-                    SourceDiagnosticReason::TimedOut.into(),
-                ))
-            }
-            _ => Ok(None),
-        }
+    fn read(&self) -> Option<SourceRead<MetricEvent>> {
+        Some(SourceRead::finite(self.0.clone(), MetricRead(0), Ok))
     }
 }
 
@@ -277,7 +284,7 @@ async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
         .with_metrics_exporter(metrics_model.clone());
-    let source = Port::owned(BurstSource::new(10));
+    let source = burst(10);
     let transform = PassthroughTransform;
     let sink = DiscardSink::<MetricEvent>::new();
     let test_handle = test_flow! {
@@ -334,7 +341,7 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
     let metrics_context =
         crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
-    let source = Port::owned(BurstSource::new(50));
+    let source = burst(50);
     let transform = DropTransform;
     let sink = DiscardSink::<MetricEvent>::new();
 
@@ -403,7 +410,7 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
 
     let per_event = Duration::from_millis(10);
     let total_events: usize = 100;
-    let source = Port::owned(BurstSource::new(total_events));
+    let source = burst(total_events);
     let transform = PassthroughTransform;
     let sink = perform(|_: &MetricEvent| Settle).through(Port::to(Sleeper {
         sleep_per_event: per_event,
@@ -501,7 +508,7 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
         crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
-    let source = Port::owned(BurstSource::new(1001));
+    let source = burst(1001);
     let transform = DropTransform;
     let sink = DiscardSink::<MetricEvent>::new();
 
@@ -584,7 +591,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
-    let source = Port::owned(ErrorAfterFirstSource::new());
+    let source = ErrorAfterFirstSource::new();
     let transform = DropTransform;
     let sink = DiscardSink::<MetricEvent>::new();
 
@@ -717,7 +724,7 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
     let metrics_context =
         crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
-    let source = Port::owned(ErrorAfterFirstSource::new());
+    let source = ErrorAfterFirstSource::new();
     let transform = DropTransform;
     let sink = DiscardSink::<MetricEvent>::new();
 
@@ -798,7 +805,7 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let total_events: usize = 250;
-    let source = Port::owned(BurstSource::new(total_events));
+    let source = burst(total_events);
     let transform = DropTransform;
     let sink = DiscardSink::<MetricEvent>::new();
 
@@ -965,7 +972,7 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
     // snapshots must carry cumulative CB counters so the last event has truth.
     let timeout_flow = Duration::from_secs(30);
     let total_events: usize = 500;
-    let source = Port::owned(BurstSource::new(total_events));
+    let source = burst(total_events);
     let transform = DropTransform;
     let sink = DiscardSink::<MetricEvent>::new();
 
@@ -1041,7 +1048,7 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
     // utilization must be derivable from bucket state even when no summaries emit.
     let timeout_flow = Duration::from_secs(30);
     let total_events: usize = 200;
-    let source = Port::owned(BurstSource::new(total_events));
+    let source = burst(total_events);
     let transform = DropTransform;
     let sink = DiscardSink::<MetricEvent>::new();
 
@@ -1151,7 +1158,7 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
         crate::replay_testkit::unsynced_context().with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
-    let source = Port::owned(BurstSource::new(10));
+    let source = burst(10);
     let sink = DiscardSink::<MetricEvent>::new();
 
     let test_handle = test_flow! {

@@ -15,6 +15,7 @@
 use crate::replay_testkit;
 
 use async_trait::async_trait;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::{event::ChainPayload, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -23,12 +24,25 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+fn channel_rows(
+    channel: &'static str,
+    count: u64,
+) -> impl TypedFiniteSourceHandler<Output = EnvelopeInput> {
+    ValuesSource::new(
+        (1..=count)
+            .map(|value| EnvelopeInput {
+                channel: channel.to_string(),
+                value,
+            })
+            .collect::<Vec<_>>(),
+    )
+}
 
 static ENVELOPE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -60,39 +74,6 @@ struct EnvelopeOutput {
 
 impl TypedPayload for EnvelopeOutput {
     const EVENT_TYPE: &'static str = "envelope.output";
-}
-
-#[derive(Clone, Debug)]
-struct ChannelSource {
-    channel: &'static str,
-    next_index: usize,
-    count: usize,
-}
-
-impl ChannelSource {
-    fn new(channel: &'static str, count: usize) -> Self {
-        Self {
-            channel,
-            next_index: 0,
-            count,
-        }
-    }
-}
-
-#[obzenflow::system("channel-fixture")]
-impl TypedFiniteSourceHandler for ChannelSource {
-    type Output = EnvelopeInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next_index >= self.count {
-            return Ok(None);
-        }
-        self.next_index += 1;
-        Ok(Some(vec![EnvelopeInput {
-            channel: self.channel.to_string(),
-            value: self.next_index as u64,
-        }]))
-    }
 }
 
 struct CallCounter {
@@ -169,8 +150,8 @@ type DropSink = obzenflow::stages::sinks::DiscardSink<EnvelopeOutput>;
 
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = Port::owned(ChannelSource::new("a", 4));
-        let source_b = Port::owned(ChannelSource::new("b", 3));
+        let source_a = channel_rows("a", 4);
+        let source_b = channel_rows("b", 3);
         let effectful_merge = EffectfulMerge::new(calls);
         let collector = DropSink::new();
 

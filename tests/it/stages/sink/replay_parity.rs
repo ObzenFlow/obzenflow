@@ -5,6 +5,7 @@
 use crate::replay_testkit;
 
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::TypedPayload;
@@ -12,9 +13,7 @@ use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::{perform, EffectError, Port};
-use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::common::HandlerError;
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -88,25 +87,6 @@ fn fixtures() -> Vec<SinkRecord> {
     ]
 }
 
-#[derive(Clone, Debug)]
-struct ValuesSource {
-    values: Vec<SinkRecord>,
-    next: usize,
-}
-
-#[obzenflow::system("values-fixture")]
-impl TypedFiniteSourceHandler for ValuesSource {
-    type Output = SinkRecord;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let Some(value) = self.values.get(self.next).cloned() else {
-            return Ok(None);
-        };
-        self.next += 1;
-        Ok(Some(vec![value]))
-    }
-}
-
 #[derive(Clone, Debug, Serialize)]
 struct StoreRecord {
     id: u64,
@@ -136,10 +116,7 @@ fn build_parity_flow(
     calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let records = obzenflow::effects::Port::owned(ValuesSource {
-            values: fixtures(),
-            next: 0,
-        });
+        let records = ValuesSource::new(fixtures());
         let csv = CsvSink::builder(SinkRecordProjection)
             .path(&csv_path)
             .columns(["id", "label", "nested", "tags", "optional"])

@@ -12,7 +12,6 @@
 
 use anyhow::Result;
 use obzenflow::application::{Banner, FlowApplication, Presentation};
-use obzenflow::effects::Port;
 use obzenflow::flow::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
@@ -258,7 +257,7 @@ fn main() -> Result<()> {
     FlowApplication::builder()
         .with_presentation(presentation)
         .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
-            let orders_handler = Port::owned(ValuesSource::new(scripted_orders(orders)));
+            let orders_handler = ValuesSource::new(scripted_orders(orders));
             let top_products_handler = stateful::top_n_by(
                 5,
                 |order: &OrderEvent| order.product_id.clone(),

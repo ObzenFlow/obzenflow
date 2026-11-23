@@ -25,6 +25,10 @@ pub struct AdmittedSource<H> {
 }
 
 impl<H> AdmittedSource<H> {
+    pub fn handler(&self) -> &H {
+        &self.handler
+    }
+
     pub fn continuation(&self) -> SourceContinuation {
         self.continuation
     }
@@ -42,8 +46,8 @@ impl<H: super::UnifiedAsyncInfiniteSourceHandler> AdmittedSource<H> {
 
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "this source stage does not take `{Self}` as its port",
-    note = "`source!` takes `Port<dyn FiniteSource<_, _>>`, `async_source!` takes `Port<dyn AsyncFiniteSource<_, _>>`, `infinite_source!` takes `Port<dyn InfiniteSource<_, _>>`, and `async_infinite_source!` takes `Port<dyn AsyncInfiniteSource<_, _>>` or the `Port<dyn HostedIngress<_>>` from ingress registration"
+    message = "`{Self}` is not a source handler",
+    note = "`source!` takes a typed source handler that declares its read port, or the `HostedSource<_>` from ingress registration"
 )]
 pub trait AdmitSource<Family: ?Sized>: sealed::Admitted<Family> + Send + Sync + 'static {
     type Output: OneFactOutcome + Send + Sync + 'static;

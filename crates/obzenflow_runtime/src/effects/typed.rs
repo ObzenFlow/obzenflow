@@ -142,8 +142,17 @@ where
     R: CallRequest<Records = super::RecordedReply>,
 {
     pub(super) async fn send(&mut self, request: R) -> Result<R::Outcome, EffectError> {
-        let projection = self.core.project_named_effect::<Call<R>>()?;
-        Box::pin(self.core.perform(Call::new(request, projection))).await
+        self.core.perform_call(request).await
+    }
+}
+
+impl EffectsCore {
+    pub(crate) async fn perform_call<R: CallRequest>(
+        &mut self,
+        request: R,
+    ) -> Result<R::Outcome, EffectError> {
+        let projection = self.project_named_effect::<Call<R>>()?;
+        Box::pin(self.perform(Call::new(request, projection))).await
     }
 }
 

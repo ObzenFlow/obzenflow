@@ -77,7 +77,7 @@ pub enum WaitReason {
     Backoff,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpPullMeasurements {
     pub requests_total: u64,

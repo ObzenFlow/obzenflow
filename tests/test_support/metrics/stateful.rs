@@ -9,7 +9,6 @@
 //! - count input events per-accumulate even when heartbeats are disabled (051j-2)
 
 use crate::replay_testkit;
-use obzenflow::effects::Port;
 
 use anyhow::{anyhow, Result};
 use obzenflow::testing::RecordingSink;
@@ -23,13 +22,11 @@ use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler,
     TypedStatefulHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
 
 /// File-local payload for the stateful-metrics flow. The JSON shape
-/// matches what `BurstSource` emits; the type fingerprints the stage
+/// matches what `burst` emits; the type fingerprints the stage
 /// contract per FLOWIP-114c.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct MetricEvent {
@@ -51,7 +48,7 @@ impl TypedPayload for AggregateMetricEvent {
 
 /// The join's two legs are semantically distinct typed inputs per
 /// FLOWIP-114c, so we declare separate types even though the underlying
-/// `BurstSource` produces the same shape on both legs in this test.
+/// `burst` produces the same shape on both legs in this test.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RefMetricEvent {
     index: u64,
@@ -79,7 +76,15 @@ struct JoinedMetricEvent {
 impl TypedPayload for JoinedMetricEvent {
     const EVENT_TYPE: &'static str = "metric.joined";
 }
+use obzenflow::stages::sources::ValuesSource;
 use std::time::{Duration, SystemTime};
+
+fn burst<T>(total: usize) -> impl TypedFiniteSourceHandler<Output = T>
+where
+    T: IndexedMetric + Send + Sync + 'static,
+{
+    ValuesSource::new((0..total as u64).map(T::from_index).collect::<Vec<_>>())
+}
 
 trait IndexedMetric: TypedPayload {
     fn from_index(index: u64) -> Self;
@@ -100,42 +105,6 @@ impl IndexedMetric for RefMetricEvent {
 impl IndexedMetric for StreamMetricEvent {
     fn from_index(index: u64) -> Self {
         Self { index }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct BurstSource<T> {
-    total: usize,
-    current: usize,
-    _output: PhantomData<fn() -> T>,
-}
-
-impl<T> BurstSource<T> {
-    fn new(total: usize) -> Self {
-        Self {
-            total,
-            current: 0,
-            _output: PhantomData,
-        }
-    }
-}
-
-#[obzenflow::system("burst")]
-impl<T> TypedFiniteSourceHandler for BurstSource<T>
-where
-    T: IndexedMetric + Send + Sync + 'static,
-{
-    type Output = T;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.current >= self.total {
-            return Ok(None);
-        }
-
-        let idx = self.current;
-        self.current += 1;
-
-        Ok(Some(vec![T::from_index(idx as u64)]))
     }
 }
 
@@ -247,7 +216,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let (sink_handler, sink_events) = RecordingSink::<AggregateMetricEvent>::new();
     let journal_dir = unique_journal_dir("stateful_metrics");
     let journal_dir_for_flow = journal_dir.clone();
-    let source = Port::owned(BurstSource::<MetricEvent>::new(total_events));
+    let source = burst::<MetricEvent>(total_events);
     let accumulator = SlowAccumulator::new(sleep_per_event);
 
     let test_handle = test_flow! {
@@ -434,8 +403,8 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
 
     let reference_events: usize = 10;
     let stream_events: usize = 0;
-    let reference_source = Port::owned(BurstSource::<RefMetricEvent>::new(reference_events));
-    let stream_source = Port::owned(BurstSource::<StreamMetricEvent>::new(stream_events));
+    let reference_source = burst::<RefMetricEvent>(reference_events);
+    let stream_source = burst::<StreamMetricEvent>(stream_events);
     let joiner = NoopJoin;
     let (sink, _events) = RecordingSink::<JoinedMetricEvent>::new();
 

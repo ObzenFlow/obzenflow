@@ -7,8 +7,6 @@ use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, Stage
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_dsl::async_source;
-use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -17,27 +15,57 @@ use tokio::sync::Semaphore;
 const FIRST: usize = 3;
 const SECOND: usize = 2;
 
-#[derive(Clone, Debug)]
-struct HeldSource {
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct HeldRead(u8);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait HeldInput {
+    #[effect(type = "flow_application.held.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &HeldRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<IdlePayload, HeldRead>, EffectError>;
+}
+
+/// Supplies `FIRST` records, then `SECOND` records once released, then ends.
+struct Held {
     release: Arc<Semaphore>,
-    polls: usize,
 }
 
 #[obzenflow_runtime::effects::system("held")]
 #[async_trait]
-impl TypedAsyncFiniteSourceHandler for HeldSource {
+impl HeldInput for Held {
+    async fn read(
+        &self,
+        from: &HeldRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<IdlePayload, HeldRead>, EffectError> {
+        match from.0 {
+            0 => Ok(FiniteRead::Batch {
+                records: vec![IdlePayload; FIRST],
+                next: HeldRead(1),
+            }),
+            1 => {
+                self.release.acquire().await.unwrap().forget();
+                Ok(FiniteRead::Batch {
+                    records: vec![IdlePayload; SECOND],
+                    next: HeldRead(2),
+                })
+            }
+            _ => Ok(FiniteRead::EndOfInput),
+        }
+    }
+}
+
+struct HeldSource(Port<dyn HeldInput>);
+
+impl TypedFiniteSourceHandler for HeldSource {
     type Output = IdlePayload;
 
-    async fn next(&mut self) -> Result<Option<Vec<IdlePayload>>, SourceError> {
-        self.polls += 1;
-        match self.polls {
-            1 => Ok(Some(vec![IdlePayload; FIRST])),
-            2 => {
-                self.release.acquire().await.unwrap().forget();
-                Ok(Some(vec![IdlePayload; SECOND]))
-            }
-            _ => Ok(None),
-        }
+    fn read(&self) -> Option<SourceRead<IdlePayload>> {
+        Some(SourceRead::finite(self.0.clone(), HeldRead(0), Ok))
     }
 }
 
@@ -115,21 +143,20 @@ enabled = true
     )
     .unwrap();
     let release = Arc::new(Semaphore::new(0));
-    let source = HeldSource {
-        release: release.clone(),
-        polls: 0,
-    };
+    let held = release.clone();
     let (bound_tx, bound_rx) = oneshot::channel();
     let (flow_tx, flow_rx) = oneshot::channel();
     let flow_tx = Mutex::new(Some(flow_tx));
     let (signal_tx, signal_rx) = oneshot::channel();
     let application = tokio::spawn(FlowApplication::launch(
         FlowDefinition::materialize(move |_| {
-            let source = Port::owned(source.clone());
+            let source = HeldSource(Port::to(Held {
+                release: held.clone(),
+            }));
             let sink = noop_sink();
             Ok(flow! {
                 name: "hosted_metrics", journals: crate::journal::memory_journals(),
-                stages: { src = async_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
                 topology: { src |> sink; }
             })
         }),

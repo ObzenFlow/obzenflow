@@ -627,6 +627,7 @@ pub(super) async fn append_domain_effect_success_facts(
 // longer cover it.
 pub(super) async fn append_effect_record(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
+    flow_context: Option<&FlowContext>,
     event: ChainEvent,
     parent: &DeliveredRecord<ChainPayload>,
     backpressure_writer: &BackpressureWriter,
@@ -636,7 +637,7 @@ pub(super) async fn append_effect_record(
     // append so downstream filtering can complete the same physical credit.
     let committer = OutputCommitter {
         data_journal,
-        flow_context: None,
+        flow_context,
 
         instrumentation: None,
         heartbeat_state: None,

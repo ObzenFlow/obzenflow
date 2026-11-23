@@ -44,6 +44,7 @@ event_names! {
         PRODUCTION_FINALIZED => "production_finalized",
         OPEN_FAILED => "open_failed",
         READER_ACQUIRED => "reader_acquired",
+        BINDING_DECLARED => "binding_declared",
         CLEANUP_SUCCEEDED => "cleanup_succeeded",
         CLEANUP_FAILED => "cleanup_failed",
         INPUT_PINNED => "input_pinned",

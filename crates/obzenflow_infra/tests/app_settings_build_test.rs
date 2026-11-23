@@ -7,19 +7,16 @@ use crate::replay_testkit;
 use anyhow::{anyhow, Result};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::FlowBuildError;
-use obzenflow_dsl::{flow, infinite_source, sink, source, FlowBuildFailure, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, FlowBuildFailure, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::journal::read::{read_run_lineage, Standing};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     AppTable, ApplicationSettingsError, CandidateSet, ResolvedRuntimeConfig,
 };
-use obzenflow_runtime::stages::common::handlers::TypedInfiniteSourceHandler;
-use obzenflow_runtime::stages::SourceError;
-use replay_testkit::{Discard, ReattachingSource};
+use replay_testkit::Discard;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -155,31 +152,16 @@ async fn an_extracted_table_is_recorded_in_the_run_manifest() {
     );
 }
 
-#[derive(Clone, Debug)]
-struct Bounded(u64);
-
-impl TypedInfiniteSourceHandler for Bounded {
-    type Output = TestEvent;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.0 == 0 {
-            return Ok(Vec::new());
-        }
-        self.0 -= 1;
-        Ok(vec![TestEvent])
-    }
-}
-
 fn resumable_flow(base: PathBuf, events: u64) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let reader = Port::to(ReattachingSource(Bounded(events)));
+        let reader = replay_testkit::preloaded_input((0..events).map(|_| TestEvent));
         let discard = Discard::<TestEvent>::default();
         Ok(flow! {
             name: "app_settings_resume",
             journals: disk_journals(base),
 
             stages: {
-                src = infinite_source!(TestEvent => reader);
+                src = source!(TestEvent => reader);
                 snk = sink!(TestEvent => discard);
             },
 

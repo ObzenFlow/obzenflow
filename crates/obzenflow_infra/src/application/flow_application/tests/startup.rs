@@ -19,7 +19,6 @@ impl IngressDecoder for IdleIngress {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_ingress_builder_hosts_multiple_sources() {
     use obzenflow_adapters::sinks::RecordingSink;
-    use obzenflow_dsl::async_infinite_source;
 
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("obzenflow.toml");
@@ -70,8 +69,8 @@ enabled = false
             name: "http_ingress_builder",
             journals: crate::journal::memory_journals(),
             stages: {
-                first = async_infinite_source!(IdlePayload => first);
-                second = async_infinite_source!(IdlePayload => second);
+                first = source!(IdlePayload => first);
+                second = source!(IdlePayload => second);
                 output = sink!(IdlePayload => output);
             },
             topology: { first |> output; second |> output; }
@@ -142,7 +141,7 @@ enabled = false
         },
     );
     let definition = FlowDefinition::materialize(move |_| {
-        let input = Port::owned(OneShotSource::new());
+        let input = one_shot();
         let output = noop_sink();
         Ok(flow! {
             name: "missing_ingress_source",
@@ -170,17 +169,6 @@ enabled = false
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authentication_admission_failure_prevents_automatic_run() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Clone, Debug)]
-    struct CountingSource(Arc<AtomicUsize>);
-    #[obzenflow_runtime::effects::system("counting")]
-    impl TypedInfiniteSourceHandler for CountingSource {
-        type Output = IdlePayload;
-        fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Vec::new())
-        }
-    }
 
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("obzenflow.toml");
@@ -210,13 +198,13 @@ enabled = false
     let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
     let hook_observed = observed.clone();
     let definition = FlowDefinition::new(move |context| async move {
-        let source = Port::owned(CountingSource(source_calls));
+        let source = counting_source(source_calls);
         let sink = noop_sink();
         let handle = flow! {
             name: "auth_admission_no_automatic_run",
             journals: crate::journal::memory_journals(),
             stages: {
-                src = infinite_source!(IdlePayload => source);
+                src = source!(IdlePayload => source);
                 sink = sink!(IdlePayload => sink);
             },
             topology: { src |> sink; }
@@ -268,17 +256,6 @@ enabled = false
 async fn occupied_port_prevents_automatic_run() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Clone, Debug)]
-    struct CountingSource(Arc<AtomicUsize>);
-    #[obzenflow_runtime::effects::system("counting")]
-    impl TypedInfiniteSourceHandler for CountingSource {
-        type Output = IdlePayload;
-        fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Vec::new())
-        }
-    }
-
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("obzenflow.toml");
     let journal_dir = dir.path().join("journals");
@@ -306,13 +283,13 @@ enabled = false
     let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
     let hook_observed = observed.clone();
     let definition = FlowDefinition::new(move |context| async move {
-        let source = Port::owned(CountingSource(source_calls));
+        let source = counting_source(source_calls);
         let sink = noop_sink();
         let handle = flow! {
             name: "bind_admission_no_automatic_run",
             journals: disk_journals(flow_journal_dir),
             stages: {
-                src = infinite_source!(IdlePayload => source);
+                src = source!(IdlePayload => source);
                 sink = sink!(IdlePayload => sink);
             },
             topology: { src |> sink; }
@@ -467,7 +444,7 @@ enabled = false
         Duration::from_secs(10),
         FlowApplication::launch(
             FlowDefinition::materialize(move |_runtime_config| {
-                let source = Port::owned(IdleInfiniteSource);
+                let source = IdleInfiniteSource::new();
                 let sink = noop_sink();
 
                 Ok(flow! {
@@ -475,7 +452,7 @@ enabled = false
                     journals: disk_journals(journal_dir),
 
                     stages: {
-                        src = infinite_source!(IdlePayload => source);
+                        src = source!(IdlePayload => source);
                         sink = sink!(IdlePayload => sink);
                     },
 
@@ -539,7 +516,7 @@ enabled = false
         Duration::from_secs(10),
         FlowApplication::launch(
             FlowDefinition::materialize(move |_runtime_config| {
-                let source = Port::owned(OneShotSource::new());
+                let source = one_shot();
                 let sink = noop_sink();
 
                 Ok(flow! {
@@ -732,7 +709,7 @@ shutdown_timeout_secs = 2
         Duration::from_secs(15),
         FlowApplication::launch(
             FlowDefinition::materialize(move |_runtime_config| {
-                let source = Port::owned(IdleInfiniteSource);
+                let source = IdleInfiniteSource::new();
                 let sink = noop_sink();
 
                 Ok(flow! {
@@ -740,7 +717,7 @@ shutdown_timeout_secs = 2
                     journals: disk_journals(journal_dir),
 
                     stages: {
-                        src = infinite_source!(IdlePayload => source);
+                        src = source!(IdlePayload => source);
                         sink = sink!(IdlePayload => sink);
                     },
 

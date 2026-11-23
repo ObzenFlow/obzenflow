@@ -43,7 +43,7 @@ pub fn build_flow() -> FlowDefinition {
             .for_effect::<EmailNotice>();
         let sms_limiter = rate_limit(1.0).for_effect::<SmsNotice>();
 
-        let updates = Port::owned(sources::ValuesSource::new(domain::carrier_updates()));
+        let updates = sources::ValuesSource::new(domain::carrier_updates());
         let locate = perform(DepotLookup::for_update).through(Port::to(SimulatedDepots));
         let notify = NotifyCustomer::through(Port::to(SimulatedMessaging));
         let emails = ConsoleSink::new(domain::format_email);

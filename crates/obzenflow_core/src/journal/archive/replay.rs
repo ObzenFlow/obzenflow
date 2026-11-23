@@ -229,6 +229,12 @@ pub trait ReplayArchive: Send + Sync {
     /// reads it (FLOWIP-134i B22).
     fn recorded_source_frontier(&self, stage_key: &str) -> crate::source::RecordedSourceFrontier;
 
+    /// The records a source rejected in this run. Each run keeps the
+    /// rejections of the records it read.
+    fn recorded_source_rejections(&self, _stage_key: &str) -> u64 {
+        0
+    }
+
     fn archive_path(&self) -> &Path;
 
     /// Take this archive's write-once continuation claim for the run resuming

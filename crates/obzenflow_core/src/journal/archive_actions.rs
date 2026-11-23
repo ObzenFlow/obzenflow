@@ -6,6 +6,7 @@
 //! evidence and the flow's own facts. Archive checks run before flow checks.
 
 use super::ArchiveStatus;
+use crate::effect_binding::SystemBinding;
 use crate::event::payloads::execution_payload::{
     ExecutionPayload, SourceContinuationRefusal, SourceContinuationRefusedFact,
 };
@@ -127,6 +128,7 @@ impl ArchiveEvidence {
 /// The facts the flow builder derives from the flow it built.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FlowEvidence {
+    pub systems: std::collections::BTreeMap<String, SystemBinding>,
     /// Stage names on a cycle.
     pub cycle_members: Vec<String>,
     /// Each source's declared continuation, by stage key.
@@ -142,6 +144,11 @@ pub struct ArchiveOverrides {
 /// Why an archive verb was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveRefusal {
+    SourceSystems {
+        verb: ReplayVerb,
+        run: PathBuf,
+        changed: Vec<ChangedSourceSystem>,
+    },
     StillRunning {
         verb: ReplayVerb,
         run: PathBuf,
@@ -170,10 +177,18 @@ pub enum ArchiveRefusal {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedSourceSystem {
+    pub stage: String,
+    pub recorded: SystemBinding,
+    pub configured: SystemBinding,
+}
+
 impl ArchiveRefusal {
     pub fn verb(&self) -> ReplayVerb {
         match self {
             Self::StillRunning { verb, .. }
+            | Self::SourceSystems { verb, .. }
             | Self::Failed { verb, .. }
             | Self::Cycle { verb, .. } => *verb,
             Self::NoWorkLeft { .. } | Self::Sources { .. } => ReplayVerb::Resume,
@@ -185,6 +200,37 @@ impl ArchiveRefusal {
 impl fmt::Display for ArchiveRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SourceSystems { verb, run, changed } => {
+                for (index, change) in changed.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, "\n\n")?;
+                    }
+                    let same_place = change.recorded.quoted() == change.configured.quoted();
+                    let quote = |binding: &SystemBinding| match binding.format() {
+                        Some(format) if same_place => format!("{} ({format})", binding.quoted()),
+                        _ => binding.quoted(),
+                    };
+                    let recorded = quote(&change.recorded);
+                    let configured = quote(&change.configured);
+                    write!(
+                        f,
+                        "cannot {} {}: source '{}' recorded its input from {recorded}, and this flow binds {configured}.",
+                        verb.word(),
+                        run.display(),
+                        change.stage,
+                    )?;
+                    match verb {
+                        ReplayVerb::Replay => {
+                            write!(f, "\nReplay it with a configuration that binds {recorded}.")?
+                        }
+                        ReplayVerb::Resume => write!(
+                            f,
+                            "\nResume it with a configuration that binds {recorded}. To read from {configured}, start a new run."
+                        )?,
+                    }
+                }
+                Ok(())
+            }
             Self::StillRunning { verb, run } => write!(
                 f,
                 "cannot {verb} {run}: it is still running.\nStop it, then {verb} it again.",
@@ -260,6 +306,23 @@ pub fn decide(
             run,
             members: flow.cycle_members.clone(),
         });
+    }
+    let mut changed: Vec<_> = archive
+        .sources
+        .iter()
+        .filter_map(|source| {
+            let recorded = source.frontier.binding()?;
+            let configured = flow.systems.get(&source.stage_key)?;
+            (recorded != configured).then(|| ChangedSourceSystem {
+                stage: source.stage_key.clone(),
+                recorded: recorded.clone(),
+                configured: configured.clone(),
+            })
+        })
+        .collect();
+    if !changed.is_empty() {
+        changed.sort_by(|a, b| a.stage.cmp(&b.stage));
+        return Err(ArchiveRefusal::SourceSystems { verb, run, changed });
     }
     if verb == ReplayVerb::Resume {
         let mut refusals: Vec<(String, ResumeRefusal)> = flow
@@ -373,6 +436,7 @@ mod tests {
 
     fn safe_flow() -> FlowEvidence {
         FlowEvidence {
+            systems: Default::default(),
             cycle_members: Vec::new(),
             sources: vec![
                 (
@@ -790,6 +854,7 @@ mod tests {
     fn archive_rows_are_checked_before_the_flows() {
         let failed = archive(ArchiveStatus::Failed, finished());
         let everything_wrong = FlowEvidence {
+            systems: Default::default(),
             cycle_members: vec!["triage".to_string()],
             sources: safe_flow().sources,
         };

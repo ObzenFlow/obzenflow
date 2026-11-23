@@ -6,6 +6,7 @@
 //! attachment across all of its subject-specific materialisations.
 
 use async_trait::async_trait;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_adapters::middleware::{
     effect_observer, MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
     MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareMaterializationContext,
@@ -17,14 +18,11 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use obzenflow_runtime::stages::observer::{
     EffectObserver, EffectObserverContext, HandlerObserver, HandlerObserverContext,
     StageLifecycleObserver, StageLifecycleObserverContext,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -79,25 +77,6 @@ impl ScopeService {
         Ok(EffectReply {
             subject: EFFECT_B.to_string(),
         })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct OneInputSource {
-    emitted: bool,
-}
-
-#[obzenflow::system("one-input")]
-impl TypedFiniteSourceHandler for OneInputSource {
-    type Output = Input;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            Ok(None)
-        } else {
-            self.emitted = true;
-            Ok(Some(vec![Input]))
-        }
     }
 }
 
@@ -277,7 +256,7 @@ async fn one_authored_observer_shares_quarantine_across_handler_effect_and_lifec
         .for_effect::<RequestA>();
         let deliveries_for_flow = deliveries.clone();
         let handle = FlowDefinition::materialize(move |_runtime_config| {
-            let input_source = Port::owned(OneInputSource { emitted: false });
+            let input_source = ValuesSource::new([Input]);
             let observed_handler = PerformsBothEffects::new(2);
             let output_sink =
                 perform(|_: &EffectFact| Delivered).through(Port::to(CountDeliveries {

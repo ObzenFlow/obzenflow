@@ -9,7 +9,6 @@ use super::harness::{Event, Passthrough, Sink, Source};
 use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::FlowId;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
-use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::pipeline::FlowHandle;
 
 pub async fn build<P, J>(
@@ -33,7 +32,6 @@ where
         matches!(depth, 1 | 2 | 3 | 4 | 5 | 20 | 100),
         "Unsupported depth: {depth}"
     );
-    let source = Port::owned(source);
     FlowDefinition::materialize(move |_runtime_config| {
         Ok(match depth {
             1 => flow! {

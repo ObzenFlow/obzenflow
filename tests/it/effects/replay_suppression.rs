@@ -5,16 +5,14 @@
 use crate::replay_testkit;
 
 use async_trait::async_trait;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow::stages::stateful::fold;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_stateful, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Effects, IdempotencyKey, Keyed, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    EffectfulStatefulHandler, TypedFiniteSourceHandler,
-};
-use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::stages::common::handlers::EffectfulStatefulHandler;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -54,40 +52,6 @@ struct ReplayEffectValue {
 
 impl TypedPayload for ReplayEffectValue {
     const EVENT_TYPE: &'static str = "effect_replay.effect_value";
-}
-
-#[derive(Clone, Debug)]
-struct ReplaySource {
-    next_value: u64,
-    calls: Option<Arc<AtomicUsize>>,
-}
-
-impl ReplaySource {
-    fn new() -> Self {
-        Self {
-            next_value: 1,
-            calls: None,
-        }
-    }
-}
-
-#[obzenflow::system("replay-inputs")]
-impl TypedFiniteSourceHandler for ReplaySource {
-    type Output = ReplayInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if let Some(calls) = &self.calls {
-            calls.fetch_add(1, Ordering::SeqCst);
-        }
-        if self.next_value > 3 {
-            return Ok(None);
-        }
-
-        let value = self.next_value;
-        self.next_value += 1;
-
-        Ok(Some(vec![ReplayInput { value }]))
-    }
 }
 
 type KeyLog = Arc<Mutex<Vec<IdempotencyKey>>>;
@@ -317,7 +281,11 @@ fn build_stateful_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = Port::owned(ReplaySource::new());
+        let inputs_handler = ValuesSource::new(
+            (1..=3)
+                .map(|value| ReplayInput { value })
+                .collect::<Vec<_>>(),
+        );
         let effectful_handler = ReplayStateful {
             counter: call_counter(calls),
         };

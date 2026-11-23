@@ -17,18 +17,111 @@ use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::EffectContext;
 use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
     TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ChannelRead(usize);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait ChannelInput {
+    #[effect(type = "deterministic_fan_in.channel.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &ChannelRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<FanInInput, ChannelRead>, EffectError>;
+}
+
+/// Supplies `count` inputs on one channel. `jitter_ms` delays each input by a
+/// deterministic amount up to that maximum, so arrival timing varies but the
+/// content does not. `delay_ms` delays every input by the same amount.
+struct ChannelFixture {
+    channel: &'static str,
+    count: usize,
+    jitter_ms: u64,
+    delay_ms: u64,
+}
+
+#[obzenflow_runtime::effects::system("channel-fixture")]
+#[async_trait]
+impl ChannelInput for ChannelFixture {
+    async fn read(
+        &self,
+        from: &ChannelRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<FanInInput, ChannelRead>, EffectError> {
+        if from.0 >= self.count {
+            return Ok(FiniteRead::EndOfInput);
+        }
+        let index = from.0 + 1;
+        if self.delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        }
+        if self.jitter_ms > 0 {
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for byte in self.channel.bytes().chain(index.to_le_bytes()) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(
+                hash % (self.jitter_ms + 1),
+            ))
+            .await;
+        }
+        Ok(FiniteRead::Batch {
+            records: vec![FanInInput {
+                channel: self.channel.to_string(),
+                value: index as u64,
+            }],
+            next: ChannelRead(index),
+        })
+    }
+}
+
+struct ChannelSource(Port<dyn ChannelInput>);
+
+impl ChannelSource {
+    fn with_jitter(channel: &'static str, count: usize, jitter_ms: u64) -> Self {
+        Self::fixture(channel, count, jitter_ms, 0)
+    }
+
+    fn with_delay(channel: &'static str, count: usize, delay_ms: u64) -> Self {
+        Self::fixture(channel, count, 0, delay_ms)
+    }
+
+    fn fixture(channel: &'static str, count: usize, jitter_ms: u64, delay_ms: u64) -> Self {
+        Self(
+            Port::to(ChannelFixture {
+                channel,
+                count,
+                jitter_ms,
+                delay_ms,
+            })
+            .own_instance(),
+        )
+    }
+}
+
+impl TypedFiniteSourceHandler for ChannelSource {
+    type Output = FanInInput;
+
+    fn read(&self) -> Option<SourceRead<FanInInput>> {
+        Some(SourceRead::finite(self.0.clone(), ChannelRead(0), Ok))
+    }
+}
 
 static FAN_IN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -70,73 +163,6 @@ struct FanInOutput {
 
 impl TypedPayload for FanInOutput {
     const EVENT_TYPE: &'static str = "fan_in.output";
-}
-
-#[derive(Clone, Debug)]
-struct ChannelSource {
-    channel: &'static str,
-    next_index: usize,
-    count: usize,
-    jitter_ms: u64,
-    delay_ms: u64,
-}
-
-impl ChannelSource {
-    /// Deterministic pseudo-jitter per (channel, index): varies arrival
-    /// timing without varying stream content, so two live runs with
-    /// different jitter settings must still merge identically.
-    fn with_jitter(channel: &'static str, count: usize, jitter_ms: u64) -> Self {
-        Self {
-            channel,
-            next_index: 0,
-            count,
-            jitter_ms,
-            delay_ms: 0,
-        }
-    }
-
-    /// Fixed per-event delay (unlike `jitter_ms`, which is a maximum). The
-    /// telemetry witness uses this to guarantee the live run crosses the
-    /// contract tick so intermediate stages emit ConsumptionProgress
-    /// mid-stream.
-    fn with_delay(channel: &'static str, count: usize, delay_ms: u64) -> Self {
-        Self {
-            channel,
-            next_index: 0,
-            count,
-            jitter_ms: 0,
-            delay_ms,
-        }
-    }
-}
-
-#[obzenflow::system("channel-fixture")]
-impl TypedFiniteSourceHandler for ChannelSource {
-    type Output = FanInInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next_index >= self.count {
-            return Ok(None);
-        }
-        self.next_index += 1;
-        if self.delay_ms > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
-        }
-        if self.jitter_ms > 0 {
-            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            for byte in self.channel.bytes().chain(self.next_index.to_le_bytes()) {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(
-                hash % (self.jitter_ms + 1),
-            ));
-        }
-        Ok(Some(vec![FanInInput {
-            channel: self.channel.to_string(),
-            value: self.next_index as u64,
-        }]))
-    }
 }
 
 /// Pure 1:1 merge: one `MergedRecord` per consumed input, so the delivered
@@ -312,8 +338,8 @@ fn build_two_channel_flow_with_jitter(
     jitter_ms: u64,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = Port::owned(ChannelSource::with_jitter("a", 4, jitter_ms));
-        let source_b = Port::owned(ChannelSource::with_jitter("b", 3, jitter_ms));
+        let source_a = ChannelSource::with_jitter("a", 4, jitter_ms);
+        let source_b = ChannelSource::with_jitter("b", 3, jitter_ms);
         let merge = MergeTransform::new();
         let effectful = EffectfulTail::new(calls);
         let collector = DropSink::<FanInOutput>::new();
@@ -354,7 +380,7 @@ fn build_skip_level_flow_with_delay(
     delay_ms: u64,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = Port::owned(ChannelSource::with_delay("a", 4, delay_ms));
+        let source_a = ChannelSource::with_delay("a", 4, delay_ms);
         let tap = TapTransform::new();
         let merge = MergeTransform::new();
         let effectful = EffectfulTail::new(calls);
@@ -390,8 +416,8 @@ fn build_skip_level_flow_with_delay(
 /// order, so `merge` runs the canonical deterministic merge.
 fn build_two_channel_stateful_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a = Port::owned(ChannelSource::with_jitter("a", 4, 0));
-        let source_b = Port::owned(ChannelSource::with_jitter("b", 3, 0));
+        let source_a = ChannelSource::with_jitter("a", 4, 0);
+        let source_b = ChannelSource::with_jitter("b", 3, 0);
         let merge = MergeTransform::new();
         let counter = OrderedListStateful::new();
         let collector = DropSink::<OrderedList>::new();

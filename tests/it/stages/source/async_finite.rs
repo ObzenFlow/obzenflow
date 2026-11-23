@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::source_poll_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
@@ -42,6 +42,9 @@ impl CountReceived {
         Ok(())
     }
 }
+use obzenflow::stages::sources::ValuesSource;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -54,37 +57,29 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("target").join(format!("{prefix}_{suffix}"))
 }
 
-#[derive(Clone, Debug)]
 struct TestAsyncEventSource {
-    emitted: usize,
+    events: ValuesSource<Vec<AsyncTestEvent>>,
     drain_calls: Arc<AtomicU64>,
 }
 
 impl TestAsyncEventSource {
     fn new(drain_calls: Arc<AtomicU64>) -> Self {
         Self {
-            emitted: 0,
+            events: ValuesSource::new(vec![
+                AsyncTestEvent { index: 0 },
+                AsyncTestEvent { index: 1 },
+            ]),
             drain_calls,
         }
     }
 }
 
-#[obzenflow::system("test-async-events")]
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for TestAsyncEventSource {
     type Output = AsyncTestEvent;
 
-    async fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted < 2 {
-            let index = self.emitted;
-            self.emitted += 1;
-            tokio::task::yield_now().await;
-            Ok(Some(vec![AsyncTestEvent {
-                index: index as u64,
-            }]))
-        } else {
-            Ok(None)
-        }
+    fn read(&self) -> Option<SourceRead<AsyncTestEvent>> {
+        TypedFiniteSourceHandler::read(&self.events)
     }
 
     async fn drain(&mut self) -> std::result::Result<(), SourceError> {
@@ -123,14 +118,14 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
     let observer_calls_for_flow = Arc::clone(&observer_calls);
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = Port::owned(TestAsyncEventSource::new(drain_calls_for_flow));
+        let source = TestAsyncEventSource::new(drain_calls_for_flow);
 
         Ok(flow! {
             name: "async_finite_source_middleware_test",
             journals: disk_journals(journal_root),
 
             stages: {
-                source = async_source!(AsyncTestEvent with { source_poll_observer(
+                source = source!(AsyncTestEvent with { source_poll_observer(
                         "count_source_poll_data",
                         CountSourcePollObserver { calls: observer_calls_for_flow }
                     ) } => source);

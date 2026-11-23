@@ -103,7 +103,8 @@ impl Repeats {
 
     async fn inputs(&mut self, source: &str) -> Result<&BTreeSet<String>, JournalReadError> {
         if !self.inputs.contains_key(source) {
-            let mut inputs = BTreeSet::new();
+            let mut pinned = BTreeSet::new();
+            let mut bound = BTreeSet::new();
             for run in &self.runs {
                 let Some((journal, path)) = run.data.get(source) else {
                     continue;
@@ -111,10 +112,13 @@ impl Repeats {
                 let mut cursor = JournalCursor::new(run.run.clone(), journal.clone(), path.clone());
                 while let Some(record) = cursor.next().await? {
                     if let Some((_, digest)) = pinned_input(&record) {
-                        inputs.insert(digest);
+                        pinned.insert(digest);
+                    } else if let Some(binding) = declared_binding(&record) {
+                        bound.insert(binding);
                     }
                 }
             }
+            let inputs = if pinned.is_empty() { bound } else { pinned };
             self.inputs.insert(source.to_owned(), inputs);
         }
         Ok(&self.inputs[source])
@@ -206,6 +210,22 @@ fn pinned_input(record: &RunRecord) -> Option<(&str, String)> {
         _ => return None,
     };
     Some((source, digest))
+}
+
+fn declared_binding(record: &RunRecord) -> Option<String> {
+    if record.journal.kind != RunJournalKind::Data {
+        return None;
+    }
+    source_key(record)?;
+    let RunRecordData::Chain(row) = &record.record else {
+        return None;
+    };
+    match &row.payload {
+        ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(binding)) => {
+            Some(binding.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn rejected_row(record: &RunRecord) -> Option<(String, u64)> {

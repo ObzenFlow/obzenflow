@@ -4,31 +4,30 @@
 
 use super::domain::{Category, OrderEvent, PaymentMethod, Product, Promotion, Sku};
 use super::fixtures;
-use obzenflow::effects::Port;
-use obzenflow::stages::sources::{self, FiniteSource, Refuse};
+use obzenflow::stages::sources::{self, TypedFiniteSourceHandler};
 
-pub fn categories_source() -> Port<dyn FiniteSource<Category, Refuse>> {
-    Port::owned(sources::ValuesSource::new(fixtures::categories()))
+pub fn categories_source() -> impl TypedFiniteSourceHandler<Output = Category> {
+    sources::ValuesSource::new(fixtures::categories())
 }
 
-pub fn products_source() -> Port<dyn FiniteSource<Product, Refuse>> {
-    Port::owned(sources::ValuesSource::new(fixtures::products()))
+pub fn products_source() -> impl TypedFiniteSourceHandler<Output = Product> {
+    sources::ValuesSource::new(fixtures::products())
 }
 
-pub fn skus_source() -> Port<dyn FiniteSource<Sku, Refuse>> {
-    Port::owned(sources::ValuesSource::new(fixtures::skus()))
+pub fn skus_source() -> impl TypedFiniteSourceHandler<Output = Sku> {
+    sources::ValuesSource::new(fixtures::skus())
 }
 
-pub fn promotions_source() -> Port<dyn FiniteSource<Promotion, Refuse>> {
-    Port::owned(sources::ValuesSource::new(fixtures::promotions()))
+pub fn promotions_source() -> impl TypedFiniteSourceHandler<Output = Promotion> {
+    sources::ValuesSource::new(fixtures::promotions())
 }
 
-pub fn payment_methods_source() -> Port<dyn FiniteSource<PaymentMethod, Refuse>> {
-    Port::owned(sources::ValuesSource::new(fixtures::payments()))
+pub fn payment_methods_source() -> impl TypedFiniteSourceHandler<Output = PaymentMethod> {
+    sources::ValuesSource::new(fixtures::payments())
 }
 
-pub fn orders_source(inject_bad_payment: bool) -> Port<dyn FiniteSource<OrderEvent, Refuse>> {
-    Port::owned(sources::ValuesSource::new(fixtures::orders(
-        inject_bad_payment,
-    )))
+pub fn orders_source(
+    inject_bad_payment: bool,
+) -> impl TypedFiniteSourceHandler<Output = OrderEvent> {
+    sources::ValuesSource::new(fixtures::orders(inject_bad_payment))
 }

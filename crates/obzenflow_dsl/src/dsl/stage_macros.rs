@@ -11,9 +11,6 @@
 //!
 //! ```ignore
 //! source!(Out => handler)
-//! async_source!(Out => handler)
-//! infinite_source!(Out => handler)
-//! async_infinite_source!(Out with rate_limit(10.0) => handler)
 //! transform!(In -> Out => handler)
 //! effectful_transform!(In -> Out with policy => handler)
 //! stateful!(In -> Out => handler)
@@ -33,7 +30,7 @@
 //!
 //! The decoration matrix covers binding-derived and explicit names plus each
 //! family's applicable contract, the `with` clause and
-//! catalog clauses. Async-source poll timeout is configured on the handler and
+//! catalog clauses. A source's poll timeout is configured on the handler and
 //! exposed through its `poll_timeout()` method; it is not a stage-macro clause
 //! or positional tuple.
 //!
@@ -106,20 +103,6 @@ macro_rules! __obzenflow_handler_path_diagnostic {
             ": the handler slot takes a name, not an expression. ",
             "Bind the handler inside the materialiser immediately above the inner flow, ",
             "then pass the name. Example: ",
-            $example,
-        ))
-    };
-}
-
-/// Implementation helper for the removed async-source timeout tuple.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_async_source_timeout_diagnostic {
-    ($surface:literal, $example:literal) => {
-        compile_error!(concat!(
-            $surface,
-            ": poll timeout is handler configuration; timeout tuples are no longer accepted. ",
-            "Configure the handler inside the materialiser, then pass its name. Example: ",
             $example,
         ))
     };
@@ -229,7 +212,7 @@ macro_rules! __obzenflow_source_typed {
         $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
     }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_typed_source!(factory = typed_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
+        $crate::__obzenflow_admit_typed_source!(factory = typed_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
         $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_finite_source_descriptor, output = $out, name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
@@ -238,11 +221,11 @@ macro_rules! __obzenflow_source_typed {
         $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_finite_source_descriptor, output = $out, name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
     }};
     (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_typed_source!(factory = typed_finite_source_descriptor, output = $out, name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
+        $crate::__obzenflow_admit_typed_source!(factory = typed_source_descriptor, output = $out, name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
     }};
 }
 
-/// Create a finite source stage descriptor.
+/// Create a source stage descriptor for a handler of any source role.
 #[macro_export]
 macro_rules! __obzenflow_source_attachment_contract {
 
@@ -445,759 +428,6 @@ macro_rules! __obzenflow_source_attachment_contract {
         $crate::__obzenflow_handler_path_diagnostic!(
             "source!",
             "let source = Port::to(MySource::new(...)); events = source!(name: \"events\", Event => source);"
-        )
-    };
-}
-
-// ============================================================================
-// async_source!  +  __obzenflow_async_source_typed!
-// ============================================================================
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_async_source_typed {
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_typed_source!(factory = typed_async_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_finite_source_descriptor, output = $out, name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_finite_source_descriptor, output = $out, name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_typed_source!(factory = typed_async_finite_source_descriptor, output = $out, name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-}
-
-/// Create an async finite source stage descriptor.
-#[macro_export]
-macro_rules! __obzenflow_async_source_attachment_contract {
-
-
-
-
-
-
-
-
-
-
-
-
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    ($out:ty => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    ($out:ty => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    (name: $name:literal, $out:ty => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = [])
-    };
-    // ── typed (binding-derived name) ──
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [])
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [])
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($mw),*])
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, middleware = [])
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, middleware = [$($mw),*])
-    };
-    ($out:ty => placeholder!()) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [])
-    };
-    ($out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [])
-    };
-    ($out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($mw),*])
-    };
-    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, middleware = [])
-    };
-    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, middleware = [$($mw),*])
-    };
-
-    // ── typed (explicit name override) ──
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [])
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [])
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [$($mw),*])
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler_head $(:: $handler_tail)*, middleware = [])
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler_head $(:: $handler_tail)*, middleware = [$($mw),*])
-    };
-    (name: $name:literal, $out:ty => placeholder!()) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [])
-    };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [])
-    };
-    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [$($mw),*])
-    };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, middleware = [])
-    };
-    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, middleware = [$($mw),*])
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!(
-            "async_source!",
-            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_source!(Event => source);"
-        )
-    };
-    ($out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!(
-            "async_source!",
-            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_source!(Event => source);"
-        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!(
-            "async_source!",
-            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_source!(Event => source);"
-        )
-    };
-    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!(
-            "async_source!",
-            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_source!(Event => source);"
-        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "async_source!",
-            "let source = Port::to(MyAsyncSource::new(...)); events = async_source!(Event => source);"
-        )
-    };
-    ($out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "async_source!",
-            "let source = Port::to(MyAsyncSource::new(...)); events = async_source!(Event => source);"
-        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "async_source!",
-            "let source = Port::to(MyAsyncSource::new(...)); events = async_source!(name: \"events\", Event => source);"
-        )
-    };
-    (name: $name:literal, $out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "async_source!",
-            "let source = Port::to(MyAsyncSource::new(...)); events = async_source!(name: \"events\", Event => source);"
-        )
-    };
-}
-
-// ============================================================================
-// infinite_source!  +  __obzenflow_infinite_source_typed!
-// ============================================================================
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_infinite_source_typed {
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_typed_source!(factory = typed_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_infinite_source_descriptor, output = $out, name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_infinite_source_descriptor, output = $out, name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_typed_source!(factory = typed_infinite_source_descriptor, output = $out, name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-}
-
-/// Create an infinite source stage descriptor.
-#[macro_export]
-macro_rules! __obzenflow_infinite_source_attachment_contract {
-
-
-
-
-
-
-
-
-
-
-
-
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ($out:ty => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ($out:ty => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, $out:ty => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    // ── typed (binding-derived name) ──
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = []        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = []        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = [$($mw),*]        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = []        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*]        )
-    };
-    ($out:ty => placeholder!()) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = []        )
-    };
-    ($out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = []        )
-    };
-    ($out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = [$($mw),*]        )
-    };
-    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]        )
-    };
-    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = []        )
-    };
-    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*]        )
-    };
-
-    // ── typed (explicit name override) ──
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = placeholder!(),
-            middleware = []        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = placeholder!($msg),
-            middleware = []        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = placeholder!(),
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = []        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, $out:ty => placeholder!()) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = placeholder!(),
-            middleware = []        )
-    };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = placeholder!($msg),
-            middleware = []        )
-    };
-    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = placeholder!(),
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = []        )
-    };
-    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*]        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "infinite_source!",
-            "let source = Port::to(MyInfiniteSource::new(...)); events = infinite_source!(Event => source);"
-        )
-    };
-    ($out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "infinite_source!",
-            "let source = Port::to(MyInfiniteSource::new(...)); events = infinite_source!(Event => source);"
-        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "infinite_source!",
-            "let source = Port::to(MyInfiniteSource::new(...)); events = infinite_source!(name: \"events\", Event => source);"
-        )
-    };
-    (name: $name:literal, $out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "infinite_source!",
-            "let source = Port::to(MyInfiniteSource::new(...)); events = infinite_source!(name: \"events\", Event => source);"
-        )
-    };
-}
-
-// ============================================================================
-// async_infinite_source!  +  __obzenflow_async_infinite_source_typed!
-// ============================================================================
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_async_infinite_source_typed {
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_typed_source!(factory = typed_async_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_infinite_source_descriptor, output = $out, name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_infinite_source_descriptor, output = $out, name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*]) => {{
-        $crate::__obzenflow_admit_typed_source!(factory = typed_async_infinite_source_descriptor, output = $out, name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*])
-    }};
-}
-
-/// Create an async infinite source stage descriptor.
-#[macro_export]
-macro_rules! __obzenflow_async_infinite_source_attachment_contract {
-
-
-
-
-
-
-
-
-
-
-
-
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ($out:ty => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ($out:ty => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, $out:ty => placeholder!() $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(@attachments [$($policy:expr),* $(,)?])? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [], observers = []) };
-    // ── typed (binding-derived name) ──
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = []        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = []        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = [$($mw),*]        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = []        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*]        )
-    };
-    ($out:ty => placeholder!()) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = []        )
-    };
-    ($out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = []        )
-    };
-    ($out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = [$($mw),*]        )
-    };
-    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]        )
-    };
-    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = []        )
-    };
-    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*]        )
-    };
-
-    // ── typed (explicit name override) ──
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = placeholder!(),
-            middleware = []        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = placeholder!($msg),
-            middleware = []        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = placeholder!(),
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = []        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, $out:ty => placeholder!()) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = placeholder!(),
-            middleware = []        )
-    };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = placeholder!($msg),
-            middleware = []        )
-    };
-    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = placeholder!(),
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]        )
-    };
-    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)*) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = []        )
-    };
-    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_typed!(
-            output = $out,
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            middleware = [$($mw),*]        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!(
-            "async_infinite_source!",
-            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_infinite_source!(Event => source);"
-        )
-    };
-    ($out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!(
-            "async_infinite_source!",
-            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_infinite_source!(Event => source);"
-        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!(
-            "async_infinite_source!",
-            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_infinite_source!(Event => source);"
-        )
-    };
-    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!(
-            "async_infinite_source!",
-            "let source = Port::to(MySource::builder().poll_timeout(timeout).build()?); events = async_infinite_source!(Event => source);"
-        )
-    };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "async_infinite_source!",
-            "let source = Port::to(MyAsyncInfiniteSource::new(...)); events = async_infinite_source!(Event => source);"
-        )
-    };
-    ($out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "async_infinite_source!",
-            "let source = Port::to(MyAsyncInfiniteSource::new(...)); events = async_infinite_source!(Event => source);"
-        )
-    };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "async_infinite_source!",
-            "let source = Port::to(MyAsyncInfiniteSource::new(...)); events = async_infinite_source!(name: \"events\", Event => source);"
-        )
-    };
-    (name: $name:literal, $out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "async_infinite_source!",
-            "let source = Port::to(MyAsyncInfiniteSource::new(...)); events = async_infinite_source!(name: \"events\", Event => source);"
         )
     };
 }
@@ -2753,16 +1983,6 @@ macro_rules! __obzenflow_stage_row {
 }
 
 #[macro_export]
-macro_rules! async_infinite_source {
-    ($($tokens:tt)*) => { $crate::__obzenflow_stage_row!(@sig plain __obzenflow_async_infinite_source_attachment_contract [] $($tokens)*) };
-}
-
-#[macro_export]
-macro_rules! async_source {
-    ($($tokens:tt)*) => { $crate::__obzenflow_stage_row!(@sig plain __obzenflow_async_source_attachment_contract [] $($tokens)*) };
-}
-
-#[macro_export]
 macro_rules! effectful_stateful {
     ($($tokens:tt)*) => { $crate::__obzenflow_stage_row!(@sig effectful __obzenflow_effectful_stateful_attachment_contract [] $($tokens)*) };
 }
@@ -3940,11 +3160,6 @@ macro_rules! __obzenflow_assert_ai_outputs {
     }};
 }
 
-#[macro_export]
-macro_rules! infinite_source {
-    ($($tokens:tt)*) => { $crate::__obzenflow_stage_row!(@sig plain __obzenflow_infinite_source_attachment_contract [] $($tokens)*) };
-}
-
 /// Declares a typed join whose catalog fact type comes first.
 ///
 /// The handler is a built-in join, a `TypedJoinHandler`, or a point-in-time
@@ -4198,7 +3413,7 @@ macro_rules! sink {
     ($($tokens:tt)*) => { $crate::__obzenflow_stage_row!(@sig sink __obzenflow_sink_attachment_contract [] $($tokens)*) };
 }
 
-/// Declares a typed finite source with optional middleware, written after the
+/// Declares a typed source with optional middleware, written after the
 /// stage's type and before `=>`.
 ///
 /// ```
@@ -4288,115 +3503,100 @@ macro_rules! sink {
 /// let source = obzenflow_dsl::source!(Fact => placeholder!()  , ingress with rate_limit(10.0));
 /// ```
 ///
-/// The handler slot of a source stage takes a `Port` or `placeholder!()`. `Port::owned` wraps
-/// a direct handler, and `Port::to` wraps a connector. Hosted ingress registration returns a port.
+/// The handler slot of a source stage takes a source handler or
+/// `placeholder!()`. The handler declares the port it reads through, and the
+/// framework reads through that port. Hosted ingress registration returns a
+/// hosted source handler.
 ///
 /// ```
-/// # use obzenflow_runtime::effects::Port;
-/// # use obzenflow_runtime::stages::source::{
-/// #     FiniteSourceConnector, Refuse, SourceError, SourceReaderInitContext,
-/// #     TypedFiniteSourceHandler,
-/// # };
-/// # use obzenflow_runtime::stages::{HostedIngressSource, HostedIngressSystem, HostedSubmission};
+/// # use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
+/// # use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+/// # use obzenflow_runtime::stages::source::TypedFiniteSourceHandler;
+/// # use obzenflow_runtime::stages::{HostedSource, HostedSubmission};
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
-/// struct Facts;
-/// #[obzenflow_runtime::effects::system("facts")]
-/// impl TypedFiniteSourceHandler for Facts {
-///     type Output = Fact;
-///     fn next(&mut self) -> Result<Option<Vec<Fact>>, SourceError> {
-///         Ok(None)
-///     }
+/// #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// struct NextFact;
+///
+/// #[obzenflow_runtime::effects::port]
+/// #[async_trait::async_trait]
+/// trait FactInput {
+///     #[effect(type = "grammar.facts.read", exactly_once, records = reply)]
+///     async fn read(
+///         &self,
+///         from: &NextFact,
+///         ctx: &EffectContext,
+///     ) -> Result<FiniteRead<Fact, NextFact>, EffectError>;
 /// }
 ///
 /// struct FactFile;
+///
 /// #[obzenflow_runtime::effects::system("fact-file")]
-/// impl FiniteSourceConnector for FactFile {
-///     type Output = Fact;
-///     type Reader = Facts;
-///     type Continuation = Refuse;
-///     fn open(&self, _: SourceReaderInitContext) -> Result<Facts, SourceError> {
-///         Ok(Facts)
+/// #[async_trait::async_trait]
+/// impl FactInput for FactFile {
+///     async fn read(
+///         &self,
+///         _from: &NextFact,
+///         _ctx: &EffectContext,
+///     ) -> Result<FiniteRead<Fact, NextFact>, EffectError> {
+///         Ok(FiniteRead::EndOfInput)
 ///     }
 /// }
 ///
-/// let facts = Port::owned(Facts);
-/// let fact_file = Port::to(FactFile);
+/// struct Facts(Port<dyn FactInput>);
+///
+/// impl TypedFiniteSourceHandler for Facts {
+///     type Output = Fact;
+///     fn read(&self) -> Option<SourceRead<Fact>> {
+///         Some(SourceRead::finite(self.0.clone(), NextFact, Ok))
+///     }
+/// }
+///
+/// let facts = Facts(Port::to(FactFile));
 /// # let (_, submissions) = tokio::sync::mpsc::channel::<HostedSubmission<Fact>>(1);
-/// # let posted = HostedIngressSource::new(
+/// # let posted = HostedSource::ingress(
 /// #     submissions,
 /// #     obzenflow_core::ingress::HostedIngressBindingSlot::new("grammar.facts"),
-/// # )
-/// # .into_port(HostedIngressSystem::Ingress);
-/// let handled = obzenflow_dsl::source!(Fact => facts);
-/// let read = obzenflow_dsl::source!(Fact => fact_file);
-/// let received = obzenflow_dsl::async_infinite_source!(Fact => posted);
+/// # );
+/// let read = obzenflow_dsl::source!(Fact => facts);
+/// let received = obzenflow_dsl::source!(Fact => posted);
 /// ```
 ///
-/// The compiler refuses a direct handler without a `Port`.
+/// A port is not a source handler, so the compiler refuses it.
 ///
 /// ```compile_fail,E0277
-/// # use obzenflow_runtime::stages::source::{SourceError, TypedFiniteSourceHandler};
+/// # use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
+/// # use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
-/// # struct Facts;
-/// # #[obzenflow_runtime::effects::system("facts")]
-/// # impl TypedFiniteSourceHandler for Facts {
-/// #     type Output = Fact;
-/// #     fn next(&mut self) -> Result<Option<Vec<Fact>>, SourceError> {
-/// #         Ok(None)
-/// #     }
-/// # }
-/// let facts = Facts;
-/// let handled = obzenflow_dsl::source!(Fact => facts);
-/// ```
-///
-/// The compiler also refuses a connector without a `Port`.
-///
-/// ```compile_fail,E0277
-/// # use obzenflow_runtime::stages::source::{
-/// #     FiniteSourceConnector, Refuse, SourceError, SourceReaderInitContext,
-/// #     TypedFiniteSourceHandler,
-/// # };
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-/// # struct Fact;
-/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
-/// # struct Facts;
-/// # impl TypedFiniteSourceHandler for Facts {
-/// #     type Output = Fact;
-/// #     fn next(&mut self) -> Result<Option<Vec<Fact>>, SourceError> {
-/// #         Ok(None)
-/// #     }
+/// # struct NextFact;
+/// # #[obzenflow_runtime::effects::port]
+/// # #[async_trait::async_trait]
+/// # trait FactInput {
+/// #     #[effect(type = "grammar.facts.read", exactly_once, records = reply)]
+/// #     async fn read(
+/// #         &self,
+/// #         from: &NextFact,
+/// #         ctx: &EffectContext,
+/// #     ) -> Result<FiniteRead<Fact, NextFact>, EffectError>;
 /// # }
 /// # struct FactFile;
 /// # #[obzenflow_runtime::effects::system("fact-file")]
-/// # impl FiniteSourceConnector for FactFile {
-/// #     type Output = Fact;
-/// #     type Reader = Facts;
-/// #     type Continuation = Refuse;
-/// #     fn open(&self, _: SourceReaderInitContext) -> Result<Facts, SourceError> {
-/// #         Ok(Facts)
+/// # #[async_trait::async_trait]
+/// # impl FactInput for FactFile {
+/// #     async fn read(
+/// #         &self,
+/// #         _from: &NextFact,
+/// #         _ctx: &EffectContext,
+/// #     ) -> Result<FiniteRead<Fact, NextFact>, EffectError> {
+/// #         Ok(FiniteRead::EndOfInput)
 /// #     }
 /// # }
-/// let fact_file = FactFile;
+/// let fact_file: Port<dyn FactInput> = Port::to(FactFile);
 /// let read = obzenflow_dsl::source!(Fact => fact_file);
-/// ```
-///
-/// The compiler also refuses an unregistered `HostedIngressSource`.
-///
-/// ```compile_fail,E0277
-/// # use obzenflow_runtime::stages::{HostedIngressSource, HostedSubmission};
-/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-/// # struct Fact;
-/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
-/// # let (_, submissions) = tokio::sync::mpsc::channel::<HostedSubmission<Fact>>(1);
-/// let posted = HostedIngressSource::new(
-///     submissions,
-///     obzenflow_core::ingress::HostedIngressBindingSlot::new("grammar.facts"),
-/// );
-/// let received = obzenflow_dsl::async_infinite_source!(Fact => posted);
 /// ```
 #[macro_export]
 macro_rules! source {

@@ -151,19 +151,17 @@ pub(crate) async fn acquire_replay_input(
             archive.recorded_source_eof(stage_key),
         );
     }
-    let head = replay_member(archive, stage_key, stage_type).await?;
-    // FLOWIP-134i B6: a resume splices the ancestors it merges with.
-    let mut ancestors = Vec::new();
-    for ancestor in archive.ancestors() {
-        if matches!(
-            ancestor.archived_stage_id(stage_key),
-            Err(ReplayError::StageNotInManifest { .. })
-        ) {
-            continue;
-        }
-        ancestors.push(replay_member(&ancestor, stage_key, stage_type).await?);
-    }
-    let replay = crate::replay::ReplayDriver::merged(head, ancestors);
+    let replay = recorded_input(archive, stage_key, stage_type).await?;
+    announce_replay_started(archive, flow_context, journal).await?;
+    Ok(replay)
+}
+
+/// Announce that a source reads its recorded input from an archive.
+pub(crate) async fn announce_replay_started(
+    archive: &Arc<dyn ReplayArchive>,
+    flow_context: &FlowContext,
+    journal: &Arc<dyn Journal<ChainEvent>>,
+) -> Result<(), BoxError> {
     let event = ChainEventFactory::execution_event(
         flow_context.stage_id.into(),
         obzenflow_core::event::payloads::execution_payload::ExecutionPayload::ReplayLifecycle(
@@ -179,7 +177,27 @@ pub(crate) async fn acquire_replay_input(
     )
     .with_flow_context(flow_context.clone());
     crate::supervised_base::publication::append(journal, event, Default::default()).await?;
-    Ok(replay)
+    Ok(())
+}
+
+pub(crate) async fn recorded_input(
+    archive: &Arc<dyn ReplayArchive>,
+    stage_key: &str,
+    stage_type: obzenflow_core::event::context::StageType,
+) -> Result<crate::replay::ReplayDriver, ReplayError> {
+    let head = replay_member(archive, stage_key, stage_type).await?;
+    // FLOWIP-134i B6: a resume splices the ancestors it merges with.
+    let mut ancestors = Vec::new();
+    for ancestor in archive.ancestors() {
+        if matches!(
+            ancestor.archived_stage_id(stage_key),
+            Err(ReplayError::StageNotInManifest { .. })
+        ) {
+            continue;
+        }
+        ancestors.push(replay_member(&ancestor, stage_key, stage_type).await?);
+    }
+    Ok(crate::replay::ReplayDriver::merged(head, ancestors))
 }
 
 async fn replay_member(
@@ -568,9 +586,29 @@ pub(crate) async fn record_source_stage_fatal(
     Ok(())
 }
 
-pub(crate) fn bind_source_system(source: &SourceSystem, registry: &EffectPortRegistry) -> Arc<str> {
+pub(crate) fn bind_source_system(
+    source: &SourceSystem,
+    registry: &EffectPortRegistry,
+) -> obzenflow_core::effect_binding::SystemBinding {
     source.attach(registry);
-    Arc::from(source.name())
+    source.binding().clone()
+}
+
+pub(crate) async fn commit_source_binding(
+    journal: &Arc<dyn Journal<ChainEvent>>,
+    flow: &FlowContext,
+    binding: &obzenflow_core::effect_binding::SystemBinding,
+) -> Result<crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>, BoxError> {
+    let event = ChainEventFactory::execution_event(
+        WriterId::from(flow.stage_id),
+        ExecutionPayload::SourceBindingDeclared(binding.clone()),
+    )
+    .with_flow_context(flow.clone());
+    Ok(
+        crate::supervised_base::publication::append(journal, event, AppendOptions::default())
+            .await?
+            .into(),
+    )
 }
 
 /// Commit an acquired reader before anything it reads (FLOWIP-134i B2).

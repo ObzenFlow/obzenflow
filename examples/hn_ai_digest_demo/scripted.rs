@@ -2,12 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::decoder::{item, selection, StoriesPort, StoryPosition, StoryReply};
 use super::domain::{HnStory, HnStoryId};
 use async_trait::async_trait;
-use obzenflow::stages::sources::{
-    AsyncFiniteSourceConnector, Refuse, SourceError, SourceReaderInitContext,
-    TypedAsyncFiniteSourceHandler,
-};
+use obzenflow::effects::{EffectContext, EffectError};
+use obzenflow::stages::sources::FiniteRead;
 
 const LISTED_STORIES: usize = 64;
 const DELETED_EVERY_NTH: usize = 11;
@@ -34,6 +33,7 @@ const VERBS: [&str; 8] = [
     "case study",
 ];
 
+#[cfg(test)]
 pub fn scripted_stories(max_stories: usize) -> Vec<HnStory> {
     (0..LISTED_STORIES.min(max_stories))
         .filter(|offset| (offset + 1) % DELETED_EVERY_NTH != 0)
@@ -57,39 +57,42 @@ fn scripted_story(offset: usize) -> HnStory {
     }
 }
 
-pub struct ScriptedStories {
-    stories: Vec<HnStory>,
-}
-
-impl ScriptedStories {
-    pub fn new(stories: Vec<HnStory>) -> Self {
-        Self { stories }
-    }
-}
+pub struct ScriptedStories;
 
 #[obzenflow::system("scripted-stories")]
 #[async_trait]
-impl AsyncFiniteSourceConnector for ScriptedStories {
-    type Output = HnStory;
-    type Reader = ScriptedStoriesReader;
-    type Continuation = Refuse;
-
-    async fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
-        Ok(ScriptedStoriesReader {
-            stories: self.stories.clone().into_iter(),
-        })
-    }
-}
-
-pub struct ScriptedStoriesReader {
-    stories: std::vec::IntoIter<HnStory>,
-}
-
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for ScriptedStoriesReader {
-    type Output = HnStory;
-
-    async fn next(&mut self) -> Result<Option<Vec<HnStory>>, SourceError> {
-        Ok(self.stories.next().map(|story| vec![story]))
+impl StoriesPort for ScriptedStories {
+    async fn read(
+        &self,
+        from: &StoryPosition,
+        _ctx: &EffectContext,
+    ) -> Result<StoryReply, EffectError> {
+        match from {
+            StoryPosition::Start { limit } => Ok(selection(
+                (0..LISTED_STORIES.min(*limit))
+                    .map(|i| HnStoryId(100 + i as u64))
+                    .collect(),
+            )),
+            StoryPosition::Selected { ids, next_index } => match ids.get(*next_index) {
+                Some(id) => {
+                    let offset = id
+                        .0
+                        .checked_sub(100)
+                        .and_then(|offset| usize::try_from(offset).ok())
+                        .filter(|offset| *offset < LISTED_STORIES)
+                        .ok_or_else(|| EffectError::Validation("unknown scripted story".into()))?;
+                    let record = if (offset + 1) % DELETED_EVERY_NTH == 0 {
+                        None
+                    } else {
+                        Some(
+                            serde_json::to_value(scripted_story(offset))
+                                .map_err(obzenflow::effects::http::unreadable)?,
+                        )
+                    };
+                    Ok(item(ids, *next_index, record))
+                }
+                None => Ok(FiniteRead::EndOfInput),
+            },
+        }
     }
 }

@@ -5,6 +5,7 @@
 use anyhow::{anyhow, Result};
 use obzenflow::effects::Port;
 use obzenflow::stages::sinks::DiscardSink;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow::stages::stateful::{self, emit};
 use obzenflow::testing::RecordingSink;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainPayload};
@@ -13,15 +14,83 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::EffectContext;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+fn sequence(max: u64) -> impl TypedFiniteSourceHandler<Output = WindowInput> {
+    ValuesSource::new(
+        (0..max)
+            .map(|index| WindowInput { index })
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WindowRead(u64);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait WindowFeed {
+    #[effect(type = "emit_per_window.input.read", exactly_once, records = reply)]
+    async fn read(
+        &self,
+        from: &WindowRead,
+        ctx: &EffectContext,
+    ) -> Result<FiniteRead<WindowInput, WindowRead>, EffectError>;
+}
+
+/// Supplies `max` inputs, each after `per_event_delay`.
+struct DelayedSequence {
+    max: u64,
+    per_event_delay: Duration,
+}
+
+#[obzenflow_runtime::effects::system("delayed-sequence")]
+#[async_trait::async_trait]
+impl WindowFeed for DelayedSequence {
+    async fn read(
+        &self,
+        from: &WindowRead,
+        _ctx: &EffectContext,
+    ) -> Result<FiniteRead<WindowInput, WindowRead>, EffectError> {
+        if from.0 >= self.max {
+            return Ok(FiniteRead::EndOfInput);
+        }
+        tokio::time::sleep(self.per_event_delay).await;
+        Ok(FiniteRead::Batch {
+            records: vec![WindowInput { index: from.0 }],
+            next: WindowRead(from.0 + 1),
+        })
+    }
+}
+
+struct DelayedSequenceSource(Port<dyn WindowFeed>);
+
+impl DelayedSequenceSource {
+    fn new(max: u64, per_event_delay: Duration) -> Self {
+        Self(Port::to(DelayedSequence {
+            max,
+            per_event_delay,
+        }))
+    }
+}
+
+impl TypedFiniteSourceHandler for DelayedSequenceSource {
+    type Output = WindowInput;
+
+    fn read(&self) -> Option<SourceRead<WindowInput>> {
+        Some(SourceRead::finite(self.0.clone(), WindowRead(0), Ok))
+    }
+}
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -76,95 +145,6 @@ struct GroupAggOutput {
 
 impl TypedPayload for GroupAggOutput {
     const EVENT_TYPE: &'static str = "stateful.emit_per_window.group_by.output";
-}
-
-#[derive(Clone, Debug)]
-struct SequenceSource {
-    next: u64,
-    max: u64,
-}
-
-impl SequenceSource {
-    fn new(max: u64) -> Self {
-        Self { next: 0, max }
-    }
-}
-
-#[obzenflow::system("sequence")]
-impl TypedFiniteSourceHandler for SequenceSource {
-    type Output = WindowInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next >= self.max {
-            return Ok(None);
-        }
-
-        let idx = self.next;
-        self.next += 1;
-        Ok(Some(vec![WindowInput { index: idx }]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DelayedSequenceSource {
-    next: u64,
-    max: u64,
-    per_event_delay: Duration,
-}
-
-impl DelayedSequenceSource {
-    fn new(max: u64, per_event_delay: Duration) -> Self {
-        Self {
-            next: 0,
-            max,
-            per_event_delay,
-        }
-    }
-}
-
-#[obzenflow::system("delayed-sequence")]
-impl TypedFiniteSourceHandler for DelayedSequenceSource {
-    type Output = WindowInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next >= self.max {
-            return Ok(None);
-        }
-
-        std::thread::sleep(self.per_event_delay);
-
-        let idx = self.next;
-        self.next += 1;
-        Ok(Some(vec![WindowInput { index: idx }]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct GroupedSequenceSource {
-    items: Vec<(String, u64)>,
-    next: usize,
-}
-
-impl GroupedSequenceSource {
-    fn new(items: Vec<(String, u64)>) -> Self {
-        Self { items, next: 0 }
-    }
-}
-
-#[obzenflow::system("grouped-sequence")]
-impl TypedFiniteSourceHandler for GroupedSequenceSource {
-    type Output = GroupInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next >= self.items.len() {
-            return Ok(None);
-        }
-
-        let (group, index) = self.items[self.next].clone();
-        self.next += 1;
-
-        Ok(Some(vec![GroupInput { group, index }]))
-    }
 }
 
 type AggregateSink = RecordingSink<WindowAgg>;
@@ -263,7 +243,7 @@ fn payload_writer_stage(payload: &FlowControlPayload) -> Option<StageId> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn emit_per_window_flushes_final_partial_window_before_authored_eof() -> Result<()> {
     let (sink, seen) = AggregateSink::new();
-    let source = Port::owned(SequenceSource::new(3));
+    let source = sequence(3);
     let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
@@ -341,7 +321,7 @@ async fn emit_per_window_flushes_final_partial_window_before_authored_eof() -> R
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn emit_per_window_final_aggregate_preserves_buffered_input_lineage() -> Result<()> {
     let (sink, _seen) = AggregateSink::new();
-    let source = Port::owned(SequenceSource::new(3));
+    let source = sequence(3);
     let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
@@ -398,7 +378,7 @@ async fn emit_per_window_final_aggregate_preserves_buffered_input_lineage() -> R
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn emit_per_window_final_aggregate_folds_runtime_minted_source_correlations() -> Result<()> {
     let (sink, seen) = AggregateSink::new();
-    let source = Port::owned(SequenceSource::new(2));
+    let source = sequence(2);
     let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
@@ -476,7 +456,7 @@ async fn emit_per_window_emits_more_than_one_window_aggregate_per_run_and_resets
     let total = 3u64;
 
     let (sink, seen) = AggregateSink::new();
-    let source = Port::owned(DelayedSequenceSource::new(total, per_event_delay));
+    let source = DelayedSequenceSource::new(total, per_event_delay);
     let window_handler = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
@@ -531,7 +511,7 @@ async fn emit_per_window_emits_more_than_one_window_aggregate_per_run_and_resets
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<()> {
     let (sink, _seen) = AggregateSink::new();
-    let source = Port::owned(SequenceSource::new(3));
+    let source = sequence(3);
     let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
@@ -617,7 +597,13 @@ async fn group_by_emit_per_window_parents_each_group_to_its_own_inputs() -> Resu
         ("c".to_string(), 4u64),
     ];
 
-    let source = Port::owned(GroupedSequenceSource::new(items.clone()));
+    let source = ValuesSource::new(
+        items
+            .iter()
+            .cloned()
+            .map(|(group, index)| GroupInput { group, index })
+            .collect::<Vec<_>>(),
+    );
     let grouped = stateful::group_by(
         |input: &GroupInput| input.group.clone(),
         |acc: &mut GroupAgg, _input: &GroupInput| acc.event_count += 1,

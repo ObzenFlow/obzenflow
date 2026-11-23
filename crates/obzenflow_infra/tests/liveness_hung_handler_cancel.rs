@@ -9,18 +9,15 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{Effects, Port, StageCompletion};
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use obzenflow_runtime::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use obzenflow_runtime::stages::observer::{
     HandlerObserver, HandlerObserverContext, StageLifecycleObserver, StageLifecycleObserverContext,
     StageLifecyclePhase,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the hung-handler cancellation test. The JSON
@@ -34,35 +31,12 @@ struct ProbeEvent {
 impl TypedPayload for ProbeEvent {
     const EVENT_TYPE: &'static str = "probe.event";
 }
+use obzenflow_adapters::sources::ValuesSource;
 use std::future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
-
-#[derive(Clone, Debug)]
-struct OneEventSource {
-    emitted: bool,
-}
-
-impl OneEventSource {
-    fn new() -> Self {
-        Self { emitted: false }
-    }
-}
-
-#[obzenflow_runtime::effects::system("one-event")]
-impl TypedFiniteSourceHandler for OneEventSource {
-    type Output = ProbeEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![ProbeEvent { value: 1 }]))
-    }
-}
 
 #[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
@@ -171,7 +145,7 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let one_event_source = Port::owned(OneEventSource::new());
+        let one_event_source = ValuesSource::new([ProbeEvent { value: 1 }]);
         let hung_transform = HungTransform::new(
             handler_entered_for_flow.clone(),
             handler_dropped_for_flow.clone(),
