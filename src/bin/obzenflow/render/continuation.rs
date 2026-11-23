@@ -8,21 +8,18 @@
 
 use super::{RunRecord, RunRecordData};
 use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, ReattachGuarantee, SourceContinuationRefusal,
+    ExecutionPayload, ReattachGuarantee, SourcePollContinuation,
 };
-use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{ChainPayload, ReplayLifecycleEvent, StageFatalReason};
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::{
+    ChainPayload, ReplayLifecycleEvent, SourceDiagnosticReason, StageFatalReason,
+};
 use std::collections::BTreeMap;
 
 /// One source's continuation, as its journal records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SourceContinuation {
-    Refused(SourceContinuationRefusal),
-    SeekFailed,
-    /// It never pinned, so it started from its beginning.
-    Started {
-        generation: u64,
-    },
+    InputChanged,
     Positioned {
         generation: u64,
     },
@@ -35,10 +32,9 @@ pub(super) enum SourceContinuation {
 }
 
 impl SourceContinuation {
-    /// A refusal or failed seek is final.
     fn then(self, next: Self) -> Self {
         match (self, next) {
-            (settled @ (Self::Refused(_) | Self::SeekFailed), _) => settled,
+            (Self::InputChanged, _) => Self::InputChanged,
             (_, next) => next,
         }
     }
@@ -62,6 +58,25 @@ impl Continuations {
         let RunRecordData::Chain(row) = &record.record else {
             return;
         };
+        if let ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
+            generation, ..
+        }) = &row.payload
+        {
+            if record
+                .journal
+                .stage
+                .as_ref()
+                .is_some_and(|stage| stage.stage_type.is_source())
+            {
+                self.continue_with(
+                    record,
+                    SourceContinuation::Positioned {
+                        generation: generation.0,
+                    },
+                );
+            }
+            return;
+        }
         let ChainPayload::Execution(execution) = &row.payload else {
             return;
         };
@@ -81,16 +96,12 @@ impl Continuations {
             return;
         }
         let continued = match execution {
-            ExecutionPayload::SourceContinuationRefused(fact) => {
-                SourceContinuation::Refused(fact.refusal.clone())
+            ExecutionPayload::SourcePollFailed(failure)
+                if failure.continuation == SourcePollContinuation::Terminal
+                    && failure.diagnostic.reason() == SourceDiagnosticReason::InputChanged =>
+            {
+                SourceContinuation::InputChanged
             }
-            ExecutionPayload::SourceSeekFailed(_) => SourceContinuation::SeekFailed,
-            ExecutionPayload::SourceStartedOnResume(fact) => SourceContinuation::Started {
-                generation: fact.generation,
-            },
-            ExecutionPayload::SourcePositioned(fact) => SourceContinuation::Positioned {
-                generation: fact.generation,
-            },
             ExecutionPayload::SourceReattached(fact) => SourceContinuation::Reattached {
                 generation: fact.generation,
                 guarantee: fact.guarantee,
@@ -101,6 +112,10 @@ impl Continuations {
             }) => SourceContinuation::JournalOnly(*kind),
             _ => return,
         };
+        self.continue_with(record, continued);
+    }
+
+    fn continue_with(&mut self, record: &RunRecord, continued: SourceContinuation) {
         let Some(stage) = &record.journal.stage else {
             return;
         };
@@ -126,14 +141,14 @@ mod tests {
     use super::SourceContinuation::*;
 
     #[test]
-    fn refusals_and_failed_seeks_are_final() {
+    fn changed_input_continuation_stays_final() {
         let reattached = Reattached {
             generation: 2,
             guarantee: ReattachGuarantee::AtMostOnce,
         };
-        assert_eq!(SeekFailed.then(reattached.clone()), SeekFailed);
+        assert_eq!(InputChanged.then(reattached.clone()), InputChanged);
         assert_eq!(
-            Positioned { generation: 1 }.then(reattached.clone()),
+            JournalOnly(super::EofKind::Natural).then(reattached.clone()),
             reattached
         );
     }

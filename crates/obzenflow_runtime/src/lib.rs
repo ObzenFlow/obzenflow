@@ -39,9 +39,7 @@ pub mod stages;
 pub mod __private {
     pub mod lifecycle;
 
-    pub use crate::stages::common::handlers::source::placeholder::PlaceholderSource;
     pub use crate::stages::common::handlers::source::prepared::{AdmitSource, AdmittedSource};
-    pub use crate::stages::common::handlers::source::SourceRowInput;
 
     // Public macros resolve through this narrow hygiene surface without
     // re-exporting Core itself as an alternate authoring gateway.
@@ -50,12 +48,10 @@ pub mod __private {
     };
     pub use crate::stages::common::handlers::source::typed::{
         TypedAsyncFiniteSourceHandlerAdapter, TypedAsyncInfiniteSourceHandlerAdapter,
-        TypedFiniteSourceHandlerAdapter, TypedInfiniteSourceHandlerAdapter,
     };
     pub use crate::stages::common::handlers::source::{
         ErasedSourceCompletion, ErasedSourceInvocation, ErasedSourceOutcome,
         UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
-        UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
     };
 }
 
@@ -123,9 +119,8 @@ pub mod prelude {
     pub use crate::stages::{
         EffectfulStatefulHandler, EffectfulTransformHandler, HostedSource, IngressDecodeError,
         IngressDecoder, IngressRecord, ObserverHandler, ResourceManaged, SourceError,
-        SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
-        TypedStatefulHandler, TypedTransformHandler,
+        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     pub use crate::typing::{SourceTyping, TransformTyping};
 

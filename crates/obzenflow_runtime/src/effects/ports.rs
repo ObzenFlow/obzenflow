@@ -233,13 +233,6 @@ impl SystemPort {
 pub struct SourceSystem {
     binding: obzenflow_core::effect_binding::SystemBinding,
     system: Arc<SystemPort>,
-    registry: Arc<Mutex<Option<EffectPortRegistry>>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SourceSystemFault {
-    Refused(EffectPortResolutionError),
-    Unbuilt,
 }
 
 impl SourceSystem {
@@ -247,21 +240,7 @@ impl SourceSystem {
         binding: obzenflow_core::effect_binding::SystemBinding,
         system: Arc<SystemPort>,
     ) -> Self {
-        Self {
-            binding,
-            system,
-            registry: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    pub(crate) fn placeholder() -> Self {
-        Self::new(
-            obzenflow_core::SystemBindingEvidence::named("placeholder")
-                .expect("static binding")
-                .binding()
-                .clone(),
-            Arc::new(SystemPort::eager(Arc::new(()))),
-        )
+        Self { binding, system }
     }
 
     pub fn name(&self) -> &str {
@@ -270,42 +249,6 @@ impl SourceSystem {
 
     pub fn binding(&self) -> &obzenflow_core::effect_binding::SystemBinding {
         &self.binding
-    }
-
-    pub(crate) fn attach(&self, registry: &EffectPortRegistry) {
-        *self
-            .registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(registry.clone());
-    }
-
-    pub(crate) fn resolve<P>(&self) -> Result<Arc<P>, SourceSystemFault>
-    where
-        P: ?Sized + Send + Sync + 'static,
-    {
-        let registry = self
-            .registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .ok_or(SourceSystemFault::Unbuilt)?;
-        let resolved =
-            registry
-                .resolve_at(self.system.coordinate)
-                .map_err(|fault| match fault {
-                    PortResolutionFault::Resolver(ResolverVerdictError::Provider(error)) => {
-                        SourceSystemFault::Refused(error)
-                    }
-                    PortResolutionFault::Resolver(
-                        ResolverVerdictError::Panicked | ResolverVerdictError::NotMaterialised,
-                    )
-                    | PortResolutionFault::MissingRegistration => SourceSystemFault::Unbuilt,
-                })?;
-        resolved
-            .port
-            .downcast_ref::<Arc<P>>()
-            .cloned()
-            .ok_or(SourceSystemFault::Unbuilt)
     }
 }
 

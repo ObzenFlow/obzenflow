@@ -72,7 +72,6 @@ trait StreamInput {
     ) -> Result<FiniteRead<LiveEvent, StreamRead>, EffectError>;
 }
 
-/// Supplies one stream event after one second.
 struct DelayedStream;
 
 #[obzenflow_runtime::effects::system("delayed-stream")]
@@ -102,12 +101,8 @@ struct DelayedStreamSource(Port<dyn StreamInput>);
 impl TypedFiniteSourceHandler for DelayedStreamSource {
     type Output = LiveEvent;
 
-    fn read(&self) -> Option<SourceRead<LiveEvent>> {
-        Some(SourceRead::finite(
-            self.0.clone(),
-            StreamRead { emitted: false },
-            Ok,
-        ))
+    fn read(&self) -> SourceRead<LiveEvent> {
+        SourceRead::finite(self.0.clone(), StreamRead { emitted: false }, Ok)
     }
 }
 

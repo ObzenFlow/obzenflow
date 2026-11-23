@@ -8,7 +8,6 @@ pub mod csv;
 mod file_system;
 mod file_version;
 pub mod http;
-pub mod http_pull;
 mod in_process;
 pub mod yaml;
 
@@ -24,11 +23,4 @@ pub use in_process::{
 pub use yaml::{
     YamlDecodeError, YamlDecoder, YamlLine, YamlNode, YamlRead, YamlRecord, YamlSelection,
     YamlSource, YamlSourceBuilder,
-};
-
-pub use http_pull::{
-    simple_poll, CursorlessPullDecoder, DecodeError, DecodeResult, FnPullDecoder, HttpPollConfig,
-    HttpPollConfigBuilder, HttpPollReader, HttpPollSource, HttpPullConfig, HttpPullConfigBuilder,
-    HttpPullReader, HttpPullSource, HttpResponse, ListDetailDecoder, ListDetailDecoderBuilder,
-    PullDecoder,
 };

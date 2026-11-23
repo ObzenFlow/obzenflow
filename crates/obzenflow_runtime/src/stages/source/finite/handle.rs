@@ -4,13 +4,13 @@
 
 //! Handle for finite source stages
 
-use crate::stages::common::handlers::source::traits::FiniteSourceHandler;
+use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 
 use super::fsm::{FiniteSourceEvent, FiniteSourceState};
 
 /// Type alias for the finite source handle
-pub type FiniteSourceHandle<H = Box<dyn FiniteSourceHandler>> =
+pub type FiniteSourceHandle<H = Box<dyn UnifiedAsyncFiniteSourceHandler>> =
     StandardHandle<FiniteSourceEvent<H>, FiniteSourceState<H>>;
 
 /// Extension trait for finite source-specific convenience methods

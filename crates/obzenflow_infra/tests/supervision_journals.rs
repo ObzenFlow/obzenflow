@@ -113,8 +113,6 @@ async fn large_in_process_documents_roundtrip_through_memory_and_reopened_disk()
         } else {
             Arc::new(MemoryJournal::with_owner(JournalOwner::stage(stage)))
         };
-        // The public event-authoring API admits documents above the retired
-        // 8 MiB logical cap. Both live and reopened readers must agree.
         let document = Document {
             body: "document content ".repeat(600_000),
         };

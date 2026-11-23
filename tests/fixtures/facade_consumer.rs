@@ -121,8 +121,8 @@ struct PureSource(Port<dyn FactInput>);
 
 impl sources::TypedFiniteSourceHandler for PureSource {
     type Output = Fact;
-    fn read(&self) -> Option<sources::SourceRead<Fact>> {
-        Some(sources::SourceRead::finite(self.0.clone(), NextFact, Ok))
+    fn read(&self) -> sources::SourceRead<Fact> {
+        sources::SourceRead::finite(self.0.clone(), NextFact, Ok)
     }
 }
 

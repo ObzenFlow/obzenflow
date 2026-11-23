@@ -7,9 +7,8 @@
 use super::fsm::{
     InfiniteSourceAction, InfiniteSourceContext, InfiniteSourceEvent, InfiniteSourceState,
 };
-use crate::execution::{SourceExecutionPhase, SourceReplayExhaustion};
+use crate::execution::SourceExecutionPhase;
 use crate::metrics::instrumentation::snapshot_stage_accounting;
-use crate::replay::ReplayDriver;
 use crate::stages::common::handlers::source::SourceError;
 use crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
@@ -19,17 +18,15 @@ use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompl
 use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::SourceControl;
 use crate::stages::source::supervision::{
-    announce_resumed_live, around_source_boundary, begin_catch_up_handoff, commit_reader_acquired,
-    commit_source_open_failure, commit_source_reattached, complete_catch_up_handoff,
-    drain_pending_outputs_async, emit_batch_to_pending_outputs, observe_source_boundary_rejection,
-    poll_error_backoff, poll_error_summary, record_source_release, record_source_stage_fatal,
-    source_error_kind, source_poll_error_record, stage_boundary_control_events,
-    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceDrain, SourceExit,
-    SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
+    announce_resumed_live, around_source_boundary, commit_source_reattached,
+    drain_pending_outputs_async, observe_source_boundary_rejection, poll_error_backoff,
+    poll_error_summary, record_source_stage_fatal, source_error_kind, source_poll_error_record,
+    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
+    PendingFailure, SourceDrain, SourcePollObservation,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
-    SourcePollReport, SourcePollResult, SourceReaderInitContext,
+    SourcePollReport, SourcePollResult,
 };
 use crate::supervised_base::base::{self, Registration, Supervisor};
 use crate::supervised_base::handler_supervised::{
@@ -38,15 +35,12 @@ use crate::supervised_base::handler_supervised::{
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised, StateWatcher};
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisorDescriptor, SupervisorKind,
 };
 use obzenflow_core::event::provenance::{ExecutionAccounting, FlowContext};
-use obzenflow_core::{
-    ChainEvent, Journal, MiddlewareExecutionScope, ReaderGeneration, StageId, WriterId,
-};
+use obzenflow_core::{ChainEvent, Journal, MiddlewareExecutionScope, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
 use std::sync::atomic::Ordering;
@@ -58,7 +52,7 @@ use tokio::time;
 pub(crate) struct AsyncInfiniteSourceSupervisor<
     H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static,
 > {
-    pub(crate) reads: Option<Arc<crate::effects::StageConstants>>,
+    pub(crate) reads: Arc<crate::effects::StageConstants>,
     pub(crate) kind: SupervisorKind,
 
     /// Supervisor name (for logging)
@@ -94,9 +88,6 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     /// Last published state (avoid waking watchers every loop) (FLOWIP-086i).
     pub(crate) last_state: Option<InfiniteSourceState<H>>,
 
-    /// Replay driver for `--replay-from` mode (FLOWIP-095a).
-    pub(crate) replay_driver: Option<ReplayDriver>,
-
     /// Replay lifecycle started timestamp for duration tracking (FLOWIP-095a).
     pub(crate) replay_started_at: Option<Instant>,
 
@@ -113,12 +104,6 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     /// A failure was selected after staging this turn's events; drain those
     /// events before transitioning to failure.
     pub(crate) pending_failure: Option<PendingFailure>,
-
-    /// Cleanup releases an acquired reader exactly once (FLOWIP-134i B2).
-    pub(crate) reader_acquired: bool,
-
-    /// The exit whose transition scheduled cleanup.
-    pub(crate) exit: Option<SourceExit>,
 }
 
 impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
@@ -392,9 +377,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
         context
             .instrumentation
             .transition_to_state(state.variant_name());
-        if let Some(exit) = state.exit() {
-            self.exit = Some(exit);
-        }
         if self.last_state.as_ref() != Some(state) {
             self.state_watcher.update(state.clone());
             self.last_state = Some(state.clone());
@@ -434,42 +416,10 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
 
     async fn execute_cleanup(
         &mut self,
-        context: &Self::Context,
+        _context: &Self::Context,
     ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
-        self.replay_driver.take();
-        let Some(mut handler) = self.handler.take() else {
-            return Ok(ActionExecution::Completed);
-        };
-        let acquired = self.reader_acquired;
-        let release = context.resources.as_ref().map(|resources| {
-            SourceRelease::new(
-                SourcePollKind::AsyncInfinite,
-                self.exit,
-                resources.completion.cause(),
-                matches!(
-                    resources.runtime_execution.source_phase_for(self.stage_id),
-                    SourceExecutionPhase::Live
-                ),
-                resources.failure_causal_event_id,
-            )
-        });
-        let flow_context = self.flow_context.clone();
-        let journal = self.data_journal.clone();
-        Ok(ActionExecution::Pending(Box::pin(async move {
-            let result = async {
-                if acquired {
-                    let drained = handler.drain().await;
-                    if let Some(release) = release {
-                        record_source_release(&journal, &flow_context, release, drained).await?;
-                    }
-                }
-                Ok::<_, Box<dyn Error + Send + Sync>>(())
-            }
-            .await;
-            drop(handler);
-            Box::new(move |_: &mut InfiniteSourceContext<H>| result.map(|()| None))
-                as ActionCompletion<InfiniteSourceContext<H>, InfiniteSourceEvent<H>>
-        })))
+        drop(self.handler.take());
+        Ok(ActionExecution::Completed)
     }
 
     async fn execute_action(
@@ -528,12 +478,9 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
             source_boundary: self.source_boundary.clone(),
             idle_backoff: self.idle_backoff.clone(),
             pending_idle_delay: self.pending_idle_delay.take(),
-            replay_driver: self.replay_driver.take(),
             replay_started_at: self.replay_started_at.take(),
             replay_completion: self.replay_completion.clone(),
             pending_failure: self.pending_failure.take(),
-            reader_acquired: self.reader_acquired,
-            exit: self.exit,
             pending_boundary_begin_drain: self.pending_boundary_begin_drain,
         };
         Some(Box::pin(async move {
@@ -547,11 +494,9 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                 owner.handler = worker.handler;
                 owner.idle_backoff = worker.idle_backoff;
                 owner.pending_idle_delay = worker.pending_idle_delay;
-                owner.replay_driver = worker.replay_driver;
                 owner.replay_started_at = worker.replay_started_at;
                 owner.replay_completion = worker.replay_completion;
                 owner.pending_failure = worker.pending_failure;
-                owner.reader_acquired = worker.reader_acquired;
                 owner.pending_boundary_begin_drain = worker.pending_boundary_begin_drain;
                 context.resources = owned_context.resources;
                 result
@@ -597,139 +542,54 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
             }
 
             InfiniteSourceState::AcquiringInput => {
-                if let Some(stage) = &self.reads {
-                    let archived = stage
-                        .effect_history
-                        .as_ref()
-                        .and_then(|history| history.source_origin.as_ref());
-                    let parent = if let Some(record) = archived {
-                        let origin = obzenflow_core::event::CausalFrontier::from_record(record)?;
-                        let event = record
-                            .authored()
-                            .with_flow_context(self.flow_context.clone());
-                        crate::supervised_base::publication::with_snapshot(
-                            origin,
-                            crate::supervised_base::publication::append(
-                                &self.data_journal,
-                                event,
-                                Default::default(),
-                            ),
-                        )
-                        .await?
-                        .into()
-                    } else {
-                        crate::stages::source::supervision::commit_source_binding(
+                let stage = &self.reads;
+                let archived = stage
+                    .effect_history
+                    .as_ref()
+                    .and_then(|history| history.source_origin.as_ref());
+                let parent = if let Some(record) = archived {
+                    let origin = obzenflow_core::event::CausalFrontier::from_record(record)?;
+                    let event = record
+                        .authored()
+                        .with_flow_context(self.flow_context.clone());
+                    crate::supervised_base::publication::with_snapshot(
+                        origin,
+                        crate::supervised_base::publication::append(
                             &self.data_journal,
-                            &self.flow_context,
-                            &self.system,
-                        )
-                        .await?
-                    };
-                    if let Some(archive) = ctx.runtime_execution.archive_for_io() {
-                        crate::stages::source::supervision::announce_replay_started(
-                            archive,
-                            &self.flow_context,
-                            &self.data_journal,
-                        )
-                        .await?;
-                        self.replay_started_at = Some(Instant::now());
-                    }
-                    self.handler
-                        .as_mut()
-                        .expect("AcquiringInput owns a source handler")
-                        .install_read_context(crate::effects::EffectInvocationContext {
-                            stage: stage.clone(),
-                            input_seq: crate::messaging::upstream_subscription::StageInputPosition(
-                                0,
-                            ),
-                            parent,
-                            backpressure_writer: ctx.backpressure_writer.clone(),
-                            emit_enabled: true,
-                            effect_boundary: None,
-                        });
-                    return Ok(EventLoopDirective::Transition(
-                        InfiniteSourceEvent::InputAcquired,
-                    ));
-                }
-                if matches!(
-                    ctx.runtime_execution.source_phase_for(self.stage_id),
-                    SourceExecutionPhase::Replaying
-                ) {
-                    self.replay_driver = Some(
-                        crate::stages::source::supervision::acquire_replay_input(
-                            &ctx.runtime_execution,
-                            &self.flow_context,
-                            StageType::InfiniteSource,
-                            self.continuation,
-                            &self.data_journal,
-                        )
-                        .await?,
-                    );
-                    self.replay_started_at = Some(Instant::now());
-                } else if !self.reader_acquired {
+                            event,
+                            Default::default(),
+                        ),
+                    )
+                    .await?
+                    .into()
+                } else {
                     crate::stages::source::supervision::commit_source_binding(
                         &self.data_journal,
                         &self.flow_context,
                         &self.system,
                     )
-                    .await?;
-                    let context = SourceReaderInitContext {
-                        stage_id: self.stage_id,
-                        stage_name: ctx.stage_name.clone(),
-                        flow_name: ctx.flow_name.clone(),
-                    };
-                    let opened = tokio::select! {
-                        biased;
-                        event = self.external_events.recv(|event| !InfiniteSourceState::defer_external_event(state, event)) => {
-                            return Ok(EventLoopDirective::Transition(event.unwrap_or_else(||
-                                InfiniteSourceEvent::Error("External control channel closed".into())
-                            )));
-                        }
-                        opened = self.handler.as_mut().expect("AcquiringInput owns a source handler").acquire(context) => opened,
-                    };
-                    if let Err(error) = opened {
-                        let flow_id = ctx.flow_id.to_string();
-                        let stage_flow_context = make_flow_context(
-                            &ctx.flow_name,
-                            &flow_id,
-                            &ctx.stage_name,
-                            self.stage_id,
-                            StageType::InfiniteSource,
-                        );
-                        let failure = commit_source_open_failure(
-                            SourceOpenFailureCommit {
-                                stage_flow_context: &stage_flow_context,
-                                source_type: SourcePollKind::AsyncInfinite,
-                                resuming: ctx.runtime_execution.resume_control().is_some(),
-                                error_journal: &ctx.error_journal,
-                                instrumentation: &ctx.instrumentation,
-                                scope: ctx.runtime_execution.stage_scope(self.stage_id),
-                            },
-                            &error,
-                        )
-                        .await?;
-                        return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                            failure.select(&mut ctx.failure_causal_event_id),
-                        )));
-                    }
-                    self.reader_acquired = true;
-                    let flow_id = ctx.flow_id.to_string();
-                    commit_reader_acquired(
+                    .await?
+                };
+                if let Some(archive) = ctx.runtime_execution.archive_for_io() {
+                    crate::stages::source::supervision::announce_replay_started(
+                        archive,
+                        &self.flow_context,
                         &self.data_journal,
-                        &make_flow_context(
-                            &ctx.flow_name,
-                            &flow_id,
-                            &ctx.stage_name,
-                            self.stage_id,
-                            StageType::InfiniteSource,
-                        ),
-                        SourcePollKind::AsyncInfinite,
-                        ctx.runtime_execution.resume_control().is_some(),
-                        self.system.name(),
                     )
                     .await?;
-                    // Return to control dispatch before admitting the first poll.
+                    self.replay_started_at = Some(Instant::now());
                 }
+                self.handler
+                    .as_mut()
+                    .expect("AcquiringInput owns a source handler")
+                    .install_read_context(crate::effects::EffectInvocationContext {
+                        stage: stage.clone(),
+                        input_seq: crate::messaging::upstream_subscription::StageInputPosition(0),
+                        parent,
+                        backpressure_writer: ctx.backpressure_writer.clone(),
+                        emit_enabled: true,
+                        effect_boundary: None,
+                    });
                 Ok(EventLoopDirective::Transition(
                     InfiniteSourceEvent::InputAcquired,
                 ))
@@ -840,282 +700,17 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                     .event_loops_total
                     .fetch_add(1, Ordering::Relaxed);
 
-                if replaying && self.reads.is_none() {
-                    let flow_context = stage_flow_context.clone();
-
-                    let tick_started_at = Instant::now();
-                    let next_result = self
-                        .replay_driver
-                        .as_mut()
-                        .expect("replay_driver is initialized")
-                        .next_replayed_event(flow_context)
-                        .await;
-                    let tick_duration = tick_started_at.elapsed();
-
-                    match next_result {
-                        Ok(Some(event)) => {
-                            if matches!(
-                                event.event.payload,
-                                obzenflow_core::event::ChainPayload::Fact(_)
-                                    | obzenflow_core::event::ChainPayload::CompositeData(_)
-                            ) && !ctx.output_contract.is_empty()
-                                && !ctx
-                                    .output_contract
-                                    .contains_descriptor(&event.event.descriptor())
-                            {
-                                return Err(format!("source replay event descriptor {} does not match its output contract", event.event.descriptor()).into());
-                            }
-                            let event = event.admit()?;
-                            ctx.instrumentation
-                                .event_loops_with_work_total
-                                .fetch_add(1, Ordering::Relaxed);
-
-                            let per_data_event_duration = if event.consumes_data_credit() {
-                                tick_duration
-                            } else {
-                                Duration::from_nanos(0)
-                            };
-
-                            let events_to_write = vec![event];
-                            emit_batch_to_pending_outputs(
-                                events_to_write,
-                                &stage_flow_context,
-                                &ctx.instrumentation,
-                                per_data_event_duration,
-                                observer_scope,
-                                &mut ctx.pending_outputs,
-                            );
-
-                            Ok(EventLoopDirective::Continue)
-                        }
-                        Ok(None) => {
-                            match ctx.runtime_execution.source_replay_exhausted(self.stage_id) {
-                                SourceReplayExhaustion::Terminate => {
-                                    // FLOWIP-095k: reproduce the archive's recorded completion kind.
-                                    let recorded_kind = self
-                                        .replay_driver
-                                        .as_ref()
-                                        .and_then(|d| d.archived_eof_kind());
-                                    let (replayed_count, skipped_count) =
-                                        self.replay_driver.as_ref().map_or((0, 0), |d| {
-                                            (d.replayed_events(), d.skipped_events())
-                                        });
-                                    self.replay_completion
-                                        .maybe_emit_completed(
-                                            &self.flow_context,
-                                            &self.data_journal,
-                                            self.replay_started_at,
-                                            ReplayCompletionFacts {
-                                                replayed_count,
-                                                skipped_count,
-                                                synthesized_eof_kind: Some(
-                                                    recorded_kind.unwrap_or(EofKind::Truncated),
-                                                ),
-                                            },
-                                        )
-                                        .await;
-
-                                    ctx.completion
-                                        .record(SourceCompletionCause::ReplayExhausted {
-                                            recorded_kind,
-                                        });
-                                    Ok(EventLoopDirective::Transition(
-                                        InfiniteSourceEvent::BeginDrain,
-                                    ))
-                                }
-                                // FLOWIP-120n handoff: commit the catch-up watermark
-                                // behind the committed recorded outputs (F9) before the
-                                // generation advances (FLOWIP-134i), record the recorded
-                                // count and the boundary, then continue from the live
-                                // handler.
-                                SourceReplayExhaustion::ContinueLive => {
-                                    let control = ctx.runtime_execution.resume_control().expect(
-                                        "ContinueLive is only returned by the Resume strategy",
-                                    );
-                                    let (replayed_count, skipped_count, crossed) = self
-                                        .replay_driver
-                                        .as_ref()
-                                        .map_or((0, 0, ReaderGeneration::default()), |d| {
-                                            (
-                                                d.replayed_events(),
-                                                d.skipped_events(),
-                                                d.frontier().crossed_generation(),
-                                            )
-                                        });
-                                    let generation = control.resume_generation();
-                                    let catch_up = begin_catch_up_handoff(
-                                        &self.data_journal,
-                                        &ctx.instrumentation,
-                                        &stage_flow_context,
-                                        &ctx.runtime_execution,
-                                        crossed,
-                                        generation,
-                                    )
-                                    .await?;
-                                    commit_source_reattached(
-                                        &self.data_journal,
-                                        &stage_flow_context,
-                                        self.continuation,
-                                        generation,
-                                    )
-                                    .await?;
-                                    self.replay_completion
-                                        .maybe_emit_completed(
-                                            &self.flow_context,
-                                            &self.data_journal,
-                                            self.replay_started_at,
-                                            ReplayCompletionFacts {
-                                                replayed_count,
-                                                skipped_count,
-                                                // FLOWIP-095k: the resume handoff
-                                                // synthesizes no terminal EOF.
-                                                synthesized_eof_kind: None,
-                                            },
-                                        )
-                                        .await;
-                                    announce_resumed_live(
-                                        &self.data_journal,
-                                        &self.flow_context,
-                                        &ctx.runtime_execution,
-                                        replayed_count,
-                                        generation,
-                                    )
-                                    .await;
-                                    // The boundary flips source phase, stage scope, and
-                                    // heartbeat to live; late prefix events stay
-                                    // reconstruction-scoped by their in-band generation.
-                                    complete_catch_up_handoff(&catch_up).await?;
-                                    self.replay_driver = None;
-                                    self.idle_backoff.reset();
-                                    self.pending_idle_delay = None;
-                                    Ok(EventLoopDirective::Transition(
-                                        InfiniteSourceEvent::ResumeLiveInput,
-                                    ))
-                                }
-                            }
-                        }
-                        Err(e) => Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                            e.to_string(),
-                        ))),
-                    }
-                } else {
-                    if replaying && self.reads.is_some() {
-                        if let Some(control) = ctx.runtime_execution.resume_control() {
-                            match self
-                                .handler
-                                .as_mut()
-                                .expect("Running owns a source handler")
-                                .cross_to_live()
-                                .await
-                            {
-                                Ok(false) => {}
-                                Ok(true) => {
-                                    commit_source_reattached(
-                                        &self.data_journal,
-                                        &stage_flow_context,
-                                        self.continuation,
-                                        control.resume_generation(),
-                                    )
-                                    .await?;
-                                    let replayed = self
-                                        .handler
-                                        .as_ref()
-                                        .expect("Running owns a source handler")
-                                        .replayed_facts();
-                                    announce_resumed_live(
-                                        &self.data_journal,
-                                        &self.flow_context,
-                                        &ctx.runtime_execution,
-                                        replayed,
-                                        control.resume_generation(),
-                                    )
-                                    .await;
-                                    return Ok(EventLoopDirective::Continue);
-                                }
-                                Err(fatal) => {
-                                    record_source_stage_fatal(
-                                        &fatal,
-                                        self.stage_id,
-                                        &ctx.stage_name,
-                                        &ctx.error_journal,
-                                    )
-                                    .await?;
-                                    return Ok(EventLoopDirective::Transition(
-                                        InfiniteSourceEvent::Error(format!(
-                                            "Fatal {:?}/{:?}: {}",
-                                            fatal.code, fatal.reason, fatal.detail
-                                        )),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    let handler = self
-                        .handler
-                        .as_ref()
-                        .expect("Running owns a source handler");
-                    let live_poll = !replaying && !handler.has_pending_records();
-                    let source_boundary = self.source_boundary.clone().filter(|_| live_poll);
-                    let poll_timeout = handler.poll_timeout().filter(|_| live_poll);
-                    let boundary_future = around_source_boundary(
-                        source_boundary,
-                        Box::pin(async {
-                            let poll_started_at = time::Instant::now();
-                            match poll_timeout {
-                                Some(timeout) => {
-                                    match time::timeout(
-                                        timeout,
-                                        self.handler
-                                            .as_mut()
-                                            .expect("Running owns a source handler")
-                                            .next_invocation(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(invocation) => SourcePollReport::from_erased(
-                                            invocation,
-                                            poll_started_at.elapsed(),
-                                        ),
-                                        Err(_) => {
-                                            let poll_duration = poll_started_at.elapsed();
-                                            let timeout_error = SourceError::Timeout(
-                                                obzenflow_core::event::SourceDiagnosticReason::TimedOut
-                                                    .into(),
-                                            );
-                                            SourcePollReport::handler_error(
-                                                timeout_error,
-                                                poll_duration,
-                                            )
-                                        }
-                                    }
-                                }
-                                None => {
-                                    let invocation = self
-                                        .handler
-                                        .as_mut()
-                                        .expect("Running owns a source handler")
-                                        .next_invocation()
-                                        .await;
-                                    SourcePollReport::from_erased(
-                                        invocation,
-                                        poll_started_at.elapsed(),
-                                    )
-                                }
-                            }
-                        }),
-                    );
-
-                    let report = tokio::select! {
-                        biased;
-                        maybe_event = self.external_events.recv(|event| !InfiniteSourceState::defer_external_event(state, event)) => Err(maybe_event),
-                        report = boundary_future => Ok(report),
-                    };
-                    if replaying && self.reads.is_some() {
-                        if let Some(control) = ctx.runtime_execution.resume_control() {
-                            if !matches!(
-                                ctx.runtime_execution.source_phase_for(self.stage_id),
-                                SourceExecutionPhase::Replaying
-                            ) {
+                if replaying {
+                    if let Some(control) = ctx.runtime_execution.resume_control() {
+                        match self
+                            .handler
+                            .as_mut()
+                            .expect("Running owns a source handler")
+                            .cross_to_live()
+                            .await
+                        {
+                            Ok(false) => {}
+                            Ok(true) => {
                                 commit_source_reattached(
                                     &self.data_journal,
                                     &stage_flow_context,
@@ -1136,219 +731,9 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     control.resume_generation(),
                                 )
                                 .await;
+                                return Ok(EventLoopDirective::Continue);
                             }
-                        }
-                    }
-                    let report = match report {
-                        Ok(report) => report,
-                        Err(maybe_event) => {
-                            self.handler
-                                .as_mut()
-                                .expect("Running owns a source handler")
-                                .poll_cancelled();
-                            return Ok(EventLoopDirective::Transition(maybe_event.unwrap_or_else(
-                                || {
-                                    InfiniteSourceEvent::Error(
-                                        "External control channel closed".to_string(),
-                                    )
-                                },
-                            )));
-                        }
-                    };
-
-                    let source_poll_observation = SourcePollObservation::new(
-                        ctx.flow_id,
-                        &stage_flow_context,
-                        &ctx.observers,
-                        MiddlewareExecutionScope::LiveHandler,
-                    );
-
-                    match report.outcome {
-                        SourceBoundaryOutcome::Rejected { policy, reason } => {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                reason = %reason,
-                                "Async infinite source boundary rejected; beginning completion"
-                            );
-                            ctx.completion.record(SourceCompletionCause::Stopped);
-                            let control_events = report.control_events;
-                            observe_source_boundary_rejection(
-                                &source_poll_observation,
-                                &control_events,
-                                policy.as_deref(),
-                            )
-                            .await;
-                            if stage_boundary_control_events(
-                                control_events,
-                                &stage_flow_context,
-                                &ctx.instrumentation,
-                                observer_scope,
-                                &mut ctx.pending_outputs,
-                            ) {
-                                self.pending_boundary_begin_drain = true;
-                                Ok(EventLoopDirective::Continue)
-                            } else {
-                                Ok(EventLoopDirective::Transition(
-                                    InfiniteSourceEvent::BeginDrain,
-                                ))
-                            }
-                        }
-                        SourceBoundaryOutcome::Polled(poll) => match poll.result {
-                            SourcePollResult::Completed(SourcePollCompletion::Batch(
-                                mut events,
-                            )) if events.iter().any(|event| event.consumes_data_credit()) => {
-                                self.idle_backoff.reset();
-                                self.pending_idle_delay = None;
-                                ctx.instrumentation
-                                    .event_loops_with_work_total
-                                    .fetch_add(1, Ordering::Relaxed);
-
-                                let source_event_count = events.len();
-                                events.extend(poll.operational_events);
-                                events.extend(report.control_events);
-                                source_poll_observation
-                                    .observe(
-                                        events.as_mut_slice(),
-                                        SourcePollObserverOutcome::Batch {
-                                            events: source_event_count,
-                                        },
-                                    )
-                                    .await;
-                                stage_source_poll_outputs(
-                                    events,
-                                    &stage_flow_context,
-                                    &ctx.instrumentation,
-                                    poll.poll_duration,
-                                    observer_scope,
-                                    &mut ctx.pending_outputs,
-                                );
-
-                                Ok(EventLoopDirective::Continue)
-                            }
-                            SourcePollResult::Completed(SourcePollCompletion::Batch(
-                                mut events,
-                            )) => {
-                                let source_event_count = events.len();
-                                events.extend(poll.operational_events);
-                                events.extend(report.control_events);
-                                source_poll_observation
-                                    .observe(
-                                        events.as_slice(),
-                                        SourcePollObserverOutcome::Batch {
-                                            events: source_event_count,
-                                        },
-                                    )
-                                    .await;
-                                if !events.is_empty() {
-                                    stage_source_poll_outputs(
-                                        events,
-                                        &stage_flow_context,
-                                        &ctx.instrumentation,
-                                        poll.poll_duration,
-                                        observer_scope,
-                                        &mut ctx.pending_outputs,
-                                    );
-                                }
-                                self.pending_idle_delay = Some(self.idle_backoff.next_delay());
-                                Ok(EventLoopDirective::Continue)
-                            }
-                            SourcePollResult::Completed(SourcePollCompletion::Eof) => {
-                                let archive = ctx.runtime_execution.archive_for_io();
-                                if self.reads.is_some()
-                                    && ctx.runtime_execution.resume_control().is_none()
-                                    && archive.is_some()
-                                {
-                                    let recorded_kind = archive.and_then(|archive| {
-                                        archive.recorded_source_eof(&ctx.stage_name)
-                                    });
-                                    ctx.completion
-                                        .record(SourceCompletionCause::ReplayExhausted {
-                                            recorded_kind,
-                                        });
-                                    let replayed_count = self
-                                        .handler
-                                        .as_ref()
-                                        .map_or(0, |handler| handler.replayed_facts());
-                                    self.replay_completion
-                                        .maybe_emit_completed(
-                                            &self.flow_context,
-                                            &self.data_journal,
-                                            self.replay_started_at,
-                                            ReplayCompletionFacts {
-                                                replayed_count,
-                                                skipped_count: 0,
-                                                synthesized_eof_kind: Some(
-                                                    recorded_kind.unwrap_or(EofKind::Truncated),
-                                                ),
-                                            },
-                                        )
-                                        .await;
-                                } else {
-                                    ctx.completion.record(SourceCompletionCause::Exhausted);
-                                }
-                                if poll.operational_events.is_empty()
-                                    && report.control_events.is_empty()
-                                {
-                                    source_poll_observation
-                                        .observe_empty(SourcePollObserverOutcome::Eof)
-                                        .await;
-                                    Ok(EventLoopDirective::Transition(
-                                        InfiniteSourceEvent::BeginDrain,
-                                    ))
-                                } else {
-                                    let mut control_events = poll.operational_events;
-                                    control_events.extend(report.control_events);
-                                    source_poll_observation
-                                        .observe(
-                                            control_events.as_mut_slice(),
-                                            SourcePollObserverOutcome::Eof,
-                                        )
-                                        .await;
-                                    stage_source_poll_outputs(
-                                        control_events,
-                                        &stage_flow_context,
-                                        &ctx.instrumentation,
-                                        Duration::from_nanos(0),
-                                        observer_scope,
-                                        &mut ctx.pending_outputs,
-                                    );
-                                    self.pending_boundary_begin_drain = true;
-                                    Ok(EventLoopDirective::Continue)
-                                }
-                            }
-                            SourcePollResult::HandlerError(error) => {
-                                tracing::warn!(
-                                    stage_name = %ctx.stage_name,
-                                    "{}",
-                                    poll_error_summary(&ctx.stage_name, &error)
-                                );
-                                let kind = source_error_kind(&error);
-                                let diagnostic =
-                                    source_poll_error_record(WriterId::from(self.stage_id), &error);
-                                self.pending_failure =
-                                    terminal_poll_failure(&ctx.stage_name, &error, &diagnostic);
-                                let mut events = vec![diagnostic];
-                                events.extend(poll.operational_events);
-                                events.extend(report.control_events);
-                                source_poll_observation
-                                    .observe(
-                                        events.as_mut_slice(),
-                                        SourcePollObserverOutcome::Error { kind },
-                                    )
-                                    .await;
-                                stage_source_poll_outputs(
-                                    events,
-                                    &stage_flow_context,
-                                    &ctx.instrumentation,
-                                    poll.poll_duration,
-                                    observer_scope,
-                                    &mut ctx.pending_outputs,
-                                );
-                                self.pending_idle_delay =
-                                    poll_error_backoff(&error, &mut self.idle_backoff);
-                                Ok(EventLoopDirective::Continue)
-                            }
-                            SourcePollResult::Fatal(fatal) => {
+                            Err(fatal) => {
                                 record_source_stage_fatal(
                                     &fatal,
                                     self.stage_id,
@@ -1356,15 +741,317 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     &ctx.error_journal,
                                 )
                                 .await?;
-                                Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                                    format!(
+                                return Ok(EventLoopDirective::Transition(
+                                    InfiniteSourceEvent::Error(format!(
                                         "Fatal {:?}/{:?}: {}",
                                         fatal.code, fatal.reason, fatal.detail
-                                    ),
-                                )))
+                                    )),
+                                ));
                             }
-                        },
+                        }
                     }
+                }
+                let handler = self
+                    .handler
+                    .as_ref()
+                    .expect("Running owns a source handler");
+                let live_poll = !replaying && !handler.has_pending_records();
+                let source_boundary = self.source_boundary.clone().filter(|_| live_poll);
+                let poll_timeout = handler.poll_timeout().filter(|_| live_poll);
+                let boundary_future = around_source_boundary(
+                    source_boundary,
+                    Box::pin(async {
+                        let poll_started_at = time::Instant::now();
+                        match poll_timeout {
+                            Some(timeout) => {
+                                match time::timeout(
+                                    timeout,
+                                    self.handler
+                                        .as_mut()
+                                        .expect("Running owns a source handler")
+                                        .next_invocation(),
+                                )
+                                .await
+                                {
+                                    Ok(invocation) => SourcePollReport::from_erased(
+                                        invocation,
+                                        poll_started_at.elapsed(),
+                                    ),
+                                    Err(_) => {
+                                        let poll_duration = poll_started_at.elapsed();
+                                        let timeout_error = SourceError::Timeout(
+                                            obzenflow_core::event::SourceDiagnosticReason::TimedOut
+                                                .into(),
+                                        );
+                                        SourcePollReport::handler_error(
+                                            timeout_error,
+                                            poll_duration,
+                                        )
+                                    }
+                                }
+                            }
+                            None => {
+                                let invocation = self
+                                    .handler
+                                    .as_mut()
+                                    .expect("Running owns a source handler")
+                                    .next_invocation()
+                                    .await;
+                                SourcePollReport::from_erased(invocation, poll_started_at.elapsed())
+                            }
+                        }
+                    }),
+                );
+
+                let report = tokio::select! {
+                    biased;
+                    maybe_event = self.external_events.recv(|event| !InfiniteSourceState::defer_external_event(state, event)) => Err(maybe_event),
+                    report = boundary_future => Ok(report),
+                };
+                if replaying {
+                    if let Some(control) = ctx.runtime_execution.resume_control() {
+                        if !matches!(
+                            ctx.runtime_execution.source_phase_for(self.stage_id),
+                            SourceExecutionPhase::Replaying
+                        ) {
+                            commit_source_reattached(
+                                &self.data_journal,
+                                &stage_flow_context,
+                                self.continuation,
+                                control.resume_generation(),
+                            )
+                            .await?;
+                            let replayed = self
+                                .handler
+                                .as_ref()
+                                .expect("Running owns a source handler")
+                                .replayed_facts();
+                            announce_resumed_live(
+                                &self.data_journal,
+                                &self.flow_context,
+                                &ctx.runtime_execution,
+                                replayed,
+                                control.resume_generation(),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                let report = match report {
+                    Ok(report) => report,
+                    Err(maybe_event) => {
+                        self.handler
+                            .as_mut()
+                            .expect("Running owns a source handler")
+                            .poll_cancelled();
+                        return Ok(EventLoopDirective::Transition(maybe_event.unwrap_or_else(
+                            || {
+                                InfiniteSourceEvent::Error(
+                                    "External control channel closed".to_string(),
+                                )
+                            },
+                        )));
+                    }
+                };
+
+                let source_poll_observation = SourcePollObservation::new(
+                    ctx.flow_id,
+                    &stage_flow_context,
+                    &ctx.observers,
+                    MiddlewareExecutionScope::LiveHandler,
+                );
+
+                match report.outcome {
+                    SourceBoundaryOutcome::Rejected { policy, reason } => {
+                        tracing::warn!(
+                            stage_name = %ctx.stage_name,
+                            reason = %reason,
+                            "Async infinite source boundary rejected; beginning completion"
+                        );
+                        ctx.completion.record(SourceCompletionCause::Stopped);
+                        let control_events = report.control_events;
+                        observe_source_boundary_rejection(
+                            &source_poll_observation,
+                            &control_events,
+                            policy.as_deref(),
+                        )
+                        .await;
+                        if stage_boundary_control_events(
+                            control_events,
+                            &stage_flow_context,
+                            &ctx.instrumentation,
+                            observer_scope,
+                            &mut ctx.pending_outputs,
+                        ) {
+                            self.pending_boundary_begin_drain = true;
+                            Ok(EventLoopDirective::Continue)
+                        } else {
+                            Ok(EventLoopDirective::Transition(
+                                InfiniteSourceEvent::BeginDrain,
+                            ))
+                        }
+                    }
+                    SourceBoundaryOutcome::Polled(poll) => match poll.result {
+                        SourcePollResult::Completed(SourcePollCompletion::Batch(mut events))
+                            if events.iter().any(|event| event.consumes_data_credit()) =>
+                        {
+                            self.idle_backoff.reset();
+                            self.pending_idle_delay = None;
+                            ctx.instrumentation
+                                .event_loops_with_work_total
+                                .fetch_add(1, Ordering::Relaxed);
+
+                            let source_event_count = events.len();
+                            events.extend(report.control_events);
+                            source_poll_observation
+                                .observe(
+                                    events.as_mut_slice(),
+                                    SourcePollObserverOutcome::Batch {
+                                        events: source_event_count,
+                                    },
+                                )
+                                .await;
+                            stage_source_poll_outputs(
+                                events,
+                                &stage_flow_context,
+                                &ctx.instrumentation,
+                                poll.poll_duration,
+                                observer_scope,
+                                &mut ctx.pending_outputs,
+                            );
+
+                            Ok(EventLoopDirective::Continue)
+                        }
+                        SourcePollResult::Completed(SourcePollCompletion::Batch(mut events)) => {
+                            let source_event_count = events.len();
+                            events.extend(report.control_events);
+                            source_poll_observation
+                                .observe(
+                                    events.as_slice(),
+                                    SourcePollObserverOutcome::Batch {
+                                        events: source_event_count,
+                                    },
+                                )
+                                .await;
+                            if !events.is_empty() {
+                                stage_source_poll_outputs(
+                                    events,
+                                    &stage_flow_context,
+                                    &ctx.instrumentation,
+                                    poll.poll_duration,
+                                    observer_scope,
+                                    &mut ctx.pending_outputs,
+                                );
+                            }
+                            self.pending_idle_delay = Some(self.idle_backoff.next_delay());
+                            Ok(EventLoopDirective::Continue)
+                        }
+                        SourcePollResult::Completed(SourcePollCompletion::Eof) => {
+                            let archive = ctx.runtime_execution.archive_for_io();
+                            if ctx.runtime_execution.resume_control().is_none() && archive.is_some()
+                            {
+                                let recorded_kind = archive.and_then(|archive| {
+                                    archive.recorded_source_eof(&ctx.stage_name)
+                                });
+                                ctx.completion
+                                    .record(SourceCompletionCause::ReplayExhausted {
+                                        recorded_kind,
+                                    });
+                                let replayed_count = self
+                                    .handler
+                                    .as_ref()
+                                    .map_or(0, |handler| handler.replayed_facts());
+                                self.replay_completion
+                                    .maybe_emit_completed(
+                                        &self.flow_context,
+                                        &self.data_journal,
+                                        self.replay_started_at,
+                                        ReplayCompletionFacts {
+                                            replayed_count,
+                                            skipped_count: 0,
+                                            synthesized_eof_kind: Some(
+                                                recorded_kind.unwrap_or(EofKind::Truncated),
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                            } else {
+                                ctx.completion.record(SourceCompletionCause::Exhausted);
+                            }
+                            if report.control_events.is_empty() {
+                                source_poll_observation
+                                    .observe_empty(SourcePollObserverOutcome::Eof)
+                                    .await;
+                                Ok(EventLoopDirective::Transition(
+                                    InfiniteSourceEvent::BeginDrain,
+                                ))
+                            } else {
+                                let mut control_events = report.control_events;
+                                source_poll_observation
+                                    .observe(
+                                        control_events.as_mut_slice(),
+                                        SourcePollObserverOutcome::Eof,
+                                    )
+                                    .await;
+                                stage_source_poll_outputs(
+                                    control_events,
+                                    &stage_flow_context,
+                                    &ctx.instrumentation,
+                                    Duration::from_nanos(0),
+                                    observer_scope,
+                                    &mut ctx.pending_outputs,
+                                );
+                                self.pending_boundary_begin_drain = true;
+                                Ok(EventLoopDirective::Continue)
+                            }
+                        }
+                        SourcePollResult::HandlerError(error) => {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                "{}",
+                                poll_error_summary(&ctx.stage_name, &error)
+                            );
+                            let kind = source_error_kind(&error);
+                            let diagnostic =
+                                source_poll_error_record(WriterId::from(self.stage_id), &error);
+                            self.pending_failure =
+                                terminal_poll_failure(&ctx.stage_name, &error, &diagnostic);
+                            let mut events = vec![diagnostic];
+                            events.extend(report.control_events);
+                            source_poll_observation
+                                .observe(
+                                    events.as_mut_slice(),
+                                    SourcePollObserverOutcome::Error { kind },
+                                )
+                                .await;
+                            stage_source_poll_outputs(
+                                events,
+                                &stage_flow_context,
+                                &ctx.instrumentation,
+                                poll.poll_duration,
+                                observer_scope,
+                                &mut ctx.pending_outputs,
+                            );
+                            self.pending_idle_delay =
+                                poll_error_backoff(&error, &mut self.idle_backoff);
+                            Ok(EventLoopDirective::Continue)
+                        }
+                        SourcePollResult::Fatal(fatal) => {
+                            record_source_stage_fatal(
+                                &fatal,
+                                self.stage_id,
+                                &ctx.stage_name,
+                                &ctx.error_journal,
+                            )
+                            .await?;
+                            Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                                format!(
+                                    "Fatal {:?}/{:?}: {}",
+                                    fatal.code, fatal.reason, fatal.detail
+                                ),
+                            )))
+                        }
+                    },
                 }
             }
 

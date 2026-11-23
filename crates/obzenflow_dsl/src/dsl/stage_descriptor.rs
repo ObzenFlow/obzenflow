@@ -40,7 +40,7 @@ use obzenflow_runtime::{
                 EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
                 EffectfulTransformHandler, EffectfulTransformHandlerAdapter, TransformHandler,
                 UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
-                UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler, UnifiedStatefulHandler,
+                UnifiedStatefulHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -52,12 +52,11 @@ use obzenflow_runtime::{
         merges::MergeStrategyKind,
         source::{
             finite::{
-                AsyncFiniteSourceBuilder, FiniteSourceBuilder, FiniteSourceConfig,
-                FiniteSourceEvent, FiniteSourceState,
+                AsyncFiniteSourceBuilder, FiniteSourceConfig, FiniteSourceEvent, FiniteSourceState,
             },
             infinite::{
-                AsyncInfiniteSourceBuilder, InfiniteSourceBuilder, InfiniteSourceConfig,
-                InfiniteSourceEvent, InfiniteSourceState,
+                AsyncInfiniteSourceBuilder, InfiniteSourceConfig, InfiniteSourceEvent,
+                InfiniteSourceState,
             },
             strategies::CompletionGate,
             SourceBoundary, SourceContinuation,
@@ -684,135 +683,10 @@ pub(crate) fn validate_authored_effect_declarations(
     Ok(())
 }
 
-/// Crate-private erased descriptor for finite source stages.
-pub(crate) struct FiniteSourceDescriptor<H: UnifiedFiniteSourceHandler + 'static> {
-    pub(crate) name: String,
-    pub(crate) source: AdmittedSource<H>,
-    pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
-}
-
-#[async_trait]
-impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
-    for FiniteSourceDescriptor<H>
-{
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    fn stage_type(&self) -> StageType {
-        StageType::FiniteSource
-    }
-
-    fn source_continuation(&self) -> Option<SourceContinuation> {
-        Some(self.source.continuation())
-    }
-
-    fn source_system(&self) -> Option<SourceSystem> {
-        Some(self.source.system().clone())
-    }
-
-    fn stage_middleware_names(&self) -> Vec<String> {
-        self.stage_middleware_factories()
-            .into_iter()
-            .map(|f| f.label().to_string())
-            .collect()
-    }
-
-    fn prepare_middleware(&mut self) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
-        let hosted = self.hosted_ingress_key().is_some();
-        crate::dsl::attachment_plan::prepare_io(
-            &self.name,
-            hosted,
-            &mut self.source_policies,
-            &mut self.ingress_policy,
-            &mut self.observers,
-        )
-    }
-
-    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
-        self.source_policies
-            .iter()
-            .map(Box::as_ref)
-            .chain(self.ingress_policy.iter().map(Box::as_ref))
-            .chain(self.observers.iter().map(Box::as_ref))
-            .collect()
-    }
-
-    async fn create_handle(
-        self: Box<Self>,
-        config: StageConfig,
-        resources: StageResources,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> StageCreationResult<BoxedStageHandle> {
-        let writer_id = WriterId::from(config.stage_id);
-
-        // Create instrumentation configuration
-        let instrumentation_config = InstrumentationConfig::default();
-        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
-            control_middleware.clone();
-
-        let source_binding = build_source_middleware_and_register_policies(
-            &config,
-            StageType::FiniteSource,
-            writer_id,
-            SourceMiddlewarePlan {
-                source_policy_factories: self.source_policies,
-                ingress_policy_factory: self.ingress_policy,
-                observer_factories: self.observers,
-                hosted_ingress_slot: None,
-            },
-            &control_middleware,
-        )?;
-
-        instrumentation
-            .bind_control_plane(
-                &config.stage_id,
-                &control_provider,
-                source_binding.expects_circuit_breaker,
-                source_binding.expects_rate_limiter,
-            )
-            .map_err(|e| e.to_string())?;
-        let instrumentation = Arc::new(instrumentation);
-
-        // Create the stage configuration
-        let mut source_config =
-            FiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
-                .with_observer_bindings(source_binding.observers.into_bindings());
-        source_config.control_strategy = source_binding.completion_gate;
-        source_config.source_boundary = source_binding.source_boundary;
-
-        // Use the builder to create the handle
-        let handle = FiniteSourceBuilder::new(self.source, source_config, resources)
-            .with_instrumentation(instrumentation)
-            .build()
-            .await
-            .map_err(|e| format!("Failed to build finite source: {e:?}"))?;
-
-        // Create adapter to bridge to StageHandle
-        let adapter = StageHandleAdapter::new(
-            handle,
-            config.stage_id,
-            config.name,
-            StageType::FiniteSource,
-            translate_stage_event_to_finite_source,
-            check_finite_source_state,
-        );
-
-        Ok(Box::new(adapter) as BoxedStageHandle)
-    }
-}
-
 /// Crate-private erased descriptor for async finite source stages.
 pub(crate) struct AsyncFiniteSourceDescriptor<H: UnifiedAsyncFiniteSourceHandler + 'static> {
     pub(crate) name: String,
-    read: Result<Option<EffectDeclaration>, StageEffectsError>,
+    read: Result<EffectDeclaration, StageEffectsError>,
     pub(crate) source: AdmittedSource<H>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
@@ -824,7 +698,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSour
     pub(crate) fn new(name: impl Into<String>, source: AdmittedSource<H>) -> Self {
         Self {
             name: name.into(),
-            read: source.handler().read_declaration().transpose(),
+            read: source.handler().read_declaration(),
             source,
             source_policies: Vec::new(),
             ingress_policy: None,
@@ -858,13 +732,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        self.read
-            .as_ref()
-            .ok()
-            .and_then(Option::as_ref)
-            .cloned()
-            .into_iter()
-            .collect()
+        self.read.as_ref().ok().cloned().into_iter().collect()
     }
 
     fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
@@ -967,135 +835,10 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
     }
 }
 
-/// Crate-private erased descriptor for infinite source stages.
-pub(crate) struct InfiniteSourceDescriptor<H: UnifiedInfiniteSourceHandler + 'static> {
-    pub(crate) name: String,
-    pub(crate) source: AdmittedSource<H>,
-    pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
-}
-
-#[async_trait]
-impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
-    for InfiniteSourceDescriptor<H>
-{
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    fn stage_type(&self) -> StageType {
-        StageType::InfiniteSource
-    }
-
-    fn source_continuation(&self) -> Option<SourceContinuation> {
-        Some(self.source.continuation())
-    }
-
-    fn source_system(&self) -> Option<SourceSystem> {
-        Some(self.source.system().clone())
-    }
-
-    fn stage_middleware_names(&self) -> Vec<String> {
-        self.stage_middleware_factories()
-            .into_iter()
-            .map(|f| f.label().to_string())
-            .collect()
-    }
-
-    fn prepare_middleware(&mut self) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
-        let hosted = self.hosted_ingress_key().is_some();
-        crate::dsl::attachment_plan::prepare_io(
-            &self.name,
-            hosted,
-            &mut self.source_policies,
-            &mut self.ingress_policy,
-            &mut self.observers,
-        )
-    }
-
-    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
-        self.source_policies
-            .iter()
-            .map(Box::as_ref)
-            .chain(self.ingress_policy.iter().map(Box::as_ref))
-            .chain(self.observers.iter().map(Box::as_ref))
-            .collect()
-    }
-
-    async fn create_handle(
-        self: Box<Self>,
-        config: StageConfig,
-        resources: StageResources,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> StageCreationResult<BoxedStageHandle> {
-        let writer_id = WriterId::from(config.stage_id);
-
-        // Create instrumentation configuration
-        let instrumentation_config = InstrumentationConfig::default();
-        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
-            control_middleware.clone();
-
-        let source_binding = build_source_middleware_and_register_policies(
-            &config,
-            StageType::InfiniteSource,
-            writer_id,
-            SourceMiddlewarePlan {
-                source_policy_factories: self.source_policies,
-                ingress_policy_factory: self.ingress_policy,
-                observer_factories: self.observers,
-                hosted_ingress_slot: None,
-            },
-            &control_middleware,
-        )?;
-
-        instrumentation
-            .bind_control_plane(
-                &config.stage_id,
-                &control_provider,
-                source_binding.expects_circuit_breaker,
-                source_binding.expects_rate_limiter,
-            )
-            .map_err(|e| e.to_string())?;
-        let instrumentation = Arc::new(instrumentation);
-
-        // Create the stage configuration
-        let mut source_config =
-            InfiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
-                .with_observer_bindings(source_binding.observers.into_bindings());
-        source_config.control_strategy = source_binding.completion_gate;
-        source_config.source_boundary = source_binding.source_boundary;
-
-        // Use the builder to create the handle
-        let handle = InfiniteSourceBuilder::new(self.source, source_config, resources)
-            .with_instrumentation(instrumentation)
-            .build()
-            .await
-            .map_err(|e| format!("Failed to build infinite source: {e:?}"))?;
-
-        // Create adapter to bridge to StageHandle
-        let adapter = StageHandleAdapter::new(
-            handle,
-            config.stage_id,
-            config.name,
-            StageType::InfiniteSource,
-            translate_stage_event_to_infinite_source,
-            check_infinite_source_state,
-        );
-
-        Ok(Box::new(adapter) as BoxedStageHandle)
-    }
-}
-
 /// Crate-private erased descriptor for async infinite source stages.
 pub(crate) struct AsyncInfiniteSourceDescriptor<H: UnifiedAsyncInfiniteSourceHandler + 'static> {
     pub(crate) name: String,
-    read: Result<Option<EffectDeclaration>, StageEffectsError>,
+    read: Result<EffectDeclaration, StageEffectsError>,
     pub(crate) source: AdmittedSource<H>,
     hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
@@ -1114,7 +857,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static>
         let hosted_ingress_slot = source.hosted_ingress_slot();
         Self {
             name: name.into(),
-            read: source.handler().read_declaration().transpose(),
+            read: source.handler().read_declaration(),
             source,
             hosted_ingress_slot,
             source_policies: Vec::new(),
@@ -1155,13 +898,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        self.read
-            .as_ref()
-            .ok()
-            .and_then(Option::as_ref)
-            .cloned()
-            .into_iter()
-            .collect()
+        self.read.as_ref().ok().cloned().into_iter().collect()
     }
 
     fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
@@ -2844,12 +2581,10 @@ fn check_merge_state(state: &MergeState) -> crate::stage_handle_adapter::StageSt
     }
 }
 
-impl<H: UnifiedFiniteSourceHandler + 'static> sealed::Sealed for FiniteSourceDescriptor<H> {}
 impl<H: UnifiedAsyncFiniteSourceHandler + 'static> sealed::Sealed
     for AsyncFiniteSourceDescriptor<H>
 {
 }
-impl<H: UnifiedInfiniteSourceHandler + 'static> sealed::Sealed for InfiniteSourceDescriptor<H> {}
 impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> sealed::Sealed
     for AsyncInfiniteSourceDescriptor<H>
 {
@@ -3279,8 +3014,13 @@ mod tests {
 
     #[test]
     fn topology_uses_resolved_family_settings_and_stable_semantic_keys() {
-        let mut descriptor =
-            AsyncInfiniteSourceDescriptor::new("source", AdmittedSource::placeholder(None));
+        let (_submissions, receiver) = tokio::sync::mpsc::channel::<DemoTransactionalOutput>(1);
+        let mut descriptor = AsyncInfiniteSourceDescriptor::new(
+            "source",
+            obzenflow_runtime::__private::AdmitSource::<dyn UnifiedAsyncInfiniteSourceHandler>::admit(
+                obzenflow_adapters::sources::ChannelSource::new(receiver),
+            ),
+        );
         descriptor.source_policies = vec![
             Box::new(
                 obzenflow_adapters::middleware::circuit_breaker()
@@ -3830,13 +3570,9 @@ mod tests {
             recorded_fan_in: false,
         };
 
-        let descriptor = FiniteSourceDescriptor {
-            name: "cb_source".to_string(),
-            source: AdmittedSource::placeholder(None),
-            source_policies: vec![Box::new(breaker)],
-            ingress_policy: None,
-            observers: vec![],
-        };
+        let mut descriptor =
+            AsyncFiniteSourceDescriptor::new("cb_source", AdmittedSource::finite_placeholder(None));
+        descriptor.source_policies = vec![Box::new(breaker)];
 
         let control_middleware = Arc::new(ControlMiddlewareAggregator::new());
         let boxed: Box<dyn StageDescriptor> = Box::new(descriptor);

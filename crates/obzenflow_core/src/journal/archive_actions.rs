@@ -7,11 +7,10 @@
 
 use super::ArchiveStatus;
 use crate::effect_binding::SystemBinding;
-use crate::event::payloads::execution_payload::{
-    ExecutionPayload, SourceContinuationRefusal, SourceContinuationRefusedFact,
-};
+use crate::event::payloads::execution_payload::{ExecutionPayload, SourcePollContinuation};
 use crate::event::payloads::flow_control_payload::EofKind;
-use crate::source::{RecordedSourceFrontier, RefusedBy, ResumeRefusal, SourceContinuation};
+use crate::event::SourceDiagnosticReason;
+use crate::source::{ResumeRefusal, SourceContinuation};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -41,7 +40,7 @@ pub struct SourceEvidence {
     pub stage_key: String,
     pub finite: bool,
     pub recorded_eof: Option<EofKind>,
-    pub frontier: RecordedSourceFrontier,
+    pub binding: Option<SystemBinding>,
 }
 
 /// How a failed run's recorded failures bear on resuming it.
@@ -59,9 +58,10 @@ pub enum FailureEvidence {
 pub fn departs_from_archive(execution: &ExecutionPayload) -> bool {
     match execution {
         ExecutionPayload::StageFatalRecorded(fatal) => fatal.reason.departs_from_archive(),
-        ExecutionPayload::SourceContinuationRefused(SourceContinuationRefusedFact {
-            refusal: SourceContinuationRefusal::InputChanged { .. },
-        }) => true,
+        ExecutionPayload::SourcePollFailed(failure) => {
+            failure.continuation == SourcePollContinuation::Terminal
+                && failure.diagnostic.reason() == SourceDiagnosticReason::InputChanged
+        }
         _ => false,
     }
 }
@@ -78,11 +78,13 @@ impl FailureFold {
     pub fn observe(&mut self, execution: &ExecutionPayload) {
         if departs_from_archive(execution) {
             self.departed = true;
-        } else if matches!(
-            execution,
-            ExecutionPayload::StageFatalRecorded(_)
-                | ExecutionPayload::SourceContinuationRefused(_)
-        ) {
+        } else if match execution {
+            ExecutionPayload::StageFatalRecorded(_) => true,
+            ExecutionPayload::SourcePollFailed(failure) => {
+                failure.continuation == SourcePollContinuation::Terminal
+            }
+            _ => false,
+        } {
             self.other = true;
         }
     }
@@ -311,7 +313,7 @@ pub fn decide(
         .sources
         .iter()
         .filter_map(|source| {
-            let recorded = source.frontier.binding()?;
+            let recorded = source.binding.as_ref()?;
             let configured = flow.systems.get(&source.stage_key)?;
             (recorded != configured).then(|| ChangedSourceSystem {
                 stage: source.stage_key.clone(),
@@ -329,12 +331,11 @@ pub fn decide(
             .sources
             .iter()
             .filter_map(|(stage_key, continuation)| {
-                let recorded = archive.source(stage_key);
-                let frontier = recorded.map(|source| &source.frontier);
                 continuation
                     .resume_refusal(
-                        recorded.and_then(|source| source.recorded_eof),
-                        frontier.unwrap_or(&RecordedSourceFrontier::default()),
+                        archive
+                            .source(stage_key)
+                            .and_then(|source| source.recorded_eof),
                     )
                     .map(|refusal| (stage_key.clone(), refusal))
             })
@@ -347,65 +348,37 @@ pub fn decide(
     Ok(())
 }
 
-fn unfinished_sources_refusal(archive: &Path, sources: &[String], by: RefusedBy) -> String {
+fn unfinished_sources_refusal(archive: &Path, sources: &[String]) -> String {
     let quoted: Vec<String> = sources.iter().map(|source| format!("'{source}'")).collect();
     let named = match quoted.as_slice() {
         [] => String::new(),
         [only] => only.clone(),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     };
-    let refuser = match by {
-        RefusedBy::Connector => "connector",
-        RefusedBy::Handler => "handler",
-    };
-    let (subject, their, refusers) = if sources.len() == 1 {
-        ("source", "its", format!("its {refuser} cannot"))
+    let (subject, their) = if sources.len() == 1 {
+        ("source", "its")
     } else {
-        ("sources", "their", format!("their {refuser}s cannot"))
+        ("sources", "their")
     };
     format!(
-        "cannot resume {}: {subject} {named} stopped with {their} input unfinished, and \
-         {refusers} continue interrupted input.\nUse a connector that continues \
-         interrupted input, or implement one.",
+        "cannot resume {}: {subject} {named} stopped with {their} input unfinished, and only \
+         the stopped process held that input.\nStart a new run.",
         archive.display()
     )
 }
 
 fn sources_refusal(archive: &Path, refusals: &[(String, ResumeRefusal)]) -> String {
-    let mut paragraphs = Vec::new();
-    for refuser in [RefusedBy::Connector, RefusedBy::Handler] {
-        let unfinished: Vec<String> = refusals
-            .iter()
-            .filter(|(_, refusal)| *refusal == ResumeRefusal::UnfinishedInput { by: refuser })
-            .map(|(source, _)| source.clone())
-            .collect();
-        if !unfinished.is_empty() {
-            paragraphs.push(unfinished_sources_refusal(archive, &unfinished, refuser));
-        }
-    }
-    for (source, refusal) in refusals {
-        match refusal {
-            ResumeRefusal::UnfinishedInput { .. } => {}
-            ResumeRefusal::RecordedWithoutPositions => paragraphs.push(format!(
-                "cannot resume {}: source '{source}' recorded its input without positions, so \
-                 its connector cannot continue it from where it stopped.\nStart a new run.",
-                archive.display()
-            )),
-            ResumeRefusal::PositionVersion { recorded, expected } => paragraphs.push(format!(
-                "cannot resume {}: source '{source}' recorded positions in version {recorded} \
-                 of its connector's format, and the connector now reads version {expected}.\n\
-                 Resume with the version that recorded them, or start a new run.",
-                archive.display()
-            )),
-        }
-    }
-    paragraphs.join("\n")
+    let unfinished: Vec<String> = refusals
+        .iter()
+        .filter(|(_, refusal)| *refusal == ResumeRefusal::UnfinishedInput)
+        .map(|(source, _)| source.clone())
+        .collect();
+    unfinished_sources_refusal(archive, &unfinished)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::NonZeroU32;
 
     const RUN: &str = "/runs/r1";
 
@@ -414,7 +387,7 @@ mod tests {
             stage_key: stage_key.to_string(),
             finite,
             recorded_eof,
-            frontier: RecordedSourceFrontier::default(),
+            binding: None,
         }
     }
 
@@ -439,18 +412,8 @@ mod tests {
             systems: Default::default(),
             cycle_members: Vec::new(),
             sources: vec![
-                (
-                    "store_orders".to_string(),
-                    SourceContinuation::Refuse {
-                        by: RefusedBy::Connector,
-                    },
-                ),
-                (
-                    "web_orders".to_string(),
-                    SourceContinuation::Refuse {
-                        by: RefusedBy::Connector,
-                    },
-                ),
+                ("store_orders".to_string(), SourceContinuation::Refuse),
+                ("web_orders".to_string(), SourceContinuation::Refuse),
             ],
         }
     }
@@ -622,8 +585,18 @@ mod tests {
         })
     }
 
-    fn source_refused(refusal: SourceContinuationRefusal) -> ExecutionPayload {
-        ExecutionPayload::SourceContinuationRefused(SourceContinuationRefusedFact { refusal })
+    fn poll_failed(
+        continuation: SourcePollContinuation,
+        reason: SourceDiagnosticReason,
+    ) -> ExecutionPayload {
+        ExecutionPayload::SourcePollFailed(
+            crate::event::payloads::execution_payload::SourcePollFailedFact {
+                kind: crate::event::status::processing_status::ErrorKind::Remote,
+                detail: String::new(),
+                continuation,
+                diagnostic: reason.into(),
+            },
+        )
     }
 
     fn folded(rows: &[ExecutionPayload], contract_violation: bool) -> FailureEvidence {
@@ -637,9 +610,10 @@ mod tests {
     #[test]
     fn only_departures_alone_fold_to_departed_from_archive() {
         use crate::event::StageFatalReason;
-        let input_changed = source_refused(SourceContinuationRefusal::InputChanged {
-            part: "file".to_string(),
-        });
+        let input_changed = poll_failed(
+            SourcePollContinuation::Terminal,
+            SourceDiagnosticReason::InputChanged,
+        );
         for departures in [
             vec![fatal(StageFatalReason::DescriptorMismatch)],
             vec![fatal(StageFatalReason::MissingRecordedFact)],
@@ -665,8 +639,15 @@ mod tests {
             ],
             vec![
                 input_changed,
-                source_refused(SourceContinuationRefusal::PositionUnreadable),
+                poll_failed(
+                    SourcePollContinuation::Terminal,
+                    SourceDiagnosticReason::RemoteFailed,
+                ),
             ],
+            vec![poll_failed(
+                SourcePollContinuation::Recoverable,
+                SourceDiagnosticReason::InputChanged,
+            )],
             vec![fatal(StageFatalReason::RecordingEnded)],
         ] {
             assert_eq!(folded(&other, false), FailureEvidence::Other, "{other:?}");
@@ -707,147 +688,26 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "cannot resume /runs/r1: sources 'store_orders' and 'web_orders' stopped with their \
-             input unfinished, and their connectors cannot continue interrupted input.\nUse a \
-             connector that continues interrupted input, or implement one."
+             input unfinished, and only the stopped process held that input.\nStart a new run."
         );
-    }
-
-    #[test]
-    fn a_seek_source_refuses_without_positions_or_at_another_version() {
-        let seek = |version: u32| FlowEvidence {
-            sources: vec![(
-                "orders".to_string(),
-                SourceContinuation::Seek {
-                    position_version: NonZeroU32::new(version).unwrap(),
-                },
-            )],
-            ..safe_flow()
-        };
-        let empty = archive(
-            ArchiveStatus::Cancelled,
-            vec![source("orders", true, Some(EofKind::Truncated))],
-        );
-        assert!(decided(ReplayVerb::Resume, &empty, &seek(1), plain()).is_ok());
-
-        let mut unpositioned = RecordedSourceFrontier::default();
-        unpositioned.observe(
-            &crate::event::ChainPayload::Fact(serde_json::json!({})),
-            None,
-        );
-        let mut recorded = source("orders", true, Some(EofKind::Truncated));
-        recorded.frontier = unpositioned;
-        let unpositioned = archive(ArchiveStatus::Cancelled, vec![recorded]);
-        assert_eq!(
-            decided(ReplayVerb::Resume, &unpositioned, &seek(1), plain()).unwrap_err(),
-            ArchiveRefusal::Sources {
-                run: PathBuf::from(RUN),
-                refusals: vec![(
-                    "orders".to_string(),
-                    ResumeRefusal::RecordedWithoutPositions
-                )],
-            }
-        );
-        let natural = archive(
-            ArchiveStatus::Cancelled,
-            vec![source("orders", true, Some(EofKind::Natural))],
-        );
-        assert!(decided(ReplayVerb::Resume, &natural, &seek(2), plain()).is_ok());
     }
 
     #[test]
     fn unfinished_source_refusal_names_every_source() {
         let archive = Path::new("/runs/interrupted");
         assert_eq!(
-            unfinished_sources_refusal(archive, &["web_orders".to_string()], RefusedBy::Connector),
+            unfinished_sources_refusal(archive, &["web_orders".to_string()]),
             "cannot resume /runs/interrupted: source 'web_orders' stopped with its input \
-             unfinished, and its connector cannot continue interrupted input.\nUse a connector \
-             that continues interrupted input, or implement one."
+             unfinished, and only the stopped process held that input.\nStart a new run."
         );
         assert!(unfinished_sources_refusal(
             archive,
             &["a".to_string(), "b".to_string(), "c".to_string()],
-            RefusedBy::Connector
         )
         .starts_with(
             "cannot resume /runs/interrupted: sources 'a', 'b' and 'c' stopped with their \
-             input unfinished, and their connectors cannot continue interrupted input."
+             input unfinished"
         ));
-    }
-
-    #[test]
-    fn an_unfinished_direct_handler_is_named_as_a_handler() {
-        let archive = Path::new("/runs/interrupted");
-        assert_eq!(
-            unfinished_sources_refusal(archive, &["local_orders".to_string()], RefusedBy::Handler),
-            "cannot resume /runs/interrupted: source 'local_orders' stopped with its input \
-             unfinished, and its handler cannot continue interrupted input.\nUse a connector \
-             that continues interrupted input, or implement one."
-        );
-        let refusals = vec![
-            (
-                "local_orders".to_string(),
-                ResumeRefusal::UnfinishedInput {
-                    by: RefusedBy::Handler,
-                },
-            ),
-            (
-                "cards".to_string(),
-                ResumeRefusal::UnfinishedInput {
-                    by: RefusedBy::Connector,
-                },
-            ),
-        ];
-        assert_eq!(
-            sources_refusal(archive, &refusals),
-            [
-                unfinished_sources_refusal(archive, &["cards".to_string()], RefusedBy::Connector),
-                unfinished_sources_refusal(
-                    archive,
-                    &["local_orders".to_string()],
-                    RefusedBy::Handler
-                ),
-            ]
-            .join("\n")
-        );
-    }
-
-    #[test]
-    fn sources_refusal_names_each_source_with_its_remedy() {
-        let archive = Path::new("/runs/interrupted");
-        let refusals = vec![
-            (
-                "cards".to_string(),
-                ResumeRefusal::UnfinishedInput {
-                    by: RefusedBy::Connector,
-                },
-            ),
-            (
-                "ledger".to_string(),
-                ResumeRefusal::RecordedWithoutPositions,
-            ),
-            (
-                "orders".to_string(),
-                ResumeRefusal::PositionVersion {
-                    recorded: NonZeroU32::MIN,
-                    expected: NonZeroU32::new(2).unwrap(),
-                },
-            ),
-        ];
-        assert_eq!(
-            sources_refusal(archive, &refusals),
-            [
-                unfinished_sources_refusal(archive, &["cards".to_string()], RefusedBy::Connector),
-                "cannot resume /runs/interrupted: source 'ledger' recorded its input without \
-                 positions, so its connector cannot continue it from where it stopped.\nStart a \
-                 new run."
-                    .to_string(),
-                "cannot resume /runs/interrupted: source 'orders' recorded positions in version 1 \
-                 of its connector's format, and the connector now reads version 2.\nResume with \
-                 the version that recorded them, or start a new run."
-                    .to_string(),
-            ]
-            .join("\n")
-        );
     }
 
     #[test]

@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The framework file system. It reads the records of a file at a configured
-//! path from a recorded position. When the file changed after a recorded
-//! read, the reply records the change, and the handler refuses it.
-
 use super::csv::CsvPosition;
 use super::file_version::FileVersion;
 use super::yaml::{read_yaml, YamlLine, YamlRead};
@@ -21,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::PathBuf;
 
-/// The framework system that reads a file at a configured path.
+/// `FileSystem` is the framework system that reads a file at a configured path.
 pub struct FileSystem {
     path: PathBuf,
     format: FileFormat,
@@ -44,8 +40,6 @@ pub(crate) struct CsvFormat {
 }
 
 impl FileSystem {
-    /// A cold port for the CSV or TSV file at `path`. The port names the
-    /// location and format, and opens nothing until a live read.
     pub(crate) fn csv_port(path: PathBuf, format: CsvFormat) -> anyhow::Result<Port<dyn CsvFile>> {
         let location = if format.delimiter == b'\t' {
             SystemLocation::Tsv(path.clone())
@@ -60,10 +54,11 @@ impl FileSystem {
         })
         .with_system_location(location)
         .map(Port::own_instance)
-        .map_err(|error| anyhow::anyhow!("the file location cannot be recorded: {error}"))
+        .map_err(|error| {
+            anyhow::anyhow!("the binding evidence cannot record the file location: {error}")
+        })
     }
 
-    /// A cold port for the YAML file at `path`.
     pub(crate) fn yaml_port(path: PathBuf) -> anyhow::Result<Port<dyn YamlFile>> {
         let location = SystemLocation::Yaml(path.clone());
         Port::deferred(move || {
@@ -74,11 +69,13 @@ impl FileSystem {
         })
         .with_system_location(location)
         .map(Port::own_instance)
-        .map_err(|error| anyhow::anyhow!("the file location cannot be recorded: {error}"))
+        .map_err(|error| {
+            anyhow::anyhow!("the binding evidence cannot record the file location: {error}")
+        })
     }
 }
 
-/// A port that reads the selected records of a YAML file.
+/// `YamlFile` is a port that reads the selected records of a YAML file.
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 pub trait YamlFile: Send + Sync {
@@ -103,7 +100,7 @@ impl YamlFile for FileSystem {
     }
 }
 
-/// A port that reads the records of a CSV or TSV file.
+/// `CsvFile` is a port that reads the records of a CSV or TSV file.
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 pub trait CsvFile: Send + Sync {
@@ -115,8 +112,9 @@ pub trait CsvFile: Send + Sync {
     ) -> Result<FiniteRead<CsvLine, CsvRead>, EffectError>;
 }
 
-/// The argument of one CSV read: the read settings and, after the first read,
-/// the position, columns and file version that the previous reply recorded.
+/// `CsvRead` is the argument of one CSV read. It holds the read settings and, after
+/// the first read, the position, columns and file version that the previous reply
+/// recorded.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CsvRead {
     chunk: usize,
@@ -148,9 +146,8 @@ impl CsvRead {
     }
 }
 
-/// One CSV record as the file held it, the line of a record that the parser
-/// refused, a file the read refused, or a file that changed after a recorded
-/// read.
+/// A `CsvLine` is one record as the file held it, a malformed record, a refused
+/// file, or a file that changed after a recorded read.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CsvLine {
     Values {
@@ -415,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn csv_read_given_headers_keeps_first_row() {
+    fn csv_given_headers_keeps_first_row() {
         let input = file("Ada,London\n");
         let format = CsvFormat {
             delimiter: b',',

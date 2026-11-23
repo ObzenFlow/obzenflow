@@ -46,10 +46,6 @@ fn reference_rows() -> impl TypedFiniteSourceHandler<Output = RefItem> {
     )
 }
 
-/// Stream source: five rows whose keys cycle the three catalog keys in an
-/// order that keeps every key's catalog row ahead of its first stream use
-/// under the canonical alternation (reference first on the ordinal tie), so
-/// the live inner join emits all five.
 fn stream_rows() -> impl TypedFiniteSourceHandler<Output = StreamItem> {
     ValuesSource::new(
         (1..=5_u64)

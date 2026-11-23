@@ -6,9 +6,7 @@ use super::*;
 use crate::journal::DiskJournal;
 use obzenflow_core::effect_binding::{SystemBindingEvidence, SystemLocation};
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::execution_payload::{
-    SourceInputPinnedFact, SourceRecordRejectedFact, SourceResumeFact,
-};
+use obzenflow_core::event::payloads::execution_payload::SourceRecordRejectedFact;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{
     ChainEventFactory, SourceDiagnostic, SourceDiagnosticReason, SystemEventFactory,
@@ -17,7 +15,6 @@ use obzenflow_core::journal::archive::manifest::{
     RunManifest, RunManifestStage, JOURNAL_SCHEMA_VERSION, OBSERVABILITY_CAPTURE_CAPABILITY,
     RUN_MANIFEST_FILENAME,
 };
-use obzenflow_core::source::SourceInputIdentity;
 use obzenflow_core::{Journal, JournalOwner, SystemId};
 use obzenflow_runtime::runtime_config::JournalSync;
 use std::io::Write;
@@ -158,25 +155,6 @@ impl Run {
             .unwrap();
     }
 
-    async fn pin(&self, file: &str) {
-        let pin = SourceInputPinnedFact {
-            identity: SourceInputIdentity::new("csv", &serde_json::json!({ "file": file }))
-                .unwrap(),
-            beginning: serde_json::from_value(serde_json::json!({"schema_version": 1, "value": 0}))
-                .unwrap(),
-        };
-        self.data
-            .append(
-                ChainEventFactory::execution_event(
-                    self.stage.into(),
-                    ExecutionPayload::SourceInputPinned(pin),
-                ),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-    }
-
     async fn bind(&self, file: &str) {
         let binding =
             SystemBindingEvidence::located("file-system", SystemLocation::Csv(file.into()))
@@ -188,25 +166,6 @@ impl Run {
                 ChainEventFactory::execution_event(
                     self.stage.into(),
                     ExecutionPayload::SourceBindingDeclared(binding),
-                ),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-    }
-
-    async fn positioned(&self, file: &str) {
-        let identity_digest = SourceInputIdentity::new("csv", &serde_json::json!({ "file": file }))
-            .unwrap()
-            .digest();
-        self.data
-            .append(
-                ChainEventFactory::execution_event(
-                    self.stage.into(),
-                    ExecutionPayload::SourcePositioned(SourceResumeFact {
-                        identity_digest,
-                        generation: 1,
-                    }),
                 ),
                 Default::default(),
             )
@@ -838,11 +797,11 @@ async fn earlier_rejections_keep_their_places_while_each_journal_holds_one() {
 #[tokio::test]
 async fn a_row_rejected_again_names_the_oldest_run_that_rejected_it() {
     let first = Run::new();
-    first.pin("night.csv").await;
+    first.bind("night.csv").await;
     first.reject(Some(3)).await;
     first.reject(Some(5)).await;
     let second = Run::new();
-    second.positioned("night.csv").await;
+    second.bind("night.csv").await;
     second.reject(Some(5)).await;
     second.reject(Some(7)).await;
     let shown = Run::new();
@@ -898,7 +857,7 @@ async fn a_row_rejected_again_names_the_oldest_run_that_rejected_it() {
 #[tokio::test]
 async fn a_run_that_rejected_rows_out_of_order_still_names_the_first() {
     let killed = Run::new();
-    killed.pin("night.csv").await;
+    killed.bind("night.csv").await;
     killed.reject(Some(5)).await;
     killed.reject(Some(3)).await;
     let shown = Run::new();
@@ -918,18 +877,18 @@ async fn rejected_row_same_binding_repeats() {
 }
 
 #[tokio::test]
-async fn rows_repeat_only_while_their_source_pinned_one_input() {
-    let unpinned = Run::new();
-    unpinned.reject(Some(164)).await;
+async fn rows_without_one_binding_never_repeat() {
+    let unbound = Run::new();
+    unbound.reject(Some(164)).await;
     let shown = Run::new();
     shown.reject(Some(164)).await;
-    assert_eq!(shown_repeats(&shown, &[&unpinned]).await, [None]);
+    assert_eq!(shown_repeats(&shown, &[&unbound]).await, [None]);
 
     let monday = Run::new();
-    monday.pin("monday.csv").await;
+    monday.bind("monday.csv").await;
     monday.reject(Some(164)).await;
     let tuesday = Run::new();
-    tuesday.positioned("tuesday.csv").await;
+    tuesday.bind("tuesday.csv").await;
     tuesday.reject(Some(164)).await;
     let shown = Run::new();
     shown.reject(Some(164)).await;
@@ -939,7 +898,7 @@ async fn rows_repeat_only_while_their_source_pinned_one_input() {
 #[tokio::test]
 async fn a_rejection_that_names_no_record_never_repeats() {
     let killed = Run::new();
-    killed.pin("night.csv").await;
+    killed.bind("night.csv").await;
     killed.reject(None).await;
     let shown = Run::new();
     shown.reject(None).await;

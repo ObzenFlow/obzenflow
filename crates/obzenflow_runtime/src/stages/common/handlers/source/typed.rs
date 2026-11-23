@@ -2,41 +2,22 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Typed source authoring and runtime envelope lowering (FLOWIP-134g).
-
-use super::continuation::{AsyncReaderOpener, SyncReaderOpener};
 use super::erased::{
-    ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncFinite, SealAsyncInfinite, SealFinite,
-    SealInfinite, SourceResumeError, UnifiedAsyncFiniteSourceHandler,
-    UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
+    ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncFinite, SealAsyncInfinite,
+    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
 };
-use super::positioned::{PositionedFiniteReader, SourceRecord};
-use super::prepared::{AsyncSourceReader, SourceReader, SyncSourceReader};
 use super::read::{read_failure, ReadEnd, SourceRead};
 use super::record_de::deserialize_json;
 use super::SourceError;
 use crate::stages::common::handler_error::StageFatal;
-use crate::stages::source::SourceReaderInitContext;
 use async_trait::async_trait;
-use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
-use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-
-use obzenflow_core::event::payloads::execution_payload::{
-    SourceContinuationRefusal, SourceInputPinnedFact,
-};
 use obzenflow_core::event::{
-    ChainEventFactory, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode, StageFatalCode,
-    StageFatalReason,
+    SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode, StageFatalCode, StageFatalReason,
 };
-use obzenflow_core::ingress::IngressContext;
-use obzenflow_core::source::{
-    EncodedSourcePosition, SourcePosition, SourcePositionError, SourceProgress,
-};
-use obzenflow_core::{ChainEvent, OneFactOutcome, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, OneFactOutcome, TypedPayload};
 use serde::de::DeserializeOwned;
 use std::fmt;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub(super) fn configuration_fatal(detail: impl Into<String>) -> StageFatal {
@@ -55,209 +36,6 @@ pub(super) fn protocol_fatal(detail: impl Into<String>) -> StageFatal {
     )
 }
 
-pub(super) fn lower_outputs<O>(
-    writer_id: WriterId,
-    outputs: Vec<(O, Option<IngressContext>)>,
-) -> Result<Vec<ChainEvent>, StageFatal>
-where
-    O: OneFactOutcome,
-{
-    let mut events = Vec::with_capacity(outputs.len());
-    for (output, ingress_context) in outputs {
-        let mut facts = output.into_facts().map_err(|error| {
-            protocol_fatal(format!(
-                "typed source output serialization failed for `{}`: {error}",
-                std::any::type_name::<O>()
-            ))
-        })?;
-        if facts.len() != 1 {
-            return Err(protocol_fatal(format!(
-                "one_fact_outcome: `{}` lowered to {} facts instead of exactly one",
-                std::any::type_name::<O>(),
-                facts.len(),
-            )));
-        }
-        let fact = facts.pop().expect("length checked above");
-        let mut event = fact.into_event(writer_id);
-        event.ingress_context = ingress_context;
-        events.push(event);
-    }
-    Ok(events)
-}
-
-/// Lower positioned records, each carrying the position after it, so the fact
-/// and its progress commit in one append (FLOWIP-134i B11).
-fn lower_positioned<O, P>(
-    writer_id: WriterId,
-    records: Vec<SourceRecord<O, P>>,
-) -> Result<Vec<ChainEvent>, StageFatal>
-where
-    O: OneFactOutcome,
-    P: SourcePosition,
-{
-    let mut outputs = Vec::with_capacity(records.len());
-    let mut progress = Vec::with_capacity(records.len());
-    for record in records {
-        let after = EncodedSourcePosition::encode(&record.after).map_err(|error| {
-            protocol_fatal(format!(
-                "source position for `{}`: {error}",
-                std::any::type_name::<P>()
-            ))
-        })?;
-        progress.push(SourceProgress { after });
-        outputs.push((record.value, None));
-    }
-    let mut events = lower_outputs(writer_id, outputs)?;
-    for (event, progress) in events.iter_mut().zip(progress) {
-        event.source_progress = Some(progress);
-    }
-    Ok(events)
-}
-
-fn http_pull_evidence(
-    writer_id: WriterId,
-    snapshot: HttpPullTelemetry,
-    recorder: &dyn ObservationRecorder,
-) -> ChainEvent {
-    use obzenflow_core::event::observability::ObservationRecord;
-    use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, HttpPullStateFact};
-    recorder.observe(ObservationRecord::HttpPull(HttpPullMeasurements {
-        requests_total: snapshot.requests_total,
-        responses_2xx: snapshot.responses_2xx,
-        responses_4xx: snapshot.responses_4xx,
-        responses_5xx: snapshot.responses_5xx,
-        rate_limited_total: snapshot.rate_limited_total,
-        retries_total: snapshot.retries_total,
-        events_decoded_total: snapshot.events_decoded_total,
-        wait_seconds_rate_limit: snapshot.wait_seconds_rate_limit,
-        wait_seconds_poll_interval: snapshot.wait_seconds_poll_interval,
-        wait_seconds_backoff: snapshot.wait_seconds_backoff,
-    }));
-    ChainEventFactory::execution_event(
-        writer_id,
-        ExecutionPayload::HttpPullState(HttpPullStateFact {
-            state: snapshot.state,
-            wait_reason: snapshot.wait_reason,
-            next_wake_unix_secs: snapshot.next_wake_unix_secs,
-            last_success_unix_secs: snapshot.last_success_unix_secs,
-        }),
-    )
-}
-
-#[derive(Default)]
-struct ObservationState {
-    open: bool,
-    snapshot: Option<HttpPullTelemetry>,
-    violation: Option<String>,
-}
-
-/// Runtime-minted, closed source-observation capability.
-///
-/// It can report one typed HTTP pull snapshot during the current live poll. It
-/// exposes no envelope, writer, routing, status, or arbitrary-payload API.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct SourceObservationSink {
-    state: Arc<Mutex<ObservationState>>,
-}
-
-impl fmt::Debug for SourceObservationSink {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SourceObservationSink")
-            .finish_non_exhaustive()
-    }
-}
-
-impl SourceObservationSink {
-    fn new() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(ObservationState::default())),
-        }
-    }
-
-    /// Report the snapshot for the current poll synchronously.
-    ///
-    /// Misuse is remembered by the capability and converted by the runtime
-    /// adapter into a framework fatal with zero poll output.
-    pub fn report_http_pull(&self, snapshot: HttpPullTelemetry) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if !state.open {
-            state.violation =
-                Some("source observation reported outside the live poll invocation".to_string());
-            return;
-        }
-        if state.snapshot.is_some() {
-            state.violation =
-                Some("source observation reported more than once in one live poll".to_string());
-            return;
-        }
-        state.snapshot = Some(snapshot);
-    }
-
-    fn begin_poll(&self) -> Result<SourceObservationPoll, StageFatal> {
-        let mut state = self.state.lock().map_err(|_| {
-            protocol_fatal("source observation capability lock was poisoned before poll")
-        })?;
-        if let Some(violation) = state.violation.take() {
-            return Err(protocol_fatal(violation));
-        }
-        if state.open {
-            return Err(protocol_fatal(
-                "source observation poll scope was opened while already active",
-            ));
-        }
-        state.open = true;
-        state.snapshot = None;
-        drop(state);
-        Ok(SourceObservationPoll {
-            sink: self.clone(),
-            finished: false,
-        })
-    }
-
-    fn finish_poll(&self) -> Result<Option<HttpPullTelemetry>, StageFatal> {
-        let mut state = self.state.lock().map_err(|_| {
-            protocol_fatal("source observation capability lock was poisoned after poll")
-        })?;
-        state.open = false;
-        if let Some(violation) = state.violation.take() {
-            state.snapshot = None;
-            return Err(protocol_fatal(violation));
-        }
-        Ok(state.snapshot.take())
-    }
-
-    fn cancel_poll(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.open = false;
-            state.snapshot = None;
-        }
-    }
-}
-
-struct SourceObservationPoll {
-    sink: SourceObservationSink,
-    finished: bool,
-}
-
-impl SourceObservationPoll {
-    fn finish(mut self) -> Result<Option<HttpPullTelemetry>, StageFatal> {
-        let result = self.sink.finish_poll();
-        self.finished = true;
-        result
-    }
-}
-
-impl Drop for SourceObservationPoll {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.sink.cancel_poll();
-        }
-    }
-}
-
 /// Pure synchronous finite source contract.
 #[diagnostic::on_unimplemented(
     message = "this source handler does not witness its arrow contract",
@@ -267,16 +45,8 @@ impl Drop for SourceObservationPoll {
 pub trait TypedFiniteSourceHandler: Send + Sync {
     type Output: OneFactOutcome + Send + Sync + 'static;
 
-    /// The read that this handler makes through its bound port.
-    fn read(&self) -> Option<SourceRead<Self::Output>> {
-        None
-    }
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Err(SourceError::Other(
-            SourceDiagnosticReason::Unclassified.into(),
-        ))
-    }
+    /// `read` returns the read that this handler makes through its bound port.
+    fn read(&self) -> SourceRead<Self::Output>;
 }
 
 /// Pure asynchronous finite source contract.
@@ -293,24 +63,8 @@ pub trait TypedAsyncFiniteSourceHandler: Send + Sync {
         Some(Duration::from_secs(30))
     }
 
-    /// The read that this handler makes through its bound port.
-    fn read(&self) -> Option<SourceRead<Self::Output>> {
-        None
-    }
-
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        Err(SourceError::Other(
-            SourceDiagnosticReason::Unclassified.into(),
-        ))
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        Ok(())
-    }
-
-    /// Runtime-only installation hook for the closed live-poll observation rail.
-    #[doc(hidden)]
-    fn install_source_observation_sink(&mut self, _sink: SourceObservationSink) {}
+    /// `read` returns the read that this handler makes through its bound port.
+    fn read(&self) -> SourceRead<Self::Output>;
 }
 
 /// Pure synchronous infinite source contract.
@@ -322,17 +76,8 @@ pub trait TypedAsyncFiniteSourceHandler: Send + Sync {
 pub trait TypedInfiniteSourceHandler: Send + Sync {
     type Output: OneFactOutcome + Send + Sync + 'static;
 
-    /// The read this handler declares. The framework performs each read
-    /// through the bound port.
-    fn read(&self) -> Option<SourceRead<Self::Output>> {
-        None
-    }
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        Err(SourceError::Other(
-            SourceDiagnosticReason::Unclassified.into(),
-        ))
-    }
+    /// `read` returns the read that this handler makes through its bound port.
+    fn read(&self) -> SourceRead<Self::Output>;
 }
 
 /// Pure asynchronous infinite source contract.
@@ -349,25 +94,8 @@ pub trait TypedAsyncInfiniteSourceHandler: Send + Sync {
         None
     }
 
-    /// The read this handler declares. The framework performs each read
-    /// through the bound port.
-    fn read(&self) -> Option<SourceRead<Self::Output>> {
-        None
-    }
-
-    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        Err(SourceError::Other(
-            SourceDiagnosticReason::Unclassified.into(),
-        ))
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        Ok(())
-    }
-
-    /// Runtime-only installation hook for the closed live-poll observation rail.
-    #[doc(hidden)]
-    fn install_source_observation_sink(&mut self, _sink: SourceObservationSink) {}
+    /// `read` returns the read that this handler makes through its bound port.
+    fn read(&self) -> SourceRead<Self::Output>;
 }
 
 /// Error returned by an [`IngressDecoder`]. It carries a typed diagnostic only,
@@ -464,256 +192,17 @@ pub fn prove_journal_form<T: TypedPayload>(value: T) -> Result<T, IngressDecodeE
         })
 }
 
-/// Runtime adapter for a synchronous typed finite source.
-#[doc(hidden)]
-pub struct TypedFiniteSourceHandlerAdapter<H> {
-    reader: SyncSourceReader<H>,
-    writer_id: Option<WriterId>,
-}
-
-impl<H> TypedFiniteSourceHandlerAdapter<H> {
-    pub fn new(handler: H) -> Self {
-        Self::with_reader(SourceReader::acquired(handler))
-    }
-
-    pub(super) fn cold(open: SyncReaderOpener<H>) -> Self {
-        Self::with_reader(SourceReader::cold(open))
-    }
-
-    fn with_reader(reader: SyncSourceReader<H>) -> Self {
-        Self {
-            reader,
-            writer_id: None,
-        }
-    }
-}
-
-impl<H: TypedFiniteSourceHandler> SealFinite for TypedFiniteSourceHandlerAdapter<H> {}
-
-impl<H: TypedFiniteSourceHandler> UnifiedFiniteSourceHandler
-    for TypedFiniteSourceHandlerAdapter<H>
-{
-    fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
-        self.reader.acquire(context)?;
-        Ok(())
-    }
-
-    fn install_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = Some(writer_id);
-    }
-
-    fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        let Some(writer_id) = self.writer_id else {
-            return ErasedSourceInvocation::fatal(configuration_fatal(
-                "typed source adapter invoked before runtime writer identity installation",
-            ));
-        };
-        let handler = self
-            .reader
-            .get_mut()
-            .expect("the source supervisor must acquire before polling");
-        match handler.next() {
-            Ok(Some(outputs)) => match lower_outputs(
-                writer_id,
-                outputs.into_iter().map(|output| (output, None)).collect(),
-            ) {
-                Ok(events) => ErasedSourceInvocation::completed(
-                    ErasedSourceCompletion::Batch(events),
-                    Vec::new(),
-                ),
-                Err(fatal) => ErasedSourceInvocation::fatal(fatal),
-            },
-            Ok(None) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof, Vec::new()),
-            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
-        }
-    }
-}
-
-/// Runtime adapter for a positioned synchronous finite reader (FLOWIP-134i B1).
-#[doc(hidden)]
-pub struct PositionedFiniteSourceHandlerAdapter<R> {
-    reader: SyncSourceReader<R>,
-    writer_id: Option<WriterId>,
-}
-
-impl<R> PositionedFiniteSourceHandlerAdapter<R> {
-    pub(super) fn cold(open: SyncReaderOpener<R>) -> Self {
-        Self {
-            reader: SourceReader::cold(open),
-            writer_id: None,
-        }
-    }
-}
-
-impl<R: PositionedFiniteReader> SealFinite for PositionedFiniteSourceHandlerAdapter<R> {}
-
-impl<R: PositionedFiniteReader + 'static> UnifiedFiniteSourceHandler
-    for PositionedFiniteSourceHandlerAdapter<R>
-{
-    fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
-        self.reader.acquire(context)?;
-        Ok(())
-    }
-
-    fn install_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = Some(writer_id);
-    }
-
-    fn input_pin(&self) -> Option<Result<SourceInputPinnedFact, SourcePositionError>> {
-        let reader = self.reader.get()?;
-        Some(
-            EncodedSourcePosition::encode(&reader.beginning()).map(|beginning| {
-                SourceInputPinnedFact {
-                    identity: reader.input_identity().clone(),
-                    beginning,
-                }
-            }),
-        )
-    }
-
-    fn resume_at(
-        &mut self,
-        pin: &SourceInputPinnedFact,
-        after: Option<&EncodedSourcePosition>,
-    ) -> Result<(), SourceResumeError> {
-        let reader = self
-            .reader
-            .get_mut()
-            .expect("the source supervisor must acquire before positioning");
-        if let Some(part) = reader.input_identity().changed_part(&pin.identity) {
-            return Err(SourceResumeError::Refused(
-                SourceContinuationRefusal::InputChanged { part },
-            ));
-        }
-        let position = after
-            .unwrap_or(&pin.beginning)
-            .decode::<R::Position>()
-            .map_err(|_| {
-                SourceResumeError::Refused(SourceContinuationRefusal::PositionUnreadable)
-            })?;
-        reader.seek(position).map_err(SourceResumeError::SeekFailed)
-    }
-
-    fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        let Some(writer_id) = self.writer_id else {
-            return ErasedSourceInvocation::fatal(configuration_fatal(
-                "positioned source adapter invoked before runtime writer identity installation",
-            ));
-        };
-        let reader = self
-            .reader
-            .get_mut()
-            .expect("the source supervisor must acquire before polling");
-        match reader.next() {
-            Ok(Some(records)) => match lower_positioned(writer_id, records) {
-                Ok(events) => ErasedSourceInvocation::completed(
-                    ErasedSourceCompletion::Batch(events),
-                    Vec::new(),
-                ),
-                Err(fatal) => ErasedSourceInvocation::fatal(fatal),
-            },
-            Ok(None) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof, Vec::new()),
-            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
-        }
-    }
-}
-
-/// Runtime adapter for a synchronous typed infinite source.
-#[doc(hidden)]
-pub struct TypedInfiniteSourceHandlerAdapter<H> {
-    reader: SyncSourceReader<H>,
-    writer_id: Option<WriterId>,
-}
-
-impl<H> TypedInfiniteSourceHandlerAdapter<H> {
-    pub fn new(handler: H) -> Self {
-        Self::with_reader(SourceReader::acquired(handler))
-    }
-
-    pub(super) fn cold(open: SyncReaderOpener<H>) -> Self {
-        Self::with_reader(SourceReader::cold(open))
-    }
-
-    fn with_reader(reader: SyncSourceReader<H>) -> Self {
-        Self {
-            reader,
-            writer_id: None,
-        }
-    }
-}
-
-impl<H: TypedInfiniteSourceHandler> SealInfinite for TypedInfiniteSourceHandlerAdapter<H> {}
-
-impl<H> UnifiedInfiniteSourceHandler for TypedInfiniteSourceHandlerAdapter<H>
-where
-    H: TypedInfiniteSourceHandler + Send + Sync,
-{
-    fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
-        self.reader.acquire(context)?;
-        Ok(())
-    }
-
-    fn install_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = Some(writer_id);
-    }
-
-    fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        let Some(writer_id) = self.writer_id else {
-            return ErasedSourceInvocation::fatal(configuration_fatal(
-                "typed source adapter invoked before runtime writer identity installation",
-            ));
-        };
-        let handler = self
-            .reader
-            .get_mut()
-            .expect("the source supervisor must acquire before polling");
-        match handler.next() {
-            Ok(outputs) => match lower_outputs(
-                writer_id,
-                outputs.into_iter().map(|output| (output, None)).collect(),
-            ) {
-                Ok(events) => ErasedSourceInvocation::completed(
-                    ErasedSourceCompletion::Batch(events),
-                    Vec::new(),
-                ),
-                Err(fatal) => ErasedSourceInvocation::fatal(fatal),
-            },
-            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
-        }
-    }
-}
-
 /// Runtime adapter for an asynchronous typed finite source.
 #[doc(hidden)]
 pub struct TypedAsyncFiniteSourceHandlerAdapter<H: TypedAsyncFiniteSourceHandler> {
-    reader: AsyncSourceReader<H>,
-    writer_id: Option<WriterId>,
-    observation_sink: SourceObservationSink,
-    recorder: Arc<dyn ObservationRecorder>,
-    reads: Option<DrivenReads<H::Output>>,
+    handler: H,
+    reads: DrivenReads<H::Output>,
 }
 
 impl<H: TypedAsyncFiniteSourceHandler> TypedAsyncFiniteSourceHandlerAdapter<H> {
     pub fn new(handler: H) -> Self {
-        let reads = handler.read().map(DrivenReads::new);
-        let mut adapter = Self::with_reader(SourceReader::acquired(handler));
-        adapter.reads = reads;
-        adapter
-    }
-
-    pub(super) fn cold(open: AsyncReaderOpener<H>) -> Self {
-        Self::with_reader(SourceReader::cold(open))
-    }
-
-    fn with_reader(reader: AsyncSourceReader<H>) -> Self {
-        let observation_sink = SourceObservationSink::new();
-        Self {
-            reader,
-            writer_id: None,
-            observation_sink,
-            recorder: Arc::new(NoObservations),
-            reads: None,
-        }
+        let reads = DrivenReads::new(handler.read());
+        Self { handler, reads }
     }
 }
 
@@ -820,10 +309,7 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
         self.emitted = None;
         if let Some(event) = self.held.take() {
             self.emitted = Some(event.clone());
-            return ErasedSourceInvocation::completed(
-                ErasedSourceCompletion::Batch(vec![event]),
-                Vec::new(),
-            );
+            return ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(vec![event]));
         }
         loop {
             if let Some(end) = self.next_read().await {
@@ -831,13 +317,12 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
             }
             match self.read.next_output() {
                 None => {
-                    return ErasedSourceInvocation::completed(
-                        ErasedSourceCompletion::Batch(Vec::new()),
+                    return ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(
                         Vec::new(),
-                    )
+                    ))
                 }
                 Some(Err(error)) => match self.records(&error).await {
-                    Ok(true) => return ErasedSourceInvocation::handler_error(error, Vec::new()),
+                    Ok(true) => return ErasedSourceInvocation::handler_error(error),
                     Ok(false) => {}
                     Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
                 },
@@ -850,7 +335,7 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
         while !self.read.has_pending() {
             let Some(mut context) = self.context.clone() else {
                 return Some(ErasedSourceInvocation::fatal(configuration_fatal(
-                    "source read invoked before the runtime installed its stage context",
+                    "source read before the runtime installed its stage context",
                 )));
             };
             let Some(number) = self.number.checked_add(1) else {
@@ -871,7 +356,6 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
                 }
                 return Some(ErasedSourceInvocation::completed(
                     ErasedSourceCompletion::Eof,
-                    Vec::new(),
                 ));
             }
             let mut effects = crate::effects::EffectsCore::new(context);
@@ -885,7 +369,7 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
                     ));
                 }
                 if let Err(error) = ready.await {
-                    return Some(ErasedSourceInvocation::handler_error(error, Vec::new()));
+                    return Some(ErasedSourceInvocation::handler_error(error));
                 }
             }
             let outcome = self.read.read(&mut effects).await;
@@ -895,7 +379,6 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
                 Ok(ReadEnd::EndOfInput) => {
                     return Some(ErasedSourceInvocation::completed(
                         ErasedSourceCompletion::Eof,
-                        Vec::new(),
                     ))
                 }
                 Ok(ReadEnd::Batch) => {
@@ -909,10 +392,7 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
                     match read_failure(&error) {
                         Some(failure) => match self.records(&failure).await {
                             Ok(true) => {
-                                return Some(ErasedSourceInvocation::handler_error(
-                                    failure,
-                                    Vec::new(),
-                                ))
+                                return Some(ErasedSourceInvocation::handler_error(failure))
                             }
                             Ok(false) => {}
                             Err(fatal) => return Some(ErasedSourceInvocation::fatal(fatal)),
@@ -953,16 +433,27 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
                 )
             }
         };
+        if self.reproduced
+            && self.context.as_ref().is_some_and(|context| {
+                super::read::recording_ends_before(context, self.number, &event.id)
+            })
+        {
+            return match effects.reproduce_trailing_crossing().await {
+                Ok(()) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof),
+                Err(error) => ErasedSourceInvocation::fatal(
+                    effects
+                        .authoring_halt_fatal()
+                        .unwrap_or_else(|| protocol_fatal(error.to_string())),
+                ),
+            };
+        }
         match self.preserved(event).await {
             Ok(event) => {
                 if self.reproduced {
                     self.replayed += 1;
                 }
                 self.emitted = Some(event.clone());
-                ErasedSourceInvocation::completed(
-                    ErasedSourceCompletion::Batch(vec![event]),
-                    Vec::new(),
-                )
+                ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(vec![event]))
             }
             Err(fatal) => ErasedSourceInvocation::fatal(fatal),
         }
@@ -973,8 +464,6 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
     }
 }
 
-// Each run keeps the rejections of the records it read, so a resume repeats
-// none of the rejections its recorded runs committed.
 fn committed_rejections(context: &crate::effects::EffectInvocationContext) -> u64 {
     let (Some(archive), Some(flow)) = (
         context.stage.runtime_execution.archive_for_io(),
@@ -1055,149 +544,47 @@ where
     H: TypedAsyncFiniteSourceHandler + Send + Sync,
 {
     fn has_pending_records(&self) -> bool {
-        self.reads.as_ref().is_some_and(DrivenReads::has_pending)
+        self.reads.has_pending()
     }
 
     fn replayed_facts(&self) -> u64 {
-        self.reads.as_ref().map_or(0, |reads| reads.replayed)
+        self.reads.replayed
     }
 
     fn read_declaration(
         &self,
-    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
-        self.reads.as_ref().map(|reads| reads.read.declaration())
+    ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError> {
+        self.reads.read.declaration()
     }
 
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
-        if let Some(reads) = &mut self.reads {
-            reads.context = Some(context);
-        }
+        self.reads.context = Some(context);
     }
 
     fn poll_cancelled(&mut self) {
-        if let Some(reads) = &mut self.reads {
-            reads.poll_cancelled();
-        }
-    }
-
-    async fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
-        if let Some(handler) = self.reader.acquire(context).await? {
-            if self.writer_id.is_some() {
-                handler.install_source_observation_sink(self.observation_sink.clone());
-            }
-        }
-        Ok(())
-    }
-
-    fn install_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = Some(writer_id);
-        if let Some(handler) = self.reader.get_mut() {
-            handler.install_source_observation_sink(self.observation_sink.clone());
-        }
-    }
-
-    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
-        self.recorder = recorder;
+        self.reads.poll_cancelled();
     }
 
     fn poll_timeout(&self) -> Option<Duration> {
-        self.reader
-            .get()
-            .map_or(Some(Duration::from_secs(30)), |handler| {
-                handler.poll_timeout()
-            })
+        self.handler.poll_timeout()
     }
 
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        if let Some(reads) = &mut self.reads {
-            return reads.invocation().await;
-        }
-        let Some(writer_id) = self.writer_id else {
-            return ErasedSourceInvocation::fatal(configuration_fatal(
-                "typed async source adapter invoked before runtime writer identity installation",
-            ));
-        };
-        let scope = match self.observation_sink.begin_poll() {
-            Ok(scope) => scope,
-            Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
-        };
-        let result = self
-            .reader
-            .get_mut()
-            .expect("the source supervisor must acquire before polling")
-            .next()
-            .await;
-        let snapshot = match scope.finish() {
-            Ok(snapshot) => snapshot,
-            Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
-        };
-        let observations = snapshot
-            .map(|snapshot| {
-                vec![http_pull_evidence(
-                    writer_id,
-                    snapshot,
-                    self.recorder.as_ref(),
-                )]
-            })
-            .unwrap_or_default();
-        match result {
-            Ok(Some(outputs)) => match lower_outputs(
-                writer_id,
-                outputs.into_iter().map(|output| (output, None)).collect(),
-            ) {
-                Ok(events) => ErasedSourceInvocation::completed(
-                    ErasedSourceCompletion::Batch(events),
-                    observations,
-                ),
-                Err(fatal) => ErasedSourceInvocation::fatal(fatal),
-            },
-            Ok(None) => {
-                ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof, observations)
-            }
-            Err(error) => ErasedSourceInvocation::handler_error(error, observations),
-        }
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        match self.reader.get_mut() {
-            Some(handler) => handler.drain().await,
-            None => Ok(()),
-        }
+        self.reads.invocation().await
     }
 }
 
 /// Runtime adapter for an asynchronous typed infinite source.
 #[doc(hidden)]
 pub struct TypedAsyncInfiniteSourceHandlerAdapter<H: TypedAsyncInfiniteSourceHandler> {
-    reader: AsyncSourceReader<H>,
-    writer_id: Option<WriterId>,
-    observation_sink: SourceObservationSink,
-    recorder: Arc<dyn ObservationRecorder>,
-    reads: Option<DrivenReads<H::Output>>,
+    handler: H,
+    reads: DrivenReads<H::Output>,
 }
 
 impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<H> {
     pub fn new(handler: H) -> Self {
-        let reads = handler.read().map(DrivenReads::new);
-        Self {
-            reads,
-            ..Self::with_reader(SourceReader::acquired(handler))
-        }
-    }
-
-    pub(super) fn cold(open: AsyncReaderOpener<H>) -> Self {
-        Self::with_reader(SourceReader::cold(open))
-    }
-
-    fn with_reader(reader: AsyncSourceReader<H>) -> Self {
-        let observation_sink = SourceObservationSink::new();
-        Self {
-            reader,
-            writer_id: None,
-            observation_sink,
-            recorder: Arc::new(NoObservations),
-            reads: None,
-        }
+        let reads = DrivenReads::new(handler.read());
+        Self { handler, reads }
     }
 }
 
@@ -1212,127 +599,248 @@ where
     H: TypedAsyncInfiniteSourceHandler + Send + Sync,
 {
     fn has_pending_records(&self) -> bool {
-        self.reads.as_ref().is_some_and(DrivenReads::has_pending)
+        self.reads.has_pending()
     }
 
     fn read_declaration(
         &self,
-    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
-        self.reads.as_ref().map(|reads| reads.read.declaration())
+    ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError> {
+        self.reads.read.declaration()
     }
 
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
-        if let Some(reads) = &mut self.reads {
-            reads.context = Some(context);
-        }
+        self.reads.context = Some(context);
     }
 
     fn poll_cancelled(&mut self) {
-        if let Some(reads) = &mut self.reads {
-            reads.poll_cancelled();
-        }
+        self.reads.poll_cancelled();
     }
 
     async fn cross_to_live(&mut self) -> Result<bool, StageFatal> {
-        match &mut self.reads {
-            Some(reads) => reads.cross_to_live().await,
-            None => Ok(false),
-        }
+        self.reads.cross_to_live().await
     }
 
     fn replayed_facts(&self) -> u64 {
-        self.reads.as_ref().map_or(0, |reads| reads.replayed)
-    }
-
-    async fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
-        if let Some(handler) = self.reader.acquire(context).await? {
-            if self.writer_id.is_some() {
-                handler.install_source_observation_sink(self.observation_sink.clone());
-            }
-        }
-        Ok(())
-    }
-
-    fn install_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = Some(writer_id);
-        if let Some(handler) = self.reader.get_mut() {
-            handler.install_source_observation_sink(self.observation_sink.clone());
-        }
-    }
-
-    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
-        self.recorder = recorder;
+        self.reads.replayed
     }
 
     fn poll_timeout(&self) -> Option<Duration> {
-        self.reader.get().and_then(|handler| handler.poll_timeout())
+        self.handler.poll_timeout()
     }
 
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        if let Some(reads) = &mut self.reads {
-            return reads.invocation().await;
-        }
-        let Some(writer_id) = self.writer_id else {
-            return ErasedSourceInvocation::fatal(configuration_fatal(
-                "typed async source adapter invoked before runtime writer identity installation",
-            ));
-        };
-        let scope = match self.observation_sink.begin_poll() {
-            Ok(scope) => scope,
-            Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
-        };
-        let result = self
-            .reader
-            .get_mut()
-            .expect("the source supervisor must acquire before polling")
-            .next()
-            .await;
-        let snapshot = match scope.finish() {
-            Ok(snapshot) => snapshot,
-            Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
-        };
-        let observations = snapshot
-            .map(|snapshot| {
-                vec![http_pull_evidence(
-                    writer_id,
-                    snapshot,
-                    self.recorder.as_ref(),
-                )]
-            })
-            .unwrap_or_default();
-        match result {
-            Ok(outputs) => match lower_outputs(
-                writer_id,
-                outputs.into_iter().map(|output| (output, None)).collect(),
-            ) {
-                Ok(events) => ErasedSourceInvocation::completed(
-                    ErasedSourceCompletion::Batch(events),
-                    observations,
-                ),
-                Err(fatal) => ErasedSourceInvocation::fatal(fatal),
-            },
-            Err(error) => ErasedSourceInvocation::handler_error(error, observations),
+        self.reads.invocation().await
+    }
+}
+
+impl<H: TypedAsyncFiniteSourceHandler + 'static>
+    super::prepared::sealed::Admitted<dyn UnifiedAsyncFiniteSourceHandler> for H
+{
+}
+
+impl<H: TypedAsyncFiniteSourceHandler + 'static>
+    super::prepared::AdmitSource<dyn UnifiedAsyncFiniteSourceHandler> for H
+{
+    type Output = H::Output;
+    type Handler = TypedAsyncFiniteSourceHandlerAdapter<H>;
+
+    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
+        let handler = TypedAsyncFiniteSourceHandlerAdapter::new(self);
+        let system = handler.reads.read.source_system();
+        let continuation = handler.reads.read.continuation();
+        super::prepared::AdmittedSource {
+            handler,
+            continuation,
+            system,
         }
     }
+}
 
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        match self.reader.get_mut() {
-            Some(handler) => handler.drain().await,
-            None => Ok(()),
+impl<H: TypedAsyncInfiniteSourceHandler + 'static>
+    super::prepared::sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler> for H
+{
+}
+
+impl<H: TypedAsyncInfiniteSourceHandler + 'static>
+    super::prepared::AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler> for H
+{
+    type Output = H::Output;
+    type Handler = TypedAsyncInfiniteSourceHandlerAdapter<H>;
+
+    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
+        let handler = TypedAsyncInfiniteSourceHandlerAdapter::new(self);
+        let system = handler.reads.read.source_system();
+        let continuation = handler.reads.read.continuation();
+        super::prepared::AdmittedSource {
+            handler,
+            continuation,
+            system,
+        }
+    }
+}
+
+#[doc(hidden)]
+pub enum SyncInfiniteReads {}
+
+#[doc(hidden)]
+pub struct InfiniteReadAdapter<Output> {
+    reads: DrivenReads<Output>,
+}
+
+impl<Output> SealAsyncInfinite for InfiniteReadAdapter<Output> {}
+
+#[async_trait]
+impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandler
+    for InfiniteReadAdapter<Output>
+{
+    fn has_pending_records(&self) -> bool {
+        self.reads.has_pending()
+    }
+
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::InfiniteSource
+    }
+
+    fn idle_backoff_cap(&self) -> Duration {
+        SYNC_IDLE_BACKOFF_CAP
+    }
+
+    fn read_declaration(
+        &self,
+    ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError> {
+        self.reads.read.declaration()
+    }
+
+    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
+        self.reads.context = Some(context);
+    }
+
+    fn poll_cancelled(&mut self) {
+        self.reads.poll_cancelled();
+    }
+
+    async fn cross_to_live(&mut self) -> Result<bool, StageFatal> {
+        self.reads.cross_to_live().await
+    }
+
+    fn replayed_facts(&self) -> u64 {
+        self.reads.replayed
+    }
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
+        self.reads.invocation().await
+    }
+}
+
+impl<H: TypedInfiniteSourceHandler + 'static> super::prepared::sealed::Admitted<SyncInfiniteReads>
+    for H
+{
+}
+
+impl<H: TypedInfiniteSourceHandler + 'static> super::prepared::AdmitSource<SyncInfiniteReads>
+    for H
+{
+    type Output = H::Output;
+    type Handler = InfiniteReadAdapter<H::Output>;
+
+    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
+        let read = self.read();
+        let system = read.source_system();
+        let continuation = read.continuation();
+        super::prepared::AdmittedSource {
+            handler: InfiniteReadAdapter {
+                reads: DrivenReads::new(read),
+            },
+            continuation,
+            system,
+        }
+    }
+}
+
+#[doc(hidden)]
+pub enum SyncFiniteReads {}
+
+#[doc(hidden)]
+pub struct FiniteReadAdapter<Output> {
+    reads: DrivenReads<Output>,
+}
+
+impl<Output> SealAsyncFinite for FiniteReadAdapter<Output> {}
+
+#[async_trait]
+impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncFiniteSourceHandler
+    for FiniteReadAdapter<Output>
+{
+    fn has_pending_records(&self) -> bool {
+        self.reads.has_pending()
+    }
+
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::FiniteSource
+    }
+
+    fn replayed_facts(&self) -> u64 {
+        self.reads.replayed
+    }
+
+    fn idle_backoff_cap(&self) -> Duration {
+        SYNC_IDLE_BACKOFF_CAP
+    }
+
+    fn read_declaration(
+        &self,
+    ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError> {
+        self.reads.read.declaration()
+    }
+
+    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
+        self.reads.context = Some(context);
+    }
+
+    fn poll_cancelled(&mut self) {
+        self.reads.poll_cancelled();
+    }
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
+        self.reads.invocation().await
+    }
+}
+
+impl<H: TypedFiniteSourceHandler + 'static> super::prepared::sealed::Admitted<SyncFiniteReads>
+    for H
+{
+}
+
+impl<H: TypedFiniteSourceHandler + 'static> super::prepared::AdmitSource<SyncFiniteReads> for H {
+    type Output = H::Output;
+    type Handler = FiniteReadAdapter<H::Output>;
+
+    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
+        let read = self.read();
+        let system = read.source_system();
+        let continuation = read.continuation();
+        super::prepared::AdmittedSource {
+            handler: FiniteReadAdapter {
+                reads: DrivenReads::new(read),
+            },
+            continuation,
+            system,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::erased::ErasedSourceOutcome;
     use super::*;
-    use crate::execution::{RuntimeExecution, RuntimeMode};
-    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-    use obzenflow_core::event::ChainPayload;
-    use obzenflow_core::{FlowId, OneFactOutcome, StageId, TransformOutcome, TypedPayload};
     use serde::{Deserialize, Serialize};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     struct Row(u32);
@@ -1356,290 +864,6 @@ mod tests {
             }
             Ok(Row(row + self.offset))
         }
-    }
-
-    #[derive(Clone, Debug)]
-    struct OneRow;
-
-    impl TypedFiniteSourceHandler for OneRow {
-        type Output = Row;
-
-        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-            Ok(Some(vec![Row(7)]))
-        }
-    }
-
-    #[test]
-    fn finite_adapter_owns_canonical_envelope_and_writer() {
-        let writer_id = WriterId::from(StageId::new());
-        let mut adapter = TypedFiniteSourceHandlerAdapter::new(OneRow);
-        UnifiedFiniteSourceHandler::install_writer_id(&mut adapter, writer_id);
-
-        let (outcome, observations) =
-            UnifiedFiniteSourceHandler::next_invocation(&mut adapter).into_parts();
-        let ErasedSourceOutcome::Completed(ErasedSourceCompletion::Batch(events)) = outcome else {
-            panic!("expected batch")
-        };
-        assert!(observations.is_empty());
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].writer_id, writer_id);
-        assert_eq!(events[0].event_type(), Row::event_type_name());
-        assert_eq!(Row::from_event(&events[0]), Some(Row(7)));
-    }
-
-    #[test]
-    fn missing_writer_fails_before_handler_poll() {
-        #[derive(Clone, Debug)]
-        struct Counted {
-            calls: Arc<AtomicUsize>,
-        }
-
-        impl TypedFiniteSourceHandler for Counted {
-            type Output = Row;
-
-            fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(vec![Row(1)]))
-            }
-        }
-
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut adapter = TypedFiniteSourceHandlerAdapter::new(Counted {
-            calls: calls.clone(),
-        });
-        let (outcome, observations) =
-            UnifiedFiniteSourceHandler::next_invocation(&mut adapter).into_parts();
-        let ErasedSourceOutcome::Fatal(fatal) = outcome else {
-            panic!("expected fatal")
-        };
-        assert!(observations.is_empty());
-        assert_eq!(fatal.code, StageFatalCode::Configuration);
-        assert_eq!(fatal.reason, StageFatalReason::ConfigurationInvariant);
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    struct OtherRow(u32);
-
-    impl TypedPayload for OtherRow {
-        const EVENT_TYPE: &'static str = "typed_source.other_row";
-    }
-
-    #[derive(Clone, Debug)]
-    struct DishonestProduct {
-        first: Row,
-        second: OtherRow,
-    }
-
-    impl obzenflow_core::OutcomeFacts for DishonestProduct {
-        fn fact_types() -> Vec<obzenflow_core::TypedFactType> {
-            vec![
-                obzenflow_core::TypedFactType::of::<Row>(),
-                obzenflow_core::TypedFactType::of::<OtherRow>(),
-            ]
-        }
-
-        fn into_facts(
-            self,
-        ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::OutcomeError> {
-            Ok(vec![
-                obzenflow_core::TypedFact::from_payload(self.first)?,
-                obzenflow_core::TypedFact::from_payload(self.second)?,
-            ])
-        }
-
-        fn try_from_facts(
-            facts: &[obzenflow_core::TypedFact],
-        ) -> Result<Self, obzenflow_core::OutcomeError> {
-            Ok(Self {
-                first: obzenflow_core::event::schema::decode_member_fact(facts)?,
-                second: obzenflow_core::event::schema::decode_member_fact(facts)?,
-            })
-        }
-    }
-
-    impl obzenflow_core::Outcome for DishonestProduct {
-        type Members = obzenflow_core::event::schema::WithMember<
-            Row,
-            obzenflow_core::event::schema::WithMember<
-                OtherRow,
-                obzenflow_core::event::schema::EmptySet,
-            >,
-        >;
-
-        fn member_fact_types() -> Vec<obzenflow_core::TypedFactType> {
-            <Self as obzenflow_core::OutcomeFacts>::fact_types()
-        }
-    }
-
-    impl TransformOutcome for DishonestProduct {}
-
-    // Deliberately false semantic assertion: the adapter must detect that
-    // this value lowers to two facts and commit neither one.
-    impl OneFactOutcome for DishonestProduct {}
-
-    #[derive(Clone, Debug)]
-    struct DishonestSource;
-
-    impl TypedFiniteSourceHandler for DishonestSource {
-        type Output = DishonestProduct;
-
-        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-            Ok(Some(vec![DishonestProduct {
-                first: Row(1),
-                second: OtherRow(2),
-            }]))
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct ListSource;
-
-    impl TypedFiniteSourceHandler for ListSource {
-        type Output = obzenflow_core::outcome![Row | OtherRow];
-
-        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-            Ok(Some(vec![
-                obzenflow_core::outcome(Row(1)),
-                obzenflow_core::outcome(OtherRow(2)),
-            ]))
-        }
-    }
-
-    #[test]
-    fn source_list_output_writes_recorded_facts() {
-        let writer_id = WriterId::from(StageId::new());
-        let mut adapter = TypedFiniteSourceHandlerAdapter::new(ListSource);
-        UnifiedFiniteSourceHandler::install_writer_id(&mut adapter, writer_id);
-
-        let (outcome, _) = UnifiedFiniteSourceHandler::next_invocation(&mut adapter).into_parts();
-        let ErasedSourceOutcome::Completed(ErasedSourceCompletion::Batch(events)) = outcome else {
-            panic!("expected batch")
-        };
-        assert_eq!(events.len(), 2);
-        assert_eq!(Row::from_event(&events[0]), Some(Row(1)));
-        assert_eq!(OtherRow::from_event(&events[1]), Some(OtherRow(2)));
-        assert!(events.iter().all(|event| event.writer_id == writer_id));
-    }
-
-    #[test]
-    fn lowering_contradiction_is_atomic_framework_fatal() {
-        let mut adapter = TypedFiniteSourceHandlerAdapter::new(DishonestSource);
-        UnifiedFiniteSourceHandler::install_writer_id(&mut adapter, WriterId::from(StageId::new()));
-
-        let (outcome, observations) =
-            UnifiedFiniteSourceHandler::next_invocation(&mut adapter).into_parts();
-        let ErasedSourceOutcome::Fatal(fatal) = outcome else {
-            panic!("dishonest one-fact output must fail atomically")
-        };
-        assert!(observations.is_empty());
-        assert_eq!(fatal.code, StageFatalCode::Protocol);
-        assert_eq!(fatal.reason, StageFatalReason::ProtocolInputIntegrity);
-        assert!(fatal.detail.contains("lowered to 2 facts"));
-    }
-
-    #[derive(Clone, Debug)]
-    struct SnapshotThenValidation {
-        sink: Option<SourceObservationSink>,
-    }
-
-    #[async_trait]
-    impl TypedAsyncFiniteSourceHandler for SnapshotThenValidation {
-        type Output = Row;
-
-        async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-            let snapshot = HttpPullTelemetry {
-                requests_total: 3,
-                ..HttpPullTelemetry::default()
-            };
-            self.sink
-                .as_ref()
-                .expect("runtime installs observation sink")
-                .report_http_pull(snapshot);
-            Err(SourceError::Validation(
-                SourceDiagnosticReason::InvalidRecord.into(),
-            ))
-        }
-
-        fn install_source_observation_sink(&mut self, sink: SourceObservationSink) {
-            self.sink = Some(sink);
-        }
-    }
-
-    #[tokio::test]
-    async fn same_poll_snapshot_survives_validation_error() {
-        let writer_id = WriterId::from(StageId::new());
-        let mut adapter =
-            TypedAsyncFiniteSourceHandlerAdapter::new(SnapshotThenValidation { sink: None });
-        UnifiedAsyncFiniteSourceHandler::install_writer_id(&mut adapter, writer_id);
-        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
-        UnifiedAsyncFiniteSourceHandler::install_observation_recorder(
-            &mut adapter,
-            execution.observation_recorder(FlowId::new(), writer_id),
-        );
-
-        let (outcome, observations) =
-            UnifiedAsyncFiniteSourceHandler::next_invocation(&mut adapter)
-                .await
-                .into_parts();
-        assert!(matches!(
-            outcome,
-            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref diagnostic))
-                if diagnostic.reason() == SourceDiagnosticReason::InvalidRecord
-        ));
-        assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].writer_id, writer_id);
-        assert!(matches!(
-            &observations[0].payload,
-            ChainPayload::Execution(ExecutionPayload::HttpPullState(_))
-        ));
-        use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
-        assert!(execution.observations().snapshot().iter().flat_map(|packet| &packet.records)
-            .any(|record| matches!(record, ObservationRecord::HttpPull(snapshot) if snapshot.requests_total == 3)));
-    }
-
-    #[derive(Clone, Debug)]
-    struct MisusesCapabilityOnInstall {
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl TypedAsyncFiniteSourceHandler for MisusesCapabilityOnInstall {
-        type Output = Row;
-
-        async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(vec![Row(9)]))
-        }
-
-        fn install_source_observation_sink(&mut self, sink: SourceObservationSink) {
-            sink.report_http_pull(HttpPullTelemetry::default());
-        }
-    }
-
-    #[tokio::test]
-    async fn observation_misuse_fails_before_poll_with_zero_output() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut adapter = TypedAsyncFiniteSourceHandlerAdapter::new(MisusesCapabilityOnInstall {
-            calls: calls.clone(),
-        });
-        UnifiedAsyncFiniteSourceHandler::install_writer_id(
-            &mut adapter,
-            WriterId::from(StageId::new()),
-        );
-
-        let (outcome, observations) =
-            UnifiedAsyncFiniteSourceHandler::next_invocation(&mut adapter)
-                .await
-                .into_parts();
-        let ErasedSourceOutcome::Fatal(fatal) = outcome else {
-            panic!("out-of-poll capability use must be fatal")
-        };
-        assert!(observations.is_empty());
-        assert_eq!(fatal.code, StageFatalCode::Protocol);
-        assert_eq!(fatal.reason, StageFatalReason::ProtocolInputIntegrity);
-        assert!(fatal.detail.contains("outside the live poll"));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1725,239 +949,5 @@ mod tests {
             non_finite.reason(),
             SourceDiagnosticReason::UnrepresentableValue
         );
-    }
-}
-
-impl<H: TypedAsyncFiniteSourceHandler + 'static>
-    super::prepared::sealed::Admitted<dyn UnifiedAsyncFiniteSourceHandler> for H
-{
-}
-
-impl<H: TypedAsyncFiniteSourceHandler + 'static>
-    super::prepared::AdmitSource<dyn UnifiedAsyncFiniteSourceHandler> for H
-{
-    type Output = H::Output;
-    type Handler = TypedAsyncFiniteSourceHandlerAdapter<H>;
-
-    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
-        let handler = TypedAsyncFiniteSourceHandlerAdapter::new(self);
-        let (system, continuation) = handler
-            .reads
-            .as_ref()
-            .map(|reads| (reads.read.source_system(), reads.read.continuation()))
-            .expect("a source handler in a row reads through a bound port");
-        super::prepared::AdmittedSource {
-            handler,
-            continuation,
-            system,
-        }
-    }
-}
-
-impl<H: TypedAsyncInfiniteSourceHandler + 'static>
-    super::prepared::sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler> for H
-{
-}
-
-impl<H: TypedAsyncInfiniteSourceHandler + 'static>
-    super::prepared::AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler> for H
-{
-    type Output = H::Output;
-    type Handler = TypedAsyncInfiniteSourceHandlerAdapter<H>;
-
-    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
-        let handler = TypedAsyncInfiniteSourceHandlerAdapter::new(self);
-        let (system, continuation) = handler
-            .reads
-            .as_ref()
-            .map(|reads| (reads.read.source_system(), reads.read.continuation()))
-            .expect("a source handler in a row reads through a bound port");
-        super::prepared::AdmittedSource {
-            handler,
-            continuation,
-            system,
-        }
-    }
-}
-
-/// The stage family of a synchronous typed infinite handler that reads
-/// through a bound port. Its reads run on the asynchronous supervisor.
-#[doc(hidden)]
-pub enum SyncInfiniteReads {}
-
-/// Runtime adapter that drives the declared read of a synchronous typed
-/// infinite source.
-#[doc(hidden)]
-pub struct InfiniteReadAdapter<Output> {
-    reads: DrivenReads<Output>,
-}
-
-impl<Output> SealAsyncInfinite for InfiniteReadAdapter<Output> {}
-
-#[async_trait]
-impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandler
-    for InfiniteReadAdapter<Output>
-{
-    fn has_pending_records(&self) -> bool {
-        self.reads.has_pending()
-    }
-
-    fn supervisor_kind(&self) -> SupervisorKind {
-        SupervisorKind::InfiniteSource
-    }
-
-    fn idle_backoff_cap(&self) -> Duration {
-        SYNC_IDLE_BACKOFF_CAP
-    }
-
-    fn read_declaration(
-        &self,
-    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
-        Some(self.reads.read.declaration())
-    }
-
-    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
-        self.reads.context = Some(context);
-    }
-
-    fn poll_cancelled(&mut self) {
-        self.reads.poll_cancelled();
-    }
-
-    async fn cross_to_live(&mut self) -> Result<bool, StageFatal> {
-        self.reads.cross_to_live().await
-    }
-
-    fn replayed_facts(&self) -> u64 {
-        self.reads.replayed
-    }
-
-    fn install_writer_id(&mut self, _writer_id: WriterId) {}
-
-    fn poll_timeout(&self) -> Option<Duration> {
-        None
-    }
-
-    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        self.reads.invocation().await
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        Ok(())
-    }
-}
-
-impl<H: TypedInfiniteSourceHandler + 'static> super::prepared::sealed::Admitted<SyncInfiniteReads>
-    for H
-{
-}
-
-impl<H: TypedInfiniteSourceHandler + 'static> super::prepared::AdmitSource<SyncInfiniteReads>
-    for H
-{
-    type Output = H::Output;
-    type Handler = InfiniteReadAdapter<H::Output>;
-
-    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
-        let read = self
-            .read()
-            .expect("a source handler in a row reads through a bound port");
-        let system = read.source_system();
-        let continuation = read.continuation();
-        super::prepared::AdmittedSource {
-            handler: InfiniteReadAdapter {
-                reads: DrivenReads::new(read),
-            },
-            continuation,
-            system,
-        }
-    }
-}
-
-/// The stage family of a synchronous typed handler that reads through a bound
-/// port. Its reads run on the asynchronous supervisor.
-#[doc(hidden)]
-pub enum SyncFiniteReads {}
-
-/// Runtime adapter that drives the declared read of a synchronous typed
-/// finite source.
-#[doc(hidden)]
-pub struct FiniteReadAdapter<Output> {
-    reads: DrivenReads<Output>,
-}
-
-impl<Output> SealAsyncFinite for FiniteReadAdapter<Output> {}
-
-#[async_trait]
-impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncFiniteSourceHandler
-    for FiniteReadAdapter<Output>
-{
-    fn has_pending_records(&self) -> bool {
-        self.reads.has_pending()
-    }
-
-    fn supervisor_kind(&self) -> SupervisorKind {
-        SupervisorKind::FiniteSource
-    }
-
-    fn replayed_facts(&self) -> u64 {
-        self.reads.replayed
-    }
-
-    fn idle_backoff_cap(&self) -> Duration {
-        SYNC_IDLE_BACKOFF_CAP
-    }
-
-    fn read_declaration(
-        &self,
-    ) -> Option<Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>> {
-        Some(self.reads.read.declaration())
-    }
-
-    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
-        self.reads.context = Some(context);
-    }
-
-    fn poll_cancelled(&mut self) {
-        self.reads.poll_cancelled();
-    }
-
-    fn install_writer_id(&mut self, _writer_id: WriterId) {}
-
-    fn poll_timeout(&self) -> Option<Duration> {
-        None
-    }
-
-    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        self.reads.invocation().await
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        Ok(())
-    }
-}
-
-impl<H: TypedFiniteSourceHandler + 'static> super::prepared::sealed::Admitted<SyncFiniteReads>
-    for H
-{
-}
-
-impl<H: TypedFiniteSourceHandler + 'static> super::prepared::AdmitSource<SyncFiniteReads> for H {
-    type Output = H::Output;
-    type Handler = FiniteReadAdapter<H::Output>;
-
-    fn admit(self) -> super::prepared::AdmittedSource<Self::Handler> {
-        let read = self
-            .read()
-            .expect("a source handler in a row reads through a bound port");
-        let system = read.source_system();
-        let continuation = read.continuation();
-        super::prepared::AdmittedSource {
-            handler: FiniteReadAdapter {
-                reads: DrivenReads::new(read),
-            },
-            continuation,
-            system,
-        }
     }
 }

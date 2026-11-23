@@ -28,12 +28,6 @@
 //! immediately above the inner `flow!`, and only their names appear here.
 //! `placeholder!()` and `placeholder!("reason")` remain the sketching forms.
 //!
-//! The decoration matrix covers binding-derived and explicit names plus each
-//! family's applicable contract, the `with` clause and
-//! catalog clauses. A source's poll timeout is configured on the handler and
-//! exposed through its `poll_timeout()` method; it is not a stage-macro clause
-//! or positional tuple.
-//!
 //! The pre-FLOWIP-114c untyped forms (`source!(handler)`,
 //! `transform!(handler)`, `sink!(handler)`, etc.) and the mixed-leg join arms
 //! (`join!(catalog Ref: mixed, ...)`) were removed in the PR that operationalized
@@ -225,7 +219,8 @@ macro_rules! __obzenflow_source_typed {
     }};
 }
 
-/// Create a source stage descriptor for a handler of any source role.
+/// `__obzenflow_source_attachment_contract!` creates a source stage descriptor for a
+/// handler of any source role.
 #[macro_export]
 macro_rules! __obzenflow_source_attachment_contract {
 
@@ -409,25 +404,25 @@ macro_rules! __obzenflow_source_attachment_contract {
     ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "source!",
-            "let source = Port::to(MySource::new(...)); events = source!(Event => source);"
+            "let source = MySource::new(...); events = source!(Event => source);"
         )
     };
     ($out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "source!",
-            "let source = Port::to(MySource::new(...)); events = source!(Event => source);"
+            "let source = MySource::new(...); events = source!(Event => source);"
         )
     };
     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "source!",
-            "let source = Port::to(MySource::new(...)); events = source!(name: \"events\", Event => source);"
+            "let source = MySource::new(...); events = source!(name: \"events\", Event => source);"
         )
     };
     (name: $name:literal, $out:ty => $handler:expr $(, [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "source!",
-            "let source = Port::to(MySource::new(...)); events = source!(name: \"events\", Event => source);"
+            "let source = MySource::new(...); events = source!(name: \"events\", Event => source);"
         )
     };
 }
@@ -3413,7 +3408,7 @@ macro_rules! sink {
     ($($tokens:tt)*) => { $crate::__obzenflow_stage_row!(@sig sink __obzenflow_sink_attachment_contract [] $($tokens)*) };
 }
 
-/// Declares a typed source with optional middleware, written after the
+/// `source!` declares a typed source with optional middleware, written after the
 /// stage's type and before `=>`.
 ///
 /// ```
@@ -3504,9 +3499,9 @@ macro_rules! sink {
 /// ```
 ///
 /// The handler slot of a source stage takes a source handler or
-/// `placeholder!()`. The handler declares the port it reads through, and the
-/// framework reads through that port. Hosted ingress registration returns a
-/// hosted source handler.
+/// `placeholder!()`. The handler declares its read port. The framework reads
+/// through that port. Hosted ingress registration returns a hosted source
+/// handler.
 ///
 /// ```
 /// # use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
@@ -3548,8 +3543,8 @@ macro_rules! sink {
 ///
 /// impl TypedFiniteSourceHandler for Facts {
 ///     type Output = Fact;
-///     fn read(&self) -> Option<SourceRead<Fact>> {
-///         Some(SourceRead::finite(self.0.clone(), NextFact, Ok))
+///     fn read(&self) -> SourceRead<Fact> {
+///         SourceRead::finite(self.0.clone(), NextFact, Ok)
 ///     }
 /// }
 ///

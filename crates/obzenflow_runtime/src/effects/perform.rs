@@ -110,61 +110,6 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     /// # }
     /// let read = perform(|_: &Ticket| Read).through(Port::to(Desk));
     /// ```
-    ///
-    /// A source port declares no effect, so it does not answer a request:
-    ///
-    /// ```compile_fail,E0277
-    /// # use obzenflow_runtime::effects::{
-    /// #     perform, CallRequest, DomainFacts, EffectContext, EffectError, Idempotent, Port,
-    /// # };
-    /// # use obzenflow_runtime::stages::source::{
-    /// #     FiniteSource, FiniteSourceConnector, Refuse, SourceError, SourceReaderInitContext,
-    /// #     TypedFiniteSourceHandler,
-    /// # };
-    /// # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    /// # struct Ticket;
-    /// # impl obzenflow_core::TypedPayload for Ticket {
-    /// #     const EVENT_TYPE: &'static str = "doc.ticket";
-    /// # }
-    /// # struct TicketReader;
-    /// # impl TypedFiniteSourceHandler for TicketReader {
-    /// #     type Output = Ticket;
-    /// #     fn next(&mut self) -> Result<Option<Vec<Ticket>>, SourceError> {
-    /// #         Ok(None)
-    /// #     }
-    /// # }
-    /// struct Tickets;
-    /// #[obzenflow_runtime::effects::system("tickets")]
-    /// impl FiniteSourceConnector for Tickets {
-    ///     type Output = Ticket;
-    ///     type Reader = TicketReader;
-    ///     type Continuation = Refuse;
-    ///     fn open(&self, _: SourceReaderInitContext) -> Result<TicketReader, SourceError> {
-    ///         Ok(TicketReader)
-    ///     }
-    /// }
-    ///
-    /// # #[derive(Debug, Clone, serde::Serialize)]
-    /// # struct Read;
-    /// # #[obzenflow_runtime::effects::__async_trait]
-    /// # impl CallRequest for Read {
-    /// #     const EFFECT_TYPE: &'static str = "doc.read";
-    /// #     type Safety = Idempotent;
-    /// #     type Port = dyn FiniteSource<Ticket, Refuse>;
-    /// #     type Outcome = Ticket;
-    /// #     type Records = DomainFacts;
-    /// #     async fn call(
-    /// #         &self,
-    /// #         _: &dyn FiniteSource<Ticket, Refuse>,
-    /// #         _: &mut EffectContext,
-    /// #     ) -> Result<Ticket, EffectError> {
-    /// #         Ok(Ticket)
-    /// #     }
-    /// # }
-    /// # fn main() {
-    /// let read = perform(|_: &Ticket| Read).through(Port::to(Tickets));
-    /// # }
-    /// ```
     pub fn through(self, port: Port<R::Port>) -> Perform<F, In, R>
     where
         R::Port: PortEffects,

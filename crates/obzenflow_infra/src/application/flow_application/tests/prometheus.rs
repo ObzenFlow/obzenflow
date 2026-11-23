@@ -29,7 +29,6 @@ trait HeldInput {
     ) -> Result<FiniteRead<IdlePayload, HeldRead>, EffectError>;
 }
 
-/// Supplies `FIRST` records, then `SECOND` records once released, then ends.
 struct Held {
     release: Arc<Semaphore>,
 }
@@ -64,8 +63,8 @@ struct HeldSource(Port<dyn HeldInput>);
 impl TypedFiniteSourceHandler for HeldSource {
     type Output = IdlePayload;
 
-    fn read(&self) -> Option<SourceRead<IdlePayload>> {
-        Some(SourceRead::finite(self.0.clone(), HeldRead(0), Ok))
+    fn read(&self) -> SourceRead<IdlePayload> {
+        SourceRead::finite(self.0.clone(), HeldRead(0), Ok)
     }
 }
 

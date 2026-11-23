@@ -45,9 +45,6 @@ trait ChannelInput {
     ) -> Result<FiniteRead<FanInInput, ChannelRead>, EffectError>;
 }
 
-/// Supplies `count` inputs on one channel. `jitter_ms` delays each input by a
-/// deterministic amount up to that maximum, so arrival timing varies but the
-/// content does not. `delay_ms` delays every input by the same amount.
 struct ChannelFixture {
     channel: &'static str,
     count: usize,
@@ -118,8 +115,8 @@ impl ChannelSource {
 impl TypedFiniteSourceHandler for ChannelSource {
     type Output = FanInInput;
 
-    fn read(&self) -> Option<SourceRead<FanInInput>> {
-        Some(SourceRead::finite(self.0.clone(), ChannelRead(0), Ok))
+    fn read(&self) -> SourceRead<FanInInput> {
+        SourceRead::finite(self.0.clone(), ChannelRead(0), Ok)
     }
 }
 

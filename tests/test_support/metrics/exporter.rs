@@ -29,9 +29,6 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
 
-/// File-local payload for the metrics exporter integration test. The JSON
-/// shape matches what `burst` emits; the type fingerprints the
-/// stage contract per FLOWIP-114c.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct MetricEvent {
     index: u64,
@@ -69,7 +66,6 @@ trait MetricInput {
     ) -> Result<FiniteRead<MetricEvent, MetricRead>, EffectError>;
 }
 
-/// Supplies one event, then times out once before its input ends.
 struct ErrorAfterFirst {
     failed: std::sync::atomic::AtomicBool,
 }
@@ -108,8 +104,8 @@ impl ErrorAfterFirstSource {
 impl TypedFiniteSourceHandler for ErrorAfterFirstSource {
     type Output = MetricEvent;
 
-    fn read(&self) -> Option<SourceRead<MetricEvent>> {
-        Some(SourceRead::finite(self.0.clone(), MetricRead(0), Ok))
+    fn read(&self) -> SourceRead<MetricEvent> {
+        SourceRead::finite(self.0.clone(), MetricRead(0), Ok)
     }
 }
 

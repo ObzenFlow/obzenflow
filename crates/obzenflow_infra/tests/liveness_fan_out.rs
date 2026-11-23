@@ -68,9 +68,6 @@ trait ProbeInput {
     ) -> Result<FiniteRead<ProbeEvent, ProbeRead>, EffectError>;
 }
 
-/// Supplies value 1, then value 2 after ten seconds. The input ends when the
-/// finish gate opens, so the resumed edge stays observable until the test
-/// driver sees both recoveries.
 struct DelayedTwoEvents {
     finish_gate: Arc<tokio::sync::Notify>,
 }
@@ -108,8 +105,8 @@ struct DelayedTwoEventSource(Port<dyn ProbeInput>);
 impl TypedFiniteSourceHandler for DelayedTwoEventSource {
     type Output = ProbeEvent;
 
-    fn read(&self) -> Option<SourceRead<ProbeEvent>> {
-        Some(SourceRead::finite(self.0.clone(), ProbeRead(0), Ok))
+    fn read(&self) -> SourceRead<ProbeEvent> {
+        SourceRead::finite(self.0.clone(), ProbeRead(0), Ok)
     }
 }
 

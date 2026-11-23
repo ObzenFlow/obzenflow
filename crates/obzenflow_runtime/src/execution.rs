@@ -11,9 +11,7 @@
 //! for each stage, then continues live.
 
 use crate::metrics::observations::ObservationRegistry;
-use crate::stages::source::SourceContinuation;
 use obzenflow_core::event::observability::ObservationRecorder;
-use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::{FlowId, WriterId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -86,17 +84,6 @@ pub enum SourceExecutionPhase {
     Replaying,
 }
 
-/// What a source does when its recorded input is exhausted. In FLOWIP-120r a
-/// replay always terminates; FLOWIP-120n's resume returns `ContinueLive` so an
-/// infinite source hands off to live polling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceReplayExhaustion {
-    /// Stop reconstructing; the source reaches its normal terminal.
-    Terminate,
-    /// Hand off to live polling (FLOWIP-120n resume).
-    ContinueLive,
-}
-
 /// Whether a stage's heartbeat task should run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeartbeatExecutionPolicy {
@@ -161,8 +148,6 @@ pub trait ExecutionStrategy: std::fmt::Debug + Send + Sync {
     fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy;
     /// Whether a source is reconstructing or polling live.
     fn source_phase_for(&self, stage: StageId) -> SourceExecutionPhase;
-    /// What a source does once its recorded input is exhausted.
-    fn source_replay_exhausted(&self, stage: StageId) -> SourceReplayExhaustion;
     /// Whether a stage's heartbeat task should run.
     fn heartbeat_policy_for(&self, stage: StageId) -> HeartbeatExecutionPolicy;
 }
@@ -189,11 +174,6 @@ impl ExecutionStrategy for Live {
     }
     fn source_phase_for(&self, _stage: StageId) -> SourceExecutionPhase {
         SourceExecutionPhase::Live
-    }
-    fn source_replay_exhausted(&self, _stage: StageId) -> SourceReplayExhaustion {
-        // A live source never reconstructs, so this is never reached; the
-        // terminal answer is harmless if it is.
-        SourceReplayExhaustion::Terminate
     }
     fn heartbeat_policy_for(&self, _stage: StageId) -> HeartbeatExecutionPolicy {
         HeartbeatExecutionPolicy::Active
@@ -232,9 +212,6 @@ impl ExecutionStrategy for Replay {
     fn source_phase_for(&self, _stage: StageId) -> SourceExecutionPhase {
         SourceExecutionPhase::Replaying
     }
-    fn source_replay_exhausted(&self, _stage: StageId) -> SourceReplayExhaustion {
-        SourceReplayExhaustion::Terminate
-    }
     fn heartbeat_policy_for(&self, _stage: StageId) -> HeartbeatExecutionPolicy {
         HeartbeatExecutionPolicy::Suppressed
     }
@@ -251,9 +228,6 @@ impl ExecutionStrategy for Replay {
 pub struct ResumeState {
     resume_generation: ReaderGeneration,
     frontier_by_stage: Mutex<HashMap<StageId, ReaderGeneration>>,
-    /// Each replaying source's answer at the end of its recorded input, from
-    /// its admitted continuation and recorded completion (FLOWIP-134i B8).
-    source_exhaustion: Mutex<HashMap<StageId, SourceReplayExhaustion>>,
     /// Told whenever a stage crosses into the resume generation, so the
     /// pipeline supervisor can record reconstruction completion (FLOWIP-134i B6).
     crossings: Mutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
@@ -264,7 +238,6 @@ impl ResumeState {
         Self {
             resume_generation,
             frontier_by_stage: Mutex::new(HashMap::new()),
-            source_exhaustion: Mutex::new(HashMap::new()),
             crossings: Mutex::new(None),
         }
     }
@@ -280,14 +253,6 @@ impl ResumeState {
 
     fn stage_is_live(&self, stage: StageId) -> bool {
         self.frontier(stage) >= self.resume_generation
-    }
-
-    fn source_exhaustion(&self, stage: StageId) -> Option<SourceReplayExhaustion> {
-        self.source_exhaustion
-            .lock()
-            .expect("resume source registry lock poisoned")
-            .get(&stage)
-            .copied()
     }
 }
 
@@ -348,34 +313,6 @@ impl ResumeControl {
             .crossings
             .lock()
             .expect("resume crossings lock poisoned") = Some(observer);
-    }
-
-    /// Register a source's admitted continuation and recorded completion, which
-    /// decide its exhaustion answer (FLOWIP-134i B8). A naturally completed
-    /// source reproduces its completion; admission refused every other
-    /// unfinished `Refuse` source.
-    pub fn register_source_continuation(
-        &self,
-        stage: StageId,
-        continuation: SourceContinuation,
-        recorded_eof: Option<EofKind>,
-    ) {
-        let exhaustion = match continuation {
-            SourceContinuation::Reattach { .. } => SourceReplayExhaustion::ContinueLive,
-            SourceContinuation::RecordedRead | SourceContinuation::Seek { .. }
-                if recorded_eof != Some(EofKind::Natural) =>
-            {
-                SourceReplayExhaustion::ContinueLive
-            }
-            SourceContinuation::RecordedRead
-            | SourceContinuation::Seek { .. }
-            | SourceContinuation::Refuse { .. } => SourceReplayExhaustion::Terminate,
-        };
-        self.0
-            .source_exhaustion
-            .lock()
-            .expect("resume source registry lock poisoned")
-            .insert(stage, exhaustion);
     }
 }
 
@@ -439,11 +376,6 @@ impl ExecutionStrategy for Resume {
         } else {
             SourceExecutionPhase::Replaying
         }
-    }
-    fn source_replay_exhausted(&self, stage: StageId) -> SourceReplayExhaustion {
-        self.state
-            .source_exhaustion(stage)
-            .unwrap_or(SourceReplayExhaustion::Terminate)
     }
     fn heartbeat_policy_for(&self, stage: StageId) -> HeartbeatExecutionPolicy {
         if self.state.stage_is_live(stage) {
@@ -713,11 +645,6 @@ impl RuntimeExecution {
         SourceExecutionPhases(Arc::clone(&self.strategy))
     }
 
-    /// What a source does once its recorded input is exhausted.
-    pub fn source_replay_exhausted(&self, stage: StageId) -> SourceReplayExhaustion {
-        self.strategy.source_replay_exhausted(stage)
-    }
-
     /// Whether a stage's heartbeat task should run.
     pub fn heartbeat_policy_for(&self, stage: StageId) -> HeartbeatExecutionPolicy {
         self.strategy.heartbeat_policy_for(stage)
@@ -727,8 +654,6 @@ impl RuntimeExecution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stages::source::RefusedBy;
-    use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
     use obzenflow_core::MiddlewareExecutionScope as Scope;
 
     fn at() -> ExecutionPosition {
@@ -773,10 +698,6 @@ mod tests {
             SourceExecutionPhase::Replaying
         );
         assert_eq!(
-            s.source_replay_exhausted(StageId::new()),
-            SourceReplayExhaustion::Terminate
-        );
-        assert_eq!(
             s.heartbeat_policy_for(StageId::new()),
             HeartbeatExecutionPolicy::Suppressed
         );
@@ -794,10 +715,6 @@ mod tests {
         assert_eq!(
             s.effect_port_registration_policy(),
             EffectPortRegistrationPolicy::OptionalStrictReplay
-        );
-        assert_eq!(
-            s.source_replay_exhausted(StageId::new()),
-            SourceReplayExhaustion::Terminate
         );
     }
 
@@ -827,50 +744,6 @@ mod tests {
             s.heartbeat_policy_for(stage),
             HeartbeatExecutionPolicy::DormantUntilLive
         );
-
-        // The declaration and recorded completion decide exhaustion (B8): a
-        // natural completion is reproduced, unfinished input continues.
-        assert_eq!(
-            s.source_replay_exhausted(stage),
-            SourceReplayExhaustion::Terminate
-        );
-        let seek = SourceContinuation::Seek {
-            position_version: std::num::NonZeroU32::MIN,
-        };
-        for (continuation, recorded_eof, expected) in [
-            (
-                SourceContinuation::Refuse {
-                    by: RefusedBy::Handler,
-                },
-                Some(EofKind::Natural),
-                SourceReplayExhaustion::Terminate,
-            ),
-            (
-                seek,
-                Some(EofKind::Natural),
-                SourceReplayExhaustion::Terminate,
-            ),
-            (
-                seek,
-                Some(EofKind::Truncated),
-                SourceReplayExhaustion::ContinueLive,
-            ),
-            (seek, None, SourceReplayExhaustion::ContinueLive),
-            (
-                SourceContinuation::Reattach {
-                    guarantee: ReattachGuarantee::AtMostOnce,
-                },
-                Some(EofKind::Truncated),
-                SourceReplayExhaustion::ContinueLive,
-            ),
-        ] {
-            control.register_source_continuation(stage, continuation, recorded_eof);
-            assert_eq!(
-                s.source_replay_exhausted(stage),
-                expected,
-                "{continuation:?} after {recorded_eof:?}"
-            );
-        }
 
         // Crossing the boundary flips every per-stage answer to live.
         control.record_generation_boundary(stage, ReaderGeneration(1));

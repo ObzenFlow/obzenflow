@@ -10,12 +10,10 @@
 
 use obzenflow_core::event::chain_event::ChainPayload;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::observability::{
-    HttpPullMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot,
-};
+use obzenflow_core::event::observability::{HttpPullMeasurements, HttpSurfaceRouteMetricsSnapshot};
 use obzenflow_core::event::observability::{MeasurementWindow, RuntimeObservability};
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerFact, CircuitState, ExecutionPayload, HttpPullStateFact,
+    CircuitBreakerFact, CircuitState, ExecutionPayload,
 };
 use obzenflow_core::event::provenance::{RetryAccounting, RuntimeProvenance};
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -281,7 +279,7 @@ pub struct MetricsStore {
         HashMap<(String, HttpMethod, String, String), HttpSurfaceRouteMetricsSnapshot>,
 
     // HTTP pull telemetry (FLOWIP-084e)
-    pub http_pull_metrics: HashMap<StageId, HttpPullMetricsSnapshot>,
+    pub http_pull_metrics: HashMap<StageId, HttpPullMeasurements>,
 
     // AI chunking telemetry (FLOWIP-086z)
     pub ai_chunking_metrics: HashMap<StageId, obzenflow_core::metrics::AiChunkingMetricsSnapshot>,
@@ -1027,16 +1025,6 @@ impl MetricsStore {
         }
     }
 
-    fn fold_http_pull_state(&mut self, stage_id: StageId, state: &HttpPullStateFact) {
-        let entry = self.http_pull_metrics.entry(stage_id).or_default();
-        entry.state = Some(state.state);
-        entry.wait_reason = state.wait_reason;
-        entry.next_wake_unix_secs = state.next_wake_unix_secs;
-        entry.last_success_unix_secs = entry
-            .last_success_unix_secs
-            .max(state.last_success_unix_secs);
-    }
-
     /// Reconcile per-stage terminal state from the pipeline aggregate barrier.
     ///
     /// `PipelineLifecycle::AllStagesCompleted` is written only after the pipeline
@@ -1237,10 +1225,7 @@ impl MetricsStore {
                         }
                     }
                     ObservationRecord::HttpPull(measurements) => {
-                        self.http_pull_metrics
-                            .entry(stage_id)
-                            .or_default()
-                            .measurements = Some(measurements);
+                        self.http_pull_metrics.insert(stage_id, measurements);
                     }
                     ObservationRecord::EdgeLiveness {
                         upstream,
@@ -1472,7 +1457,6 @@ impl MetricsAggregatorAction {
                     // are selected; historical occurrences are never counted.
                     let store = &mut ctx.metrics_store;
                     let mut selected = false;
-                    let mut http_seen = false;
                     let mut lifecycle_seen = false;
                     for envelope in events.iter() {
                         if let Some(packet) = &envelope.envelope.observability {
@@ -1501,10 +1485,9 @@ impl MetricsAggregatorAction {
                                 }
                                 true
                             }
-                            ChainPayload::Execution(
-                                ExecutionPayload::HttpPullState(_)
-                                | ExecutionPayload::CircuitBreaker(_),
-                            ) => *journal_kind == MetricsJournalKind::Data,
+                            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(_)) => {
+                                *journal_kind == MetricsJournalKind::Data
+                            }
                             _ => false,
                         };
                         // Runtime accounting is a separate factual fold; a business
@@ -1603,14 +1586,6 @@ impl MetricsAggregatorAction {
                                 .or_insert(seq);
                             let current = store.stage_vector_clocks.entry(stage_id).or_default();
                             *current = (*current).max(seq);
-                            if let ChainPayload::Execution(ExecutionPayload::HttpPullState(state)) =
-                                &envelope.payload
-                            {
-                                if !http_seen {
-                                    store.fold_http_pull_state(stage_id, state);
-                                    http_seen = true;
-                                }
-                            }
                             if let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(fact)) =
                                 &envelope.payload
                             {
@@ -1857,8 +1832,7 @@ fn metrics_cancelled<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::observability::{CaptureScope, HttpPullTelemetry};
-    use obzenflow_core::event::payloads::execution_payload::HttpPullStateFact;
+    use obzenflow_core::event::observability::CaptureScope;
     use obzenflow_core::FlowId;
 
     use async_trait::async_trait;
@@ -1971,42 +1945,15 @@ mod tests {
     }
 
     #[test]
-    fn http_pull_state_and_measurements_have_independent_authorities() {
-        use obzenflow_core::event::observability::{HttpPullState, WaitReason};
-
+    fn http_measurements_older_capture_ignored() {
         let stage_id = StageId::new();
         let mut store = MetricsStore::default();
-        let first = HttpPullTelemetry {
-            state: HttpPullState::Waiting,
-            wait_reason: Some(WaitReason::PollInterval),
-            next_wake_unix_secs: Some(500),
-            last_success_unix_secs: Some(400),
-            requests_total: 8,
-            responses_2xx: 5,
-            responses_4xx: 2,
-            responses_5xx: 1,
-            rate_limited_total: 2,
-            retries_total: 3,
-            events_decoded_total: 21,
-            wait_seconds_rate_limit: 4.0,
-            wait_seconds_poll_interval: 7.0,
-            wait_seconds_backoff: 2.0,
-        };
         let scope = CaptureScope {
             flow_id: FlowId::new(),
             resume_generation: Default::default(),
         };
         store.stage_metrics.entry(stage_id).or_default();
-        let mut fold = |telemetry: &HttpPullTelemetry, seq| {
-            store.fold_http_pull_state(
-                stage_id,
-                &HttpPullStateFact {
-                    state: telemetry.state,
-                    wait_reason: telemetry.wait_reason,
-                    next_wake_unix_secs: telemetry.next_wake_unix_secs,
-                    last_success_unix_secs: telemetry.last_success_unix_secs,
-                },
-            );
+        let mut fold = |measurements: HttpPullMeasurements, seq| {
             use obzenflow_core::event::observability::*;
             let mut packet = ObservabilityContext::new(CaptureStamp {
                 capture_scope: scope,
@@ -2017,51 +1964,40 @@ mod tests {
             });
             packet
                 .records
-                .push(ObservationRecord::HttpPull(HttpPullMeasurements::from(
-                    telemetry,
-                )));
+                .push(ObservationRecord::HttpPull(measurements));
             store.observations.offer(packet);
             store.refresh_measurements(&HashMap::new());
         };
-        fold(&first, 2);
+        fold(
+            HttpPullMeasurements {
+                requests_total: 8,
+                responses_2xx: 5,
+                responses_4xx: 2,
+                responses_5xx: 1,
+                rate_limited_total: 2,
+            },
+            2,
+        );
+        fold(
+            HttpPullMeasurements {
+                requests_total: 7,
+                responses_2xx: 4,
+                responses_4xx: 1,
+                responses_5xx: 0,
+                rate_limited_total: 1,
+            },
+            1,
+        );
 
-        let latest = HttpPullTelemetry {
-            state: HttpPullState::Fetching,
-            wait_reason: None,
-            next_wake_unix_secs: None,
-            last_success_unix_secs: Some(399),
-            requests_total: 7,
-            responses_2xx: 4,
-            responses_4xx: 1,
-            responses_5xx: 0,
-            rate_limited_total: 1,
-            retries_total: 2,
-            events_decoded_total: 20,
-            wait_seconds_rate_limit: 3.0,
-            wait_seconds_poll_interval: 6.0,
-            wait_seconds_backoff: 1.0,
-        };
-        fold(&latest, 1);
-
-        let folded = store
+        let measurements = store
             .http_pull_metrics
             .get(&stage_id)
-            .expect("typed snapshot is indexed by stage");
-        assert!(matches!(folded.state, Some(HttpPullState::Fetching)));
-        assert!(folded.wait_reason.is_none());
-        assert_eq!(folded.next_wake_unix_secs, None);
-        assert_eq!(folded.last_success_unix_secs, Some(400));
-        let measurements = folded.measurements.as_ref().unwrap();
+            .expect("measurements are indexed by stage");
         assert_eq!(measurements.requests_total, 8);
         assert_eq!(measurements.responses_2xx, 5);
         assert_eq!(measurements.responses_4xx, 2);
         assert_eq!(measurements.responses_5xx, 1);
         assert_eq!(measurements.rate_limited_total, 2);
-        assert_eq!(measurements.retries_total, 3);
-        assert_eq!(measurements.events_decoded_total, 21);
-        assert_eq!(measurements.wait_seconds_rate_limit, 4.0);
-        assert_eq!(measurements.wait_seconds_poll_interval, 7.0);
-        assert_eq!(measurements.wait_seconds_backoff, 2.0);
     }
 
     #[test]

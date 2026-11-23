@@ -48,7 +48,6 @@ trait WindowFeed {
     ) -> Result<FiniteRead<WindowInput, WindowRead>, EffectError>;
 }
 
-/// Supplies `max` inputs, each after `per_event_delay`.
 struct DelayedSequence {
     max: u64,
     per_event_delay: Duration,
@@ -87,8 +86,8 @@ impl DelayedSequenceSource {
 impl TypedFiniteSourceHandler for DelayedSequenceSource {
     type Output = WindowInput;
 
-    fn read(&self) -> Option<SourceRead<WindowInput>> {
-        Some(SourceRead::finite(self.0.clone(), WindowRead(0), Ok))
+    fn read(&self) -> SourceRead<WindowInput> {
+        SourceRead::finite(self.0.clone(), WindowRead(0), Ok)
     }
 }
 
@@ -589,7 +588,7 @@ async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn group_by_emit_per_window_parents_each_group_to_its_own_inputs() -> Result<()> {
-    let items = vec![
+    let items = [
         ("a".to_string(), 0u64),
         ("b".to_string(), 1u64),
         ("a".to_string(), 2u64),
@@ -599,8 +598,7 @@ async fn group_by_emit_per_window_parents_each_group_to_its_own_inputs() -> Resu
 
     let source = ValuesSource::new(
         items
-            .iter()
-            .cloned()
+            .into_iter()
             .map(|(group, index)| GroupInput { group, index })
             .collect::<Vec<_>>(),
     );

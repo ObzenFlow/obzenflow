@@ -45,9 +45,6 @@ pub enum SourcePollResult {
 pub struct SourcePollReport {
     /// The poll result.
     pub result: SourcePollResult,
-    /// Closed runtime-authored operational observations from this same poll.
-    /// They are not source batch facts and never participate in control policy.
-    pub operational_events: Vec<ChainEvent>,
     /// Time spent in the raw source poll or timeout only. Error normalization,
     /// boundary policy, output staging, and idle delay are excluded.
     pub poll_duration: Duration,
@@ -55,8 +52,7 @@ pub struct SourcePollReport {
 
 impl SourcePollReport {
     pub(crate) fn from_erased(invocation: ErasedSourceInvocation, poll_duration: Duration) -> Self {
-        let (outcome, operational_events) = invocation.into_parts();
-        let result = match outcome {
+        let result = match invocation.into_outcome() {
             ErasedSourceOutcome::Completed(ErasedSourceCompletion::Batch(events)) => {
                 SourcePollResult::Completed(SourcePollCompletion::Batch(events))
             }
@@ -68,7 +64,6 @@ impl SourcePollReport {
         };
         Self {
             result,
-            operational_events,
             poll_duration,
         }
     }
@@ -76,7 +71,6 @@ impl SourcePollReport {
     pub(crate) fn handler_error(error: SourceError, poll_duration: Duration) -> Self {
         Self {
             result: SourcePollResult::HandlerError(error),
-            operational_events: Vec::new(),
             poll_duration,
         }
     }

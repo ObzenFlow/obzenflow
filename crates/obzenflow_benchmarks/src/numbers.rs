@@ -2,15 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! A numbered input that benchmark sources read through a port.
-
 use async_trait::async_trait;
 use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
 use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// The first number of the next read.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct NextNumber(pub u64);
 
@@ -25,8 +22,6 @@ pub trait NumberFeed {
     ) -> Result<FiniteRead<u64, NextNumber>, EffectError>;
 }
 
-/// Supplies the numbers from zero up to a total, up to `batch` numbers in
-/// each read.
 pub struct Numbers {
     total: Option<u64>,
     batch: u64,
@@ -34,7 +29,6 @@ pub struct Numbers {
 }
 
 impl Numbers {
-    /// `total` numbers, up to `batch` in each read.
     pub fn counting(total: u64, batch: u64) -> Self {
         Self {
             total: Some(total),
@@ -43,7 +37,6 @@ impl Numbers {
         }
     }
 
-    /// `total` numbers, one in each read after a wait of `pace`.
     pub fn paced(total: u64, pace: Duration) -> Self {
         Self {
             pace,
@@ -51,7 +44,6 @@ impl Numbers {
         }
     }
 
-    /// An input that never answers its first read.
     pub fn idle() -> Self {
         Self {
             total: None,

@@ -158,7 +158,6 @@ pub use identity::{
     deterministic_event_id, deterministic_event_time, deterministic_payload_event_id,
     deterministic_typed_output_event, EffectOutputOrdinal,
 };
-pub(crate) use ports::SourceSystemFault;
 pub use ports::{
     EffectBindingBuildError, EffectPortRegistry, EffectPortResolutionError, EffectPortResolver,
     EffectRegistrationCollectionError,

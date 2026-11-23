@@ -47,8 +47,6 @@ trait TickInput {
     ) -> Result<FiniteRead<Tick, TickRead>, EffectError>;
 }
 
-/// Supplies ticks 1 to `emit`. A sealing input then ends; a stalling input
-/// waits without ending.
 struct TickFeed {
     emit: u64,
     seal: bool,
@@ -75,7 +73,6 @@ impl TickInput for TickFeed {
     }
 }
 
-/// An in-process finite tick source, so an unfinished run refuses its resume.
 struct Ticks(Port<dyn TickInput>);
 
 impl Ticks {
@@ -91,8 +88,8 @@ impl Ticks {
 impl TypedFiniteSourceHandler for Ticks {
     type Output = Tick;
 
-    fn read(&self) -> Option<SourceRead<Tick>> {
-        Some(SourceRead::finite(self.0.clone(), TickRead(0), Ok).in_process())
+    fn read(&self) -> SourceRead<Tick> {
+        SourceRead::finite(self.0.clone(), TickRead(0), Ok).in_process()
     }
 }
 

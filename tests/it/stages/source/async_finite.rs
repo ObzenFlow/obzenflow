@@ -12,7 +12,6 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
 use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the async-finite source stage test. The JSON
@@ -59,17 +58,15 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
 
 struct TestAsyncEventSource {
     events: ValuesSource<Vec<AsyncTestEvent>>,
-    drain_calls: Arc<AtomicU64>,
 }
 
 impl TestAsyncEventSource {
-    fn new(drain_calls: Arc<AtomicU64>) -> Self {
+    fn new() -> Self {
         Self {
             events: ValuesSource::new(vec![
                 AsyncTestEvent { index: 0 },
                 AsyncTestEvent { index: 1 },
             ]),
-            drain_calls,
         }
     }
 }
@@ -78,13 +75,8 @@ impl TestAsyncEventSource {
 impl TypedAsyncFiniteSourceHandler for TestAsyncEventSource {
     type Output = AsyncTestEvent;
 
-    fn read(&self) -> Option<SourceRead<AsyncTestEvent>> {
+    fn read(&self) -> SourceRead<AsyncTestEvent> {
         TypedFiniteSourceHandler::read(&self.events)
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), SourceError> {
-        self.drain_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }
 }
 
@@ -107,18 +99,16 @@ impl SourcePollObserver for CountSourcePollObserver {
 
 #[tokio::test]
 async fn async_finite_source_applies_stage_middleware() -> Result<()> {
-    let drain_calls = Arc::new(AtomicU64::new(0));
     let events = Arc::new(AtomicU64::new(0));
     let sink = perform(|_: &AsyncTestEvent| Received).through(Port::to(CountReceived {
         received: events.clone(),
     }));
     let observer_calls = Arc::new(AtomicU64::new(0));
     let journal_root = unique_journal_dir("async_finite_source_middleware");
-    let drain_calls_for_flow = Arc::clone(&drain_calls);
     let observer_calls_for_flow = Arc::clone(&observer_calls);
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestAsyncEventSource::new(drain_calls_for_flow);
+        let source = TestAsyncEventSource::new();
 
         Ok(flow! {
             name: "async_finite_source_middleware_test",

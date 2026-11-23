@@ -57,18 +57,14 @@ impl Source {
 impl TypedAsyncFiniteSourceHandler for Source {
     type Output = Input;
 
-    fn read(&self) -> Option<SourceRead<Input>> {
+    fn read(&self) -> SourceRead<Input> {
         let origin = self.origin;
-        Some(SourceRead::finite(
-            self.port.clone(),
-            NextNumber(0),
-            move |index| {
-                Ok(Input {
-                    index,
-                    emitted_ns: origin.elapsed().as_nanos() as u64,
-                })
-            },
-        ))
+        SourceRead::finite(self.port.clone(), NextNumber(0), move |index| {
+            Ok(Input {
+                index,
+                emitted_ns: origin.elapsed().as_nanos() as u64,
+            })
+        })
     }
 }
 

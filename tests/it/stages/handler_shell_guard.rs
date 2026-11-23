@@ -194,10 +194,6 @@ fn retry_contracts_with_live_non_middleware_owners_stay_present() {
             vec!["RetryDisposition"],
         ),
         (
-            "crates/obzenflow_adapters/src/sources/http_pull.rs",
-            vec!["HttpRetryConfig"],
-        ),
-        (
             "crates/obzenflow_core/src/event/payloads/execution_payload.rs",
             vec![
                 "RetryScheduled",
@@ -367,48 +363,10 @@ fn middleware_context_is_confined_to_the_typed_policy_substrate() {
 }
 
 #[test]
-fn resume_live_handoff_clears_idle_state_in_every_source_supervisor() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // Asynchronous finite connectors declare `Refuse` (FLOWIP-134i B14), so
-    // that supervisor has no resume-live handoff.
-    for relative in [
-        "crates/obzenflow_runtime/src/stages/source/finite/supervisor.rs",
-        "crates/obzenflow_runtime/src/stages/source/infinite/supervisor.rs",
-        "crates/obzenflow_runtime/src/stages/source/infinite/async_supervisor.rs",
-    ] {
-        let source = fs::read_to_string(root.join(relative)).expect("read source supervisor");
-        let arm = source
-            .find("SourceReplayExhaustion::ContinueLive =>")
-            .unwrap_or_else(|| panic!("{relative} must handle resume-live exhaustion"));
-        // The finite handoff positions its reader in one delegated method.
-        let handoff_start = source.find("async fn hand_off_to_live(").unwrap_or(arm);
-        let handoff = &source[handoff_start..];
-        let reset = handoff
-            .find("self.idle_backoff.reset();")
-            .unwrap_or_else(|| panic!("{relative} must reset resume-live backoff"));
-        let clear_delay = handoff
-            .find("self.pending_idle_delay = None;")
-            .unwrap_or_else(|| panic!("{relative} must clear its pending resume-live delay"));
-        let drop_replay = handoff
-            .find("self.replay_driver = None;")
-            .unwrap_or_else(|| panic!("{relative} must leave replay before the next live poll"));
-        let continue_live = handoff
-            .find("Ok(EventLoopDirective::Continue)")
-            .unwrap_or_else(|| panic!("{relative} must re-enter the live event loop"));
-        assert!(
-            reset < continue_live && clear_delay < continue_live && drop_replay < continue_live,
-            "{relative} must clear stale idle state before its first resumed live poll"
-        );
-    }
-}
-
-#[test]
 fn every_source_supervisor_closes_poll_timing_before_error_normalisation() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for relative in [
-        "crates/obzenflow_runtime/src/stages/source/finite/supervisor.rs",
         "crates/obzenflow_runtime/src/stages/source/finite/async_supervisor.rs",
-        "crates/obzenflow_runtime/src/stages/source/infinite/supervisor.rs",
         "crates/obzenflow_runtime/src/stages/source/infinite/async_supervisor.rs",
     ] {
         let source = fs::read_to_string(root.join(relative)).expect("read source supervisor");
@@ -437,9 +395,7 @@ fn every_source_supervisor_closes_poll_timing_before_error_normalisation() {
 fn eof_and_boundary_rejection_cannot_schedule_idle_delay() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for relative in [
-        "crates/obzenflow_runtime/src/stages/source/finite/supervisor.rs",
         "crates/obzenflow_runtime/src/stages/source/finite/async_supervisor.rs",
-        "crates/obzenflow_runtime/src/stages/source/infinite/supervisor.rs",
         "crates/obzenflow_runtime/src/stages/source/infinite/async_supervisor.rs",
     ] {
         let source = fs::read_to_string(root.join(relative)).expect("read source supervisor");
@@ -1003,7 +959,7 @@ fn default_http_source_transport_stays_cold_until_execute() {
     let mut guarded = vec![
         root.join("src/stages/sources.rs"),
         root.join("crates/obzenflow_infra/src/clients/http/mod.rs"),
-        root.join("crates/obzenflow_adapters/src/sources/http_pull.rs"),
+        root.join("crates/obzenflow_infra/src/clients/http/api.rs"),
         root.join("crates/obzenflow_infra/src/web/studio_registration.rs"),
     ];
     rust_sources_under(&root.join("examples/hn_ai_digest_demo"), &mut guarded);
@@ -1134,16 +1090,4 @@ fn reqwest_guard_rejects_production_expect_but_ignores_test_expect() {
         production_expect_calls(source),
         vec!["preseeded".to_string()]
     );
-}
-
-#[test]
-fn cold_http_wiring_guard_allows_explicit_custom_client_injection() {
-    let custom_injection = r#"
-        fn materialize_source(custom_client: std::sync::Arc<dyn HttpClient>) {
-            let _ = HttpPullConfig::builder().client(custom_client);
-        }
-    "#;
-
-    inspect_http_wiring(custom_injection)
-        .expect("an already-constructed custom port is an explicit cold injection");
 }

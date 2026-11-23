@@ -117,8 +117,8 @@ mod tests {
     impl TypedFiniteSourceHandler for Src {
         type Output = Out;
 
-        fn read(&self) -> Option<SourceRead<Out>> {
-            Some(SourceRead::finite(self.0.clone(), NextOut, Ok))
+        fn read(&self) -> SourceRead<Out> {
+            SourceRead::finite(self.0.clone(), NextOut, Ok)
         }
     }
 
@@ -127,8 +127,8 @@ mod tests {
     impl TypedAsyncFiniteSourceHandler for AsyncSrc {
         type Output = Out;
 
-        fn read(&self) -> Option<SourceRead<Out>> {
-            Some(SourceRead::finite(self.0.clone(), NextOut, Ok))
+        fn read(&self) -> SourceRead<Out> {
+            SourceRead::finite(self.0.clone(), NextOut, Ok)
         }
     }
 
@@ -137,8 +137,8 @@ mod tests {
     impl TypedInfiniteSourceHandler for InfSrc {
         type Output = Out;
 
-        fn read(&self) -> Option<SourceRead<Out>> {
-            Some(live_read(&self.0))
+        fn read(&self) -> SourceRead<Out> {
+            live_read(&self.0)
         }
     }
 
@@ -147,8 +147,8 @@ mod tests {
     impl TypedAsyncInfiniteSourceHandler for AsyncInfSrc {
         type Output = Out;
 
-        fn read(&self) -> Option<SourceRead<Out>> {
-            Some(live_read(&self.0))
+        fn read(&self) -> SourceRead<Out> {
+            live_read(&self.0)
         }
     }
 
@@ -456,7 +456,6 @@ mod tests {
         declare(Src(no_out()));
     }
 
-    // ── async finite source ───────────────────────────────────────────────────────
     #[test]
     fn async_source_typed_bare() {
         let async_src = AsyncSrc(no_out());
@@ -478,7 +477,6 @@ mod tests {
         crate::source!(name: "s", Out => async_src );
     }
 
-    // ── infinite source ────────────────────────────────────────────────────
     #[test]
     fn infinite_source_typed_bare() {
         let inf_src = InfSrc(no_out());
@@ -500,7 +498,6 @@ mod tests {
         crate::source!(name: "s", Out => inf_src );
     }
 
-    // ── async infinite source ──────────────────────────────────────────────
     #[test]
     fn async_infinite_source_typed_bare() {
         let async_inf_src = AsyncInfSrc(no_out());

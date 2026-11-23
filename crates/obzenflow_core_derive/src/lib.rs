@@ -66,9 +66,6 @@ pub fn runtime_command(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// itself once, on either `impl`. A struct that serves as its own port names
 /// itself with `#[port(system = "name")]` instead.
 ///
-/// A source connector names itself on its `impl` of a connector trait. The source stage
-/// records this name each time it opens a reader. A resumed run does not check the name.
-///
 /// The facade export resolves contracts through the facade's effects module.
 /// A renamed dependency can supply its module with `effects = <path>`.
 #[proc_macro_attribute]

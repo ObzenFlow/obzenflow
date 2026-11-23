@@ -6,8 +6,7 @@
 
 use crate::dsl::stage_descriptor::{
     AsyncFiniteSourceDescriptor, AsyncInfiniteSourceDescriptor, EffectfulTransformDescriptor,
-    FiniteSourceDescriptor, InfiniteSourceDescriptor, JoinDescriptor, StageDescriptor,
-    StatefulDescriptor, TransformDescriptor,
+    JoinDescriptor, StageDescriptor, StatefulDescriptor, TransformDescriptor,
 };
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
@@ -19,8 +18,7 @@ use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactOutcome, Outcome, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
     AdmitSource, AdmittedSource, JoinBinding, TypedJoinHandlerAdapter,
-    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
-    UnifiedInfiniteSourceHandler,
+    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
 };
 use obzenflow_runtime::effects::{
     effectful_transform_effects, Command, DeclareEffects, DeclaredEffectSet, Effects,
@@ -603,27 +601,6 @@ pub trait SourceStageFamily<H> {
     ) -> Box<dyn StageDescriptor>;
 }
 
-impl<H: UnifiedFiniteSourceHandler + 'static> SourceStageFamily<H>
-    for dyn UnifiedFiniteSourceHandler
-{
-    fn stage(
-        name: String,
-        source: AdmittedSource<H>,
-        source_policies: Vec<Box<dyn MiddlewareFactory>>,
-        ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-        observers: Vec<Box<dyn MiddlewareFactory>>,
-    ) -> Box<dyn StageDescriptor> {
-        let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
-            name,
-            source: source,
-            source_policies,
-            ingress_policy,
-            observers,
-        });
-        descriptor
-    }
-}
-
 impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> SourceStageFamily<H>
     for obzenflow_runtime::stages::common::handlers::source::SyncInfiniteReads
 {
@@ -675,27 +652,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + 'static> SourceStageFamily<H>
         descriptor.ingress_policy = ingress_policy;
         descriptor.observers = observers;
         Box::new(descriptor)
-    }
-}
-
-impl<H: UnifiedInfiniteSourceHandler + 'static> SourceStageFamily<H>
-    for dyn UnifiedInfiniteSourceHandler
-{
-    fn stage(
-        name: String,
-        source: AdmittedSource<H>,
-        source_policies: Vec<Box<dyn MiddlewareFactory>>,
-        ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-        observers: Vec<Box<dyn MiddlewareFactory>>,
-    ) -> Box<dyn StageDescriptor> {
-        let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
-            name,
-            source: source,
-            source_policies,
-            ingress_policy,
-            observers,
-        });
-        descriptor
     }
 }
 

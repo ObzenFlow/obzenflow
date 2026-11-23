@@ -63,7 +63,6 @@ trait SeedInput {
     ) -> Result<FiniteRead<SeedEvent, SeedRead>, EffectError>;
 }
 
-/// Supplies one seed, then ends its input after `eof_delay`.
 struct DelayedEof {
     eof_delay: Duration,
 }
@@ -98,8 +97,8 @@ impl DelayedEofEventSource {
 impl TypedFiniteSourceHandler for DelayedEofEventSource {
     type Output = SeedEvent;
 
-    fn read(&self) -> Option<SourceRead<SeedEvent>> {
-        Some(SourceRead::finite(self.0.clone(), SeedRead(0), Ok))
+    fn read(&self) -> SourceRead<SeedEvent> {
+        SourceRead::finite(self.0.clone(), SeedRead(0), Ok)
     }
 }
 

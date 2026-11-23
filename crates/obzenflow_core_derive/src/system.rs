@@ -11,8 +11,8 @@ use syn::{Ident, Item, ItemImpl, LitStr, Path, Token};
 const ARGUMENTS: &str =
     "`#[obzenflow::system]` takes the system's name, as in `#[obzenflow::system(\"stripe\")]`";
 
-const NOT_A_PORT_IMPL: &str = "`#[obzenflow::system(\"…\")]` marks a system's `impl` of its port, \
-                               connector or source handler trait, as in \
+const NOT_A_PORT_IMPL: &str = "`#[obzenflow::system(\"…\")]` marks a system's `impl` of its port \
+                               trait, as in \
                                `impl PaymentGatewayPort for StripeProcessor`; a struct that \
                                serves as its own port names itself with \
                                `#[obzenflow::port(system = \"…\")]`";

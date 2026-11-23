@@ -2,12 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Rows a lineage's sources rejected. A row is one source's record index while
-//! that source pinned one input across the earlier runs, so a later run that
-//! rejects the same row again records a repeat. Cursors read the earlier
-//! journals one record at a time, in row order, and hold no rejection beyond
-//! their own.
-
 use super::{JournalCursor, JournalReadError, SourceJournals};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::ChainPayload;
@@ -103,7 +97,6 @@ impl Repeats {
 
     async fn inputs(&mut self, source: &str) -> Result<&BTreeSet<String>, JournalReadError> {
         if !self.inputs.contains_key(source) {
-            let mut pinned = BTreeSet::new();
             let mut bound = BTreeSet::new();
             for run in &self.runs {
                 let Some((journal, path)) = run.data.get(source) else {
@@ -111,15 +104,12 @@ impl Repeats {
                 };
                 let mut cursor = JournalCursor::new(run.run.clone(), journal.clone(), path.clone());
                 while let Some(record) = cursor.next().await? {
-                    if let Some((_, digest)) = pinned_input(&record) {
-                        pinned.insert(digest);
-                    } else if let Some(binding) = declared_binding(&record) {
+                    if let Some(binding) = declared_binding(&record) {
                         bound.insert(binding);
                     }
                 }
             }
-            let inputs = if pinned.is_empty() { bound } else { pinned };
-            self.inputs.insert(source.to_owned(), inputs);
+            self.inputs.insert(source.to_owned(), bound);
         }
         Ok(&self.inputs[source])
     }
@@ -191,25 +181,6 @@ fn source_key(record: &RunRecord) -> Option<&str> {
         .as_ref()
         .filter(|stage| stage.stage_type.is_source())
         .map(|stage| stage.key.as_str())
-}
-
-fn pinned_input(record: &RunRecord) -> Option<(&str, String)> {
-    if record.journal.kind != RunJournalKind::Data {
-        return None;
-    }
-    let source = source_key(record)?;
-    let RunRecordData::Chain(row) = &record.record else {
-        return None;
-    };
-    let digest = match &row.payload {
-        ChainPayload::Execution(ExecutionPayload::SourceInputPinned(pin)) => pin.identity.digest(),
-        ChainPayload::Execution(
-            ExecutionPayload::SourcePositioned(resumed)
-            | ExecutionPayload::SourceStartedOnResume(resumed),
-        ) => resumed.identity_digest.clone(),
-        _ => return None,
-    };
-    Some((source, digest))
 }
 
 fn declared_binding(record: &RunRecord) -> Option<String> {

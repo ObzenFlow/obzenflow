@@ -178,15 +178,11 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
         })?
         .map_err(|e| anyhow!("flow completion failed: {e}"))?;
 
-    // The second poll's rate-limiter wait lasts about five seconds. The stop
-    // interrupts it, so the flow ends well before the wait would.
     assert!(
         stop_requested.elapsed() < Duration::from_secs(4),
         "the stop did not interrupt the source rate-limiter wait"
     );
 
-    // The second read is recorded before the rate-limiter wait, so the drain
-    // publishes its event: events_in_total == 2.
     let tail = system_journal
         .read_last_n(64)
         .await

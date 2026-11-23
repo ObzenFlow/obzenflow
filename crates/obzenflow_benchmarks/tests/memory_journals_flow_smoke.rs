@@ -9,9 +9,6 @@ use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::pipeline::PipelineState;
 use serde::{Deserialize, Serialize};
 
-/// File-local payload for the memory-journals smoke test. Matches the
-/// `{ "n": u64 }` shape of each smoke input; the type satisfies
-/// FLOWIP-114c's typed-stage requirement.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SmokeEvent {
     n: u64,

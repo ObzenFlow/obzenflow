@@ -75,7 +75,6 @@ trait SeedInput {
     ) -> Result<FiniteRead<SeedEvent, SeedRead>, EffectError>;
 }
 
-/// Supplies one seed. Its input ends once the first iteration starts.
 struct SeedThenEof {
     target: u64,
     iteration_started: Arc<Notify>,
@@ -114,8 +113,8 @@ impl SeedThenEofSource {
 impl TypedFiniteSourceHandler for SeedThenEofSource {
     type Output = SeedEvent;
 
-    fn read(&self) -> Option<SourceRead<SeedEvent>> {
-        Some(SourceRead::finite(self.0.clone(), SeedRead(0), Ok))
+    fn read(&self) -> SourceRead<SeedEvent> {
+        SourceRead::finite(self.0.clone(), SeedRead(0), Ok)
     }
 }
 

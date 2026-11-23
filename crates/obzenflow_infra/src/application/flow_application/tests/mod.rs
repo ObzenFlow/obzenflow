@@ -49,7 +49,6 @@ trait TestInput {
     ) -> Result<FiniteRead<IdlePayload, NextInput>, EffectError>;
 }
 
-/// Input that ends at once or waits for ever. It counts each read.
 struct ScriptedInput {
     ends: bool,
     reads: Arc<AtomicUsize>,
@@ -72,7 +71,6 @@ impl TestInput for ScriptedInput {
     }
 }
 
-/// A finite source that reads its scripted input.
 struct FiniteInput(Port<dyn TestInput>);
 
 impl FiniteInput {
@@ -88,8 +86,8 @@ impl FiniteInput {
 impl TypedFiniteSourceHandler for FiniteInput {
     type Output = IdlePayload;
 
-    fn read(&self) -> Option<SourceRead<IdlePayload>> {
-        Some(SourceRead::finite(self.0.clone(), NextInput, Ok))
+    fn read(&self) -> SourceRead<IdlePayload> {
+        SourceRead::finite(self.0.clone(), NextInput, Ok)
     }
 }
 
@@ -126,8 +124,6 @@ impl TestLiveInput for NoLiveInput {
 
 type Readiness = Arc<dyn Fn() -> BoxFuture<'static, Result<(), SourceError>> + Send + Sync>;
 
-/// A continuous source whose input never becomes ready. Its readiness wait
-/// is the test's probe.
 struct IdleInfiniteSource {
     port: Port<dyn TestLiveInput>,
     ready: Readiness,
@@ -151,15 +147,15 @@ impl IdleInfiniteSource {
 impl TypedInfiniteSourceHandler for IdleInfiniteSource {
     type Output = IdlePayload;
 
-    fn read(&self) -> Option<SourceRead<IdlePayload>> {
+    fn read(&self) -> SourceRead<IdlePayload> {
         let ready = self.ready.clone();
-        Some(SourceRead::continuous(
+        SourceRead::continuous(
             self.port.clone(),
             NextLiveInput,
             move || ready(),
             ReattachGuarantee::AtMostOnce,
             Ok,
-        ))
+        )
     }
 }
 

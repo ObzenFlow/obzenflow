@@ -58,7 +58,8 @@ pub(super) struct RecordedAnswers {
 }
 
 impl EffectContext {
-    /// Offer a measurement from the live system to the stage's observation recorder.
+    /// `observe` sends a measurement from the live system to the observation recorder of
+    /// the stage, if the stage has one.
     pub fn observe(&self, observation: obzenflow_core::event::observability::ObservationRecord) {
         if let Some(recorder) = &self.recorder {
             recorder.observe(observation);

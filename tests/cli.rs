@@ -129,8 +129,6 @@ trait TickNumbers {
     ) -> Result<FiniteRead<u64, TickRead>, EffectError>;
 }
 
-/// Supplies tick numbers up to `last`, waiting `pace` before each one. With
-/// no `last`, the input never ends.
 struct Numbers {
     last: Option<u64>,
     pace: Duration,
@@ -156,7 +154,6 @@ impl TickNumbers for Numbers {
     }
 }
 
-/// Ticks 1 to 503. Rows after the third are invalid records.
 struct RejectingTicks(Port<dyn TickNumbers>);
 
 impl RejectingTicks {
@@ -171,19 +168,18 @@ impl RejectingTicks {
 impl TypedFiniteSourceHandler for RejectingTicks {
     type Output = Tick;
 
-    fn read(&self) -> Option<SourceRead<Tick>> {
-        Some(SourceRead::finite(self.0.clone(), TickRead(0), |n| {
+    fn read(&self) -> SourceRead<Tick> {
+        SourceRead::finite(self.0.clone(), TickRead(0), |n| {
             if n > 3 {
                 return Err(SourceError::Validation(
                     SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord).record(n - 1),
                 ));
             }
             Ok(Tick { n })
-        }))
+        })
     }
 }
 
-/// One tick every 30 milliseconds, without end.
 struct PacedTicks(Port<dyn TickNumbers>);
 
 impl PacedTicks {
@@ -198,10 +194,8 @@ impl PacedTicks {
 impl TypedAsyncFiniteSourceHandler for PacedTicks {
     type Output = Tick;
 
-    fn read(&self) -> Option<SourceRead<Tick>> {
-        Some(SourceRead::finite(self.0.clone(), TickRead(0), |n| {
-            Ok(Tick { n: n - 1 })
-        }))
+    fn read(&self) -> SourceRead<Tick> {
+        SourceRead::finite(self.0.clone(), TickRead(0), |n| Ok(Tick { n: n - 1 }))
     }
 }
 

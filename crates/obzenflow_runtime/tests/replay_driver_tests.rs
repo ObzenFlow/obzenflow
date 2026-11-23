@@ -5,21 +5,14 @@
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::journal_record::JournalRecord;
-use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, SourceContinuationRefusal, SourceInputPinnedFact,
-};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::reader::JournalReader;
-use obzenflow_core::source::{
-    EncodedSourcePosition, SourceInputIdentity, SourcePosition, SourceProgress,
-};
 use obzenflow_core::{ChainEvent, JournalWriterId, ReaderGeneration, StageId, StageKey, WriterId};
-use obzenflow_runtime::replay::{ReplayContextTemplate, ReplayDriver, ReplayMember, SourceHandoff};
-use serde::{Deserialize, Serialize};
+use obzenflow_runtime::replay::{ReplayContextTemplate, ReplayDriver, ReplayMember};
 use std::path::PathBuf;
 
 struct TestReader {
@@ -338,125 +331,13 @@ async fn replay_driver_maps_reader_error_to_corrupted_archive() {
     assert!(matches!(err, ReplayError::CorruptedArchive { .. }));
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct Line(u64);
-
-impl SourcePosition for Line {}
-
-fn at(line: u64) -> EncodedSourcePosition {
-    EncodedSourcePosition::encode(&Line(line)).unwrap()
-}
-
-fn input_pin(file: &str) -> SourceInputPinnedFact {
-    SourceInputPinnedFact {
-        identity: SourceInputIdentity::new("test", &serde_json::json!({ "file": file })).unwrap(),
-        beginning: at(0),
-    }
-}
-
-fn pinned(writer: WriterId, pin: &SourceInputPinnedFact) -> ChainEvent {
-    ChainEventFactory::execution_event(writer, ExecutionPayload::SourceInputPinned(pin.clone()))
-}
-
-fn row(writer: WriterId, after: Option<u64>) -> ChainEvent {
-    let mut event = ChainEventFactory::data_event(
+fn row(writer: WriterId) -> ChainEvent {
+    ChainEventFactory::data_event(
         writer,
         "test.row",
         std::num::NonZeroU32::MIN,
         serde_json::json!({}),
-    );
-    event.source_progress = after.map(|line| SourceProgress { after: at(line) });
-    event
-}
-
-/// Replays `events` to exhaustion: the handoff they support and the input count.
-async fn reconstructed(
-    events: Vec<ChainEvent>,
-) -> (Result<SourceHandoff, SourceContinuationRefusal>, u64) {
-    let reader = Box::new(TestReader {
-        envelopes: events
-            .into_iter()
-            .map(|event| JournalRecord::new(JournalWriterId::new(), event))
-            .collect(),
-        pos: 0,
-        at_end_hint: true,
-        fail: false,
-    });
-    let mut driver = ReplayDriver::new(reader, PathBuf::from("archive.log"), template());
-    drain_driver(&mut driver).await;
-    let line_version = obzenflow_core::source::position_version::<Line>();
-    (
-        driver.frontier().handoff(line_version),
-        driver.replayed_events(),
     )
-}
-
-#[tokio::test]
-async fn the_frontier_is_the_last_position_bound_to_the_latest_pin() {
-    let writer = WriterId::from(StageId::new());
-    let first = input_pin("first");
-    let second = input_pin("second");
-
-    // FLOWIP-134i B15: never pinned, nothing admitted.
-    assert_eq!(
-        reconstructed(Vec::new()).await,
-        (Ok(SourceHandoff::Start), 0)
-    );
-    // A pinned empty prefix starts at the recorded beginning; the preserved
-    // pin is not delivered input.
-    assert_eq!(
-        reconstructed(vec![pinned(writer, &first)]).await,
-        (
-            Ok(SourceHandoff::Seek {
-                pin: first.clone(),
-                after: None,
-            }),
-            0
-        )
-    );
-    assert_eq!(
-        reconstructed(vec![
-            pinned(writer, &first),
-            row(writer, Some(1)),
-            row(writer, Some(2)),
-        ])
-        .await,
-        (
-            Ok(SourceHandoff::Seek {
-                pin: first.clone(),
-                after: Some(at(2)),
-            }),
-            2
-        )
-    );
-    // A re-pin binds only the records after it.
-    assert_eq!(
-        reconstructed(vec![
-            pinned(writer, &first),
-            row(writer, Some(1)),
-            pinned(writer, &second),
-        ])
-        .await
-        .0,
-        Ok(SourceHandoff::Seek {
-            pin: second.clone(),
-            after: None,
-        })
-    );
-    assert_eq!(
-        reconstructed(vec![
-            pinned(writer, &first),
-            row(writer, Some(1)),
-            pinned(writer, &second),
-            row(writer, Some(5)),
-        ])
-        .await
-        .0,
-        Ok(SourceHandoff::Seek {
-            pin: second,
-            after: Some(at(5)),
-        })
-    );
 }
 
 fn member(events: &[ChainEvent], flow: &str) -> ReplayMember {
@@ -508,7 +389,7 @@ async fn a_torn_descendant_continues_with_its_ancestors_remaining_records() {
     // FLOWIP-134i B6: the torn run re-admitted two of four rows before its
     // stop wrote `Truncated`; the splice drops that EOF.
     let writer = WriterId::from(StageId::new());
-    let rows: Vec<_> = (1..=4).map(|line| row(writer, Some(line))).collect();
+    let rows: Vec<_> = (1..=4).map(|_| row(writer)).collect();
     let head = member(
         &[
             rows[0].clone(),
@@ -538,7 +419,7 @@ async fn a_torn_descendant_continues_with_its_ancestors_remaining_records() {
 #[tokio::test]
 async fn the_member_ending_the_merged_records_supplies_the_eof() {
     let writer = WriterId::from(StageId::new());
-    let rows: Vec<_> = (1..=3).map(|line| row(writer, Some(line))).collect();
+    let rows: Vec<_> = (1..=3).map(|_| row(writer)).collect();
     let marker = ChainEventFactory::catch_up_complete_event(
         writer,
         ReaderGeneration(1),
@@ -559,7 +440,6 @@ async fn the_member_ending_the_merged_records_supplies_the_eof() {
     let mut driver = ReplayDriver::merged(extended, vec![shorter]);
     assert_eq!(spliced(&mut driver).await.len(), 3);
     assert_eq!(driver.archived_eof_kind(), Some(EofKind::Truncated));
-    assert_eq!(driver.frontier().crossed_generation(), ReaderGeneration(1));
 
     // A descendant that added nothing keeps its ancestor's EOF.
     let tied = member(
@@ -586,9 +466,9 @@ async fn the_member_ending_the_merged_records_supplies_the_eof() {
 #[tokio::test]
 async fn a_lineage_that_disagrees_by_recorded_identity_refuses() {
     let writer = WriterId::from(StageId::new());
-    let shared = row(writer, Some(1));
-    let head = member(&[shared.clone(), row(writer, Some(2))], "torn");
-    let ancestor = member(&[shared, row(writer, Some(2))], "parent");
+    let shared = row(writer);
+    let head = member(&[shared.clone(), row(writer)], "torn");
+    let ancestor = member(&[shared, row(writer)], "parent");
     let mut driver = ReplayDriver::merged(head, vec![ancestor]);
     driver
         .next_replayed_event(flow_context())
@@ -611,7 +491,7 @@ async fn a_torn_resume_of_a_torn_resume_splices_its_whole_lineage() {
     // three; its torn resume re-admitted one. Each copy comes from the newest
     // run still holding it.
     let writer = WriterId::from(StageId::new());
-    let rows: Vec<_> = (1..=5).map(|line| row(writer, Some(line))).collect();
+    let rows: Vec<_> = (1..=5).map(|_| row(writer)).collect();
     let head = member(&[rows[0].clone(), eof(writer, EofKind::Truncated)], "torn");
     let parent = member(
         &[rows[..3].to_vec(), vec![eof(writer, EofKind::Truncated)]].concat(),
@@ -635,20 +515,4 @@ async fn a_torn_resume_of_a_torn_resume_splices_its_whole_lineage() {
         ["torn", "parent", "parent", "grandparent", "grandparent"]
     );
     assert_eq!(driver.archived_eof_kind(), Some(EofKind::Natural));
-}
-
-#[tokio::test]
-async fn admitted_input_without_its_pin_or_position_refuses() {
-    let writer = WriterId::from(StageId::new());
-    // FLOWIP-134i B11: a positioned record with no preceding pin is corrupt.
-    assert_eq!(
-        reconstructed(vec![row(writer, Some(1))]).await.0,
-        Err(SourceContinuationRefusal::MissingEvidence)
-    );
-    assert_eq!(
-        reconstructed(vec![pinned(writer, &input_pin("file")), row(writer, None)])
-            .await
-            .0,
-        Err(SourceContinuationRefusal::MissingEvidence)
-    );
 }

@@ -117,20 +117,16 @@ impl TimestampedSource {
 impl TypedFiniteSourceHandler for TimestampedSource {
     type Output = BenchEvent;
 
-    fn read(&self) -> Option<SourceRead<BenchEvent>> {
-        Some(SourceRead::finite(
-            self.0.clone(),
-            NextNumber(0),
-            |event_id| {
-                Ok(BenchEvent {
-                    event_id,
-                    emit_time_nanos: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos(),
-                })
-            },
-        ))
+    fn read(&self) -> SourceRead<BenchEvent> {
+        SourceRead::finite(self.0.clone(), NextNumber(0), |event_id| {
+            Ok(BenchEvent {
+                event_id,
+                emit_time_nanos: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            })
+        })
     }
 }
 

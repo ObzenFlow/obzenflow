@@ -43,17 +43,13 @@ struct Ticks(Port<dyn crate::numbers::NumberFeed>);
 impl TypedFiniteSourceHandler for Ticks {
     type Output = Tick;
 
-    fn read(&self) -> Option<SourceRead<Tick>> {
-        Some(SourceRead::finite(
-            self.0.clone(),
-            crate::numbers::NextNumber(0),
-            |n| {
-                Ok(Tick {
-                    n,
-                    body: "x".repeat(256),
-                })
-            },
-        ))
+    fn read(&self) -> SourceRead<Tick> {
+        SourceRead::finite(self.0.clone(), crate::numbers::NextNumber(0), |n| {
+            Ok(Tick {
+                n,
+                body: "x".repeat(256),
+            })
+        })
     }
 }
 

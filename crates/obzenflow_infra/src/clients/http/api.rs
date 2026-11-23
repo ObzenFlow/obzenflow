@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// The HTTP system an application port can use to read JSON.
+/// `HttpApi` is the HTTP system that an application port can use to read JSON.
 pub struct HttpApi {
     base: Url,
     client: Arc<dyn HttpClient>,
@@ -68,7 +68,8 @@ impl HttpApi {
     }
 }
 
-/// A configured endpoint. The port resolves its client on the first live call.
+/// `JsonEndpoint` is a configured JSON endpoint. Its port resolves the HTTP client
+/// on the first live call.
 pub struct JsonEndpoint {
     base: Url,
     location: HttpEndpoint,

@@ -309,8 +309,6 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
     )
     .map_err(anyhow::Error::from_boxed)?;
 
-    // Resume: a source reads through its effect history, so the corrupted
-    // archive refuses the resume before any stage runs.
     let calls = Arc::new(AtomicUsize::new(0));
     let delivered = Arc::new(AtomicU64::new(0));
     let failure = {

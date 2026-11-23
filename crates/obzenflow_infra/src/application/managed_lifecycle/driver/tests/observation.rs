@@ -124,16 +124,11 @@ impl TypedAsyncFiniteSourceHandler for PendingFinite {
         None
     }
 
-    fn read(&self) -> Option<SourceRead<Payload>> {
-        Some(SourceRead::finite(
-            self.0.clone(),
-            PendingRead { emitted: false },
-            Ok,
-        ))
+    fn read(&self) -> SourceRead<Payload> {
+        SourceRead::finite(self.0.clone(), PendingRead { emitted: false }, Ok)
     }
 }
 
-/// Each readiness wait is one poll of the pending source.
 struct PendingLive {
     port: Port<dyn PendingLiveInput>,
     source: PendingSource,
@@ -142,9 +137,9 @@ struct PendingLive {
 impl TypedInfiniteSourceHandler for PendingLive {
     type Output = Payload;
 
-    fn read(&self) -> Option<SourceRead<Payload>> {
+    fn read(&self) -> SourceRead<Payload> {
         let source = self.source.clone();
-        Some(SourceRead::continuous(
+        SourceRead::continuous(
             self.port.clone(),
             PendingTake,
             move || {
@@ -156,7 +151,7 @@ impl TypedInfiniteSourceHandler for PendingLive {
             },
             ReattachGuarantee::AtMostOnce,
             Ok,
-        ))
+        )
     }
 }
 

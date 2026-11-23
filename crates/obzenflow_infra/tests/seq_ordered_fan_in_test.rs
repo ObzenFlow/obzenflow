@@ -338,7 +338,6 @@ trait BatchInput {
     ) -> Result<FiniteRead<TxRow, BatchRead>, EffectError>;
 }
 
-/// Supplies its rows, then waits for the release before the input ends.
 struct Pausing {
     rows: Vec<TxRow>,
     release: Arc<std::sync::atomic::AtomicBool>,
@@ -370,8 +369,8 @@ struct PausingBatch(Port<dyn BatchInput>);
 impl TypedFiniteSourceHandler for PausingBatch {
     type Output = TxRow;
 
-    fn read(&self) -> Option<SourceRead<TxRow>> {
-        Some(SourceRead::finite(self.0.clone(), BatchRead(0), Ok))
+    fn read(&self) -> SourceRead<TxRow> {
+        SourceRead::finite(self.0.clone(), BatchRead(0), Ok)
     }
 }
 

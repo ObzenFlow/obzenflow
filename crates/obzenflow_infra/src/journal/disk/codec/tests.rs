@@ -519,7 +519,7 @@ fn complete_observation_record() -> JournalRecord<ChainPayload> {
             {"observation_type":"rate_limiter_utilisation","unit":"stage","utilization_percent":0.25,"events_in_window":u64::MAX,"window_size_ms":0},
             {"observation_type":"backpressure_activity","window_ms":0,"delayed_events":1,"delay_ms_total":2,"delay_ms_max":3,"min_credit":0,"limiting_downstream_stage_id":StageId::new()},
             {"observation_type":"resource_usage","cpu_percent":-0.0,"memory_bytes":u64::MAX,"thread_count":null},
-            {"observation_type":"http_pull","requests_total":u64::MAX,"responses_2xx":1,"responses_4xx":2,"responses_5xx":3,"rate_limited_total":4,"retries_total":5,"events_decoded_total":6,"wait_seconds_rate_limit":-0.0,"wait_seconds_poll_interval":0.25,"wait_seconds_backoff":0.5},
+            {"observation_type":"http_pull","requests_total":u64::MAX,"responses_2xx":1,"responses_4xx":2,"responses_5xx":3,"rate_limited_total":4},
             {"observation_type":"ai_chunking_work","rerender_attempts_total":u64::MAX,"max_decomposition_depth_reached":u32::MAX,"budget_overhead_tokens":1001,"excluded_items":[0,127,128]},
             {"observation_type":"stage_heartbeat","activity":{"kind":"polling"},"handler_blocked_ms":0,"last_consumed_event_id":parent,"last_output_event_id":null},
             {"observation_type":"edge_liveness","upstream":StageId::new(),"reader":StageId::new(),"state":"recovered","idle_ms":u64::MAX,"last_reader_seq":0,"last_event_id":parent},

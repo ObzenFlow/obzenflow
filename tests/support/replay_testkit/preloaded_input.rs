@@ -53,9 +53,6 @@ impl PreloadedFeed for Preloaded {
     }
 }
 
-/// Live input that holds its values and stays open. Each read takes one
-/// value, and the source waits once the values are read. A resumed run
-/// reattaches the input `at_most_once`.
 pub struct PreloadedInput<T> {
     port: Port<dyn PreloadedFeed>,
     values: Queue,
@@ -88,9 +85,9 @@ where
 {
     type Output = T;
 
-    fn read(&self) -> Option<SourceRead<T>> {
+    fn read(&self) -> SourceRead<T> {
         let values = self.values.clone();
-        Some(SourceRead::continuous(
+        SourceRead::continuous(
             self.port.clone(),
             NextPreloaded,
             move || {
@@ -108,6 +105,6 @@ where
                     SourceError::Deserialization(SourceDiagnosticReason::MalformedInput.into())
                 })
             },
-        ))
+        )
     }
 }

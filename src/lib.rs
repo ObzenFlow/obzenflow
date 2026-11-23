@@ -36,12 +36,11 @@
 //! Handlers contain the processing logic for each stage. The framework provides
 //! several handler traits, each matching a different stage role.
 //!
-//! **Sources** produce events. [`crate::stages::sources::ValuesSource`] is the easiest way
-//! to emit a `Vec<T>` (or any iterator) of typed payloads. A source stage takes a
-//! [`crate::effects::Port`]. `Port::owned` wraps the source by value:
+//! **Sources** produce events. A `source!` row takes a source handler. The handler
+//! declares its read port. [`crate::stages::sources::ValuesSource`] is the easiest way
+//! to emit a `Vec<T>` (or any iterator) of typed payloads:
 //!
 //! ```rust,ignore
-//! use obzenflow::effects::Port;
 //! use obzenflow::stages::sources;
 //!
 //! let readings = vec![
@@ -77,8 +76,8 @@
 //!
 //! ### `stages:`
 //! Let-bindings that produce stage descriptors via macros:
-//! - `source!(Out => handler)` for a source. The handler declares whether
-//!   its input ends and the port it reads through.
+//! - `source!(Out => handler)` for a source. The handler declares its read
+//!   port and whether its input ends.
 //! - `transform!(In -> Out => handler)` for a synchronous transform.
 //! - `effectful_transform!(In -> Out => handler)` for a transform that
 //!   performs the external work its handler's effect set declares.
@@ -91,9 +90,9 @@
 //! `source!(Out with rate_limit(10.0) => handler)`. Controls and passive
 //! observers share `with middleware` or `with { first, second }`, written
 //! before `=>`. Middleware built with `.for_effect::<E>()` guards only that
-//! effect, such as `let fetch_retry = retry().max_attempts(3).for_effect::<Fetch>();`;
-//! the complete plan is validated before any middleware is materialized or
-//! effect connector is opened.
+//! effect, such as `let fetch_retry = retry().max_attempts(3).for_effect::<Fetch>();`.
+//! The flow builder validates the complete plan before it materializes any
+//! middleware or resolves any effect system.
 //!
 //! ### `topology:`
 //! Edges connecting stages:
@@ -128,7 +127,6 @@
 //!
 //! ```no_run
 //! use anyhow::Result;
-//! use obzenflow::effects::Port;
 //! use obzenflow::schema::TypedPayload;
 //! use obzenflow::stages::{sources, transforms};
 //! use obzenflow::flow::{flow, sink, source, transform, FlowDefinition};

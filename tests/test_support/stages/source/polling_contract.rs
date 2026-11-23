@@ -65,31 +65,27 @@ trait PollInput {
     ) -> Result<ContinuousRead<PollingEvent, PollTake>, EffectError>;
 }
 
-/// What a scripted input does on each physical read or take.
 enum Script {
-    /// One event after `raw_delay`, then the end of input.
     Once {
         calls: Arc<AtomicUsize>,
         raw_delay: Duration,
         ordinal: usize,
     },
-    /// The first read never answers; the next one ends the input.
-    PendingThenEof { calls: Arc<AtomicUsize> },
-    /// One step per read, each read's time recorded.
+    PendingThenEof {
+        calls: Arc<AtomicUsize>,
+    },
     Steps {
         steps: Vec<ScriptStep>,
         poll_times: PollTimes,
     },
-    /// The input ends at the first read.
-    Eof { calls: Arc<AtomicUsize> },
-    /// One live event after `raw_delay`, then empty takes, or takes that never
-    /// answer when `then_pending` is set.
+    Eof {
+        calls: Arc<AtomicUsize>,
+    },
     LiveOnce {
         calls: Arc<AtomicUsize>,
         raw_delay: Duration,
         then_pending: bool,
     },
-    /// Empty live takes. The first take notifies `first_poll`.
     Idle {
         calls: Arc<AtomicUsize>,
         first_poll: Arc<Notify>,
@@ -227,8 +223,8 @@ impl AsyncFiniteOnce {
 impl TypedAsyncFiniteSourceHandler for AsyncFiniteOnce {
     type Output = PollingEvent;
 
-    fn read(&self) -> Option<SourceRead<PollingEvent>> {
-        Some(finite(&self.0))
+    fn read(&self) -> SourceRead<PollingEvent> {
+        finite(&self.0)
     }
 }
 
@@ -247,8 +243,8 @@ impl SyncInfiniteOnce {
 impl TypedInfiniteSourceHandler for SyncInfiniteOnce {
     type Output = PollingEvent;
 
-    fn read(&self) -> Option<SourceRead<PollingEvent>> {
-        Some(live(&self.0))
+    fn read(&self) -> SourceRead<PollingEvent> {
+        live(&self.0)
     }
 }
 
@@ -267,8 +263,8 @@ impl AsyncInfiniteOnce {
 impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteOnce {
     type Output = PollingEvent;
 
-    fn read(&self) -> Option<SourceRead<PollingEvent>> {
-        Some(live(&self.0))
+    fn read(&self) -> SourceRead<PollingEvent> {
+        live(&self.0)
     }
 }
 
@@ -293,8 +289,8 @@ impl TypedAsyncFiniteSourceHandler for TimeoutThenEof {
         Some(self.timeout)
     }
 
-    fn read(&self) -> Option<SourceRead<PollingEvent>> {
-        Some(finite(&self.port))
+    fn read(&self) -> SourceRead<PollingEvent> {
+        finite(&self.port)
     }
 }
 
@@ -317,8 +313,8 @@ impl TypedAsyncFiniteSourceHandler for DisabledTimeoutThenEof {
         None
     }
 
-    fn read(&self) -> Option<SourceRead<PollingEvent>> {
-        Some(finite(&self.0))
+    fn read(&self) -> SourceRead<PollingEvent> {
+        finite(&self.0)
     }
 }
 
@@ -333,8 +329,8 @@ impl SyncScriptedSource {
 impl TypedFiniteSourceHandler for SyncScriptedSource {
     type Output = PollingEvent;
 
-    fn read(&self) -> Option<SourceRead<PollingEvent>> {
-        Some(finite(&self.0))
+    fn read(&self) -> SourceRead<PollingEvent> {
+        finite(&self.0)
     }
 }
 
@@ -349,8 +345,8 @@ impl AsyncScriptedSource {
 impl TypedAsyncFiniteSourceHandler for AsyncScriptedSource {
     type Output = PollingEvent;
 
-    fn read(&self) -> Option<SourceRead<PollingEvent>> {
-        Some(finite(&self.0))
+    fn read(&self) -> SourceRead<PollingEvent> {
+        finite(&self.0)
     }
 }
 
@@ -365,8 +361,8 @@ impl AsyncIdleInfiniteSource {
 impl TypedAsyncInfiniteSourceHandler for AsyncIdleInfiniteSource {
     type Output = PollingEvent;
 
-    fn read(&self) -> Option<SourceRead<PollingEvent>> {
-        Some(live(&self.0))
+    fn read(&self) -> SourceRead<PollingEvent> {
+        live(&self.0)
     }
 }
 
@@ -381,8 +377,8 @@ impl ImmediateEof {
 impl TypedFiniteSourceHandler for ImmediateEof {
     type Output = PollingEvent;
 
-    fn read(&self) -> Option<SourceRead<PollingEvent>> {
-        Some(finite(&self.0))
+    fn read(&self) -> SourceRead<PollingEvent> {
+        finite(&self.0)
     }
 }
 

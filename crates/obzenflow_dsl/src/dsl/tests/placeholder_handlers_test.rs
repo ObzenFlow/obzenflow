@@ -5,30 +5,10 @@
 use crate::dsl::typing::{PlaceholderJoin, PlaceholderStateful, PlaceholderTransform};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
-use obzenflow_runtime::__private::{
-    PlaceholderSource, TypedJoinHandlerAdapter, UnifiedJoinHandler,
-};
-use obzenflow_runtime::stages::common::handlers::source::traits::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler,
-};
+use obzenflow_runtime::__private::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
 use obzenflow_runtime::stages::common::handlers::{TransformHandler, TypedStatefulHandler};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-
-#[test]
-fn placeholder_finite_source_signals_eof() {
-    let mut handler = PlaceholderSource::new(None);
-    let next = FiniteSourceHandler::next(&mut handler).expect("finite source next");
-    assert!(next.is_none());
-}
-
-#[test]
-fn placeholder_infinite_source_idles_with_empty_batch() {
-    let mut handler = PlaceholderSource::new(None);
-    let next = InfiniteSourceHandler::next(&mut handler).expect("infinite source next");
-    assert!(next.is_empty());
-}
 
 #[test]
 fn placeholder_transform_drops_data_events() {
@@ -49,21 +29,6 @@ async fn placeholder_transform_drains_cleanly() {
     TransformHandler::drain(&mut handler)
         .await
         .expect("transform drain");
-}
-
-#[tokio::test]
-async fn placeholder_async_source_is_safe_in_both_modes() {
-    let mut handler = PlaceholderSource::new(None);
-
-    let finite = <PlaceholderSource as AsyncFiniteSourceHandler>::next(&mut handler)
-        .await
-        .expect("async finite next");
-    assert!(finite.is_none());
-
-    let infinite = <PlaceholderSource as AsyncInfiniteSourceHandler>::next(&mut handler)
-        .await
-        .expect("async infinite next");
-    assert!(infinite.is_empty());
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

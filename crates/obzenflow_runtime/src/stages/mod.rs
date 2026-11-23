@@ -21,9 +21,8 @@ pub use common::{
     prove_journal_form, EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig,
     HostedSource, HostedSubmission, IngressDecodeError, IngressDecoder, IngressReceiptSender,
     IngressRecord, ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision, SignalGate,
-    SourceObservationSink, StatefulEmission, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-    TypedStatefulHandler,
+    StatefulEmission, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedStatefulHandler,
 };
 
 pub use common::{CreditWaker, WakeOn};

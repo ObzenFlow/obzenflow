@@ -4,7 +4,6 @@
 
 //! Pipeline and stage configuration types
 
-use crate::stages::common::handlers::source::traits::{FiniteSourceHandler, InfiniteSourceHandler};
 use crate::stages::common::handlers::TransformHandler;
 use obzenflow_core::{SccId, StageId};
 use std::collections::HashSet;
@@ -47,8 +46,6 @@ pub struct CycleGuardConfig {
 
 /// Stage handler type that can be converted to BoxedStageHandle
 pub enum StageHandlerType {
-    FiniteSource(Box<dyn FiniteSourceHandler>),
-    InfiniteSource(Box<dyn InfiniteSourceHandler>),
     Transform(Box<dyn TransformHandler>),
     // TODO: FLOWIP-080 will fix Stateful with proper type erasure for associated types
 }

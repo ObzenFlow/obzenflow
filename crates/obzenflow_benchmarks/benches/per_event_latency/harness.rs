@@ -47,18 +47,14 @@ pub struct Source {
 impl TypedFiniteSourceHandler for Source {
     type Output = Event;
 
-    fn read(&self) -> Option<SourceRead<Event>> {
+    fn read(&self) -> SourceRead<Event> {
         let origin = self.origin;
-        Some(SourceRead::finite(
-            self.port.clone(),
-            NextNumber(0),
-            move |id| {
-                Ok(Event {
-                    id,
-                    emitted_ns: origin.elapsed().as_nanos() as u64,
-                })
-            },
-        ))
+        SourceRead::finite(self.port.clone(), NextNumber(0), move |id| {
+            Ok(Event {
+                id,
+                emitted_ns: origin.elapsed().as_nanos() as u64,
+            })
+        })
     }
 }
 

@@ -25,9 +25,6 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
 
-/// File-local payload for the stateful-metrics flow. The JSON shape
-/// matches what `burst` emits; the type fingerprints the stage
-/// contract per FLOWIP-114c.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct MetricEvent {
     index: u64,
@@ -46,9 +43,6 @@ impl TypedPayload for AggregateMetricEvent {
     const EVENT_TYPE: &'static str = "metric.aggregate";
 }
 
-/// The join's two legs are semantically distinct typed inputs per
-/// FLOWIP-114c, so we declare separate types even though the underlying
-/// `burst` produces the same shape on both legs in this test.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RefMetricEvent {
     index: u64,

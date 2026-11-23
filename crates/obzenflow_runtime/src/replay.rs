@@ -5,52 +5,13 @@
 //! Execution of replay through the Core archive and journal contracts.
 
 use obzenflow_core::event::chain_event::ReplayDisposition;
-use obzenflow_core::event::payloads::execution_payload::SourceContinuationRefusal;
-use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_core::journal::JournalReader;
-use obzenflow_core::source::RecordedSourceFrontier;
-pub use obzenflow_core::source::SourceHandoff;
-use obzenflow_core::{ChainEvent, ReaderGeneration, StageId};
-use std::num::NonZeroU32;
+use obzenflow_core::{ChainEvent, StageId};
 use std::path::PathBuf;
-
-/// The committed frontier a source's replay read (FLOWIP-134i B11), and the
-/// last generation its recorded markers crossed.
-#[derive(Debug, Default, Clone)]
-pub struct SourceFrontier {
-    recorded: RecordedSourceFrontier,
-    crossed: ReaderGeneration,
-}
-
-impl SourceFrontier {
-    fn observe(&mut self, event: &ChainEvent) {
-        if let ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
-            generation, ..
-        }) = &event.payload
-        {
-            self.crossed = self.crossed.max(*generation);
-        }
-        self.recorded
-            .observe(&event.payload, event.source_progress.as_ref());
-    }
-
-    /// The last generation the source's recorded markers crossed.
-    pub fn crossed_generation(&self) -> ReaderGeneration {
-        self.crossed
-    }
-
-    /// Where a connector positioned in version `expected` continues, by the
-    /// rule archive admission applied before the claim (B22).
-    pub fn handoff(
-        &self,
-        expected: NonZeroU32,
-    ) -> Result<SourceHandoff, SourceContinuationRefusal> {
-        self.recorded.handoff(expected).map_err(Into::into)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ReplayContextTemplate {
@@ -140,7 +101,6 @@ pub struct ReplayDriver {
     replayed_events: u64,
     skipped_events: u64,
     archived_eof_kind: Option<EofKind>,
-    frontier: SourceFrontier,
 }
 
 impl ReplayDriver {
@@ -177,13 +137,7 @@ impl ReplayDriver {
             replayed_events: 0,
             skipped_events: 0,
             archived_eof_kind: None,
-            frontier: SourceFrontier::default(),
         }
-    }
-
-    /// The committed frontier read so far; complete once the driver is exhausted.
-    pub fn frontier(&self) -> &SourceFrontier {
-        &self.frontier
     }
 
     pub fn replayed_events(&self) -> u64 {
@@ -237,7 +191,6 @@ impl ReplayDriver {
 
         let ReplayableRecord { envelope, authored } = record;
         let disposition = authored.replay_disposition();
-        self.frontier.observe(&authored);
         let original_event_id = authored.id;
         let template = &self.members[newest].member.replay_context;
         let mut new_event = authored;

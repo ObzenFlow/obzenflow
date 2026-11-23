@@ -1770,7 +1770,6 @@ trait CountedInput {
     ) -> Result<FiniteRead<usize, Position>, EffectError>;
 }
 
-/// Counts up to `end`. The read at `fails_at` times out once.
 struct FlakyCount {
     end: usize,
     fails_at: usize,
@@ -1798,7 +1797,6 @@ impl CountedInput for FlakyCount {
     }
 }
 
-/// Supplies one record when its gate opens and reports its progress.
 struct GatedInput {
     gate: Arc<tokio::sync::Semaphore>,
     index: usize,
@@ -1839,13 +1837,9 @@ where
 {
     type Output = T;
 
-    fn read(&self) -> Option<SourceRead<T>> {
+    fn read(&self) -> SourceRead<T> {
         let item = self.item;
-        Some(SourceRead::finite(
-            self.port.clone(),
-            Position(0),
-            move |count| Ok(item(count)),
-        ))
+        SourceRead::finite(self.port.clone(), Position(0), move |count| Ok(item(count)))
     }
 }
 

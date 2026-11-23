@@ -81,15 +81,6 @@ fn stage_frame(
             error: error.as_deref(),
             at,
         },
-        ExecutionPayload::SourceCleanupFailed(failure) => {
-            let context = &envelope.envelope.provenance.event.flow_context;
-            StudioMessage::SourceCleanupFailed {
-                stage_id: context.stage_id,
-                stage_name: &context.stage_name,
-                failure,
-                at,
-            }
-        }
         ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::RateLimiter(_) => {
             let context = &envelope.envelope.provenance.event.flow_context;
             let unit = super::middleware::policy_unit(payload)?;

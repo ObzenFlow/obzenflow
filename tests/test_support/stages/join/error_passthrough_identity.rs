@@ -33,7 +33,6 @@ fn reference_rows() -> impl TypedFiniteSourceHandler<Output = RefItem> {
     )
 }
 
-/// Stream source: five rows, keys cycling r1..r3, values 1..=5.
 fn stream_rows() -> impl TypedFiniteSourceHandler<Output = StreamItem> {
     ValuesSource::new(
         (1..=5_u64)

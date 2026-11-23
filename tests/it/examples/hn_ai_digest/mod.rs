@@ -4,4 +4,3 @@
 
 mod prompt_regression;
 mod rig_import_guard;
-mod story_decoder;

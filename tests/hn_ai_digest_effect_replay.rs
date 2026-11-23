@@ -2701,8 +2701,6 @@ trait ItemFeed {
     ) -> Result<FiniteRead<DigestItem, Offset>, EffectError>;
 }
 
-/// Supplies items 1 to `last` from a recorded offset. With `holds_after`, the
-/// input waits after that many items without ending.
 #[derive(Clone, Copy, Debug)]
 struct ContinuableItems {
     last: u64,
@@ -2747,8 +2745,8 @@ struct KeyedItems(Port<dyn ItemFeed>);
 impl TypedFiniteSourceHandler for KeyedItems {
     type Output = DigestItem;
 
-    fn read(&self) -> Option<SourceRead<DigestItem>> {
-        Some(SourceRead::finite(self.0.clone(), Offset(0), Ok))
+    fn read(&self) -> SourceRead<DigestItem> {
+        SourceRead::finite(self.0.clone(), Offset(0), Ok)
     }
 }
 

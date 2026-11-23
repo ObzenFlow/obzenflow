@@ -109,24 +109,16 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
         });
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081d).
-        let mut handler = self.source.handler;
+        let handler = self.source.handler;
         let idle_cap = handler.idle_backoff_cap();
         let kind = handler.supervisor_kind();
-        handler.install_writer_id(WriterId::from(self.config.stage_id));
-        handler.install_observation_recorder(context.instrumentation.observation_recorder());
 
-        let reads = if self.resources.effect_declarations.is_empty() {
-            None
-        } else {
-            Some(
-                crate::stages::common::handlers::source::read::read_stage(
-                    &self.resources,
-                    context.instrumentation.clone(),
-                )
-                .await
-                .map_err(|error| BuilderError::Other(error.to_string()))?,
-            )
-        };
+        let reads = crate::stages::common::handlers::source::read::read_stage(
+            &self.resources,
+            context.instrumentation.clone(),
+        )
+        .await
+        .map_err(|error| BuilderError::Other(error.to_string()))?;
         let supervisor = AsyncInfiniteSourceSupervisor {
             reads,
             kind,
@@ -136,20 +128,17 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
             flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
             continuation: self.source.continuation,
-            system: bind_source_system(&self.source.system, &self.resources.effect_ports),
+            system: bind_source_system(&self.source.system),
             idle_backoff: IdleBackoff::exponential_with_cap(Duration::from_millis(1), idle_cap),
             pending_idle_delay: None,
             external_events: event_receiver.into(),
             state_watcher: state_watcher.clone(),
             last_state: None,
-            replay_driver: None,
             replay_started_at: None,
             replay_completion: ReplayCompletionGuard::default(),
             source_boundary: self.config.source_boundary,
             pending_boundary_begin_drain: false,
             pending_failure: None,
-            reader_acquired: false,
-            exit: None,
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);

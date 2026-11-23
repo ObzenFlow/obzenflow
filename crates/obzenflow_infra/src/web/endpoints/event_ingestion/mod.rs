@@ -5,9 +5,9 @@
 //! Handle-first ingress plus optional HTTP event ingestion endpoints
 //!
 //! Applications use [`crate::application::FlowApplicationBuilder::http_ingress`]
-//! to register HTTP ingress and receive its hosted port for the flow. The builder hosts
-//! the ingress and controls its lifecycle. For an application-owned protocol, clone a
-//! handle from [`ingress_source`]. Then give the bundle to
+//! to register HTTP ingress and receive its hosted source handler for the flow. The
+//! builder hosts the ingress and controls its lifecycle. For an application-owned
+//! protocol, clone a handle from [`ingress_source`]. Then give the bundle to
 //! [`crate::application::FlowApplicationBuilder::ingress`].
 //! HTTP ingress provides the hosted routes:
 //! - `POST {base_path}/events` (single event)
@@ -248,8 +248,8 @@ fn install_source_phases<T>(
             Ok(())
         }
         None => Err(ApplicationError::FlowBuildFailed(format!(
-            "hosted ingress {kind} '{}' can't read its source's execution phase because the flow \
-             was built without a runtime execution; build the flow with flow!",
+            "hosted ingress {kind} '{}' cannot read the execution phase of its source, because the \
+             flow has no runtime execution. Use flow! to build the flow.",
             state.ingress_key()
         ))),
     }
@@ -271,8 +271,7 @@ where
     D: IngressDecoder,
 {
     /// `into_parts` splits the bundle into its hosted source and its submission handle.
-    /// One source stage reads the submissions. The split does not start a runtime
-    /// execution.
+    /// It does not start a runtime execution. One source stage reads the submissions.
     ///
     /// ```compile_fail,E0382
     /// use obzenflow_infra::web::endpoints::event_ingestion::{Ingress, IngressDecoder};
@@ -318,8 +317,8 @@ where
     D: IngressDecoder,
 {
     /// `into_parts` splits the bundle into its hosted source and its HTTP hosting
-    /// attachment. One source stage reads the submissions. The split does not start a
-    /// runtime execution.
+    /// attachment. It does not start a runtime execution. One source stage reads the
+    /// submissions.
     ///
     /// ```compile_fail,E0382
     /// use obzenflow_infra::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder};

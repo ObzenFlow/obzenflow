@@ -31,7 +31,7 @@ mod tests {
         TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
         TypedStatefulHandler, TypedTransformHandler,
     };
-    use obzenflow_runtime::stages::source::{RefusedBy, SourceContinuation};
+    use obzenflow_runtime::stages::source::SourceContinuation;
     use obzenflow_runtime::typing::TransformTyping;
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
     use serde::{Deserialize, Serialize};
@@ -204,8 +204,8 @@ mod tests {
     impl TypedFiniteSourceHandler for SyncExactSource {
         type Output = InputEvent;
 
-        fn read(&self) -> Option<SourceRead<InputEvent>> {
-            Some(finite_read(exact_event))
+        fn read(&self) -> SourceRead<InputEvent> {
+            finite_read(exact_event)
         }
     }
 
@@ -214,8 +214,8 @@ mod tests {
     impl TypedAsyncFiniteSourceHandler for AsyncExactSource {
         type Output = InputEvent;
 
-        fn read(&self) -> Option<SourceRead<InputEvent>> {
-            Some(finite_read(exact_event))
+        fn read(&self) -> SourceRead<InputEvent> {
+            finite_read(exact_event)
         }
     }
 
@@ -224,8 +224,8 @@ mod tests {
     impl TypedFiniteSourceHandler for InProcessSource {
         type Output = InputEvent;
 
-        fn read(&self) -> Option<SourceRead<InputEvent>> {
-            Some(finite_read(exact_event).in_process())
+        fn read(&self) -> SourceRead<InputEvent> {
+            finite_read(exact_event).in_process()
         }
     }
 
@@ -234,8 +234,8 @@ mod tests {
     impl TypedInfiniteSourceHandler for InfiniteExactSource {
         type Output = InputEvent;
 
-        fn read(&self) -> Option<SourceRead<InputEvent>> {
-            Some(live_read(exact_event))
+        fn read(&self) -> SourceRead<InputEvent> {
+            live_read(exact_event)
         }
     }
 
@@ -244,8 +244,8 @@ mod tests {
     impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteExactSource {
         type Output = InputEvent;
 
-        fn read(&self) -> Option<SourceRead<InputEvent>> {
-            Some(live_read(exact_event))
+        fn read(&self) -> SourceRead<InputEvent> {
+            live_read(exact_event)
         }
     }
 
@@ -254,8 +254,8 @@ mod tests {
     impl TypedFiniteSourceHandler for MultiExactSource {
         type Output = outcome![InputEvent | AlternateEvent];
 
-        fn read(&self) -> Option<SourceRead<Self::Output>> {
-            Some(finite_read(either_event))
+        fn read(&self) -> SourceRead<Self::Output> {
+            finite_read(either_event)
         }
     }
 
@@ -264,8 +264,8 @@ mod tests {
     impl TypedAsyncFiniteSourceHandler for AsyncMultiExactSource {
         type Output = outcome![InputEvent | AlternateEvent];
 
-        fn read(&self) -> Option<SourceRead<Self::Output>> {
-            Some(finite_read(either_event))
+        fn read(&self) -> SourceRead<Self::Output> {
+            finite_read(either_event)
         }
     }
 
@@ -274,8 +274,8 @@ mod tests {
     impl TypedInfiniteSourceHandler for InfiniteMultiExactSource {
         type Output = outcome![InputEvent | AlternateEvent];
 
-        fn read(&self) -> Option<SourceRead<Self::Output>> {
-            Some(live_read(either_event))
+        fn read(&self) -> SourceRead<Self::Output> {
+            live_read(either_event)
         }
     }
 
@@ -284,8 +284,8 @@ mod tests {
     impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteMultiExactSource {
         type Output = outcome![InputEvent | AlternateEvent];
 
-        fn read(&self) -> Option<SourceRead<Self::Output>> {
-            Some(live_read(either_event))
+        fn read(&self) -> SourceRead<Self::Output> {
+            live_read(either_event)
         }
     }
 
@@ -584,9 +584,7 @@ mod tests {
             [
                 Some(SourceContinuation::RecordedRead),
                 Some(SourceContinuation::RecordedRead),
-                Some(SourceContinuation::Refuse {
-                    by: RefusedBy::Handler
-                }),
+                Some(SourceContinuation::Refuse),
                 reattach,
                 reattach,
             ],

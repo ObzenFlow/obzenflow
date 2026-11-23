@@ -25,7 +25,6 @@ use obzenflow_core::journal::archive::manifest::RunManifestDirectFactAdmission;
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
-use obzenflow_core::source::RecordedSourceFrontier;
 use obzenflow_core::{FlowId, JournalWriterId, ReaderGeneration, StageId, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
@@ -685,8 +684,11 @@ impl ReplayArchive for HistoryReads {
         self.inner.recorded_source_rejections(stage_key)
     }
 
-    fn recorded_source_frontier(&self, stage_key: &str) -> RecordedSourceFrontier {
-        self.inner.recorded_source_frontier(stage_key)
+    fn recorded_source_binding(
+        &self,
+        stage_key: &str,
+    ) -> Option<obzenflow_core::effect_binding::SystemBinding> {
+        self.inner.recorded_source_binding(stage_key)
     }
 
     fn archive_path(&self) -> &Path {

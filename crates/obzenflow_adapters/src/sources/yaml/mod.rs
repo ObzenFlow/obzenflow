@@ -2,13 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Finite YAML source.
+//! This module holds the finite YAML source.
 //!
 //! A [`YamlSource`] handler reads through a `file-system` port. Each read
-//! reads at most `max_bytes`, parses the document, resolves the
+//! takes at most `max_bytes` from the file, parses the document, resolves the
 //! [`YamlSelection`] and returns the next selected records. The port records
-//! each reply, and the handler maps each recorded record with its
-//! [`YamlDecoder`]. A rejected record is reported and the read continues.
+//! each reply. The handler maps each recorded record with its [`YamlDecoder`].
+//! The handler reports each record that the decoder rejects. The read then
+//! continues.
 
 mod de;
 mod document;
@@ -80,8 +81,8 @@ impl std::fmt::Debug for YamlRecord<'_> {
     }
 }
 
-/// Error returned by a [`YamlDecoder`]. It carries a typed diagnostic only;
-/// the reader adds the record index and position.
+/// `YamlDecodeError` is the error that a [`YamlDecoder`] returns. It holds only
+/// a typed diagnostic. The source handler adds the record index and the position.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct YamlDecodeError(SourceDiagnostic);
@@ -146,13 +147,15 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
         self
     }
 
-    /// Maximum records decoded per poll; must be positive.
+    /// `batch_size` sets the maximum number of records in one read. It must be
+    /// positive.
     pub fn batch_size(mut self, batch_size: usize) -> Self {
         self.batch_size = batch_size;
         self
     }
 
-    /// Maximum file size read at opening; must be positive.
+    /// `max_bytes` sets the maximum number of bytes that one read takes from the
+    /// file. It must be positive.
     pub fn max_bytes(mut self, max_bytes: usize) -> Self {
         self.max_bytes = max_bytes;
         self
@@ -187,8 +190,8 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
     }
 }
 
-/// A YAML source handler. It reads through a cold `file-system` port and maps
-/// each recorded record with its decoder.
+/// `YamlSource` reads the records of a YAML file through a cold `file-system`
+/// port. Its decoder maps each recorded record to the output.
 #[derive(Clone)]
 pub struct YamlSource<D> {
     port: Port<dyn YamlFile>,
@@ -226,9 +229,9 @@ impl<D: YamlDecoder> SourceTyping for YamlSource<D> {
 impl<D: YamlDecoder> TypedFiniteSourceHandler for YamlSource<D> {
     type Output = D::Output;
 
-    fn read(&self) -> Option<SourceRead<D::Output>> {
+    fn read(&self) -> SourceRead<D::Output> {
         let decoder = self.decoder.clone();
-        Some(SourceRead::finite_in(
+        SourceRead::finite_in(
             self.port.clone(),
             YamlRead {
                 batch: self.batch_size,
@@ -237,7 +240,7 @@ impl<D: YamlDecoder> TypedFiniteSourceHandler for YamlSource<D> {
                 at: None,
             },
             move |_: &YamlRead, line: YamlLine| decode_line(&decoder, line),
-        ))
+        )
     }
 }
 
@@ -254,8 +257,8 @@ fn decode_line<D: YamlDecoder>(decoder: &D, line: YamlLine) -> Result<D::Output,
     }
 }
 
-/// The argument of one YAML read: the read settings and, after the first
-/// read, the next record index and the file version.
+/// `YamlRead` is the argument of one YAML read. It holds the read settings and,
+/// after the first read, the next record index and the file version.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct YamlRead {
     batch: usize,
@@ -270,8 +273,8 @@ struct YamlAt {
     version: FileVersion,
 }
 
-/// One selected record, a document the read refused, or a file that changed
-/// after a recorded read.
+/// A `YamlLine` is one selected record, a document that the read refused, or a
+/// file that changed after a recorded read.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum YamlLine {
     Record {
@@ -285,13 +288,11 @@ pub enum YamlLine {
     Changed,
 }
 
-/// One parsed YAML value as the reply records it.
+/// A `YamlNode` is one parsed YAML value as the reply records it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct YamlNode(Node);
 
-/// Read the next selected records of the file at `path`. A failure becomes a
-/// recorded refusal, so a replay gives the same answer.
 pub(crate) fn read_yaml(path: &Path, from: YamlRead) -> FiniteRead<YamlLine, YamlRead> {
     let refused = |error: SourceError| FiniteRead::Batch {
         records: vec![YamlLine::Refused {
@@ -439,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn yaml_read_selection_returns_records_in_order() {
+    fn yaml_selection_returns_ordered_records() {
         let input = file(
             "orders:\n  - {order_id: a, amount_cents: 1}\n  - {order_id: b, amount_cents: 2}\n  - {order_id: c, amount_cents: 3}\n",
         );
@@ -482,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn file_source_reasons_come_from_input() {
+    fn yaml_input_produces_file_reasons() {
         use SourceDiagnosticReason::*;
         let missing = {
             let (records, _) = lines(read_yaml(

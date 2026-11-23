@@ -21,10 +21,10 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::mpsc;
 
-/// A finite source that transfers its values into one live execution. Its
-/// `in-memory` system creates the iterator at the first live read and answers
-/// each read with one item. Exhaustion is fused. Neither the input nor its
-/// items need Clone.
+/// `ValuesSource` is a finite source that transfers its values into one live
+/// execution. Its `in-memory` system creates the iterator at the first live read
+/// and answers each read with one item. After the last item, each read ends the
+/// input. `ValuesSource` does not clone the input or its items.
 pub struct ValuesSource<I: IntoIterator> {
     port: Port<dyn ValueFeed>,
     values: PhantomData<fn() -> I>,
@@ -59,7 +59,7 @@ impl<I: IntoIterator> Clone for ValuesSource<I> {
     }
 }
 
-/// The port of an in-memory value feed.
+/// `ValueFeed` is the port of an in-memory value feed.
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 pub trait ValueFeed: Send + Sync {
@@ -71,8 +71,8 @@ pub trait ValueFeed: Send + Sync {
     ) -> Result<FiniteRead<serde_json::Value, ValuesRead>, EffectError>;
 }
 
-/// The argument of one read of an in-memory value feed: the position of the
-/// next item.
+/// `ValuesRead` is the argument of one read of an in-memory value feed. It holds
+/// the position of the next item.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValuesRead {
     at: u64,
@@ -169,23 +169,20 @@ where
 {
     type Output = I::Item;
 
-    fn read(&self) -> Option<SourceRead<Self::Output>> {
-        Some(
-            SourceRead::finite(self.port.clone(), ValuesRead { at: 0 }, |value| {
-                serde_json::from_value(value).map_err(|_| {
-                    SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into())
-                })
-            })
-            .in_process(),
-        )
+    fn read(&self) -> SourceRead<Self::Output> {
+        SourceRead::finite(self.port.clone(), ValuesRead { at: 0 }, |value| {
+            serde_json::from_value(value)
+                .map_err(|_| SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into()))
+        })
+        .in_process()
     }
 }
 
-/// An infinite source that reads one Tokio channel receiver through its
-/// `channel` system. Input still buffered in the channel when a run stops is
+/// `ChannelSource` is an infinite source that reads one Tokio channel receiver
+/// through its `channel` system. Input still in the channel when a run stops is
 /// lost, so a resumed run reattaches with `AtMostOnce`. A closed channel is a
-/// source error. Orderly drain closes the receiver; use topology fan-out to
-/// distribute facts to multiple downstream stages.
+/// source error. Use topology fan-out to send facts to more than one downstream
+/// stage.
 pub struct ChannelSource<T> {
     port: Port<dyn ChannelFeed>,
     state: Arc<ChannelState<T>>,
@@ -213,7 +210,8 @@ impl<T: TypedPayload + Send + Sync + 'static> ChannelSource<T> {
     }
 }
 
-/// The port of a channel feed. A read takes the items the channel holds.
+/// `ChannelFeed` is the port of a channel feed. A read takes the items that the
+/// channel holds.
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 pub trait ChannelFeed: Send + Sync {
@@ -225,7 +223,8 @@ pub trait ChannelFeed: Send + Sync {
     ) -> Result<ContinuousRead<serde_json::Value, ChannelRead>, EffectError>;
 }
 
-/// The argument of one read of a channel feed: at most `batch` items.
+/// `ChannelRead` is the argument of one read of a channel feed. It sets the
+/// maximum number of items that the read takes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelRead {
     batch: usize,
@@ -321,9 +320,9 @@ impl<T: TypedPayload> SourceTyping for ChannelSource<T> {
 impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler for ChannelSource<T> {
     type Output = T;
 
-    fn read(&self) -> Option<SourceRead<T>> {
+    fn read(&self) -> SourceRead<T> {
         let state = self.state.clone();
-        Some(SourceRead::continuous(
+        SourceRead::continuous(
             self.port.clone(),
             ChannelRead { batch: 1000 },
             move || {
@@ -336,12 +335,7 @@ impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler fo
                     SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into())
                 })
             },
-        ))
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        self.state.receiver.lock().await.close();
-        Ok(())
+        )
     }
 }
 

@@ -29,7 +29,6 @@ use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
 
-/// A source whose input never arrives, so the pipeline stays idle.
 struct IdleSource(Port<dyn NumberFeed>);
 
 impl IdleSource {
@@ -41,12 +40,12 @@ impl IdleSource {
 impl TypedFiniteSourceHandler for IdleSource {
     type Output = BenchEvent;
 
-    fn read(&self) -> Option<SourceRead<BenchEvent>> {
-        Some(SourceRead::finite(self.0.clone(), NextNumber(0), |_| {
+    fn read(&self) -> SourceRead<BenchEvent> {
+        SourceRead::finite(self.0.clone(), NextNumber(0), |_| {
             Err(obzenflow_runtime::stages::SourceError::Other(
                 obzenflow_core::event::SourceDiagnosticReason::Unclassified.into(),
             ))
-        }))
+        })
     }
 }
 

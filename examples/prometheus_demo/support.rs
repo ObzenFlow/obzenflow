@@ -56,8 +56,6 @@ trait RequestSequence {
     ) -> Result<FiniteRead<usize, SequencePosition>, EffectError>;
 }
 
-/// Generates the request sequence and simulates a source outage at each
-/// `outage_interval`.
 struct HighVolumeGenerator {
     total_events: usize,
     outage_interval: usize,
@@ -102,7 +100,6 @@ impl RequestSequence for HighVolumeGenerator {
     }
 }
 
-/// Reads the request sequence and maps each recorded position to a request.
 struct HighVolumeSource {
     port: Port<dyn RequestSequence>,
 }
@@ -110,12 +107,12 @@ struct HighVolumeSource {
 impl TypedFiniteSourceHandler for HighVolumeSource {
     type Output = DataRequest;
 
-    fn read(&self) -> Option<SourceRead<DataRequest>> {
-        Some(SourceRead::finite(
+    fn read(&self) -> SourceRead<DataRequest> {
+        SourceRead::finite(
             self.port.clone(),
             SequencePosition { next_id: 0 },
             data_request,
-        ))
+        )
     }
 }
 

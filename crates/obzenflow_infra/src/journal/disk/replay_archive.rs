@@ -25,7 +25,6 @@ use obzenflow_core::journal::archive::manifest::{
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::archive_actions::{ArchiveEvidence, ReplayVerb};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
-use obzenflow_core::source::RecordedSourceFrontier;
 use obzenflow_core::{ChainEvent, StageId};
 use std::collections::HashMap;
 use std::fs::File;
@@ -46,9 +45,7 @@ pub struct DiskReplayArchive {
     /// Each source journal's committed EOF kind (FLOWIP-134i B8), from the
     /// same scan; under a merged lineage, the kind ending its merged records.
     recorded_source_eof: HashMap<String, EofKind>,
-    /// Each source journal's committed frontier (FLOWIP-134i B22), from the
-    /// same scan; under a merged lineage, the frontier of its merged records.
-    recorded_frontier: HashMap<String, RecordedSourceFrontier>,
+    recorded_binding: HashMap<String, obzenflow_core::effect_binding::SystemBinding>,
     /// Each source journal's count of records a replay re-admits or
     /// preserves, from the same scan.
     replayable_by_source: HashMap<String, u64>,
@@ -170,7 +167,7 @@ impl DiskReplayArchive {
                 .map(|stage_key| SourceEvidence {
                     finite: self.manifest.stages[&stage_key].stage_type == StageType::FiniteSource,
                     recorded_eof: self.recorded_source_eof(&stage_key),
-                    frontier: self.recorded_source_frontier(&stage_key),
+                    binding: self.recorded_source_binding(&stage_key),
                     stage_key,
                 })
                 .collect(),
@@ -338,7 +335,7 @@ impl DiskReplayArchive {
                 read_write_lock: Arc::new(RwLock::new(())),
                 max_recorded_generation: obzenflow_core::ReaderGeneration(0),
                 recorded_source_eof: HashMap::new(),
-                recorded_frontier: HashMap::new(),
+                recorded_binding: HashMap::new(),
                 replayable_by_source: HashMap::new(),
                 rejections_by_source: HashMap::new(),
                 reconstruction_completed: None,
@@ -421,7 +418,7 @@ impl DiskReplayArchive {
             read_write_lock: Arc::new(RwLock::new(())),
             max_recorded_generation: scan.max_generation,
             recorded_source_eof: scan.eof_by_source,
-            recorded_frontier: scan.frontier_by_source,
+            recorded_binding: scan.binding_by_source,
             replayable_by_source: scan.replayable_by_source,
             rejections_by_source,
             reconstruction_completed,
@@ -576,7 +573,7 @@ impl DiskReplayArchive {
             }
         }
         let mut merged_eof = HashMap::new();
-        let mut merged_frontier = HashMap::new();
+        let mut merged_binding = HashMap::new();
         for stage_key in self.source_stage_keys() {
             let members: Vec<&Self> = ancestors
                 .iter()
@@ -606,15 +603,15 @@ impl DiskReplayArchive {
                     verify_source_prefix(member, longest, &stage_key, &self.archive_path)?;
                 }
             }
-            if let Some(frontier) = longest.recorded_frontier.get(&stage_key) {
-                merged_frontier.insert(stage_key.clone(), frontier.clone());
+            if let Some(binding) = longest.recorded_binding.get(&stage_key) {
+                merged_binding.insert(stage_key.clone(), binding.clone());
             }
             if let Some(kind) = longest.recorded_source_eof.get(&stage_key) {
                 merged_eof.insert(stage_key, *kind);
             }
         }
         self.recorded_source_eof = merged_eof;
-        self.recorded_frontier = merged_frontier;
+        self.recorded_binding = merged_binding;
         for ancestor in &ancestors {
             self.max_recorded_generation = self
                 .max_recorded_generation
@@ -832,11 +829,11 @@ impl ReplayArchive for DiskReplayArchive {
             .unwrap_or(0)
     }
 
-    fn recorded_source_frontier(&self, stage_key: &str) -> RecordedSourceFrontier {
-        self.recorded_frontier
-            .get(stage_key)
-            .cloned()
-            .unwrap_or_default()
+    fn recorded_source_binding(
+        &self,
+        stage_key: &str,
+    ) -> Option<obzenflow_core::effect_binding::SystemBinding> {
+        self.recorded_binding.get(stage_key).cloned()
     }
 
     fn archive_path(&self) -> &Path {
@@ -945,7 +942,7 @@ impl DiskReplayArchive {
             read_write_lock: Arc::new(RwLock::new(())),
             max_recorded_generation: obzenflow_core::ReaderGeneration(0),
             recorded_source_eof: HashMap::new(),
-            recorded_frontier: HashMap::new(),
+            recorded_binding: HashMap::new(),
             replayable_by_source: HashMap::from([("src".to_string(), replayable)]),
             rejections_by_source: HashMap::new(),
             reconstruction_completed: None,
@@ -964,8 +961,7 @@ struct SourceJournalScan {
     eof_by_source: HashMap<String, EofKind>,
     /// Each source's count of records a replay re-admits or preserves.
     replayable_by_source: HashMap<String, u64>,
-    /// Each source's committed frontier, folded as a replay reads it (B22).
-    frontier_by_source: HashMap<String, RecordedSourceFrontier>,
+    binding_by_source: HashMap<String, obzenflow_core::effect_binding::SystemBinding>,
 }
 
 /// A shorter member's records for `stage_key` must open the longest member's,
@@ -1096,6 +1092,7 @@ fn scan_source_journals(
     policy: ReadPolicy,
     purpose: ScanPurpose,
 ) -> Result<SourceJournalScan, ReplayError> {
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
     use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
     use obzenflow_core::event::ChainPayload;
 
@@ -1104,7 +1101,7 @@ fn scan_source_journals(
     let mut max_generation = 0u64;
     let mut eof_by_source = HashMap::new();
     let mut replayable_by_source = HashMap::new();
-    let mut frontier_by_source = HashMap::new();
+    let mut binding_by_source = HashMap::new();
     for (stage_key, stage_info) in &manifest.stages {
         if stage_info.is_effectful && !stage_info.stage_type.is_source() {
             let path = archive_path.join(&stage_info.data_journal_file);
@@ -1153,13 +1150,12 @@ fn scan_source_journals(
                             *replayable_by_source
                                 .entry(stage_key.clone())
                                 .or_insert(0u64) += 1;
-                            frontier_by_source
-                                .entry(stage_key.clone())
-                                .or_insert_with(RecordedSourceFrontier::default)
-                                .observe(
-                                    &record.payload,
-                                    record.envelope.provenance.event.source_progress.as_ref(),
-                                );
+                            if let ChainPayload::Execution(
+                                ExecutionPayload::SourceBindingDeclared(binding),
+                            ) = &record.payload
+                            {
+                                binding_by_source.insert(stage_key.clone(), binding.clone());
+                            }
                         }
                         if let ChainPayload::FlowControl(control) = &record.payload {
                             if let FlowControlPayload::CatchUpComplete { generation, .. } = control
@@ -1201,7 +1197,7 @@ fn scan_source_journals(
         max_generation: obzenflow_core::ReaderGeneration(max_generation),
         eof_by_source,
         replayable_by_source,
-        frontier_by_source,
+        binding_by_source,
     })
 }
 

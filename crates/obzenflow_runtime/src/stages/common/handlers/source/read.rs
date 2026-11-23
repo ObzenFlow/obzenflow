@@ -2,8 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Source reads through a bound port, driven by the framework.
-
 use super::SourceError;
 use crate::effects::{
     AnswersEffect, Call, CallRequest, EffectDeclaration, EffectError, EffectsCore, Port,
@@ -70,34 +68,33 @@ pub(crate) async fn read_stage(
     }))
 }
 
-/// One recorded answer to a finite read: records and the argument of the next
-/// read, or the end of the input.
+/// `FiniteRead` is the recorded reply to one finite read. It holds records and the
+/// argument of the next read, or the end of the input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FiniteRead<Record, Next> {
     Batch { records: Vec<Record>, next: Next },
     EndOfInput,
 }
 
-/// One recorded answer to a continuous read: the records it took and the
-/// argument of the next read.
+/// `ContinuousRead` is the recorded reply to one continuous read. It holds the records
+/// that the read took and the argument of the next read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContinuousRead<Record, Next> {
     pub records: Vec<Record>,
     pub next: Next,
 }
 
-/// The read that a source handler declares. It holds the bound port, the
-/// argument of the first read and the map from a recorded record to the
-/// handler's output. The framework performs each read and keeps the argument
-/// of the next read from the recorded reply.
+/// `SourceRead` is the read that a source handler declares through its bound port.
+/// The framework performs each read and keeps the argument of the next read from the
+/// recorded reply.
 pub struct SourceRead<Output> {
     reads: Box<dyn Reads<Output>>,
     continuation: super::SourceContinuation,
 }
 
 impl<Output: Send + Sync + 'static> SourceRead<Output> {
-    /// A finite read. Each reply gives the argument of the next read, or ends
-    /// the input.
+    /// `SourceRead::finite` makes a finite read. Each reply gives the argument of the next
+    /// read or ends the input.
     pub fn finite<R, Record, F>(port: Port<R::Port>, first: R, output: F) -> Self
     where
         R: CallRequest<Outcome = FiniteRead<Record, R>, Records = RecordedReply>
@@ -112,8 +109,8 @@ impl<Output: Send + Sync + 'static> SourceRead<Output> {
         Self::finite_in(port, first, move |_: &R, record| output(record))
     }
 
-    /// A finite read whose map also reads the argument that the reply gave for
-    /// the next read, such as the columns of a file.
+    /// `SourceRead::finite_in` makes a finite read whose map also gets the argument of the
+    /// next read, for example the columns of a file.
     pub fn finite_in<R, Record, F>(port: Port<R::Port>, first: R, output: F) -> Self
     where
         R: CallRequest<Outcome = FiniteRead<Record, R>, Records = RecordedReply>
@@ -136,9 +133,9 @@ impl<Output: Send + Sync + 'static> SourceRead<Output> {
         }
     }
 
-    /// A continuous read. `ready` resolves when the system holds input, so a
-    /// wait for input makes no read. Each reply gives the argument of the next
-    /// read. A resumed run continues live reads under `guarantee`.
+    /// `SourceRead::continuous` makes a continuous read. Each live read waits for `ready`,
+    /// which resolves when the system holds input. A resumed run continues the live reads
+    /// under `guarantee`.
     pub fn continuous<R, Record, F, Ready>(
         port: Port<R::Port>,
         first: R,
@@ -169,13 +166,10 @@ impl<Output: Send + Sync + 'static> SourceRead<Output> {
         }
     }
 
-    /// The same read, of input that only this process holds. A resume of a
-    /// run that did not finish this input is refused, and a finished input
-    /// resumes.
+    /// `in_process` returns the same read for input that only this process holds. The
+    /// framework refuses to resume a run that did not finish this input.
     pub fn in_process(mut self) -> Self {
-        self.continuation = super::SourceContinuation::Refuse {
-            by: super::RefusedBy::Handler,
-        };
+        self.continuation = super::SourceContinuation::Refuse;
         self
     }
 
@@ -215,7 +209,6 @@ impl<Output: Send + Sync + 'static> SourceRead<Output> {
     }
 }
 
-/// How one read ended.
 pub(crate) enum ReadEnd {
     Batch,
     EndOfInput,
@@ -340,8 +333,6 @@ where
     }
 }
 
-/// Whether a strict replay's recording holds no outcome for read `number`, so
-/// the recorded input ends before it.
 pub(crate) fn recording_ends(
     context: &crate::effects::EffectInvocationContext,
     number: u64,
@@ -362,8 +353,19 @@ pub(crate) fn recording_ends(
         })
 }
 
-/// A failed read that the source reports and reads past. Failures of the
-/// framework's own recording stop the stage instead.
+pub(crate) fn recording_ends_before(
+    context: &crate::effects::EffectInvocationContext,
+    number: u64,
+    fact: &obzenflow_core::EventId,
+) -> bool {
+    recording_ends(context, number + 1)
+        && context
+            .stage
+            .effect_history
+            .as_ref()
+            .is_some_and(|history| !history.actions().holds_fact(fact))
+}
+
 pub(crate) fn read_failure(error: &EffectError) -> Option<SourceError> {
     let reason = match error {
         EffectError::Timeout(_) => {
@@ -374,9 +376,10 @@ pub(crate) fn read_failure(error: &EffectError) -> Option<SourceError> {
         EffectError::Transport(_) => SourceDiagnosticReason::RemoteFailed,
         EffectError::RateLimited { .. } => SourceDiagnosticReason::RateLimited,
         EffectError::Validation(_) => {
-            return Some(SourceError::Validation(
-                SourceDiagnosticReason::InvalidRecord.into(),
-            ))
+            return Some(SourceError::Terminal {
+                kind: SourcePollErrorKind::Validation,
+                diagnostic: SourceDiagnosticReason::InvalidRecord.into(),
+            })
         }
         EffectError::Permanent(_) => {
             return Some(SourceError::Terminal {
@@ -395,4 +398,51 @@ pub(crate) fn read_failure(error: &EffectError) -> Option<SourceError> {
         _ => return None,
     };
     Some(SourceError::Transport(reason.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_read_returns_remote_reason() {
+        let cases = [
+            (
+                EffectError::Timeout("deadline".into()),
+                SourceDiagnosticReason::TimedOut,
+            ),
+            (
+                EffectError::RateLimited {
+                    message: "429 Too Many Requests".into(),
+                    retry_after: std::time::Duration::from_secs(1),
+                },
+                SourceDiagnosticReason::RateLimited,
+            ),
+            (
+                EffectError::Permanent("401 Unauthorized".into()),
+                SourceDiagnosticReason::RemoteRejected,
+            ),
+            (
+                EffectError::Transport("503 Service Unavailable".into()),
+                SourceDiagnosticReason::RemoteFailed,
+            ),
+        ];
+        for (error, reason) in cases {
+            let failure = read_failure(&error).expect("a remote failure is reported");
+            assert_eq!(failure.diagnostic().reason(), reason, "{error:?}");
+            assert!(!format!("{failure} {failure:?}").contains("Unauthorized"));
+        }
+    }
+
+    #[test]
+    fn refused_read_request_fails_terminally() {
+        let failure = read_failure(&EffectError::Validation("422 Unprocessable Entity".into()))
+            .expect("a refused request is reported");
+        assert!(failure.is_terminal(), "{failure:?}");
+        assert_eq!(failure.kind(), SourcePollErrorKind::Validation);
+        assert_eq!(
+            failure.diagnostic().reason(),
+            SourceDiagnosticReason::InvalidRecord
+        );
+    }
 }

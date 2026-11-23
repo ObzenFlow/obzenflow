@@ -33,7 +33,6 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::source::strategies::{CompletionCauseSlot, CompletionContext, CompletionGate};
-use crate::stages::source::supervision::SourceExit;
 
 // ============================================================================
 // FSM States
@@ -169,16 +168,6 @@ impl<H> InfiniteSourceState<H> {
                 Self::Cancelling(cause)
             }
             _ => Self::Failing(cause),
-        }
-    }
-
-    /// The exit whose transition schedules cleanup (FLOWIP-134i B2).
-    pub(crate) fn exit(&self) -> Option<SourceExit> {
-        match self {
-            Self::Finalizing => Some(SourceExit::Finalizing),
-            Self::Failing(_) => Some(SourceExit::Failing),
-            Self::Cancelling(_) => Some(SourceExit::Cancelling),
-            _ => None,
         }
     }
 

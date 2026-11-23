@@ -15,7 +15,7 @@ use obzenflow_core::event::payloads::effect_payload::{
     EffectInputPosition, EffectOrdinal, EffectType, SETTLEMENT_EFFECT_TYPE,
 };
 use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, SourceContinuationRefusal,
+    ExecutionPayload, SourcePollContinuation,
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
@@ -415,15 +415,19 @@ async fn stage_fatals(run_dir: &Path) -> Result<Vec<StageFatalRecorded>> {
     Ok(fatals)
 }
 
-async fn source_refusals(run_dir: &Path) -> Result<Vec<(String, SourceContinuationRefusal)>> {
+async fn source_refusals(
+    run_dir: &Path,
+) -> Result<Vec<(String, obzenflow_core::event::SourceDiagnosticReason)>> {
     let mut snapshot = open_disk_run(run_dir).await?;
     let mut refusals = Vec::new();
     while let Some(record) = snapshot.next().await? {
         if let (RunRecordData::Chain(row), Some(stage)) = (&record.record, &record.journal.stage) {
-            if let ChainPayload::Execution(ExecutionPayload::SourceContinuationRefused(fact)) =
+            if let ChainPayload::Execution(ExecutionPayload::SourcePollFailed(failure)) =
                 &row.payload
             {
-                refusals.push((stage.key.clone(), fact.refusal.clone()));
+                if failure.continuation == SourcePollContinuation::Terminal {
+                    refusals.push((stage.key.clone(), failure.diagnostic.reason()));
+                }
             }
         }
     }

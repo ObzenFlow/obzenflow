@@ -48,7 +48,8 @@ pub enum BindingEvidenceError {
     InvalidLocation,
 }
 
-/// The configured supplier recorded at a source and in the descriptor of its read.
+/// `SystemBinding` identifies a configured system and its optional location. A source
+/// and the descriptor of its read record it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemBinding {
     system: String,
@@ -65,9 +66,9 @@ pub enum SystemLocation {
     Json(HttpEndpoint),
 }
 
-/// An HTTP API base URL suitable for durable, operator-readable evidence.
+/// `HttpEndpoint` is the base URL of an HTTP API with no credentials, query or fragment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct HttpEndpoint(String);
 
 impl HttpEndpoint {
@@ -90,6 +91,26 @@ impl HttpEndpoint {
     }
 }
 
+impl TryFrom<String> for HttpEndpoint {
+    type Error = BindingEvidenceError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let url = url::Url::parse(&value).map_err(|_| BindingEvidenceError::InvalidLocation)?;
+        let endpoint = Self::from_url(&url)?;
+        if endpoint.0 == value {
+            Ok(endpoint)
+        } else {
+            Err(BindingEvidenceError::InvalidLocation)
+        }
+    }
+}
+
+impl From<HttpEndpoint> for String {
+    fn from(endpoint: HttpEndpoint) -> Self {
+        endpoint.0
+    }
+}
+
 impl SystemBinding {
     pub fn name(&self) -> &str {
         &self.system
@@ -99,7 +120,7 @@ impl SystemBinding {
         self.location.as_ref()
     }
 
-    /// The binding as a refusal quotes it.
+    /// `quoted` returns the binding as a refusal quotes it.
     pub fn quoted(&self) -> String {
         match &self.location {
             None => format!("'{}'", self.system),
@@ -107,7 +128,7 @@ impl SystemBinding {
         }
     }
 
-    /// The format the system reads at its location.
+    /// `format` returns the format that the system reads at its location.
     pub fn format(&self) -> Option<&'static str> {
         self.location.as_ref().map(SystemLocation::format)
     }
@@ -141,7 +162,7 @@ impl std::fmt::Display for SystemBinding {
     }
 }
 
-/// Bounded canonical evidence for an effect binding.
+/// `SystemBindingEvidence` is bounded canonical evidence for an effect binding.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SystemBindingEvidence {
     binding: SystemBinding,
@@ -225,6 +246,18 @@ pub enum EffectBindingIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_endpoint_with_credentials_refused() {
+        let refused = serde_json::from_str::<HttpEndpoint>(r#""https://user:secret@example.com/""#);
+        assert!(refused.is_err(), "{refused:?}");
+        let endpoint: HttpEndpoint = serde_json::from_str(r#""https://example.com/""#)
+            .expect("a canonical endpoint reads back");
+        assert_eq!(
+            serde_json::to_string(&endpoint).expect("the endpoint writes"),
+            r#""https://example.com/""#
+        );
+    }
 
     #[test]
     fn bounded_evidence_debug_never_projects_bytes() {

@@ -46,7 +46,6 @@ trait CompFeed {
     ) -> Result<FiniteRead<CompInput, CompRead>, EffectError>;
 }
 
-/// Supplies inputs 1 to 3 and counts each physical read.
 struct CompInputs {
     calls: Arc<AtomicUsize>,
 }
@@ -81,8 +80,8 @@ impl CompSource {
 impl TypedFiniteSourceHandler for CompSource {
     type Output = CompInput;
 
-    fn read(&self) -> Option<SourceRead<CompInput>> {
-        Some(SourceRead::finite(self.0.clone(), CompRead(0), Ok))
+    fn read(&self) -> SourceRead<CompInput> {
+        SourceRead::finite(self.0.clone(), CompRead(0), Ok)
     }
 }
 

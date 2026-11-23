@@ -83,8 +83,6 @@ impl StoriesPort for HttpApi {
     }
 }
 
-/// The HN stories source. It selects up to `max_stories` stories through its
-/// port and maps each recorded item to an `HnStory`.
 pub struct HnStories {
     pub port: Port<dyn StoriesPort>,
     pub max_stories: usize,
@@ -99,13 +97,13 @@ impl TypedAsyncFiniteSourceHandler for HnStories {
         Some(self.poll_timeout)
     }
 
-    fn read(&self) -> Option<SourceRead<HnStory>> {
-        Some(SourceRead::finite(
+    fn read(&self) -> SourceRead<HnStory> {
+        SourceRead::finite(
             self.port.clone(),
             StoryPosition::Start {
                 limit: self.max_stories,
             },
             decode_item,
-        ))
+        )
     }
 }

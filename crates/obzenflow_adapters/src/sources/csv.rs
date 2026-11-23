@@ -5,8 +5,8 @@
 //! CSV file source
 //!
 //! A CSV source handler reads records through a `file-system` port. The port
-//! records each reply, and the handler decodes each recorded record. A row
-//! that the decoder refuses is reported, and the read continues.
+//! records each reply. The handler decodes each recorded record. The handler
+//! reports each row that the decoder rejects. The read then continues.
 
 use super::file_system::{CsvFile, CsvFormat, CsvLine, CsvRead, FileSystem};
 use super::file_version::input_changed;
@@ -16,7 +16,7 @@ use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErro
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::stages::common::handlers::source::{SourceRead, TypedFiniteSourceHandler};
-use obzenflow_runtime::stages::source::{SourceError, SourcePosition};
+use obzenflow_runtime::stages::source::SourceError;
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -33,10 +33,8 @@ impl TypedPayload for CsvRow {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// A redacted view of one CSV record presented to a [`CsvDecoder`].
-///
-/// The view exposes named and positional field access without making the
-/// connector's reader state part of the application-facing contract.
+/// `CsvRecord` gives a [`CsvDecoder`] access to the fields of one CSV record,
+/// by name or by position.
 #[derive(Clone, Copy)]
 pub struct CsvRecord<'a> {
     headers: &'a StringRecord,
@@ -89,8 +87,8 @@ impl std::fmt::Debug for CsvRecord<'_> {
     }
 }
 
-/// Error returned by an application-owned [`CsvDecoder`]. It carries a typed
-/// diagnostic only; the reader adds the record index and line.
+/// `CsvDecodeError` is the error that a [`CsvDecoder`] returns. It holds only a
+/// typed diagnostic. The source handler adds the record index and the line.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct CsvDecodeError(SourceDiagnostic);
@@ -143,8 +141,8 @@ impl From<csv::Error> for CsvDecodeError {
     }
 }
 
-/// The parser position before the next record of a CSV file. Seeking reparses
-/// no prefix.
+/// `CsvPosition` is the parser position before the next record of a CSV file. A
+/// read from this position does not parse the earlier part of the file again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CsvPosition {
     byte: u64,
@@ -153,8 +151,6 @@ pub struct CsvPosition {
     row_index: u64,
     skip_remaining: u64,
 }
-
-impl SourcePosition for CsvPosition {}
 
 impl CsvPosition {
     pub(crate) fn at(parser: &csv::Position, row_index: usize, skip_remaining: usize) -> Self {
@@ -326,8 +322,8 @@ where
     }
 }
 
-/// A CSV source handler. It reads records through a cold `file-system` port
-/// and maps each recorded record to its output with its decoder.
+/// `CsvSource` reads the records of a CSV file through a cold `file-system` port.
+/// Its decoder maps each recorded record to the output.
 #[derive(Clone)]
 pub struct CsvSource<D> {
     port: Port<dyn CsvFile>,
@@ -340,13 +336,13 @@ pub struct CsvSource<D> {
 impl<D: CsvDecoder> TypedFiniteSourceHandler for CsvSource<D> {
     type Output = D::Output;
 
-    fn read(&self) -> Option<SourceRead<D::Output>> {
+    fn read(&self) -> SourceRead<D::Output> {
         let decoder = self.decoder.clone();
-        Some(SourceRead::finite_in(
+        SourceRead::finite_in(
             self.port.clone(),
             CsvRead::first(self.chunk_size, self.skip_rows, self.select_columns.clone()),
             move |read: &CsvRead, line: CsvLine| decode_line(&decoder, read, line),
-        ))
+        )
     }
 }
 
@@ -496,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn csv_line_unknown_variant_returns_invalid_record() {
+    fn unknown_csv_variant_returns_invalid_record() {
         let error = decode_line(&TierCsv, &tier_headers(), values(&["Platinum"])).unwrap_err();
         assert!(matches!(error, SourceError::Validation(_)), "{error:?}");
         assert_eq!(
@@ -508,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn csv_line_changed_file_returns_input_changed() {
+    fn changed_csv_line_returns_input_changed() {
         let error = decode_line(&CsvRowDecoder, &after_header(), CsvLine::Changed).unwrap_err();
         assert!(error.is_terminal(), "{error:?}");
         assert_eq!(

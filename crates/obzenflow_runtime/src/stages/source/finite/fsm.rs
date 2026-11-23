@@ -33,7 +33,6 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::source::strategies::{CompletionCauseSlot, CompletionContext, CompletionGate};
-use crate::stages::source::supervision::SourceExit;
 
 // ============================================================================
 // FSM States
@@ -167,16 +166,6 @@ impl<H> FiniteSourceState<H> {
                 Self::Cancelling(cause)
             }
             _ => Self::Failing(cause),
-        }
-    }
-
-    /// The exit whose transition schedules cleanup (FLOWIP-134i B2).
-    pub(crate) fn exit(&self) -> Option<SourceExit> {
-        match self {
-            Self::Finalizing => Some(SourceExit::Finalizing),
-            Self::Failing(_) => Some(SourceExit::Failing),
-            Self::Cancelling(_) => Some(SourceExit::Cancelling),
-            _ => None,
         }
     }
 
@@ -798,7 +787,6 @@ pub(crate) mod tests {
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex};
 
-    use crate::stages::common::handlers::source::traits::FiniteSourceHandler as TestFiniteSourceHandler;
     use crate::stages::source::strategies::{
         CompletionContext, CompletionDecision, CompletionGate, SourceCompletionCause,
     };
@@ -833,7 +821,6 @@ pub(crate) mod tests {
     /// Minimal in-memory journal for tests
     pub(crate) struct TestJournal<T: JournalEvent> {
         id: JournalId,
-        fail_appends: Arc<std::sync::atomic::AtomicBool>,
         append_gate: Mutex<Option<AppendGate<T>>>,
         append_failure: Mutex<Option<AppendMatch<T>>>,
         owner: Option<JournalOwner>,
@@ -854,14 +841,6 @@ pub(crate) mod tests {
             gate
         }
 
-        pub(crate) fn with_append_failure(
-            mut self,
-            fail: Arc<std::sync::atomic::AtomicBool>,
-        ) -> Self {
-            self.fail_appends = fail;
-            self
-        }
-
         pub(crate) fn fail_matching_append(
             &self,
             matches: impl Fn(&T) -> bool + Send + Sync + 'static,
@@ -872,7 +851,6 @@ pub(crate) mod tests {
         pub(crate) fn new(owner: JournalOwner) -> Self {
             Self {
                 id: JournalId::new(),
-                fail_appends: Arc::default(),
                 append_gate: Mutex::new(None),
                 append_failure: Mutex::new(None),
                 owner: Some(owner),
@@ -922,7 +900,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .take_if(|matches| matches(&event))
                 .is_some();
-            if fails_once || self.fail_appends.load(std::sync::atomic::Ordering::SeqCst) {
+            if fails_once {
                 return Err(JournalError::Full);
             }
             let event = options.capture.prepare(0, event);
@@ -998,45 +976,88 @@ pub(crate) mod tests {
     #[derive(Clone, Debug)]
     struct DummySource;
 
-    impl TestFiniteSourceHandler for DummySource {
-        fn next(
+    impl crate::stages::common::handlers::source::SealAsyncFinite for DummySource {}
+    impl crate::stages::common::handlers::source::SealAsyncInfinite for DummySource {}
+
+    #[async_trait]
+    impl crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler for DummySource {
+        fn read_declaration(
+            &self,
+        ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError> {
+            unreachable!("the state projection makes no read")
+        }
+
+        fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
+
+        fn poll_timeout(&self) -> Option<std::time::Duration> {
+            None
+        }
+
+        async fn next_invocation(
             &mut self,
-        ) -> Result<
-            Option<Vec<ChainEvent>>,
-            crate::stages::common::handlers::source::traits::SourceError,
-        > {
-            // This test source never emits data; it's only used to drive EOF behaviour
-            // in combination with the control strategy and breaker state.
-            Ok(None)
+        ) -> crate::stages::common::handlers::source::ErasedSourceInvocation {
+            crate::stages::common::handlers::source::ErasedSourceInvocation::completed(
+                crate::stages::common::handlers::source::ErasedSourceCompletion::Eof,
+            )
         }
     }
 
     #[async_trait]
-    impl crate::stages::common::handlers::source::traits::AsyncFiniteSourceHandler for DummySource {
-        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, crate::stages::SourceError> {
-            Ok(None)
+    impl crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler for DummySource {
+        fn read_declaration(
+            &self,
+        ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError> {
+            unreachable!("the state projection makes no read")
+        }
+
+        fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
+
+        fn poll_timeout(&self) -> Option<std::time::Duration> {
+            None
+        }
+
+        async fn next_invocation(
+            &mut self,
+        ) -> crate::stages::common::handlers::source::ErasedSourceInvocation {
+            crate::stages::common::handlers::source::ErasedSourceInvocation::completed(
+                crate::stages::common::handlers::source::ErasedSourceCompletion::Batch(Vec::new()),
+            )
         }
     }
 
-    impl crate::stages::common::handlers::source::traits::InfiniteSourceHandler for DummySource {
-        fn next(&mut self) -> Result<Vec<ChainEvent>, crate::stages::SourceError> {
-            Ok(Vec::new())
-        }
+    fn projection_reads(
+        stage_id: CoreStageId,
+        journal: &Arc<dyn Journal<ChainEvent>>,
+    ) -> Arc<crate::effects::StageConstants> {
+        Arc::new(crate::effects::StageConstants {
+            flow_id: FlowId::new(),
+            stage_id,
+            stage_key: "source_projection".to_string(),
+            writer_id: WriterId::from(stage_id),
+            stage_logic_version: "1".to_string(),
+            data_journal: journal.clone(),
+            flow_context: None,
+            observers: None,
+            instrumentation: None,
+            heartbeat_state: None,
+            effect_history: None,
+            current_run_history: crate::effects::CurrentRunHistory::new(journal.clone()),
+            runtime_execution: crate::execution::RuntimeExecution::new(
+                crate::execution::RuntimeMode::Live,
+                None,
+            ),
+            effect_ports: crate::effects::EffectPortRegistry::new(),
+            effect_declarations: Vec::new(),
+            output_contract: OutcomeContract::empty(),
+            backpressure_readers: Vec::new(),
+            lineage: Default::default(),
+            catch_up: None,
+        })
     }
 
-    #[async_trait]
-    impl crate::stages::common::handlers::source::traits::AsyncInfiniteSourceHandler for DummySource {
-        async fn next(&mut self) -> Result<Vec<ChainEvent>, crate::stages::SourceError> {
-            Ok(Vec::new())
-        }
-    }
-
-    // Exercise both physical supervisors for each source family using the same
-    // existing journal fixture. FSM acceptance is checked before any action runs.
     macro_rules! source_state_projection_test {
         ($test:ident, $context:ident, $init:ident, $state:ident, $event:ident,
-         $sync:ident, $async:ident, $finite:literal, {$($extra:ident: $value:expr),* $(,)?},
-         [$($async_extra:ident: $async_value:expr),* $(,)?]) => {
+         $async:ident, $finite:literal, {$($extra:ident: $value:expr),* $(,)?}) => {
             #[tokio::test]
             async fn $test() {
                 use crate::supervised_base::base::Supervisor;
@@ -1045,12 +1066,12 @@ pub(crate) mod tests {
                 };
                 use std::time::{Duration, Instant};
 
-                for asynchronous in [false, true] {
+                {
                     let stage_id = CoreStageId::new();
                     let data_journal: Arc<dyn Journal<ChainEvent>> =
                         Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
                     let build_async = |external_events, state_watcher| $async {
-                        $($async_extra: $async_value,)*
+                        reads: projection_reads(stage_id, &data_journal),
                         name: "source_projection".into(),
                         handler: Some(DummySource),
                         data_journal: data_journal.clone(),
@@ -1062,43 +1083,17 @@ pub(crate) mod tests {
                         external_events,
                         state_watcher,
                         last_state: None,
-                        replay_driver: None,
                         replay_started_at: None,
                         replay_completion: Default::default(),
                         source_boundary: None,
                         pending_failure: None,
-                        reader_acquired: false,
-                        exit: None,
-                        system: obzenflow_core::SystemBindingEvidence::named("projection").unwrap().binding().clone(),
-                        $($extra: $value,)*
-                    };
-                    let build_sync = || $sync {
-                        name: "source_projection".into(),
-                        handler: Some(DummySource),
-                        data_journal: data_journal.clone(),
-                        flow_context: FlowContext::new("source_projection", stage_id),
-                        stage_id,
-                        idle_backoff: IdleBackoff::exponential_with_cap(
-                            Duration::from_millis(1), Duration::from_millis(10)),
-                        pending_idle_delay: None,
-                        replay_driver: None,
-                        replay_started_at: None,
-                        replay_completion: Default::default(),
-                        source_boundary: None,
-                        pending_failure: None,
-                        reader_acquired: false,
-                        exit: None,
                         system: obzenflow_core::SystemBindingEvidence::named("projection").unwrap().binding().clone(),
                         $($extra: $value,)*
                     };
                     let build_fsm = |initial_state| {
-                        if asynchronous {
-                            let (_, external_events, state_watcher) =
-                                ChannelBuilder::new().build($state::<DummySource>::Created);
-                            build_async(external_events.into(), state_watcher).build_state_machine(initial_state)
-                        } else {
-                            build_sync().build_state_machine(initial_state)
-                        }
+                        let (_, external_events, state_watcher) =
+                            ChannelBuilder::new().build($state::<DummySource>::Created);
+                        build_async(external_events.into(), state_watcher).build_state_machine(initial_state)
                     };
                     let mut ctx = $context::<DummySource>::new($init {
                         stage_id,
@@ -1133,17 +1128,15 @@ pub(crate) mod tests {
                         let old_entry = Instant::now() - Duration::from_secs(60);
                         *ctx.instrumentation.state_entered_at.write().unwrap() = old_entry;
                         let actions = fsm.handle(event, &mut ctx).await.unwrap();
-                        if asynchronous {
-                            let (_, receiver, watcher) = ChannelBuilder::new().build(fsm.state().clone());
-                            build_async(receiver.into(), watcher).after_transition(fsm.state(), &ctx);
-                        } else {
-                            build_sync().after_transition(fsm.state(), &ctx);
-                        }
+                        let (_, receiver, watcher) = ChannelBuilder::new().build(fsm.state().clone());
+                        build_async(receiver.into(), watcher).after_transition(fsm.state(), &ctx);
                         assert_eq!(fsm.state().variant_name(), destination);
                         assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), destination);
                         assert!(*ctx.instrumentation.state_entered_at.read().unwrap() > old_entry);
+                        let (_, receiver, watcher) = ChannelBuilder::new().build(fsm.state().clone());
+                        let supervisor = build_async(receiver.into(), watcher);
                         for action in actions {
-                            if build_sync().supervisor_action(&action).is_none() {
+                            if supervisor.supervisor_action(&action).is_none() {
                                 action.execute(&mut ctx).await.unwrap();
                             }
                         }
@@ -1171,12 +1164,8 @@ pub(crate) mod tests {
                         let repeated = matches!(initial, $state::Failing(_));
                         let mut fsm = build_fsm(initial);
                         let actions = fsm.handle($event::Error("failure".into()), &mut ctx).await.unwrap();
-                        if asynchronous {
-                            let (_, receiver, watcher) = ChannelBuilder::new().build(fsm.state().clone());
-                            build_async(receiver.into(), watcher).after_transition(fsm.state(), &ctx);
-                        } else {
-                            build_sync().after_transition(fsm.state(), &ctx);
-                        }
+                        let (_, receiver, watcher) = ChannelBuilder::new().build(fsm.state().clone());
+                        build_async(receiver.into(), watcher).after_transition(fsm.state(), &ctx);
                         let expected_reason = if repeated { "first" } else { "failure" };
                         assert_eq!(fsm.state(), &$state::Failing(expected_reason.into()));
                         assert_eq!(actions.is_empty(), repeated);
@@ -1187,7 +1176,8 @@ pub(crate) mod tests {
                         ctx.instrumentation.transition_to_state("Running");
                         let mut fsm = build_fsm($state::Running);
                         let actions = fsm.handle($event::Completed, &mut ctx).await.unwrap();
-                        build_sync().after_transition(fsm.state(), &ctx);
+                        let (_, receiver, watcher) = ChannelBuilder::new().build(fsm.state().clone());
+                        build_async(receiver.into(), watcher).after_transition(fsm.state(), &ctx);
                         assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Draining");
                         assert!(actions.is_empty());
                     }
@@ -1196,33 +1186,28 @@ pub(crate) mod tests {
         };
     }
 
-    use crate::stages::source::finite::{
-        async_supervisor::AsyncFiniteSourceSupervisor, supervisor::FiniteSourceSupervisor,
-    };
+    use crate::stages::source::finite::async_supervisor::AsyncFiniteSourceSupervisor;
     use crate::stages::source::infinite::{
         async_supervisor::AsyncInfiniteSourceSupervisor,
         fsm::{
             InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceEvent,
             InfiniteSourceState,
         },
-        supervisor::InfiniteSourceSupervisor,
     };
     use obzenflow_fsm::StateVariant;
 
     source_state_projection_test!(finite_source_states_precede_actions,
         FiniteSourceContext, FiniteSourceContextInit, FiniteSourceState, FiniteSourceEvent,
-        FiniteSourceSupervisor, AsyncFiniteSourceSupervisor, true,
+        AsyncFiniteSourceSupervisor, true,
         { pending_boundary_eof: false, pending_boundary_rejected: false,
-          continuation: crate::stages::source::SourceContinuation::Refuse {
-              by: crate::stages::source::RefusedBy::Connector } },
-        [reads: None, kind: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::AsyncFiniteSource]);
+          kind: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::AsyncFiniteSource });
     source_state_projection_test!(infinite_source_states_precede_actions,
         InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceState, InfiniteSourceEvent,
-        InfiniteSourceSupervisor, AsyncInfiniteSourceSupervisor, false,
+        AsyncInfiniteSourceSupervisor, false,
         { pending_boundary_begin_drain: false,
           continuation: crate::stages::source::SourceContinuation::Reattach {
-              guarantee: obzenflow_core::event::payloads::execution_payload::ReattachGuarantee::AtMostOnce } },
-        [reads: None, kind: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::AsyncInfiniteSource]);
+              guarantee: obzenflow_core::event::payloads::execution_payload::ReattachGuarantee::AtMostOnce },
+          kind: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::AsyncInfiniteSource });
 
     #[tokio::test]
     async fn send_eof_uses_poison_flag_when_breaker_open() {

@@ -13,7 +13,6 @@ use super::system_payload::{
     CommandDiscardDisposition, ContractName, ContractResultStatusLabel, SystemFeedRole,
 };
 use crate::ai::{ChunkExclusionReason, ChunkPlanningSummary, OversizePolicy};
-use crate::event::observability::{HttpPullState, WaitReason};
 use crate::event::provenance::ExecutionAccounting;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::types::{Count, DurationMs};
@@ -81,18 +80,8 @@ pub enum ExecutionPayload {
     Backpressure(BackpressureFact),
     SourceRecordRejected(SourceRecordRejectedFact),
     SourcePollFailed(SourcePollFailedFact),
-    SourceOpenFailed(SourceOpenFailedFact),
     SourceBindingDeclared(crate::effect_binding::SystemBinding),
-    SourceReaderAcquired(SourceReaderAcquiredFact),
-    SourceCleanupSucceeded(SourceCleanupSucceededFact),
-    SourceCleanupFailed(SourceCleanupFailedFact),
-    SourceInputPinned(SourceInputPinnedFact),
-    SourcePositioned(SourceResumeFact),
-    SourceStartedOnResume(SourceResumeFact),
     SourceReattached(SourceReattachedFact),
-    SourceContinuationRefused(SourceContinuationRefusedFact),
-    SourceSeekFailed(SourceSeekFailedFact),
-    HttpPullState(HttpPullStateFact),
     AiChunkingPlanned(AiChunkingPlannedFact),
     AccumulatorProgress {
         inputs_since_last_report: u64,
@@ -523,14 +512,6 @@ pub enum SourcePollContinuation {
     Terminal,
 }
 
-/// Why the supervisor was opening a reader when acquisition failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceOpenIntent {
-    Start,
-    Resume,
-}
-
 /// A row a source refused and read past.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -548,86 +529,6 @@ pub struct SourcePollFailedFact {
     pub detail: String,
     pub continuation: SourcePollContinuation,
     pub diagnostic: super::source_diagnostic::SourceDiagnostic,
-}
-
-/// Opening evidence, distinct from a poll failure; no poll occurred.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceOpenFailedFact {
-    pub source_type: SourcePollKind,
-    pub error_type: SourcePollErrorKind,
-    pub intent: SourceOpenIntent,
-    pub diagnostic: super::source_diagnostic::SourceDiagnostic,
-    pub timestamp_ms: u64,
-}
-
-/// A supervisor opened a source reader (FLOWIP-134i B2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceReaderAcquiredFact {
-    pub source_type: SourcePollKind,
-    pub intent: SourceOpenIntent,
-    pub system: String,
-}
-
-/// Where a source was when it released its reader.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceCleanupPhase {
-    /// Before live admission, while a resume positioned the reader.
-    Recovery,
-    Live,
-}
-
-/// Why a source released its reader.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceCleanupTrigger {
-    Exhausted,
-    Stopped,
-    Failed,
-}
-
-/// A source released the reader it acquired (FLOWIP-134i B2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceCleanupSucceededFact {
-    pub source_type: SourcePollKind,
-    pub phase: SourceCleanupPhase,
-    pub trigger: SourceCleanupTrigger,
-}
-
-/// A source failed to release its reader. The failure is secondary: it never
-/// replaces the stage's primary failure, which it names.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceCleanupFailedFact {
-    pub source_type: SourcePollKind,
-    pub phase: SourceCleanupPhase,
-    pub trigger: SourceCleanupTrigger,
-    pub error_type: SourcePollErrorKind,
-    pub diagnostic: super::source_diagnostic::SourceDiagnostic,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub primary_failure: Option<crate::EventId>,
-}
-
-/// What a positioned source's following positions index, committed before its
-/// first record (FLOWIP-134i B1, B11).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceInputPinnedFact {
-    pub identity: crate::source::SourceInputIdentity,
-    pub beginning: crate::source::EncodedSourcePosition,
-}
-
-/// How a positioned source continued on resume: positioned after its committed
-/// prefix, or started because it never pinned (FLOWIP-134i B15). It names the
-/// input by digest and the generation it entered; never a position.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceResumeFact {
-    pub identity_digest: String,
-    pub generation: u64,
 }
 
 /// What a source's live reattachment can cost the input it read but had not
@@ -654,43 +555,6 @@ pub struct SourceReattachedFact {
     pub guarantee: ReattachGuarantee,
 }
 
-/// Why a resume cannot continue a source's interrupted input.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "refusal", rename_all = "snake_case")]
-pub enum SourceContinuationRefusal {
-    /// A named part of the input identity differs from the pin (B10).
-    InputChanged { part: String },
-    /// Admitted records lack their recorded positions or pin (B11).
-    MissingEvidence,
-    /// The recorded position has another version or does not decode.
-    PositionUnreadable,
-    /// The source's connector does not position it.
-    Unpositioned,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceContinuationRefusedFact {
-    pub refusal: SourceContinuationRefusal,
-}
-
-/// A positioned source failed to seek after its committed prefix.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceSeekFailedFact {
-    pub identity_digest: String,
-    pub diagnostic: super::source_diagnostic::SourceDiagnostic,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HttpPullStateFact {
-    pub state: HttpPullState,
-    pub wait_reason: Option<WaitReason>,
-    pub next_wake_unix_secs: Option<u64>,
-    pub last_success_unix_secs: Option<u64>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AiChunkingPlannedFact {
@@ -702,12 +566,7 @@ pub struct AiChunkingPlannedFact {
 
 impl ExecutionPayload {
     pub const fn payload_schema_version(&self) -> std::num::NonZeroU32 {
-        match self {
-            Self::SourceCleanupFailed(_) | Self::SourceReaderAcquired(_) => {
-                std::num::NonZeroU32::new(2).unwrap()
-            }
-            _ => std::num::NonZeroU32::MIN,
-        }
+        std::num::NonZeroU32::MIN
     }
 
     pub fn event_type(&self, stage_name: &str) -> std::borrow::Cow<'static, str> {
@@ -732,18 +591,8 @@ impl ExecutionPayload {
             Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourceRecordRejected(_) => vocabulary::source::RECORD_REJECTED,
             Self::SourcePollFailed(_) => vocabulary::source::POLL_FAILED,
-            Self::SourceOpenFailed(_) => vocabulary::source::OPEN_FAILED,
             Self::SourceBindingDeclared(_) => vocabulary::source::BINDING_DECLARED,
-            Self::SourceReaderAcquired(_) => vocabulary::source::READER_ACQUIRED,
-            Self::SourceCleanupSucceeded(_) => vocabulary::source::CLEANUP_SUCCEEDED,
-            Self::SourceCleanupFailed(_) => vocabulary::source::CLEANUP_FAILED,
-            Self::SourceInputPinned(_) => vocabulary::source::INPUT_PINNED,
-            Self::SourcePositioned(_) => vocabulary::source::POSITIONED,
-            Self::SourceStartedOnResume(_) => vocabulary::source::STARTED_ON_RESUME,
             Self::SourceReattached(_) => vocabulary::source::REATTACHED,
-            Self::SourceContinuationRefused(_) => vocabulary::source::CONTINUATION_REFUSED,
-            Self::SourceSeekFailed(_) => vocabulary::source::SEEK_FAILED,
-            Self::HttpPullState(_) => "source.http_pull_state",
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
             Self::AccumulatorProgress { .. } => "stateful.accumulation_progress",
             Self::JoinReferenceProgress { .. } => "join.reference_progress",
@@ -782,18 +631,8 @@ impl ExecutionPayload {
             | Self::Backpressure(_)
             | Self::SourceRecordRejected(_)
             | Self::SourcePollFailed(_)
-            | Self::SourceOpenFailed(_)
             | Self::SourceBindingDeclared(_)
-            | Self::SourceReaderAcquired(_)
-            | Self::SourceCleanupSucceeded(_)
-            | Self::SourceCleanupFailed(_)
-            | Self::SourceInputPinned(_)
-            | Self::SourcePositioned(_)
-            | Self::SourceStartedOnResume(_)
             | Self::SourceReattached(_)
-            | Self::SourceContinuationRefused(_)
-            | Self::SourceSeekFailed(_)
-            | Self::HttpPullState(_)
             | Self::AiChunkingPlanned(_)
             | Self::AccumulatorProgress { .. }
             | Self::JoinReferenceProgress { .. }

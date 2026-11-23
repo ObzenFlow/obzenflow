@@ -258,7 +258,6 @@ trait BatchInput {
     ) -> Result<FiniteRead<RateLimiterTestEvent, BatchRead>, EffectError>;
 }
 
-/// Supplies one batch of the given size per read.
 struct Batches {
     sizes: Vec<u64>,
 }
@@ -297,15 +296,15 @@ impl BatchedSource {
 impl TypedFiniteSourceHandler for BatchedSource {
     type Output = RateLimiterTestEvent;
 
-    fn read(&self) -> Option<SourceRead<RateLimiterTestEvent>> {
-        Some(SourceRead::finite(
+    fn read(&self) -> SourceRead<RateLimiterTestEvent> {
+        SourceRead::finite(
             self.0.clone(),
             BatchRead {
                 batch: 0,
                 next_id: 0,
             },
             Ok,
-        ))
+        )
     }
 }
 
@@ -333,8 +332,6 @@ trait ScriptedInput {
     ) -> Result<FiniteRead<RateLimiterTestEvent, ScriptRead>, EffectError>;
 }
 
-/// Plays one scripted step per physical read: data, an empty reply, a
-/// failed read or the end of input.
 struct Script {
     steps: Vec<SourceStep>,
     played: AtomicUsize,
@@ -383,7 +380,6 @@ fn script(steps: Vec<SourceStep>) -> SourceRead<RateLimiterTestEvent> {
     )
 }
 
-/// Synchronous finite source that plays a scripted read sequence.
 struct ScriptedSyncSource(Vec<SourceStep>);
 
 impl ScriptedSyncSource {
@@ -395,12 +391,11 @@ impl ScriptedSyncSource {
 impl TypedFiniteSourceHandler for ScriptedSyncSource {
     type Output = RateLimiterTestEvent;
 
-    fn read(&self) -> Option<SourceRead<RateLimiterTestEvent>> {
-        Some(script(self.0.clone()))
+    fn read(&self) -> SourceRead<RateLimiterTestEvent> {
+        script(self.0.clone())
     }
 }
 
-/// Asynchronous finite source that plays a scripted read sequence.
 struct ScriptedAsyncSource(Vec<SourceStep>);
 
 impl ScriptedAsyncSource {
@@ -412,8 +407,8 @@ impl ScriptedAsyncSource {
 impl TypedAsyncFiniteSourceHandler for ScriptedAsyncSource {
     type Output = RateLimiterTestEvent;
 
-    fn read(&self) -> Option<SourceRead<RateLimiterTestEvent>> {
-        Some(script(self.0.clone()))
+    fn read(&self) -> SourceRead<RateLimiterTestEvent> {
+        script(self.0.clone())
     }
 }
 

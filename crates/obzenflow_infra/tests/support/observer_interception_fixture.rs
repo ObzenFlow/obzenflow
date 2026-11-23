@@ -130,7 +130,6 @@ trait OrderInput {
     ) -> Result<FiniteRead<OrderAccepted, OrderRead>, EffectError>;
 }
 
-/// Supplies `ORDER_COUNT` orders and counts each physical read.
 struct Orders {
     reads: Arc<AtomicUsize>,
 }
@@ -161,8 +160,8 @@ struct OrderSource(Port<dyn OrderInput>);
 impl TypedFiniteSourceHandler for OrderSource {
     type Output = OrderAccepted;
 
-    fn read(&self) -> Option<SourceRead<OrderAccepted>> {
-        Some(SourceRead::finite(self.0.clone(), OrderRead(0), Ok))
+    fn read(&self) -> SourceRead<OrderAccepted> {
+        SourceRead::finite(self.0.clone(), OrderRead(0), Ok)
     }
 }
 

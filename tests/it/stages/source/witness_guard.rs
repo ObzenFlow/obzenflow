@@ -2,21 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Architecture and raw-erasure census guard for FLOWIP-134g, and FLOWIP-122i's
-//! guard that only hosted ingress records that its sender redelivers.
-
 use proc_macro2::{TokenStream, TokenTree};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
-
-const RAW_SOURCE_TRAITS: &[&str] = &[
-    "FiniteSourceHandler",
-    "AsyncFiniteSourceHandler",
-    "InfiniteSourceHandler",
-    "AsyncInfiniteSourceHandler",
-];
 
 const RETIRED_IDENTIFIERS: &[&str] = &[
     "__obzenflow_source_untyped",
@@ -24,8 +14,6 @@ const RETIRED_IDENTIFIERS: &[&str] = &[
     "__obzenflow_infinite_source_untyped",
     "__obzenflow_async_infinite_source_untyped",
 ];
-
-const RAW_ALLOWLIST: &str = include_str!("../../../fixtures/raw_source_handler_allowlist.txt");
 
 fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
     if !path.is_dir() {
@@ -57,22 +45,9 @@ fn workspace_rust_sources(root: &Path) -> Vec<PathBuf> {
     sources
 }
 
-fn implementing_type_name(ty: &syn::Type) -> String {
-    match ty {
-        syn::Type::Path(path) => path
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string())
-            .unwrap_or_else(|| "<empty-path>".to_string()),
-        _ => "<non-path-type>".to_string(),
-    }
-}
-
 #[derive(Default)]
 struct SurfaceVisitor {
     retired: Vec<String>,
-    raw_implementors: Vec<(String, String)>,
 }
 
 impl SurfaceVisitor {
@@ -101,65 +76,6 @@ impl<'ast> Visit<'ast> for SurfaceVisitor {
     fn visit_token_stream(&mut self, tokens: &'ast TokenStream) {
         self.visit_macro_tokens(tokens.clone());
     }
-
-    fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
-        if let Some(trait_name) = implementation
-            .trait_
-            .as_ref()
-            .and_then(|(_, path, _)| path.segments.last())
-            .map(|segment| segment.ident.to_string())
-            .filter(|name| RAW_SOURCE_TRAITS.contains(&name.as_str()))
-        {
-            self.raw_implementors
-                .push((trait_name, implementing_type_name(&implementation.self_ty)));
-        }
-        syn::visit::visit_item_impl(self, implementation);
-    }
-}
-
-fn parse_raw_allowlist() -> BTreeMap<(String, String, String), String> {
-    let mut entries = BTreeMap::new();
-    for (line_index, line) in RAW_ALLOWLIST.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields = line.split('|').map(str::trim).collect::<Vec<_>>();
-        assert_eq!(
-            fields.len(),
-            4,
-            "invalid raw-source allowlist line {}: {line}",
-            line_index + 1
-        );
-        assert!(
-            matches!(
-                fields[0],
-                "framework_erasure" | "structural_adapter" | "test_harness"
-            ),
-            "invalid raw-source category on line {}: {}",
-            line_index + 1,
-            fields[0]
-        );
-        assert!(
-            RAW_SOURCE_TRAITS.contains(&fields[2]),
-            "invalid raw-source trait on line {}: {}",
-            line_index + 1,
-            fields[2]
-        );
-        let key = (
-            fields[1].to_string(),
-            fields[2].to_string(),
-            fields[3].to_string(),
-        );
-        assert!(
-            entries.insert(key.clone(), fields[0].to_string()).is_none(),
-            "duplicate raw-source allowlist entry: {}|{}|{}",
-            key.0,
-            key.1,
-            key.2
-        );
-    }
-    entries
 }
 
 #[test]
@@ -189,40 +105,6 @@ fn retired_source_compatibility_macros_stay_absent() {
         violations.is_empty(),
         "retired source compatibility identifiers resurfaced:\n{}",
         violations.join("\n")
-    );
-}
-
-#[test]
-fn raw_source_implementations_match_the_checked_in_allowlist() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let expected = parse_raw_allowlist();
-    let mut actual = BTreeSet::new();
-
-    for source_path in workspace_rust_sources(&root) {
-        let source = fs::read_to_string(&source_path).expect("read Rust source");
-        let syntax = syn::parse_file(&source)
-            .unwrap_or_else(|error| panic!("parse {}: {error}", source_path.display()));
-        let mut visitor = SurfaceVisitor::default();
-        visitor.visit_file(&syntax);
-        let relative = source_path
-            .strip_prefix(&root)
-            .expect("workspace-relative source")
-            .to_string_lossy()
-            .replace('\\', "/");
-        for (trait_name, implementor) in visitor.raw_implementors {
-            assert!(
-                actual.insert((relative.clone(), trait_name.clone(), implementor.clone())),
-                "duplicate raw source implementation: {relative}|{trait_name}|{implementor}"
-            );
-        }
-    }
-
-    let expected_keys = expected.keys().cloned().collect::<BTreeSet<_>>();
-    let unexpected = actual.difference(&expected_keys).collect::<Vec<_>>();
-    let stale = expected_keys.difference(&actual).collect::<Vec<_>>();
-    assert!(
-        unexpected.is_empty() && stale.is_empty(),
-        "raw source-handler allowlist drifted\nunexpected: {unexpected:#?}\nstale: {stale:#?}"
     );
 }
 
@@ -321,9 +203,7 @@ fn erased_source_descriptors_remain_crate_private() {
             .expect("read source descriptor module");
 
     for name in [
-        "FiniteSourceDescriptor",
         "AsyncFiniteSourceDescriptor",
-        "InfiniteSourceDescriptor",
         "AsyncInfiniteSourceDescriptor",
     ] {
         assert!(

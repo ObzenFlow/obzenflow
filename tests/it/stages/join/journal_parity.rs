@@ -46,7 +46,6 @@ trait RowInput {
     ) -> Result<FiniteRead<serde_json::Value, RowRead>, EffectError>;
 }
 
-/// Supplies its rows one per read and counts each physical read.
 struct Rows {
     rows: Vec<serde_json::Value>,
     reads: Arc<AtomicUsize>,
@@ -95,14 +94,14 @@ where
 {
     type Output = T;
 
-    fn read(&self) -> Option<SourceRead<T>> {
-        Some(SourceRead::finite(self.port.clone(), RowRead(0), |row| {
+    fn read(&self) -> SourceRead<T> {
+        SourceRead::finite(self.port.clone(), RowRead(0), |row| {
             serde_json::from_value(row).map_err(|_| {
                 SourceError::Deserialization(
                     obzenflow_core::event::SourceDiagnosticReason::MalformedInput.into(),
                 )
             })
-        }))
+        })
     }
 }
 

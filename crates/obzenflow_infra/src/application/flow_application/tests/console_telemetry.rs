@@ -436,7 +436,6 @@ trait ControlledInput {
     ) -> Result<FiniteRead<IdlePayload, NextControlled>, EffectError>;
 }
 
-/// Signals each take, then waits for the next input. A closed input ends.
 struct Controlled {
     input: tokio::sync::Mutex<mpsc::Receiver<IdlePayload>>,
     entered: mpsc::UnboundedSender<()>,
@@ -475,8 +474,8 @@ impl ControlledSource {
 impl TypedFiniteSourceHandler for ControlledSource {
     type Output = IdlePayload;
 
-    fn read(&self) -> Option<SourceRead<IdlePayload>> {
-        Some(SourceRead::finite(self.0.clone(), NextControlled, Ok))
+    fn read(&self) -> SourceRead<IdlePayload> {
+        SourceRead::finite(self.0.clone(), NextControlled, Ok)
     }
 }
 

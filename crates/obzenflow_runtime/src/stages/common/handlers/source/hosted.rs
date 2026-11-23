@@ -2,18 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The hosted-ingress queue, the stage's read of it and the request-identity
-//! index.
-//!
-//! Admission queues decoded, proven values, each with a receipt sender. The
-//! stage reads the queue through its port. The recorded reply holds each
-//! member's journal form and ingress identity, and the receipt senders stay
-//! with the host. The stage's single writer decides every identified member
-//! against the index of committed identities and resolves receipts only after
-//! the member's own row commits. Replay and resume rebuild the index from the
-//! recorded replies before the slot goes live.
-
-use super::continuation::SourceContinuation;
 use super::erased::{
     ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncInfinite,
     UnifiedAsyncInfiniteSourceHandler,
@@ -21,6 +9,7 @@ use super::erased::{
 use super::prepared::{sealed as admission_sealed, AdmitSource, AdmittedSource};
 use super::read::{read_failure, recording_ends, ContinuousRead};
 use super::typed::{configuration_fatal, preserve_recorded, protocol_fatal};
+use super::SourceContinuation;
 use super::SourceError;
 use crate::effects::{
     AnswersEffect, Call, EffectContext, EffectDeclaration, EffectError, EffectInvocationContext,
@@ -36,7 +25,7 @@ use obzenflow_core::ingress::{
     HostedIngressBindingSlot, IngressAttemptSeq, IngressContentDigest, IngressContext,
     IngressReceipt, IngressRequestId,
 };
-use obzenflow_core::{ChainEvent, EventId, EventType, OneFactOutcome, WriterId};
+use obzenflow_core::{ChainEvent, EventId, EventType, OneFactOutcome};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -49,7 +38,7 @@ use tokio::sync::{mpsc, oneshot};
 /// Resolves one submitted member's commit evidence.
 pub type IngressReceiptSender = oneshot::Sender<IngressReceipt>;
 
-/// One admitted member waiting for the stage's read.
+/// `HostedSubmission` is one admitted member that waits for the stage to read it.
 pub struct HostedSubmission<T> {
     value: T,
     context: IngressContext,
@@ -74,15 +63,11 @@ impl<T> fmt::Debug for HostedSubmission<T> {
     }
 }
 
-/// The argument of one read of a hosted queue: at most `batch` admitted
-/// members.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostedRead {
     batch: usize,
 }
 
-/// One admitted member as its read recorded it: the validated journal form of
-/// its value and its durable ingress identity.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostedMember {
     fact: HostedFact,
@@ -135,7 +120,6 @@ impl HostedFact {
     }
 }
 
-/// `HostedQueue` is the port of a hosted queue. Only Runtime implements it.
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 pub trait HostedQueue: Send + Sync {
@@ -259,14 +243,14 @@ impl<T> fmt::Debug for HostedSource<T> {
 }
 
 impl<T: OneFactOutcome + Send + Sync + 'static> HostedSource<T> {
-    /// A source of the submissions that framework-managed HTTP ingress admits.
-    /// Its system is `http-ingress`.
+    /// `HostedSource::http` makes a source of the submissions that the framework-managed
+    /// HTTP ingress admits. Its system is `http-ingress`.
     pub fn http(rx: mpsc::Receiver<HostedSubmission<T>>, slot: HostedIngressBindingSlot) -> Self {
         Self::named("http-ingress", rx, slot)
     }
 
-    /// A source of the submissions that protocol-neutral ingress admits. Its
-    /// system is `ingress`.
+    /// `HostedSource::ingress` makes a source of the submissions that the protocol-neutral
+    /// ingress admits. Its system is `ingress`.
     pub fn ingress(
         rx: mpsc::Receiver<HostedSubmission<T>>,
         slot: HostedIngressBindingSlot,
@@ -300,7 +284,7 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedSource<T> {
         self
     }
 
-    /// The name of the system that admits this source's submissions.
+    /// `system_name` returns the name of the system that admits this source's submissions.
     pub fn system_name(&self) -> &str {
         self.port.binding().name()
     }
@@ -331,8 +315,6 @@ impl<Out: OneFactOutcome + Send + Sync + 'static> AdmitSource<dyn UnifiedAsyncIn
     }
 }
 
-/// Runtime adapter for a hosted source. It reads the queue through its port,
-/// decides each recorded member, and resolves receipts only after commit.
 #[doc(hidden)]
 pub struct HostedReadAdapter<T> {
     port: Port<dyn HostedQueue>,
@@ -375,20 +357,16 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
         self.emitted = None;
         if let Some(event) = self.held.take() {
             self.emitted = Some(event.clone());
-            return ErasedSourceInvocation::completed(
-                ErasedSourceCompletion::Batch(vec![event]),
-                Vec::new(),
-            );
+            return ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(vec![event]));
         }
         loop {
             if let Some(staged) = self.staged.pop_front() {
                 return match self.materialize(staged).await {
                     Ok(event) => {
                         self.emitted = Some(event.clone());
-                        ErasedSourceInvocation::completed(
-                            ErasedSourceCompletion::Batch(vec![event]),
-                            Vec::new(),
-                        )
+                        ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(vec![
+                            event,
+                        ]))
                     }
                     Err(fatal) => ErasedSourceInvocation::fatal(fatal),
                 };
@@ -422,7 +400,6 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
             }
             return Some(ErasedSourceInvocation::completed(
                 ErasedSourceCompletion::Eof,
-                Vec::new(),
             ));
         }
         let mut effects = EffectsCore::new(context);
@@ -436,7 +413,7 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
                 ));
             }
             if let Err(error) = self.queue.ready().await {
-                return Some(ErasedSourceInvocation::handler_error(error, Vec::new()));
+                return Some(ErasedSourceInvocation::handler_error(error));
             }
         }
         let outcome = effects.perform_call(HostedRead { batch: self.batch }).await;
@@ -462,7 +439,7 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
                     return Some(ErasedSourceInvocation::fatal(fatal));
                 }
                 Some(match read_failure(&error) {
-                    Some(failure) => ErasedSourceInvocation::handler_error(failure, Vec::new()),
+                    Some(failure) => ErasedSourceInvocation::handler_error(failure),
                     None => ErasedSourceInvocation::fatal(protocol_fatal(error.to_string())),
                 })
             }
@@ -511,8 +488,8 @@ impl<T: OneFactOutcome + Send + Sync + 'static> SealAsyncInfinite for HostedRead
 impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandler
     for HostedReadAdapter<T>
 {
-    fn read_declaration(&self) -> Option<Result<EffectDeclaration, StageEffectsError>> {
-        Some(<Port<dyn HostedQueue> as AnswersEffect<Call<HostedRead>>>::declaration(&self.port))
+    fn read_declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {
+        <Port<dyn HostedQueue> as AnswersEffect<Call<HostedRead>>>::declaration(&self.port)
     }
 
     fn install_read_context(&mut self, context: EffectInvocationContext) {
@@ -562,8 +539,6 @@ impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandle
         }
     }
 
-    fn install_writer_id(&mut self, _writer_id: WriterId) {}
-
     fn poll_timeout(&self) -> Option<Duration> {
         None
     }
@@ -574,11 +549,6 @@ impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandle
 
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
         self.invocation().await
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        self.queue.rx.lock().await.close();
-        Ok(())
     }
 
     fn settle_committed(&mut self, committed: &[EventId]) {
@@ -978,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn receipts_resolve_only_after_their_own_row_commits() {
+    fn receipt_resolves_after_row_commit() {
         let mut harness = Harness::new();
         let (member, mut answer, sender) = harness.member(7, 100, None, None);
         let rows = harness.read(vec![(member, sender)]);
@@ -995,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_member_keeps_context_and_journal_form() {
+    fn recorded_member_reads_back_unchanged() {
         let mut harness = Harness::new();
         let (member, _answer, _sender) = harness.member(8, 100, Some(0), Some("batch-1"));
         let recorded: HostedMember =
@@ -1067,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn unequal_content_in_one_read_is_a_conflict() {
+    fn unequal_content_same_key_returns_conflict() {
         let mut harness = Harness::new();
         let (first, _first_answer, first_sender) = harness.member(7, 100, None, Some("tx-1"));
         let (second, mut conflict, second_sender) = harness.member(8, 100, None, Some("tx-1"));
@@ -1077,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_members_are_identified_by_index() {
+    fn batch_members_identified_by_index() {
         let mut harness = Harness::new();
         let (member, _answer, sender) = harness.member(7, 100, Some(0), Some("batch-1"));
         let rows = harness.read(vec![(member, sender)]);
@@ -1096,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn retries_accepted_after_the_window_are_admitted_again() {
+    fn retry_after_window_admits_row() {
         let mut harness = Harness::new();
         let (member, _answer, sender) = harness.member(7, 100, None, Some("tx-1"));
         let rows = harness.read(vec![(member, sender)]);
@@ -1114,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn the_index_reports_its_size() {
+    fn index_size_excludes_expired_identities() {
         let mut harness = Harness::new();
         let (keyed, _keyed_answer, keyed_sender) = harness.member(7, 100, None, Some("tx-1"));
         let (plain, _plain_answer, plain_sender) = harness.member(8, 100, None, None);
@@ -1132,7 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn reproduced_members_rebuild_the_index_without_receipts() {
+    fn reproduced_members_rebuild_index_without_receipts() {
         let mut harness = Harness::new();
         let (member, _answer, _sender) = harness.member(7, 100, None, Some("tx-1"));
         let staged = harness.admission.decide(vec![member], |_| None);
