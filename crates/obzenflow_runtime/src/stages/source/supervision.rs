@@ -286,21 +286,22 @@ pub(crate) async fn commit_source_fact(
     Ok(recorded.envelope.provenance.event.id)
 }
 
-/// Commit a reattaching source's declared guarantee behind its catch-up
-/// markers and before its first live record (FLOWIP-122i). Only a `Reattach`
-/// source continues live without a position.
 pub(crate) async fn commit_source_reattached(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     stage_flow_context: &FlowContext,
     continuation: SourceContinuation,
     generation: obzenflow_core::ReaderGeneration,
 ) -> Result<(), BoxError> {
-    let SourceContinuation::Reattach { guarantee } = continuation else {
-        return Err(format!(
-            "source '{}' continued live without a declared reattachment",
-            stage_flow_context.stage_name
-        )
-        .into());
+    let guarantee = match continuation {
+        SourceContinuation::Reattach { guarantee } => guarantee,
+        SourceContinuation::RecordedRead => return Ok(()),
+        SourceContinuation::Refuse => {
+            return Err(format!(
+                "source '{}' continued live without a declared reattachment",
+                stage_flow_context.stage_name
+            )
+            .into())
+        }
     };
     commit_source_fact(
         data_journal,

@@ -60,12 +60,12 @@ struct ProbeRead(u8);
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait ProbeInput {
-    #[effect(type = "liveness_fan_out.probe.read", exactly_once, records = reply)]
+    #[query(type = "liveness_fan_out.probe.read")]
     async fn read(
         &self,
         from: &ProbeRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<ProbeEvent, ProbeRead>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<ProbeEvent, ProbeRead>, obzenflow_runtime::queries::QueryError>;
 }
 
 struct DelayedTwoEvents {
@@ -78,8 +78,8 @@ impl ProbeInput for DelayedTwoEvents {
     async fn read(
         &self,
         from: &ProbeRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<ProbeEvent, ProbeRead>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<ProbeEvent, ProbeRead>, obzenflow_runtime::queries::QueryError> {
         match from.0 {
             0 => Ok(FiniteRead::Batch {
                 records: vec![ProbeEvent { value: 1 }],
@@ -100,7 +100,7 @@ impl ProbeInput for DelayedTwoEvents {
     }
 }
 
-struct DelayedTwoEventSource(Port<dyn ProbeInput>);
+struct DelayedTwoEventSource(obzenflow_runtime::queries::QueryPort<dyn ProbeInput>);
 
 impl TypedFiniteSourceHandler for DelayedTwoEventSource {
     type Output = ProbeEvent;
@@ -212,7 +212,7 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let numbers_handler = DelayedTwoEventSource(Port::to(DelayedTwoEvents {
+        let numbers_handler = DelayedTwoEventSource(obzenflow_runtime::queries::QueryPort::to(DelayedTwoEvents {
             finish_gate: source_finish_gate,
         }));
         let slow_handler = SlowTransform::new();

@@ -428,12 +428,12 @@ struct NextControlled;
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait ControlledInput {
-    #[effect(type = "flow_application.controlled.take", at_most_once, records = reply)]
+    #[query(type = "flow_application.controlled.take")]
     async fn take(
         &self,
         from: &NextControlled,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<IdlePayload, NextControlled>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<IdlePayload, NextControlled>, obzenflow_runtime::queries::QueryError>;
 }
 
 struct Controlled {
@@ -447,8 +447,8 @@ impl ControlledInput for Controlled {
     async fn take(
         &self,
         _from: &NextControlled,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<IdlePayload, NextControlled>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<IdlePayload, NextControlled>, obzenflow_runtime::queries::QueryError> {
         self.entered.send(()).expect("source observation is alive");
         Ok(match self.input.lock().await.recv().await {
             Some(event) => FiniteRead::Batch {
@@ -460,11 +460,11 @@ impl ControlledInput for Controlled {
     }
 }
 
-struct ControlledSource(Port<dyn ControlledInput>);
+struct ControlledSource(obzenflow_runtime::queries::QueryPort<dyn ControlledInput>);
 
 impl ControlledSource {
     fn new(input: mpsc::Receiver<IdlePayload>, entered: mpsc::UnboundedSender<()>) -> Self {
-        Self(Port::to(Controlled {
+        Self(obzenflow_runtime::queries::QueryPort::to(Controlled {
             input: tokio::sync::Mutex::new(input),
             entered,
         }))

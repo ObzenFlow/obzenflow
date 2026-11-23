@@ -21,12 +21,12 @@ struct HeldRead(u8);
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait HeldInput {
-    #[effect(type = "flow_application.held.read", exactly_once, records = reply)]
+    #[query(type = "flow_application.held.read")]
     async fn read(
         &self,
         from: &HeldRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<IdlePayload, HeldRead>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<IdlePayload, HeldRead>, obzenflow_runtime::queries::QueryError>;
 }
 
 struct Held {
@@ -39,8 +39,8 @@ impl HeldInput for Held {
     async fn read(
         &self,
         from: &HeldRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<IdlePayload, HeldRead>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<IdlePayload, HeldRead>, obzenflow_runtime::queries::QueryError> {
         match from.0 {
             0 => Ok(FiniteRead::Batch {
                 records: vec![IdlePayload; FIRST],
@@ -58,7 +58,7 @@ impl HeldInput for Held {
     }
 }
 
-struct HeldSource(Port<dyn HeldInput>);
+struct HeldSource(obzenflow_runtime::queries::QueryPort<dyn HeldInput>);
 
 impl TypedFiniteSourceHandler for HeldSource {
     type Output = IdlePayload;
@@ -149,7 +149,7 @@ enabled = true
     let (signal_tx, signal_rx) = oneshot::channel();
     let application = tokio::spawn(FlowApplication::launch(
         FlowDefinition::materialize(move |_| {
-            let source = HeldSource(Port::to(Held {
+            let source = HeldSource(obzenflow_runtime::queries::QueryPort::to(Held {
                 release: held.clone(),
             }));
             let sink = noop_sink();

@@ -409,6 +409,7 @@ mod tests {
                         error_event,
                     ])),
                     poll_duration,
+                    retry_after: None,
                 }
             }))
             .await;
@@ -450,6 +451,7 @@ mod tests {
                         test_event(),
                     ])),
                     poll_duration: Duration::from_millis(1),
+                    retry_after: None,
                 }
             }))
             .await;
@@ -543,6 +545,7 @@ mod tests {
                         test_event(),
                     ])),
                     poll_duration: Duration::from_millis(1),
+                    retry_after: None,
                 }
             }))
             .await;

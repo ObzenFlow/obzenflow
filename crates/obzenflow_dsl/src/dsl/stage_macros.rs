@@ -3549,7 +3549,10 @@ macro_rules! sink {
 /// }
 ///
 /// let facts = Facts(Port::to(FactFile));
-/// # let (_, submissions) = tokio::sync::mpsc::channel::<HostedSubmission<Fact>>(1);
+/// # let (_, submissions) =
+/// #     obzenflow_runtime::stages::common::handlers::source::source_channel::<
+/// #         HostedSubmission<Fact>,
+/// #     >(1);
 /// # let posted = HostedSource::ingress(
 /// #     submissions,
 /// #     obzenflow_core::ingress::HostedIngressBindingSlot::new("grammar.facts"),

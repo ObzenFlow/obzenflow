@@ -686,7 +686,6 @@ pub(crate) fn validate_authored_effect_declarations(
 /// Crate-private erased descriptor for async finite source stages.
 pub(crate) struct AsyncFiniteSourceDescriptor<H: UnifiedAsyncFiniteSourceHandler + 'static> {
     pub(crate) name: String,
-    read: Result<EffectDeclaration, StageEffectsError>,
     pub(crate) source: AdmittedSource<H>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
@@ -698,7 +697,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSour
     pub(crate) fn new(name: impl Into<String>, source: AdmittedSource<H>) -> Self {
         Self {
             name: name.into(),
-            read: source.handler().read_declaration(),
             source,
             source_policies: Vec::new(),
             ingress_policy: None,
@@ -731,13 +729,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         Some(self.source.system().clone())
     }
 
-    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        self.read.as_ref().ok().cloned().into_iter().collect()
-    }
-
-    fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
-        refuse_effect_row(&self.name, self.read.as_ref().err())
-    }
 
     fn stage_middleware_names(&self) -> Vec<String> {
         self.stage_middleware_factories()
@@ -838,7 +829,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 /// Crate-private erased descriptor for async infinite source stages.
 pub(crate) struct AsyncInfiniteSourceDescriptor<H: UnifiedAsyncInfiniteSourceHandler + 'static> {
     pub(crate) name: String,
-    read: Result<EffectDeclaration, StageEffectsError>,
     pub(crate) source: AdmittedSource<H>,
     hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
@@ -857,7 +847,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static>
         let hosted_ingress_slot = source.hosted_ingress_slot();
         Self {
             name: name.into(),
-            read: source.handler().read_declaration(),
             source,
             hosted_ingress_slot,
             source_policies: Vec::new(),
@@ -897,13 +886,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
         Some(self.source.system().clone())
     }
 
-    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        self.read.as_ref().ok().cloned().into_iter().collect()
-    }
-
-    fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
-        refuse_effect_row(&self.name, self.read.as_ref().err())
-    }
 
     fn stage_middleware_names(&self) -> Vec<String> {
         self.stage_middleware_factories()
@@ -3014,7 +2996,10 @@ mod tests {
 
     #[test]
     fn topology_uses_resolved_family_settings_and_stable_semantic_keys() {
-        let (_submissions, receiver) = tokio::sync::mpsc::channel::<DemoTransactionalOutput>(1);
+        let (_submissions, receiver) =
+            obzenflow_runtime::stages::common::handlers::source::source_channel::<
+                DemoTransactionalOutput,
+            >(1);
         let mut descriptor = AsyncInfiniteSourceDescriptor::new(
             "source",
             obzenflow_runtime::__private::AdmitSource::<dyn UnifiedAsyncInfiniteSourceHandler>::admit(

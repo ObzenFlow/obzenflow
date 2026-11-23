@@ -5,8 +5,8 @@
 use super::decoder::{item, selection, StoriesPort, StoryPosition, StoryReply};
 use super::domain::{HnStory, HnStoryId};
 use async_trait::async_trait;
-use obzenflow::effects::{EffectContext, EffectError};
-use obzenflow::stages::sources::FiniteRead;
+use obzenflow::queries::{QueryContext, QueryError};
+use obzenflow::stages::sources::{FiniteRead, SourceDiagnosticReason, SourcePollErrorKind};
 
 const LISTED_STORIES: usize = 64;
 const DELETED_EVERY_NTH: usize = 11;
@@ -33,14 +33,6 @@ const VERBS: [&str; 8] = [
     "case study",
 ];
 
-#[cfg(test)]
-pub fn scripted_stories(max_stories: usize) -> Vec<HnStory> {
-    (0..LISTED_STORIES.min(max_stories))
-        .filter(|offset| (offset + 1) % DELETED_EVERY_NTH != 0)
-        .map(scripted_story)
-        .collect()
-}
-
 fn scripted_story(offset: usize) -> HnStory {
     let id = 100 + offset as u64;
     let topic = TOPICS[offset % TOPICS.len()];
@@ -65,8 +57,8 @@ impl StoriesPort for ScriptedStories {
     async fn read(
         &self,
         from: &StoryPosition,
-        _ctx: &EffectContext,
-    ) -> Result<StoryReply, EffectError> {
+        _ctx: &QueryContext,
+    ) -> Result<StoryReply, QueryError> {
         match from {
             StoryPosition::Start { limit } => Ok(selection(
                 (0..LISTED_STORIES.min(*limit))
@@ -80,13 +72,17 @@ impl StoriesPort for ScriptedStories {
                         .checked_sub(100)
                         .and_then(|offset| usize::try_from(offset).ok())
                         .filter(|offset| *offset < LISTED_STORIES)
-                        .ok_or_else(|| EffectError::Validation("unknown scripted story".into()))?;
+                        .ok_or_else(|| {
+                            QueryError::terminal(SourcePollErrorKind::Validation, SourceDiagnosticReason::InvalidValue)
+                        })?;
                     let record = if (offset + 1) % DELETED_EVERY_NTH == 0 {
                         None
                     } else {
                         Some(
                             serde_json::to_value(scripted_story(offset))
-                                .map_err(obzenflow::effects::http::unreadable)?,
+                                .map_err(|_| QueryError::terminal(
+                                    SourcePollErrorKind::Other, SourceDiagnosticReason::UnrepresentableValue,
+                                ))?,
                         )
                     };
                     Ok(item(ids, *next_index, record))
@@ -95,4 +91,12 @@ impl StoriesPort for ScriptedStories {
             },
         }
     }
+}
+
+#[cfg(test)]
+pub fn scripted_stories(max_stories: usize) -> Vec<HnStory> {
+    (0..LISTED_STORIES.min(max_stories))
+        .filter(|offset| (offset + 1) % DELETED_EVERY_NTH != 0)
+        .map(scripted_story)
+        .collect()
 }

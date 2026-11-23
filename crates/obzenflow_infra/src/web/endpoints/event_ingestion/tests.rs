@@ -25,6 +25,7 @@ use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::pipeline::ingress::IngressEvidenceWriter;
 use obzenflow_runtime::pipeline::PipelineState;
+use obzenflow_runtime::stages::common::handlers::source::SourceReceiver;
 use obzenflow_runtime::stages::HostedSubmission;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -33,7 +34,6 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
-use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Order {
@@ -139,7 +139,7 @@ fn refusal_reasons(facts: &[SystemPayload]) -> Vec<(IngressRefusalReason, u64)> 
 struct Edge {
     stage_id: StageId,
     state: IngestionState<Order>,
-    rx: Option<mpsc::Receiver<HostedSubmission<Order>>>,
+    rx: Option<SourceReceiver<HostedSubmission<Order>>>,
     journal: Arc<MemoryJournal<SystemEvent>>,
 }
 
@@ -576,7 +576,7 @@ async fn unrepresentable_values_are_refused_at_the_failing_field() {
 async fn an_unanswered_member_is_unknown_never_success() {
     let mut edge = Edge::plain();
     edge.ready().await;
-    let mut rx = edge.rx.take().expect("source queue");
+    let rx = edge.rx.take().expect("source queue");
     let keyed = {
         let endpoint = edge.single();
         tokio::spawn(async move {
@@ -595,7 +595,8 @@ async fn an_unanswered_member_is_unknown_never_success() {
     };
     // Both members reach the queue; dropping it drops their receipts.
     for _ in 0..2 {
-        drop(rx.recv().await.expect("queued member"));
+        rx.ready().await.expect("queued member");
+        drop(rx.take(1));
     }
     let keyed = unary(keyed.await.unwrap().unwrap());
     let keyless = unary(keyless.await.unwrap().unwrap());
@@ -640,7 +641,7 @@ async fn the_acknowledgement_deadline_answers_unknown() {
 }
 
 struct CountEnqueuedBeforeObservation {
-    receiver: std::sync::Mutex<mpsc::Receiver<HostedSubmission<Order>>>,
+    receiver: SourceReceiver<HostedSubmission<Order>>,
     observed: Arc<AtomicUsize>,
 }
 
@@ -657,11 +658,7 @@ impl IngressBoundaryMiddleware for CountEnqueuedBeforeObservation {
         if outcome != IngressAdmissionOutcome::AcceptedForEnqueue {
             return;
         }
-        let mut receiver = self.receiver.lock().expect("receiver lock");
-        let mut enqueued = 0;
-        while receiver.try_recv().is_ok() {
-            enqueued += 1;
-        }
+        let enqueued = self.receiver.take(usize::MAX).len();
         assert_eq!(enqueued, attempt.event_count as usize);
         self.observed.store(enqueued, Ordering::Release);
     }
@@ -684,7 +681,7 @@ async fn accepted_observation_follows_enqueue_on_single_batch_and_handle_paths()
                 stage_id: StageId::new(),
                 stage_key: "observed".into(),
                 boundary: Some(Arc::new(CountEnqueuedBeforeObservation {
-                    receiver: std::sync::Mutex::new(rx),
+                    receiver: rx,
                     observed: Arc::clone(&observed),
                 })),
             })
@@ -1277,7 +1274,7 @@ async fn a_strict_replay_refuses_ingress_throughout() {
     let ingress = http_ingress(
         decoder::<Order>(),
         IngestionConfig {
-            base_path: "/api/replayed".to_string(),
+            base_path: "/api/recorded".to_string(),
             ..IngestionConfig::default()
         },
     );

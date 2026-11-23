@@ -40,7 +40,7 @@ impl TypedPayload for Event {
 }
 
 pub struct Source {
-    port: Port<dyn NumberFeed>,
+    port: obzenflow_runtime::queries::QueryPort<dyn NumberFeed>,
     origin: Instant,
 }
 

@@ -295,8 +295,8 @@ async fn claimed_hosted_slot_fails_preflight() {
         }
         let shared_slot = slot.clone();
         let definition = FlowDefinition::materialize(move |_| {
-            let (_, first_rx) = tokio::sync::mpsc::channel(1);
-            let (_, second_rx) = tokio::sync::mpsc::channel(1);
+            let (_, first_rx) = obzenflow::stages::sources::source_channel(1);
+            let (_, second_rx) = obzenflow::stages::sources::source_channel(1);
             let first = HostedSource::<Input>::ingress(first_rx, shared_slot.clone());
             let second = HostedSource::<Input>::ingress(second_rx, shared_slot);
             Ok(flow! {

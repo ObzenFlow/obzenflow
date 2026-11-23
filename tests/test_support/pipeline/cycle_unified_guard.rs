@@ -55,12 +55,12 @@ struct SeedRead(u8);
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait SeedInput {
-    #[effect(type = "cycle_unified_guard.seed.read", exactly_once, records = reply)]
+    #[query(type = "cycle_unified_guard.seed.read")]
     async fn read(
         &self,
         from: &SeedRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<SeedEvent, SeedRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError>;
 }
 
 struct DelayedEof {
@@ -73,8 +73,8 @@ impl SeedInput for DelayedEof {
     async fn read(
         &self,
         from: &SeedRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<SeedEvent, SeedRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError> {
         if from.0 == 0 {
             return Ok(FiniteRead::Batch {
                 records: vec![SeedEvent { n: 0 }],
@@ -86,11 +86,11 @@ impl SeedInput for DelayedEof {
     }
 }
 
-struct DelayedEofEventSource(Port<dyn SeedInput>);
+struct DelayedEofEventSource(obzenflow::queries::QueryPort<dyn SeedInput>);
 
 impl DelayedEofEventSource {
     fn new(eof_delay: Duration) -> Self {
-        Self(Port::to(DelayedEof { eof_delay }))
+        Self(obzenflow::queries::QueryPort::to(DelayedEof { eof_delay }))
     }
 }
 

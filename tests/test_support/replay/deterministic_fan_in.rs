@@ -37,12 +37,12 @@ struct ChannelRead(usize);
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait ChannelInput {
-    #[effect(type = "deterministic_fan_in.channel.read", exactly_once, records = reply)]
+    #[query(type = "deterministic_fan_in.channel.read")]
     async fn read(
         &self,
         from: &ChannelRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<FanInInput, ChannelRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<FanInInput, ChannelRead>, obzenflow::queries::QueryError>;
 }
 
 struct ChannelFixture {
@@ -58,8 +58,8 @@ impl ChannelInput for ChannelFixture {
     async fn read(
         &self,
         from: &ChannelRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<FanInInput, ChannelRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<FanInInput, ChannelRead>, obzenflow::queries::QueryError> {
         if from.0 >= self.count {
             return Ok(FiniteRead::EndOfInput);
         }
@@ -88,7 +88,7 @@ impl ChannelInput for ChannelFixture {
     }
 }
 
-struct ChannelSource(Port<dyn ChannelInput>);
+struct ChannelSource(obzenflow::queries::QueryPort<dyn ChannelInput>);
 
 impl ChannelSource {
     fn with_jitter(channel: &'static str, count: usize, jitter_ms: u64) -> Self {
@@ -101,7 +101,7 @@ impl ChannelSource {
 
     fn fixture(channel: &'static str, count: usize, jitter_ms: u64, delay_ms: u64) -> Self {
         Self(
-            Port::to(ChannelFixture {
+            obzenflow::queries::QueryPort::to(ChannelFixture {
                 channel,
                 count,
                 jitter_ms,

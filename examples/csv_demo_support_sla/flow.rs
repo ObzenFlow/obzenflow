@@ -6,13 +6,17 @@ use super::domain::{
     due_bucket, plan_sla_cap_hours, triage_ticket, Customer, EnrichedTicket, Ticket, TriagedTicket,
 };
 use anyhow::Result;
+use super::scripted::TicketFixture;
 use obzenflow::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{flow, join, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::stages::joins::{JoinReferenceView, TypedJoinHandler};
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
-use obzenflow::stages::sources::{CsvDecoder, CsvSource};
+use obzenflow::queries::QueryPort;
+use obzenflow::stages::sources::{
+    CsvDecoder, CsvFile, CsvFileSystem, CsvSource,
+};
 use obzenflow::stages::transforms::TypedTransformHandler;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -28,12 +32,17 @@ const CONFIG_FILE: &str = concat!(
 #[serde(deny_unknown_fields)]
 pub struct SupportSlaSettings {
     pub customers_csv: PathBuf,
-    pub tickets_csv: PathBuf,
+    pub tickets: TicketInput,
     pub output_csv: PathBuf,
 }
 
-/// A source decoder owns the domain type it emits, just as a transform handler
-/// owns its input and output types.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketInput {
+    File(PathBuf),
+    Fixture(TicketFixture),
+}
+
 #[derive(Clone, Debug)]
 struct CustomerCsv;
 
@@ -66,8 +75,6 @@ impl TypedTransformHandler for TicketTriage {
     }
 }
 
-/// An authored join witness: these associated types are what `join!` proves
-/// against its catalog, stream, and output declaration.
 #[derive(Clone, Debug)]
 struct SupportSlaJoin;
 
@@ -115,8 +122,6 @@ impl TypedJoinHandler for SupportSlaJoin {
     }
 }
 
-/// A CSV projection owns its accepted domain type in the same way as the
-/// transform and join handlers above.
 #[derive(Clone, Debug)]
 struct EnrichedTicketCsv;
 
@@ -139,8 +144,13 @@ fn build_flow() -> FlowDefinition {
             .path(&settings.customers_csv)
             .build()
             .map_err(resources_failed)?;
+        let ticket_store: QueryPort<dyn CsvFile> = match &settings.tickets {
+            TicketInput::File(path) => CsvFileSystem::at(path).port(),
+            TicketInput::Fixture(config) => QueryPort::located(config.clone()),
+        }
+        .map_err(resources_failed)?;
         let tickets = CsvSource::builder(TicketCsv)
-            .path(&settings.tickets_csv)
+            .through(ticket_store)
             .chunk_size(25)
             .build()
             .map_err(resources_failed)?;

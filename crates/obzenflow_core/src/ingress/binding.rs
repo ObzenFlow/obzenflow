@@ -14,7 +14,7 @@ use super::boundary::IngressBoundaryMiddleware;
 use super::timing::IngressTiming;
 use super::IngressKey;
 use crate::{StageId, StageKey};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// The boundary plus replay-stable identity the DSL fills into a hosted-ingress
@@ -69,6 +69,7 @@ pub struct HostedIngressBindingSlot {
     timing: Arc<OnceLock<IngressTiming>>,
     /// FLOWIP-084l: identity-index entries, published by the source's writer.
     idempotency_entries: Arc<AtomicU64>,
+    restoring: Arc<AtomicBool>,
 }
 
 impl HostedIngressBindingSlot {
@@ -78,6 +79,7 @@ impl HostedIngressBindingSlot {
             cell: Arc::new(OnceLock::new()),
             timing: Arc::new(OnceLock::new()),
             idempotency_entries: Arc::new(AtomicU64::new(0)),
+            restoring: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -120,6 +122,15 @@ impl HostedIngressBindingSlot {
     /// The installed timing, or the defaults when hosting installed none.
     pub fn timing(&self) -> IngressTiming {
         self.timing.get().copied().unwrap_or_default()
+    }
+
+    /// Hold admission until the source restores its committed identities.
+    pub fn set_restoring(&self, restoring: bool) {
+        self.restoring.store(restoring, Ordering::Release);
+    }
+
+    pub fn is_restoring(&self) -> bool {
+        self.restoring.load(Ordering::Acquire)
     }
 
     /// Publish the source's current identity-index size.

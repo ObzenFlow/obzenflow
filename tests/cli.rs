@@ -121,12 +121,12 @@ struct TickRead(u64);
 #[obzenflow::port]
 #[async_trait::async_trait]
 trait TickNumbers {
-    #[effect(type = "cli_verify.tick_numbers.read", exactly_once, records = reply)]
+    #[query(type = "cli_verify.tick_numbers.read")]
     async fn read(
         &self,
         from: &TickRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<u64, TickRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<u64, TickRead>, obzenflow::queries::QueryError>;
 }
 
 struct Numbers {
@@ -140,8 +140,8 @@ impl TickNumbers for Numbers {
     async fn read(
         &self,
         from: &TickRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<u64, TickRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<u64, TickRead>, obzenflow::queries::QueryError> {
         let n = from.0 + 1;
         if self.last.is_some_and(|last| n > last) {
             return Ok(FiniteRead::EndOfInput);
@@ -154,11 +154,11 @@ impl TickNumbers for Numbers {
     }
 }
 
-struct RejectingTicks(Port<dyn TickNumbers>);
+struct RejectingTicks(obzenflow::queries::QueryPort<dyn TickNumbers>);
 
 impl RejectingTicks {
     fn new() -> Self {
-        Self(Port::to(Numbers {
+        Self(obzenflow::queries::QueryPort::to(Numbers {
             last: Some(503),
             pace: Duration::ZERO,
         }))
@@ -180,11 +180,11 @@ impl TypedFiniteSourceHandler for RejectingTicks {
     }
 }
 
-struct PacedTicks(Port<dyn TickNumbers>);
+struct PacedTicks(obzenflow::queries::QueryPort<dyn TickNumbers>);
 
 impl PacedTicks {
     fn new() -> Self {
-        Self(Port::to(Numbers {
+        Self(obzenflow::queries::QueryPort::to(Numbers {
             last: None,
             pace: Duration::from_millis(30),
         }))

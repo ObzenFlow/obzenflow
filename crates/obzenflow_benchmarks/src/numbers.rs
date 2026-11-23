@@ -14,12 +14,12 @@ pub struct NextNumber(pub u64);
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 pub trait NumberFeed {
-    #[effect(type = "benchmarks.numbers.read", exactly_once, records = reply)]
+    #[query(type = "benchmarks.numbers.read")]
     async fn read(
         &self,
         from: &NextNumber,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<u64, NextNumber>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<u64, NextNumber>, obzenflow_runtime::queries::QueryError>;
 }
 
 pub struct Numbers {
@@ -52,8 +52,8 @@ impl Numbers {
         }
     }
 
-    pub fn port(self) -> Port<dyn NumberFeed> {
-        Port::to(self)
+    pub fn port(self) -> obzenflow_runtime::queries::QueryPort<dyn NumberFeed> {
+        obzenflow_runtime::queries::QueryPort::to(self)
     }
 }
 
@@ -63,8 +63,8 @@ impl NumberFeed for Numbers {
     async fn read(
         &self,
         from: &NextNumber,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<u64, NextNumber>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<u64, NextNumber>, obzenflow_runtime::queries::QueryError> {
         let Some(total) = self.total else {
             return std::future::pending().await;
         };

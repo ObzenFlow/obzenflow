@@ -232,15 +232,31 @@ impl SystemPort {
 #[derive(Clone)]
 pub struct SourceSystem {
     binding: obzenflow_core::effect_binding::SystemBinding,
-    system: Arc<SystemPort>,
+    system: Option<Arc<SystemPort>>,
 }
 
 impl SourceSystem {
-    pub(super) fn new(
-        binding: obzenflow_core::effect_binding::SystemBinding,
-        system: Arc<SystemPort>,
+    pub(crate) fn event(evidence: obzenflow_core::SystemBindingEvidence) -> Self {
+        Self { binding: evidence.binding().clone(), system: None }
+    }
+
+    pub(crate) fn query<P: ?Sized + Send + Sync + 'static>(
+        evidence: obzenflow_core::SystemBindingEvidence,
+        resolve: impl Fn() -> Result<Arc<P>, crate::queries::QueryError> + Send + Sync + 'static,
     ) -> Self {
-        Self { binding, system }
+        let recipe = SystemPort::deferred(Arc::new(move || Ok(Arc::new(resolve()))));
+        Self { binding: evidence.binding().clone(), system: Some(Arc::new(recipe)) }
+    }
+
+    pub(crate) fn resolve_query<P: ?Sized + Send + Sync + 'static>(
+        &self, registry: &EffectPortRegistry,
+    ) -> Result<Result<Arc<P>, crate::queries::QueryError>, super::EffectError> {
+        let system = self.system.as_ref().ok_or_else(|| super::EffectError::ReplayArchive(format!("source {} has no query supplier", self.name())))?;
+        let entry = registry.resolve_at(system.coordinate)
+            .map_err(|fault| super::EffectError::ReplayArchive(format!("source binding {}: {fault:?}", self.name())))?;
+        let result = entry.port.downcast_ref::<Arc<Result<Arc<P>, crate::queries::QueryError>>>()
+            .ok_or_else(|| super::EffectError::ReplayArchive(format!("source binding {} has a different port type", self.name())))?;
+        Ok(result.as_ref().clone())
     }
 
     pub fn name(&self) -> &str {
@@ -827,8 +843,9 @@ impl EffectPortRegistry {
 
     #[doc(hidden)]
     pub fn install_source_system(&mut self, source: &SourceSystem) {
-        Arc::make_mut(&mut self.recipes)
-            .insert(source.system.coordinate, source.system.recipe.clone());
+        if let Some(system) = &source.system {
+            Arc::make_mut(&mut self.recipes).insert(system.coordinate, system.recipe.clone());
+        }
     }
 }
 

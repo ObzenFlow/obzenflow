@@ -4,13 +4,17 @@
 
 //! Source handler components
 
+mod channel;
 mod erased;
 mod hosted;
 pub(crate) mod placeholder;
 pub(crate) mod prepared;
 pub(crate) mod read;
 mod record_de;
-pub use read::{ContinuousRead, FiniteRead, SourceRead};
+pub use channel::{source_channel, SourceClosed, SourcePermit, SourceReceiver, SourceSender};
+pub use read::{
+    Continuous, ContinuousRead, Finite, FiniteRead, InputReadiness, ReadLifetime, SourceRead,
+};
 #[doc(hidden)]
 pub mod traits;
 pub(crate) mod typed;

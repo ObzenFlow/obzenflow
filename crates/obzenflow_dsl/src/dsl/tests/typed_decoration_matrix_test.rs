@@ -11,7 +11,6 @@
 mod tests {
     use async_trait::async_trait;
     use obzenflow_adapters::sinks::DiscardSink;
-    use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
     use obzenflow_core::{ChainEvent, TypedPayload};
     use obzenflow_runtime::effects::{
         EffectCommitHandle, EffectError, EffectPortResolutionError, EffectSafety, Effects, Port,
@@ -21,7 +20,7 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
 
     use obzenflow_runtime::stages::common::handlers::source::{
-        ContinuousRead, FiniteRead, SourceRead,
+        Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
     };
     use obzenflow_runtime::stages::common::handlers::{
         EffectfulStatefulHandler, EffectfulTransformHandler, JoinReferenceView, StatefulEmission,
@@ -29,6 +28,7 @@ mod tests {
         TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
         TypedStatefulHandler, TypedTransformHandler,
     };
+    use obzenflow_runtime::stages::SourceError;
     use obzenflow_runtime::typing::TransformTyping;
     use serde::{Deserialize, Serialize};
 
@@ -54,20 +54,20 @@ mod tests {
 
     #[obzenflow_runtime::effects::port]
     #[async_trait]
-    trait OutInput {
-        #[effect(type = "decoration_matrix.out.read", exactly_once, records = reply)]
+    trait OutInput: InputReadiness {
+        #[query(type = "decoration_matrix.out.read")]
         async fn read(
             &self,
             from: &NextOut,
-            ctx: &EffectContext,
-        ) -> Result<FiniteRead<Out, NextOut>, EffectError>;
+            ctx: &obzenflow_runtime::queries::QueryContext,
+        ) -> Result<FiniteRead<Out, NextOut>, obzenflow_runtime::queries::QueryError>;
 
-        #[effect(type = "decoration_matrix.out.take", at_most_once, records = reply)]
+        #[query(type = "decoration_matrix.out.take")]
         async fn take(
             &self,
             from: &NextLiveOut,
-            ctx: &EffectContext,
-        ) -> Result<ContinuousRead<Out, NextLiveOut>, EffectError>;
+            ctx: &obzenflow_runtime::queries::QueryContext,
+        ) -> Result<ContinuousRead<Out, NextLiveOut>, obzenflow_runtime::queries::QueryError>;
     }
 
     struct NoOut;
@@ -77,20 +77,27 @@ mod tests {
     }
 
     #[async_trait]
+    impl InputReadiness for NoOut {
+        async fn ready(&self) -> Result<(), SourceError> {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
     impl OutInput for NoOut {
         async fn read(
             &self,
             _from: &NextOut,
-            _ctx: &EffectContext,
-        ) -> Result<FiniteRead<Out, NextOut>, EffectError> {
+            _ctx: &obzenflow_runtime::queries::QueryContext,
+        ) -> Result<FiniteRead<Out, NextOut>, obzenflow_runtime::queries::QueryError> {
             Ok(FiniteRead::EndOfInput)
         }
 
         async fn take(
             &self,
             _from: &NextLiveOut,
-            _ctx: &EffectContext,
-        ) -> Result<ContinuousRead<Out, NextLiveOut>, EffectError> {
+            _ctx: &obzenflow_runtime::queries::QueryContext,
+        ) -> Result<ContinuousRead<Out, NextLiveOut>, obzenflow_runtime::queries::QueryError> {
             Ok(ContinuousRead {
                 records: Vec::new(),
                 next: NextLiveOut,
@@ -98,21 +105,15 @@ mod tests {
         }
     }
 
-    fn no_out() -> Port<dyn OutInput> {
-        Port::to(NoOut)
+    fn no_out() -> obzenflow_runtime::queries::QueryPort<dyn OutInput> {
+        obzenflow_runtime::queries::QueryPort::to(NoOut)
     }
 
-    fn live_read(port: &Port<dyn OutInput>) -> SourceRead<Out> {
-        SourceRead::continuous(
-            port.clone(),
-            NextLiveOut,
-            || Box::pin(std::future::pending()),
-            ReattachGuarantee::AtMostOnce,
-            Ok,
-        )
+    fn live_read(port: &obzenflow_runtime::queries::QueryPort<dyn OutInput>) -> SourceRead<Out, Continuous> {
+        SourceRead::continuous(port.clone(), NextLiveOut, Ok)
     }
 
-    struct Src(Port<dyn OutInput>);
+    struct Src(obzenflow_runtime::queries::QueryPort<dyn OutInput>);
 
     impl TypedFiniteSourceHandler for Src {
         type Output = Out;
@@ -122,7 +123,7 @@ mod tests {
         }
     }
 
-    struct AsyncSrc(Port<dyn OutInput>);
+    struct AsyncSrc(obzenflow_runtime::queries::QueryPort<dyn OutInput>);
 
     impl TypedAsyncFiniteSourceHandler for AsyncSrc {
         type Output = Out;
@@ -132,22 +133,22 @@ mod tests {
         }
     }
 
-    struct InfSrc(Port<dyn OutInput>);
+    struct InfSrc(obzenflow_runtime::queries::QueryPort<dyn OutInput>);
 
     impl TypedInfiniteSourceHandler for InfSrc {
         type Output = Out;
 
-        fn read(&self) -> SourceRead<Out> {
+        fn read(&self) -> SourceRead<Out, Continuous> {
             live_read(&self.0)
         }
     }
 
-    struct AsyncInfSrc(Port<dyn OutInput>);
+    struct AsyncInfSrc(obzenflow_runtime::queries::QueryPort<dyn OutInput>);
 
     impl TypedAsyncInfiniteSourceHandler for AsyncInfSrc {
         type Output = Out;
 
-        fn read(&self) -> SourceRead<Out> {
+        fn read(&self) -> SourceRead<Out, Continuous> {
             live_read(&self.0)
         }
     }

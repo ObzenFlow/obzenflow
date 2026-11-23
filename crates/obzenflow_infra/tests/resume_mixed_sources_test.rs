@@ -590,12 +590,12 @@ struct TickRead(u64);
 #[obzenflow_runtime::effects::port]
 #[async_trait::async_trait]
 trait TickInput {
-    #[effect(type = "resume_mixed.ticks.read", exactly_once, records = reply)]
+    #[query(type = "resume_mixed.ticks.read")]
     async fn read(
         &self,
         from: &TickRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<ChannelTick, TickRead>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<ChannelTick, TickRead>, obzenflow_runtime::queries::QueryError>;
 }
 
 struct StallingTicks {
@@ -608,8 +608,8 @@ impl TickInput for StallingTicks {
     async fn read(
         &self,
         from: &TickRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<ChannelTick, TickRead>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<ChannelTick, TickRead>, obzenflow_runtime::queries::QueryError> {
         self.polls.fetch_add(1, Ordering::SeqCst);
         if from.0 < 3 {
             return Ok(FiniteRead::Batch {
@@ -624,7 +624,7 @@ impl TickInput for StallingTicks {
     }
 }
 
-struct StallingFiniteSource(Port<dyn TickInput>);
+struct StallingFiniteSource(obzenflow_runtime::queries::QueryPort<dyn TickInput>);
 
 impl TypedFiniteSourceHandler for StallingFiniteSource {
     type Output = ChannelTick;
@@ -640,7 +640,7 @@ fn build_stalling_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let finite_handler = StallingFiniteSource(Port::to(StallingTicks { polls }));
+        let finite_handler = StallingFiniteSource(obzenflow_runtime::queries::QueryPort::to(StallingTicks { polls }));
         let infinite_handler =
             replay_testkit::preloaded_input((101..103).map(|value| ChannelTick {
                 channel: "i".to_string(),
@@ -766,7 +766,7 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
 
 fn build_channel_flow(
     journal_base: PathBuf,
-    ticks: tokio::sync::mpsc::Receiver<ChannelTick>,
+    ticks: obzenflow_runtime::stages::common::handlers::source::SourceReceiver<ChannelTick>,
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
@@ -806,7 +806,7 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
 
-    let (sender, ticks) = tokio::sync::mpsc::channel(8);
+    let (sender, ticks) = obzenflow_runtime::stages::common::handlers::source::source_channel(8);
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_channel_flow(journal_base.clone(), ticks, delivered.clone())
         .build(replay_testkit::unsynced_context())
@@ -825,7 +825,7 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
     drop(sender);
     let recorded_run = replay_testkit::latest_run_dir(&journal_base);
 
-    let (sender, ticks) = tokio::sync::mpsc::channel(8);
+    let (sender, ticks) = obzenflow_runtime::stages::common::handlers::source::source_channel(8);
     let delivered = Arc::new(AtomicU64::new(0));
     {
         let _bootstrap = install_bootstrap_config(

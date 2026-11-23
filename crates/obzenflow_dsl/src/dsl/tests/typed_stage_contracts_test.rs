@@ -23,7 +23,7 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
 
     use obzenflow_runtime::stages::common::handlers::source::{
-        ContinuousRead, FiniteRead, SourceRead,
+        source_channel, Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
     };
     use obzenflow_runtime::stages::common::handlers::{
         EffectfulTransformHandler, HostedSource, JoinReferenceView, StatefulEmission,
@@ -124,20 +124,20 @@ mod tests {
 
     #[obzenflow_runtime::effects::port]
     #[async_trait]
-    trait ExactInput {
-        #[effect(type = "stage_contracts.input.read", exactly_once, records = reply)]
+    trait ExactInput: InputReadiness {
+        #[query(type = "stage_contracts.input.read")]
         async fn read(
             &self,
             from: &NextInput,
-            ctx: &EffectContext,
-        ) -> Result<FiniteRead<InputEvent, NextInput>, EffectError>;
+            ctx: &obzenflow_runtime::queries::QueryContext,
+        ) -> Result<FiniteRead<InputEvent, NextInput>, obzenflow_runtime::queries::QueryError>;
 
-        #[effect(type = "stage_contracts.input.take", at_most_once, records = reply)]
+        #[query(type = "stage_contracts.input.take")]
         async fn take(
             &self,
             from: &NextLiveInput,
-            ctx: &EffectContext,
-        ) -> Result<ContinuousRead<InputEvent, NextLiveInput>, EffectError>;
+            ctx: &obzenflow_runtime::queries::QueryContext,
+        ) -> Result<ContinuousRead<InputEvent, NextLiveInput>, obzenflow_runtime::queries::QueryError>;
     }
 
     struct NoInput;
@@ -147,20 +147,27 @@ mod tests {
     }
 
     #[async_trait]
+    impl InputReadiness for NoInput {
+        async fn ready(&self) -> Result<(), obzenflow_runtime::stages::SourceError> {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
     impl ExactInput for NoInput {
         async fn read(
             &self,
             _from: &NextInput,
-            _ctx: &EffectContext,
-        ) -> Result<FiniteRead<InputEvent, NextInput>, EffectError> {
+            _ctx: &obzenflow_runtime::queries::QueryContext,
+        ) -> Result<FiniteRead<InputEvent, NextInput>, obzenflow_runtime::queries::QueryError> {
             Ok(FiniteRead::EndOfInput)
         }
 
         async fn take(
             &self,
             _from: &NextLiveInput,
-            _ctx: &EffectContext,
-        ) -> Result<ContinuousRead<InputEvent, NextLiveInput>, EffectError> {
+            _ctx: &obzenflow_runtime::queries::QueryContext,
+        ) -> Result<ContinuousRead<InputEvent, NextLiveInput>, obzenflow_runtime::queries::QueryError> {
             Ok(ContinuousRead {
                 records: Vec::new(),
                 next: NextLiveInput,
@@ -171,24 +178,20 @@ mod tests {
     fn finite_read<O: OneFactOutcome + Send + Sync + 'static>(
         output: fn(InputEvent) -> O,
     ) -> SourceRead<O> {
-        SourceRead::finite(Port::to(NoInput), NextInput, move |event| Ok(output(event)))
+        SourceRead::finite(obzenflow_runtime::queries::QueryPort::to(NoInput), NextInput, move |event| Ok(output(event)))
     }
 
     fn live_read<O: OneFactOutcome + Send + Sync + 'static>(
         output: fn(InputEvent) -> O,
-    ) -> SourceRead<O> {
-        SourceRead::continuous(
-            Port::to(NoInput),
-            NextLiveInput,
-            || Box::pin(std::future::pending()),
-            ReattachGuarantee::AtMostOnce,
-            move |event| Ok(output(event)),
-        )
+    ) -> SourceRead<O, Continuous> {
+        SourceRead::continuous(obzenflow_runtime::queries::QueryPort::to(NoInput), NextLiveInput, move |event| {
+            Ok(output(event))
+        })
     }
 
     fn live_input<T: TypedPayload + Send + Sync + 'static>(
     ) -> obzenflow_adapters::sources::ChannelSource<T> {
-        obzenflow_adapters::sources::ChannelSource::new(tokio::sync::mpsc::channel(1).1)
+        obzenflow_adapters::sources::ChannelSource::new(source_channel(1).1)
     }
 
     fn exact_event(event: InputEvent) -> InputEvent {
@@ -234,7 +237,7 @@ mod tests {
     impl TypedInfiniteSourceHandler for InfiniteExactSource {
         type Output = InputEvent;
 
-        fn read(&self) -> SourceRead<InputEvent> {
+        fn read(&self) -> SourceRead<InputEvent, Continuous> {
             live_read(exact_event)
         }
     }
@@ -244,7 +247,7 @@ mod tests {
     impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteExactSource {
         type Output = InputEvent;
 
-        fn read(&self) -> SourceRead<InputEvent> {
+        fn read(&self) -> SourceRead<InputEvent, Continuous> {
             live_read(exact_event)
         }
     }
@@ -274,7 +277,7 @@ mod tests {
     impl TypedInfiniteSourceHandler for InfiniteMultiExactSource {
         type Output = outcome![InputEvent | AlternateEvent];
 
-        fn read(&self) -> SourceRead<Self::Output> {
+        fn read(&self) -> SourceRead<Self::Output, Continuous> {
             live_read(either_event)
         }
     }
@@ -284,7 +287,7 @@ mod tests {
     impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteMultiExactSource {
         type Output = outcome![InputEvent | AlternateEvent];
 
-        fn read(&self) -> SourceRead<Self::Output> {
+        fn read(&self) -> SourceRead<Self::Output, Continuous> {
             live_read(either_event)
         }
     }
@@ -593,7 +596,7 @@ mod tests {
 
         // FLOWIP-122i B3: Runtime admits hosted ingress with the one guarantee
         // no connector can declare.
-        let (_submit, queue) = tokio::sync::mpsc::channel(1);
+        let (_submit, queue) = source_channel(1);
         let hosted = HostedSource::<InputEvent>::ingress(
             queue,
             obzenflow_core::ingress::HostedIngressBindingSlot::new("test.input"),

@@ -2,19 +2,18 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::channel::SourceReceiver;
 use super::erased::{
     ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncInfinite,
     UnifiedAsyncInfiniteSourceHandler,
 };
 use super::prepared::{sealed as admission_sealed, AdmitSource, AdmittedSource};
-use super::read::{read_failure, recording_ends, ContinuousRead};
+use super::read::recording_ends;
 use super::typed::{configuration_fatal, preserve_recorded, protocol_fatal};
 use super::SourceContinuation;
 use super::SourceError;
-use crate::effects::{
-    AnswersEffect, Call, EffectContext, EffectDeclaration, EffectError, EffectInvocationContext,
-    EffectsCore, Port, StageEffectsError,
-};
+use crate::effects::{EffectError, EffectInvocationContext, EffectsCore, SourceSystem};
+use obzenflow_core::query::SourceInput;
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::StageFatal;
 use async_trait::async_trait;
@@ -33,7 +32,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 /// Resolves one submitted member's commit evidence.
 pub type IngressReceiptSender = oneshot::Sender<IngressReceipt>;
@@ -61,11 +60,6 @@ impl<T> fmt::Debug for HostedSubmission<T> {
             .field("context", &self.context)
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HostedRead {
-    batch: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,17 +114,6 @@ impl HostedFact {
     }
 }
 
-#[obzenflow_runtime::effects::port]
-#[async_trait]
-pub trait HostedQueue: Send + Sync {
-    #[effect(type = "obzenflow.hosted.queue_read", at_most_once, records = reply)]
-    async fn read(
-        &self,
-        read: &HostedRead,
-        ctx: &EffectContext,
-    ) -> Result<ContinuousRead<HostedMember, HostedRead>, EffectError>;
-}
-
 type ReceiptKey = (IngressAttemptSeq, Option<usize>);
 
 fn receipt_key(context: &IngressContext) -> ReceiptKey {
@@ -138,34 +121,11 @@ fn receipt_key(context: &IngressContext) -> ReceiptKey {
 }
 
 struct QueueState<T> {
-    rx: tokio::sync::Mutex<mpsc::Receiver<HostedSubmission<T>>>,
-    front: Mutex<Option<HostedSubmission<T>>>,
+    rx: SourceReceiver<HostedSubmission<T>>,
     receipts: Mutex<HashMap<ReceiptKey, IngressReceiptSender>>,
 }
 
 impl<T> QueueState<T> {
-    async fn ready(&self) -> Result<(), SourceError> {
-        if self
-            .front
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_some()
-        {
-            return Ok(());
-        }
-        let first = self
-            .rx
-            .lock()
-            .await
-            .recv()
-            .await
-            .ok_or(SourceError::Transport(
-                SourceDiagnosticReason::InputClosed.into(),
-            ))?;
-        *self.front.lock().unwrap_or_else(PoisonError::into_inner) = Some(first);
-        Ok(())
-    }
-
     fn take_receipt(&self, context: &IngressContext) -> Option<IngressReceiptSender> {
         self.receipts
             .lock()
@@ -174,58 +134,18 @@ impl<T> QueueState<T> {
     }
 }
 
-struct QueueSystem<T> {
-    queue: Arc<QueueState<T>>,
-}
-
-#[async_trait]
-impl<T: OneFactOutcome + Send + Sync + 'static> HostedQueue for QueueSystem<T> {
-    async fn read(
-        &self,
-        read: &HostedRead,
-        _ctx: &EffectContext,
-    ) -> Result<ContinuousRead<HostedMember, HostedRead>, EffectError> {
-        let mut submissions: Vec<HostedSubmission<T>> = self
-            .queue
-            .front
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            .into_iter()
-            .collect();
-        {
-            let mut rx = self.queue.rx.lock().await;
-            while submissions.len() < read.batch {
-                match rx.try_recv() {
-                    Ok(submission) => submissions.push(submission),
-                    Err(_) => break,
-                }
-            }
-        }
-        let mut records = Vec::with_capacity(submissions.len());
-        for submission in submissions {
-            let fact = HostedFact::of(submission.value).map_err(EffectError::Serialization)?;
-            self.queue
-                .receipts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(receipt_key(&submission.context), submission.receipt);
-            records.push(HostedMember {
-                fact,
-                context: submission.context,
-            });
-        }
-        Ok(ContinuousRead {
-            records,
-            next: read.clone(),
-        })
+impl<T: OneFactOutcome> QueueState<T> {
+    fn member(&self, submission: HostedSubmission<T>) -> Result<HostedMember, EffectError> {
+        let fact=HostedFact::of(submission.value).map_err(EffectError::Serialization)?;
+        self.receipts.lock().unwrap_or_else(PoisonError::into_inner).insert(receipt_key(&submission.context),submission.receipt);
+        Ok(HostedMember {fact,context:submission.context})
     }
 }
 
 /// `HostedSource` is the handler of a hosted source stage. It holds the read
 /// port of its endpoint's queue. The host keeps the queue's submission handle.
 pub struct HostedSource<T> {
-    port: Port<dyn HostedQueue>,
+    system: SourceSystem,
     queue: Arc<QueueState<T>>,
     slot: HostedIngressBindingSlot,
     batch: usize,
@@ -235,7 +155,7 @@ impl<T> fmt::Debug for HostedSource<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostedSource")
             .field("output", &std::any::type_name::<T>())
-            .field("system", &self.port.system_name())
+            .field("system", &self.system.name())
             .field("ingress_key", self.slot.ingress_key())
             .field("max_batch_size", &self.batch)
             .finish_non_exhaustive()
@@ -245,14 +165,24 @@ impl<T> fmt::Debug for HostedSource<T> {
 impl<T: OneFactOutcome + Send + Sync + 'static> HostedSource<T> {
     /// `HostedSource::http` makes a source of the submissions that the framework-managed
     /// HTTP ingress admits. Its system is `http-ingress`.
-    pub fn http(rx: mpsc::Receiver<HostedSubmission<T>>, slot: HostedIngressBindingSlot) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// `http` panics when the ingress key makes the binding evidence longer than
+    /// 4,096 bytes.
+    pub fn http(rx: SourceReceiver<HostedSubmission<T>>, slot: HostedIngressBindingSlot) -> Self {
         Self::named("http-ingress", rx, slot)
     }
 
     /// `HostedSource::ingress` makes a source of the submissions that the protocol-neutral
     /// ingress admits. Its system is `ingress`.
+    ///
+    /// # Panics
+    ///
+    /// `ingress` panics when the ingress key makes the binding evidence longer than
+    /// 4,096 bytes.
     pub fn ingress(
-        rx: mpsc::Receiver<HostedSubmission<T>>,
+        rx: SourceReceiver<HostedSubmission<T>>,
         slot: HostedIngressBindingSlot,
     ) -> Self {
         Self::named("ingress", rx, slot)
@@ -260,19 +190,17 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedSource<T> {
 
     fn named(
         name: &'static str,
-        rx: mpsc::Receiver<HostedSubmission<T>>,
+        rx: SourceReceiver<HostedSubmission<T>>,
         slot: HostedIngressBindingSlot,
     ) -> Self {
         let queue = Arc::new(QueueState {
-            rx: tokio::sync::Mutex::new(rx),
-            front: Mutex::new(None),
+            rx,
             receipts: Mutex::new(HashMap::new()),
         });
-        let system: Arc<dyn HostedQueue> = Arc::new(QueueSystem {
-            queue: queue.clone(),
-        });
+        let location = obzenflow_core::effect_binding::SystemLocation::Ingress { key:slot.ingress_key().as_str().to_owned() };
+        let evidence = obzenflow_core::SystemBindingEvidence::located(name,location).expect("an ingress key fits the binding evidence bound");
         Self {
-            port: Port::framework_system(name, system).instance(slot.ingress_key().as_str()),
+            system: SourceSystem::event(evidence),
             queue,
             slot,
             batch: 1000,
@@ -286,7 +214,7 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedSource<T> {
 
     /// `system_name` returns the name of the system that admits this source's submissions.
     pub fn system_name(&self) -> &str {
-        self.port.binding().name()
+        self.system.name()
     }
 }
 
@@ -306,7 +234,7 @@ impl<Out: OneFactOutcome + Send + Sync + 'static> AdmitSource<dyn UnifiedAsyncIn
     type Handler = HostedReadAdapter<Out>;
 
     fn admit(self) -> AdmittedSource<Self::Handler> {
-        let system = self.port.source_system();
+        let system = self.system.clone();
         AdmittedSource {
             handler: HostedReadAdapter::new(self),
             continuation: SENDER_REDELIVERS,
@@ -317,13 +245,14 @@ impl<Out: OneFactOutcome + Send + Sync + 'static> AdmitSource<dyn UnifiedAsyncIn
 
 #[doc(hidden)]
 pub struct HostedReadAdapter<T> {
-    port: Port<dyn HostedQueue>,
+    pending: VecDeque<HostedSubmission<T>>,
     queue: Arc<QueueState<T>>,
     slot: HostedIngressBindingSlot,
     batch: usize,
     admission: HostedAdmission,
     context: Option<EffectInvocationContext>,
     number: u64,
+    attempt: obzenflow_core::event::payloads::effect_payload::EffectOrdinal,
     effects: Option<EffectsCore>,
     staged: VecDeque<Staged>,
     reproduced: bool,
@@ -337,12 +266,13 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
     fn new(source: HostedSource<T>) -> Self {
         Self {
             admission: HostedAdmission::new(source.slot.clone()),
-            port: source.port,
+            pending: VecDeque::new(),
             queue: source.queue,
             slot: source.slot,
             batch: source.batch,
             context: None,
             number: 0,
+            attempt: obzenflow_core::event::payloads::effect_payload::EffectOrdinal::new(0),
             effects: None,
             staged: VecDeque::new(),
             reproduced: false,
@@ -362,7 +292,8 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
         loop {
             if let Some(staged) = self.staged.pop_front() {
                 return match self.materialize(staged).await {
-                    Ok(event) => {
+                    Ok(None) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof),
+                    Ok(Some(event)) => {
                         self.emitted = Some(event.clone());
                         ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(vec![
                             event,
@@ -389,7 +320,7 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
             )));
         };
         context.input_seq = StageInputPosition(number);
-        if recording_ends(&context, number) {
+        if recording_ends(&context, number, self.attempt) {
             let mut effects = EffectsCore::new(context);
             if let Err(error) = effects.reproduce_trailing_crossing().await {
                 return Some(ErasedSourceInvocation::fatal(
@@ -402,7 +333,7 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
                 ErasedSourceCompletion::Eof,
             ));
         }
-        let mut effects = EffectsCore::new(context);
+        let mut effects = EffectsCore::new(context).starting_at(self.attempt);
         let reproduced = effects.is_replaying();
         if !reproduced {
             if let Err(error) = effects.cross_to_live().await {
@@ -412,41 +343,48 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
                         .unwrap_or_else(|| protocol_fatal(error.to_string())),
                 ));
             }
-            if let Err(error) = self.queue.ready().await {
-                return Some(ErasedSourceInvocation::handler_error(error));
+            if self.admission.pending.is_empty() { self.slot.set_restoring(false); }
+            if self.pending.is_empty() {
+                if self.queue.rx.ready().await.is_err() {
+                    return Some(ErasedSourceInvocation::handler_error(SourceError::Transport(SourceDiagnosticReason::InputClosed.into())));
+                }
+                self.pending.extend(self.queue.rx.take(self.batch));
             }
         }
-        let outcome = effects.perform_call(HostedRead { batch: self.batch }).await;
-        self.number = number;
+        let outcome = effects.source_input(|input| matches!(input,SourceInput::IngressMember{..}), || async {
+            let submission=self.pending.pop_front().ok_or_else(||EffectError::Execution("ready ingress held no member".into()))?;
+            let member=self.queue.member(submission)?;
+            let member=serde_json::to_value(member).map_err(|e|EffectError::Serialization(e.to_string()))?;
+            Ok(SourceInput::IngressMember{member})
+        }).await;
         self.reproduced = reproduced;
         match outcome {
-            Ok(read) => {
+            Ok(SourceInput::IngressMember {member}) => {
+                let member = match serde_json::from_value::<HostedMember>(member) {
+                    Ok(member)=>member, Err(error)=>return Some(ErasedSourceInvocation::fatal(protocol_fatal(error.to_string()))),
+                };
+                self.number = number;
+                self.attempt =
+                    obzenflow_core::event::payloads::effect_payload::EffectOrdinal::new(0);
                 if !reproduced {
-                    if let Some(fatal) = self.admission.foreign_member(&read.records) {
+                    if let Some(fatal) = self.admission.foreign_member(std::slice::from_ref(&member)) {
                         return Some(ErasedSourceInvocation::fatal(fatal));
                     }
                 }
                 let queue = &self.queue;
-                let staged = self.admission.decide(read.records, |context| {
+                let staged = self.admission.decide(vec![member], |context| {
                     (!reproduced).then(|| queue.take_receipt(context)).flatten()
                 });
                 self.staged.extend(staged);
                 self.effects = Some(effects);
                 None
             }
-            Err(error) => {
-                if let Some(fatal) = effects.authoring_halt_fatal() {
-                    return Some(ErasedSourceInvocation::fatal(fatal));
-                }
-                Some(match read_failure(&error) {
-                    Some(failure) => ErasedSourceInvocation::handler_error(failure),
-                    None => ErasedSourceInvocation::fatal(protocol_fatal(error.to_string())),
-                })
-            }
+            Ok(_) => Some(ErasedSourceInvocation::fatal(protocol_fatal("ingress expected a member"))),
+            Err(error) => Some(ErasedSourceInvocation::fatal(effects.authoring_halt_fatal().unwrap_or_else(||protocol_fatal(error.to_string())))),
         }
     }
 
-    async fn materialize(&mut self, staged: Staged) -> Result<ChainEvent, StageFatal> {
+    async fn materialize(&mut self, staged: Staged) -> Result<Option<ChainEvent>, StageFatal> {
         let Staged {
             fact,
             context,
@@ -470,6 +408,10 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
                     .unwrap_or_else(|| protocol_fatal(error.to_string())))
             }
         };
+        if self.reproduced && self.context.as_ref().is_some_and(|stage| super::read::recording_ends_before(stage, self.number, &event.id)) {
+            effects.reproduce_trailing_crossing().await.map_err(|error| effects.authoring_halt_fatal().unwrap_or_else(|| protocol_fatal(error.to_string())))?;
+            return Ok(None);
+        }
         let accepted_at_ns = context.accepted_at_ns;
         event.ingress_context = Some(context);
         let event = preserve_recorded(&mut self.recorded, self.context.as_ref(), event).await?;
@@ -478,7 +420,7 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
         if self.reproduced {
             self.replayed += 1;
         }
-        Ok(event)
+        Ok(Some(event))
     }
 }
 
@@ -488,11 +430,9 @@ impl<T: OneFactOutcome + Send + Sync + 'static> SealAsyncInfinite for HostedRead
 impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandler
     for HostedReadAdapter<T>
 {
-    fn read_declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {
-        <Port<dyn HostedQueue> as AnswersEffect<Call<HostedRead>>>::declaration(&self.port)
-    }
 
     fn install_read_context(&mut self, context: EffectInvocationContext) {
+        self.slot.set_restoring(context.stage.runtime_execution.resume_control().is_some());
         self.context = Some(context);
     }
 
@@ -511,7 +451,7 @@ impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandle
     }
 
     async fn cross_to_live(&mut self) -> Result<bool, StageFatal> {
-        if self.has_pending_records() {
+        if self.has_pending_records() || !self.admission.pending.is_empty() {
             return Ok(false);
         }
         let Some(context) = self.context.clone() else {
@@ -529,10 +469,11 @@ impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandle
         let stage_id = context.stage.stage_id;
         let mut effects = EffectsCore::new(context);
         match effects.cross_to_live().await {
-            Ok(()) => Ok(!matches!(
-                execution.source_phase_for(stage_id),
-                crate::execution::SourceExecutionPhase::Replaying
-            )),
+            Ok(()) => {
+                let live = matches!(execution.source_phase_for(stage_id), crate::execution::SourceExecutionPhase::Live);
+                if live { self.slot.set_restoring(false); }
+                Ok(live)
+            },
             Err(error) => Err(effects
                 .authoring_halt_fatal()
                 .unwrap_or_else(|| protocol_fatal(error.to_string()))),
@@ -929,7 +870,7 @@ mod tests {
 
     #[test]
     fn hosted_source_admission_records_sender_redelivers() {
-        let (_tx, rx) = mpsc::channel::<HostedSubmission<Row>>(1);
+        let (_tx, rx) = super::super::source_channel::<HostedSubmission<Row>>(1);
         let admitted = HostedSource::ingress(rx, HostedIngressBindingSlot::new(KEY)).admit();
         assert_eq!(
             admitted.continuation,
@@ -945,6 +886,51 @@ mod tests {
                 .map(|slot| slot.ingress_key().clone()),
             Some(IngressKey::from(KEY))
         );
+    }
+
+    #[tokio::test]
+    async fn hosted_ready_leaves_submission_queued() {
+        let (tx, rx) = super::super::source_channel::<HostedSubmission<Row>>(2);
+        let queue = Arc::new(QueueState {
+            rx,
+            receipts: Mutex::new(HashMap::new()),
+        });
+        let (receipt, _answer) = oneshot::channel();
+        tx.send(HostedSubmission::new(
+            Row(1),
+            context(1, KEY, None, None, 1, 1),
+            receipt,
+        ))
+        .await
+        .expect("the queue has space");
+        queue.rx.ready().await.expect("the queue holds a submission");
+        assert_eq!(queue.rx.len(), 1, "readiness takes nothing");
+        assert_eq!(tx.capacity(), 1, "readiness frees no slot");
+        let submission=queue.rx.take(1).pop().unwrap();
+        let member=queue.member(submission).unwrap();
+        assert_eq!(member.context.attempt_seq,IngressAttemptSeq(1));
+        assert_eq!(tx.capacity(), 2, "the read frees the slot");
+    }
+
+    #[test]
+    fn hosted_binding_records_ingress_key() {
+        let bound = |key: &str| {
+            let (_tx, rx) = super::super::source_channel::<HostedSubmission<Row>>(1);
+            HostedSource::http(rx, HostedIngressBindingSlot::new(key))
+                .admit()
+                .system
+                .binding()
+                .clone()
+        };
+        let tx = bound("/api/bank/tx");
+        assert_eq!(tx.name(), "http-ingress");
+        assert_eq!(
+            tx.location(),
+            Some(&obzenflow_core::effect_binding::SystemLocation::Ingress {
+                key: "/api/bank/tx".to_owned()
+            })
+        );
+        assert_ne!(tx, bound("/api/bank/ach"));
     }
 
     #[test]

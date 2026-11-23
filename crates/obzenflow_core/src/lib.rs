@@ -19,6 +19,7 @@ pub mod journal;
 pub mod metrics;
 mod serde_support;
 pub mod source;
+pub mod query;
 pub mod time;
 pub mod web;
 

@@ -106,7 +106,7 @@ fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::Path
     Ok((journal_path, temp_dir))
 }
 
-struct TimestampedSource(Port<dyn NumberFeed>);
+struct TimestampedSource(obzenflow_runtime::queries::QueryPort<dyn NumberFeed>);
 
 impl TimestampedSource {
     fn new(total_events: u64) -> Self {

@@ -215,6 +215,7 @@ pub trait EffectHistoryStore: Send + Sync {
 
 #[derive(Clone, Debug)]
 pub struct EffectHistory {
+    pub(crate) source_inputs: HashMap<EffectCursor, ChainEvent>,
     pub(super) source_observations:
         HashMap<EventId, obzenflow_core::event::observability::ObservabilityContext>,
     pub(crate) source_origin:
@@ -271,6 +272,11 @@ impl EffectCursorHistory {
     pub(crate) fn highest_attempt(&self) -> Option<EffectAttemptOrdinal> {
         self.attempts.last().map(|attempt| attempt.attempt)
     }
+}
+
+pub(super) fn source_cursor(input: &obzenflow_core::query::SourceInputRecord) -> Result<EffectCursor, EffectError> {
+    let ordinal = input.attempt.checked_sub(1).ok_or_else(|| EffectError::ReplayArchive("source input attempt zero".into()))?;
+    Ok(EffectCursor::new(input.recorded_flow_id.clone(), input.stage_key.clone(), input.number, EffectOrdinal::new(ordinal)))
 }
 
 impl EffectHistory {
@@ -356,6 +362,13 @@ impl EffectHistory {
             self.recorded_flow_id.clone()
         };
         let mut history = Self::from_cursor_histories(recorded_flow_id, histories);
+        history.source_inputs = self.source_inputs;
+        for (cursor, row) in &newer.source_inputs {
+            if history.source_inputs.get(cursor).is_some_and(|prior| prior.payload != row.payload || prior.id != row.id) {
+                return Err(EffectError::ReplayArchive(format!("source input {cursor:?} differs between archives")));
+            }
+            history.source_inputs.insert(cursor.clone(), row.clone());
+        }
         history.source_observations = self.source_observations;
         history
             .source_observations
@@ -371,7 +384,7 @@ impl EffectHistory {
     }
 
     fn holds_evidence(&self) -> bool {
-        !(self.index.is_empty() && self.attempts.is_empty() && self.abandonments.is_empty())
+        !(self.source_inputs.is_empty() && self.index.is_empty() && self.attempts.is_empty() && self.abandonments.is_empty())
     }
 
     /// Index validated cursor histories, as one run's history would be.
@@ -441,6 +454,7 @@ impl EffectHistory {
             }
         }
         Self {
+            source_inputs: HashMap::new(),
             source_observations: HashMap::new(),
             source_origin: None,
             causal: Arc::new(causal),
@@ -464,6 +478,7 @@ impl EffectHistory {
         pass_through: Option<&EventDescriptor>,
     ) -> Result<Self, EffectError> {
         let mut reader = archive.open_effect_history(stage_key).await?;
+        let mut source_inputs = HashMap::new();
         let mut source_observations = HashMap::new();
         let mut source_origin = None;
         let mut causal = HashMap::<EffectCursor, CausalFrontier>::new();
@@ -506,6 +521,13 @@ impl EffectHistory {
             }
             let event = envelope.authored();
             actions.observe(&event)?;
+            if let ChainPayload::Execution(ExecutionPayload::SourceInput(input)) = &event.payload {
+                let cursor = source_cursor(input)?;
+                if input.stage_key != stage_key || archive.recorded_flow_id().is_some_and(|namespace| input.recorded_flow_id != namespace)
+                    || source_inputs.insert(cursor, event.clone()).is_some() {
+                    return Err(EffectError::ReplayArchive(format!("invalid or duplicate source input at stage {stage_key}")));
+                }
+            }
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
                 causal
                     .entry(effect.cursor.clone())
@@ -667,6 +689,7 @@ impl EffectHistory {
                     .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
             }
         }
+        history.source_inputs = source_inputs;
         history.source_observations = source_observations;
         history.source_origin = source_origin;
         history.causal = Arc::new(causal);
@@ -682,7 +705,7 @@ impl EffectHistory {
             |cursor| {
                 history.index.contains_key(cursor)
                     || history.attempts.contains_key(cursor)
-                    || history.abandonments.contains_key(cursor)
+                    || history.abandonments.contains_key(cursor) || history.source_inputs.contains_key(cursor)
             },
             |cursor| !history.index.contains_key(cursor),
         );
@@ -818,6 +841,7 @@ impl EffectHistory {
         let terminal_attempts = index.keys().cloned().map(|cursor| (cursor, None)).collect();
 
         Ok(Self {
+            source_inputs: HashMap::new(),
             source_observations: HashMap::new(),
             source_origin: None,
             causal: Arc::new(HashMap::new()),

@@ -16,7 +16,6 @@ use obzenflow_adapters::middleware::{
     SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory, ChainPayload};
-use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::journal::Journal;
@@ -24,7 +23,9 @@ use obzenflow_core::{JournalRecord, TypedPayload, WriterId};
 use obzenflow_dsl::{sink, source, test_flow};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{EffectContext, EffectError};
-use obzenflow_runtime::stages::common::handlers::source::{ContinuousRead, FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::{
+    Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
+};
 use obzenflow_runtime::stages::common::handlers::{
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
@@ -49,20 +50,20 @@ struct PollTake;
 
 #[obzenflow_runtime::effects::port]
 #[async_trait]
-trait PollInput {
-    #[effect(type = "polling_contract.input.read", exactly_once, records = reply)]
+trait PollInput: InputReadiness {
+    #[query(type = "polling_contract.input.read")]
     async fn read(
         &self,
         from: &PollRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<PollingEvent, PollRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<PollingEvent, PollRead>, obzenflow::queries::QueryError>;
 
-    #[effect(type = "polling_contract.input.take", exactly_once, records = reply)]
+    #[query(type = "polling_contract.input.take")]
     async fn take(
         &self,
         from: &PollTake,
-        ctx: &EffectContext,
-    ) -> Result<ContinuousRead<PollingEvent, PollTake>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<ContinuousRead<PollingEvent, PollTake>, obzenflow::queries::QueryError>;
 }
 
 enum Script {
@@ -94,14 +95,21 @@ enum Script {
 
 struct ScriptedInput(Script);
 
+#[async_trait]
+impl InputReadiness for ScriptedInput {
+    async fn ready(&self) -> Result<(), obzenflow_runtime::stages::SourceError> {
+        Ok(())
+    }
+}
+
 #[obzenflow_runtime::effects::system("scripted-input")]
 #[async_trait]
 impl PollInput for ScriptedInput {
     async fn read(
         &self,
         from: &PollRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<PollingEvent, PollRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<PollingEvent, PollRead>, obzenflow::queries::QueryError> {
         let next = PollRead(from.0 + 1);
         match &self.0 {
             Script::Once {
@@ -145,17 +153,15 @@ impl PollInput for ScriptedInput {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(FiniteRead::EndOfInput)
             }
-            Script::LiveOnce { .. } | Script::Idle { .. } => Err(EffectError::Validation(
-                "a live script answers takes".into(),
-            )),
+            Script::LiveOnce { .. } | Script::Idle { .. } => Err(obzenflow::queries::QueryError::terminal(obzenflow::queries::SourcePollErrorKind::Validation,obzenflow::queries::SourceDiagnosticReason::InvalidValue)),
         }
     }
 
     async fn take(
         &self,
         _from: &PollTake,
-        _ctx: &EffectContext,
-    ) -> Result<ContinuousRead<PollingEvent, PollTake>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<ContinuousRead<PollingEvent, PollTake>, obzenflow::queries::QueryError> {
         let records = match &self.0 {
             Script::LiveOnce {
                 calls,
@@ -178,9 +184,7 @@ impl PollInput for ScriptedInput {
                 Vec::new()
             }
             _ => {
-                return Err(EffectError::Validation(
-                    "a finite script answers reads".into(),
-                ))
+                return Err(obzenflow::queries::QueryError::terminal(obzenflow::queries::SourcePollErrorKind::Validation,obzenflow::queries::SourceDiagnosticReason::InvalidValue))
             }
         };
         Ok(ContinuousRead {
@@ -190,25 +194,19 @@ impl PollInput for ScriptedInput {
     }
 }
 
-fn scripted(script: Script) -> Port<dyn PollInput> {
-    Port::to(ScriptedInput(script))
+fn scripted(script: Script) -> obzenflow::queries::QueryPort<dyn PollInput> {
+    obzenflow::queries::QueryPort::to(ScriptedInput(script))
 }
 
-fn finite(port: &Port<dyn PollInput>) -> SourceRead<PollingEvent> {
+fn finite(port: &obzenflow::queries::QueryPort<dyn PollInput>) -> SourceRead<PollingEvent> {
     SourceRead::finite(port.clone(), PollRead(0), Ok)
 }
 
-fn live(port: &Port<dyn PollInput>) -> SourceRead<PollingEvent> {
-    SourceRead::continuous(
-        port.clone(),
-        PollTake,
-        || Box::pin(async { Ok(()) }),
-        ReattachGuarantee::AtMostOnce,
-        Ok,
-    )
+fn live(port: &obzenflow::queries::QueryPort<dyn PollInput>) -> SourceRead<PollingEvent, Continuous> {
+    SourceRead::continuous(port.clone(), PollTake, Ok)
 }
 
-struct AsyncFiniteOnce(Port<dyn PollInput>);
+struct AsyncFiniteOnce(obzenflow::queries::QueryPort<dyn PollInput>);
 
 impl AsyncFiniteOnce {
     fn new(raw_delay: Duration) -> Self {
@@ -228,7 +226,7 @@ impl TypedAsyncFiniteSourceHandler for AsyncFiniteOnce {
     }
 }
 
-struct SyncInfiniteOnce(Port<dyn PollInput>);
+struct SyncInfiniteOnce(obzenflow::queries::QueryPort<dyn PollInput>);
 
 impl SyncInfiniteOnce {
     fn new(calls: Arc<AtomicUsize>) -> Self {
@@ -243,12 +241,12 @@ impl SyncInfiniteOnce {
 impl TypedInfiniteSourceHandler for SyncInfiniteOnce {
     type Output = PollingEvent;
 
-    fn read(&self) -> SourceRead<PollingEvent> {
+    fn read(&self) -> SourceRead<PollingEvent, Continuous> {
         live(&self.0)
     }
 }
 
-struct AsyncInfiniteOnce(Port<dyn PollInput>);
+struct AsyncInfiniteOnce(obzenflow::queries::QueryPort<dyn PollInput>);
 
 impl AsyncInfiniteOnce {
     fn new(calls: Arc<AtomicUsize>, raw_delay: Duration) -> Self {
@@ -263,13 +261,13 @@ impl AsyncInfiniteOnce {
 impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteOnce {
     type Output = PollingEvent;
 
-    fn read(&self) -> SourceRead<PollingEvent> {
+    fn read(&self) -> SourceRead<PollingEvent, Continuous> {
         live(&self.0)
     }
 }
 
 struct TimeoutThenEof {
-    port: Port<dyn PollInput>,
+    port: obzenflow::queries::QueryPort<dyn PollInput>,
     timeout: Duration,
 }
 
@@ -294,7 +292,7 @@ impl TypedAsyncFiniteSourceHandler for TimeoutThenEof {
     }
 }
 
-struct DisabledTimeoutThenEof(Port<dyn PollInput>);
+struct DisabledTimeoutThenEof(obzenflow::queries::QueryPort<dyn PollInput>);
 
 impl DisabledTimeoutThenEof {
     fn new(calls: Arc<AtomicUsize>, raw_delay: Duration) -> Self {
@@ -318,7 +316,7 @@ impl TypedAsyncFiniteSourceHandler for DisabledTimeoutThenEof {
     }
 }
 
-struct SyncScriptedSource(Port<dyn PollInput>);
+struct SyncScriptedSource(obzenflow::queries::QueryPort<dyn PollInput>);
 
 impl SyncScriptedSource {
     fn new(steps: Vec<ScriptStep>, poll_times: PollTimes) -> Self {
@@ -334,7 +332,7 @@ impl TypedFiniteSourceHandler for SyncScriptedSource {
     }
 }
 
-struct AsyncScriptedSource(Port<dyn PollInput>);
+struct AsyncScriptedSource(obzenflow::queries::QueryPort<dyn PollInput>);
 
 impl AsyncScriptedSource {
     fn new(steps: Vec<ScriptStep>, poll_times: PollTimes) -> Self {
@@ -350,7 +348,7 @@ impl TypedAsyncFiniteSourceHandler for AsyncScriptedSource {
     }
 }
 
-struct AsyncIdleInfiniteSource(Port<dyn PollInput>);
+struct AsyncIdleInfiniteSource(obzenflow::queries::QueryPort<dyn PollInput>);
 
 impl AsyncIdleInfiniteSource {
     fn new(calls: Arc<AtomicUsize>, first_poll: Arc<Notify>) -> Self {
@@ -361,12 +359,12 @@ impl AsyncIdleInfiniteSource {
 impl TypedAsyncInfiniteSourceHandler for AsyncIdleInfiniteSource {
     type Output = PollingEvent;
 
-    fn read(&self) -> SourceRead<PollingEvent> {
+    fn read(&self) -> SourceRead<PollingEvent, Continuous> {
         live(&self.0)
     }
 }
 
-struct ImmediateEof(Port<dyn PollInput>);
+struct ImmediateEof(obzenflow::queries::QueryPort<dyn PollInput>);
 
 impl ImmediateEof {
     fn new(calls: Arc<AtomicUsize>) -> Self {

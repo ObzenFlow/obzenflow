@@ -8,13 +8,13 @@
 //! records each reply. The handler decodes each recorded record. The handler
 //! reports each row that the decoder rejects. The read then continues.
 
-use super::file_system::{CsvFile, CsvFormat, CsvLine, CsvRead, FileSystem};
+use super::file_system::{CsvFile, CsvFileSystem, CsvPage, CsvFormat, CsvLine, CsvRead};
 use super::file_version::input_changed;
 use anyhow::{anyhow, bail, Result};
 use csv::StringRecord;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::Port;
+use obzenflow_runtime::queries::QueryPort;
 use obzenflow_runtime::stages::common::handlers::source::{SourceRead, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::source::SourceError;
 use obzenflow_runtime::typing::SourceTyping;
@@ -206,9 +206,10 @@ impl CsvDecoder for CsvRowDecoder {
 pub struct CsvSourceBuilder<D> {
     decoder: D,
     path: Option<PathBuf>,
-    has_headers: bool,
+    port: Option<QueryPort<dyn CsvFile>>,
+    has_headers: Option<bool>,
     headers: Option<Vec<String>>,
-    delimiter: u8,
+    delimiter: Option<u8>,
     chunk_size: usize,
     skip_rows: usize,
     select_columns: Option<Vec<String>>,
@@ -219,6 +220,7 @@ impl<D> std::fmt::Debug for CsvSourceBuilder<D> {
         f.debug_struct("CsvSourceBuilder")
             .field("decoder", &std::any::type_name::<D>())
             .field("path", &self.path)
+            .field("port", &self.port.as_ref().map(QueryPort::system_name))
             .field("has_headers", &self.has_headers)
             .field("headers", &self.headers)
             .field("delimiter", &self.delimiter)
@@ -234,9 +236,10 @@ impl<D> CsvSourceBuilder<D> {
         Self {
             decoder,
             path: None,
-            has_headers: true,
+            port: None,
+            has_headers: None,
             headers: None,
-            delimiter: b',',
+            delimiter: None,
             chunk_size: 1000,
             skip_rows: 0,
             select_columns: None,
@@ -248,8 +251,16 @@ impl<D> CsvSourceBuilder<D> {
         self
     }
 
+    /// `through` reads through `port` instead of a file at a path. The system
+    /// behind the port supplies the location and the CSV format, so a source with
+    /// a port takes no path, delimiter or headers.
+    pub fn through(mut self, port: QueryPort<dyn CsvFile>) -> Self {
+        self.port = Some(port);
+        self
+    }
+
     pub fn has_headers(mut self, has_headers: bool) -> Self {
-        self.has_headers = has_headers;
+        self.has_headers = Some(has_headers);
         self
     }
 
@@ -264,12 +275,12 @@ impl<D> CsvSourceBuilder<D> {
     }
 
     pub fn delimiter(mut self, delimiter: u8) -> Self {
-        self.delimiter = delimiter;
+        self.delimiter = Some(delimiter);
         self
     }
 
     pub fn tab_delimited(mut self) -> Self {
-        self.delimiter = b'\t';
+        self.delimiter = Some(b'\t');
         self
     }
 
@@ -298,22 +309,36 @@ where
     D: CsvDecoder,
 {
     pub fn build(self) -> Result<CsvSource<D>> {
-        let path = self.path.ok_or_else(|| anyhow!("path required"))?;
-
         if self.chunk_size == 0 {
             bail!("chunk_size must be > 0");
         }
-
-        if !self.has_headers && self.headers.as_ref().is_none_or(|h| h.is_empty()) {
-            bail!("headers must be provided when has_headers=false");
-        }
-
-        let format = CsvFormat {
-            delimiter: self.delimiter,
-            headers: if self.has_headers { None } else { self.headers },
+        let format_set =
+            self.has_headers.is_some() || self.headers.is_some() || self.delimiter.is_some();
+        let port = match (self.path, self.port) {
+            (Some(_), Some(_)) => {
+                bail!("a CSV source takes a path or a port, and this builder has both")
+            }
+            (None, None) => bail!("path required"),
+            (None, Some(_)) if format_set => {
+                bail!("a CSV source that reads through a port takes its format from the port")
+            }
+            (None, Some(port)) => port,
+            (Some(path), None) => {
+                let has_headers = self.has_headers.unwrap_or(true);
+                if !has_headers && self.headers.as_ref().is_none_or(|h| h.is_empty()) {
+                    bail!("headers must be provided when has_headers=false");
+                }
+                let format = CsvFormat {
+                    delimiter: self.delimiter.unwrap_or(b','),
+                    headers: if has_headers { None } else { self.headers },
+                };
+                CsvFileSystem::new(path, format).port().map_err(|error| {
+                    anyhow!("the binding evidence cannot record the file location: {error}")
+                })?
+            }
         };
         Ok(CsvSource {
-            port: FileSystem::csv_port(path, format)?,
+            port,
             decoder: self.decoder,
             chunk_size: self.chunk_size,
             skip_rows: self.skip_rows,
@@ -326,7 +351,7 @@ where
 /// Its decoder maps each recorded record to the output.
 #[derive(Clone)]
 pub struct CsvSource<D> {
-    port: Port<dyn CsvFile>,
+    port: QueryPort<dyn CsvFile>,
     decoder: D,
     chunk_size: usize,
     skip_rows: usize,
@@ -338,17 +363,21 @@ impl<D: CsvDecoder> TypedFiniteSourceHandler for CsvSource<D> {
 
     fn read(&self) -> SourceRead<D::Output> {
         let decoder = self.decoder.clone();
-        SourceRead::finite_in(
+        SourceRead::pages(
             self.port.clone(),
-            CsvRead::first(self.chunk_size, self.skip_rows, self.select_columns.clone()),
-            move |read: &CsvRead, line: CsvLine| decode_line(&decoder, read, line),
+            CsvRead { limit: std::num::NonZeroUsize::new(self.chunk_size).expect("validated chunk size"), skip_rows: self.skip_rows, columns: self.select_columns.clone(), after: None },
+            |from, page| Ok(match page {
+                CsvPage::EndOfInput => None,
+                CsvPage::Batch {headers,records,next} => Some((StringRecord::from(headers), records, CsvRead { after:Some(next), ..from.clone() })),
+            }),
+            move |headers, line| decode_line(&decoder, headers, line),
         )
     }
 }
 
 fn decode_line<D: CsvDecoder>(
     decoder: &D,
-    read: &CsvRead,
+    headers: &StringRecord,
     line: CsvLine,
 ) -> Result<D::Output, SourceError> {
     match line {
@@ -357,14 +386,17 @@ fn decode_line<D: CsvDecoder>(
             line,
             values,
         } => {
-            let headers = StringRecord::from(read.headers().to_vec());
             let fields = StringRecord::from(values);
             decoder
-                .decode(CsvRecord::new(&headers, &fields))
+                .decode(CsvRecord::new(headers, &fields))
                 .map_err(|error| SourceError::Validation(located_line(error.0.record(index), line)))
         }
-        CsvLine::Malformed { index, line } => Err(SourceError::Validation(located_line(
-            SourceDiagnostic::from(SourceDiagnosticReason::MalformedInput).record(index),
+        CsvLine::Malformed {
+            index,
+            line,
+            reason,
+        } => Err(SourceError::Validation(located_line(
+            SourceDiagnostic::from(reason).record(index),
             line,
         ))),
         CsvLine::Refused { kind, diagnostic } => Err(SourceError::Terminal { kind, diagnostic }),
@@ -420,17 +452,7 @@ mod tests {
         }
     }
 
-    fn after_header() -> CsvRead {
-        serde_json::from_value(serde_json::json!({
-            "chunk": 1, "skip_rows": 0, "columns": null,
-            "at": {
-                "position": {"byte": 0, "line": 1, "record": 0, "row_index": 0, "skip_remaining": 0},
-                "version": {"inode": 0, "size": 0, "modified": [0, 0], "changed": [0, 0]},
-                "headers": ["name", "city"], "selected": null
-            }
-        }))
-        .unwrap()
-    }
+    fn after_header() -> StringRecord { StringRecord::from(vec!["name","city"]) }
 
     fn values(fields: &[&str]) -> CsvLine {
         CsvLine::Values {
@@ -454,7 +476,11 @@ mod tests {
         let malformed = decode_line(
             &CsvRowDecoder,
             &after_header(),
-            CsvLine::Malformed { index: 3, line: 4 },
+            CsvLine::Malformed {
+                index: 3,
+                line: 4,
+                reason: SourceDiagnosticReason::UnexpectedShape,
+            },
         )
         .unwrap_err();
         assert!(
@@ -462,6 +488,10 @@ mod tests {
             "{malformed:?}"
         );
         assert_eq!(malformed.diagnostic().location().record_index(), Some(3));
+        assert_eq!(
+            malformed.diagnostic().reason(),
+            SourceDiagnosticReason::UnexpectedShape
+        );
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -485,11 +515,7 @@ mod tests {
         type Output = TierRow;
     }
 
-    fn tier_headers() -> CsvRead {
-        let mut read = serde_json::to_value(after_header()).unwrap();
-        read["at"]["headers"] = serde_json::json!(["tier"]);
-        serde_json::from_value(read).unwrap()
-    }
+    fn tier_headers() -> StringRecord { StringRecord::from(vec!["tier"]) }
 
     #[test]
     fn unknown_csv_variant_returns_invalid_record() {
@@ -512,5 +538,49 @@ mod tests {
             SourceDiagnosticReason::InputChanged,
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn through_port_source_needs_no_path() {
+        use obzenflow_core::effect_binding::{DelimitedHeaders, SystemLocation};
+        use obzenflow_runtime::__private::AdmitSource;
+        use obzenflow_runtime::stages::common::handlers::source::SyncFiniteReads;
+
+        let store = super::super::file_system::CsvFileSystem::at("/data/tickets.csv")
+            .delimiter(b';')
+            .port()
+            .expect("the location fits the binding evidence");
+        assert_eq!(
+            store.binding().location(),
+            Some(&SystemLocation::Delimited {
+                path: "/data/tickets.csv".into(),
+                delimiter: ';',
+                headers: DelimitedHeaders::FirstRow,
+            })
+        );
+        let binding = store.binding().clone();
+        let source = CsvSource::builder(CsvRowDecoder)
+            .chunk_size(25)
+            .through(store)
+            .build()
+            .expect("a port supplies the file");
+        let admitted = AdmitSource::<SyncFiniteReads>::admit(source);
+        assert_eq!(admitted.system().binding(), &binding);
+
+        let other = || {
+            super::super::file_system::CsvFileSystem::at("/data/other.csv")
+                .port()
+                .unwrap()
+        };
+        assert!(CsvSource::builder(CsvRowDecoder)
+            .path("/data/tickets.csv")
+            .through(other())
+            .build()
+            .is_err());
+        assert!(CsvSource::builder(CsvRowDecoder)
+            .through(other())
+            .tab_delimited()
+            .build()
+            .is_err());
     }
 }

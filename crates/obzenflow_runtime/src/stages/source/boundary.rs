@@ -48,10 +48,12 @@ pub struct SourcePollReport {
     /// Time spent in the raw source poll or timeout only. Error normalization,
     /// boundary policy, output staging, and idle delay are excluded.
     pub poll_duration: Duration,
+    pub retry_after: Option<Duration>,
 }
 
 impl SourcePollReport {
     pub(crate) fn from_erased(invocation: ErasedSourceInvocation, poll_duration: Duration) -> Self {
+        let retry_after = invocation.retry_after();
         let result = match invocation.into_outcome() {
             ErasedSourceOutcome::Completed(ErasedSourceCompletion::Batch(events)) => {
                 SourcePollResult::Completed(SourcePollCompletion::Batch(events))
@@ -65,6 +67,7 @@ impl SourcePollReport {
         Self {
             result,
             poll_duration,
+            retry_after,
         }
     }
 
@@ -72,6 +75,7 @@ impl SourcePollReport {
         Self {
             result: SourcePollResult::HandlerError(error),
             poll_duration,
+            retry_after: None,
         }
     }
 }

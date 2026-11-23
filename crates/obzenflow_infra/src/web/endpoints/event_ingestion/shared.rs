@@ -18,6 +18,9 @@ use obzenflow_core::ingress::{
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::execution::{SourceExecutionPhase, SourceExecutionPhases};
 use obzenflow_runtime::pipeline::PipelineState;
+use obzenflow_runtime::stages::common::handlers::source::{
+    source_channel, SourceReceiver, SourceSender,
+};
 use obzenflow_runtime::stages::{
     prove_journal_form, HostedSubmission, IngressDecodeError, IngressDecoder, IngressRecord,
 };
@@ -26,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 
 use super::AuthConfig;
 
@@ -357,7 +360,7 @@ impl EdgeRefusal {
 
 /// Shared state between ingestion endpoints and the in-process handle.
 pub struct IngestionState<T> {
-    tx: mpsc::Sender<HostedSubmission<T>>,
+    tx: SourceSender<HostedSubmission<T>>,
     ready: Arc<AtomicBool>,
     source_phases: Arc<OnceLock<SourceExecutionPhases>>,
     buffer_capacity: usize,
@@ -386,11 +389,11 @@ impl<T> Clone for IngestionState<T> {
 }
 
 impl<T> IngestionState<T> {
-    pub fn new(mut config: IngestionConfig) -> (Self, mpsc::Receiver<HostedSubmission<T>>) {
+    pub fn new(mut config: IngestionConfig) -> (Self, SourceReceiver<HostedSubmission<T>>) {
         config.base_path = normalize_base_path(&config.base_path);
         let ingress_key = resolve_ingress_key(config.ingress_key.clone(), &config.base_path);
         let buffer_capacity = config.buffer_capacity;
-        let (tx, rx) = mpsc::channel(buffer_capacity);
+        let (tx, rx) = source_channel(buffer_capacity);
         let ingress_slot = HostedIngressBindingSlot::new(ingress_key);
         let evidence = EvidenceRecorder {
             enabled: config.record_ingress_evidence,
@@ -476,7 +479,7 @@ impl<T> IngestionState<T> {
     /// `resume_live` returns true while the runtime reports the hosted source as live.
     /// `is_ready` returns true only when this value and `pipeline_running` are both true.
     pub fn resume_live(&self) -> bool {
-        matches!(self.source_phase(), Some(SourceExecutionPhase::Live))
+        matches!(self.source_phase(), Some(SourceExecutionPhase::Live)) && !self.ingress_slot.is_restoring()
     }
 
     fn source_phase(&self) -> Option<SourceExecutionPhase> {

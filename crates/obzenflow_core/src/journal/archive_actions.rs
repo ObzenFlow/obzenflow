@@ -728,4 +728,48 @@ mod tests {
             Err(ArchiveRefusal::Cycle { .. })
         ));
     }
+
+    #[test]
+    fn moved_ingress_endpoint_refused() {
+        use crate::effect_binding::{SystemBindingEvidence, SystemLocation};
+        let endpoint = |key: &str| {
+            SystemBindingEvidence::located(
+                "http-ingress",
+                SystemLocation::Ingress {
+                    key: key.to_owned(),
+                },
+            )
+            .unwrap()
+            .binding()
+            .clone()
+        };
+        let mut recorded = source("live_tx", false, None);
+        recorded.binding = Some(endpoint("/api/bank/tx"));
+        let archive = archive(ArchiveStatus::Cancelled, vec![recorded]);
+        let flow = FlowEvidence {
+            systems: [("live_tx".to_string(), endpoint("/api/bank/v2/tx"))]
+                .into_iter()
+                .collect(),
+            cycle_members: Vec::new(),
+            sources: Vec::new(),
+        };
+        for verb in [ReplayVerb::Replay, ReplayVerb::Resume] {
+            let refusal = decide(
+                verb,
+                Path::new(RUN),
+                &archive,
+                &flow,
+                ArchiveOverrides::default(),
+            )
+            .expect_err("a moved endpoint is another supplier");
+            assert!(matches!(refusal, ArchiveRefusal::SourceSystems { .. }));
+            let message = refusal.to_string();
+            for expected in [
+                "'http-ingress' at '/api/bank/tx'",
+                "'http-ingress' at '/api/bank/v2/tx'",
+            ] {
+                assert!(message.contains(expected), "{expected}: {message}");
+            }
+        }
+    }
 }

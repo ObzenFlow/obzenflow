@@ -4,7 +4,7 @@
 
 use super::binding::is_system_name;
 use super::call::{call_port_slot, Call, CallRequest};
-use super::ports::{SourceSystem, SystemPort};
+use super::ports::SystemPort;
 use super::{
     Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectError, EffectName,
     EffectPortResolutionError, EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName,
@@ -228,13 +228,6 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         }
     }
 
-    pub(crate) fn framework_system(name: &'static str, system: Arc<P>) -> Self {
-        assert!(
-            is_system_name(name),
-            "a framework system's name follows the system name grammar"
-        );
-        Self::named(name, SystemPort::eager(system))
-    }
 
     /// The name of the system behind this port, as its evidence and diagnostics
     /// record it.
@@ -251,19 +244,30 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         self.evidence.binding()
     }
 
-    #[doc(hidden)]
-    pub fn with_system_location(
-        mut self,
-        location: obzenflow_core::effect_binding::SystemLocation,
-    ) -> Result<Self, obzenflow_core::BindingEvidenceError> {
-        self.evidence = SystemBindingEvidence::located(self.evidence.binding().name(), location)?;
-        self.name = LogicalEffectBindingName::for_resource(&self.evidence);
-        Ok(self)
+    /// `Port::located` makes a port whose system `config` builds when a live call needs
+    /// it, at most once per run. The binding records the system's name and the
+    /// location in `config`, so the recorded location is the one that the system reads.
+    pub fn located<C>(config: C) -> Result<Self, obzenflow_core::BindingEvidenceError>
+    where
+        C: LocatedSystem,
+        PortImpl<C::System>: ServesPort<P, C::System>,
+    {
+        let location = config.location();
+        let mut port = Self::deferred(move || config.build());
+        port.locate(location)?;
+        Ok(port)
     }
 
-    pub(crate) fn source_system(&self) -> SourceSystem {
-        SourceSystem::new(self.binding().clone(), Arc::clone(&self.port))
+
+    fn locate(
+        &mut self,
+        location: obzenflow_core::effect_binding::SystemLocation,
+    ) -> Result<(), obzenflow_core::BindingEvidenceError> {
+        self.evidence = SystemBindingEvidence::located(self.evidence.binding().name(), location)?;
+        self.name = LogicalEffectBindingName::for_resource(&self.evidence);
+        Ok(())
     }
+
 
     #[doc(hidden)]
     pub fn own_instance(self) -> Self
@@ -310,7 +314,7 @@ fn instance_name(base: &str, instance: &str) -> String {
     format!("{base}{suffix}")
 }
 
-const fn checked_system_name<T: SystemName>() -> &'static str {
+pub(crate) const fn checked_system_name<T: SystemName>() -> &'static str {
     const {
         assert!(
             is_system_name(T::NAME),
@@ -378,6 +382,19 @@ const fn checked_system_name<T: SystemName>() -> &'static str {
 )]
 pub trait SystemName {
     const NAME: &'static str;
+}
+
+/// `LocatedSystem` is the configuration of a framework system that reads at a
+/// location. [`Port::located`] records the location and builds the system from the
+/// same value.
+pub trait LocatedSystem: Send + Sync + 'static {
+    type System: SystemName + Send + Sync + 'static;
+
+    /// `location` returns the place and the format configuration that the system reads.
+    fn location(&self) -> obzenflow_core::effect_binding::SystemLocation;
+
+    /// `build` makes the system for a live call.
+    fn build(&self) -> Result<Self::System, EffectPortResolutionError>;
 }
 
 /// A built system, by value or in an `Arc`, as [`Port::to`] takes it.

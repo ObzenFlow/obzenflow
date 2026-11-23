@@ -38,7 +38,7 @@ struct Tick {
 impl TypedPayload for Tick {
     const EVENT_TYPE: &'static str = "validation_benchmark.tick";
 }
-struct Ticks(Port<dyn crate::numbers::NumberFeed>);
+struct Ticks(obzenflow_runtime::queries::QueryPort<dyn crate::numbers::NumberFeed>);
 
 impl TypedFiniteSourceHandler for Ticks {
     type Output = Tick;

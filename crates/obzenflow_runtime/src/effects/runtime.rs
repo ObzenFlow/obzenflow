@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 mod sink_group;
+mod source_journal;
 use super::boundary::PhysicalCallOutcome;
 use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
 use super::*;
@@ -644,6 +645,11 @@ impl EffectsCore {
     #[cfg(test)]
     pub(crate) fn next_effect_ordinal_for_test(&self) -> EffectOrdinal {
         self.next_effect_ordinal
+    }
+
+    pub(crate) fn starting_at(mut self, ordinal: EffectOrdinal) -> Self {
+        self.next_effect_ordinal = ordinal;
+        self
     }
 
     /// Evidence of every user fact committed by this invocation, in commit
@@ -2122,7 +2128,7 @@ impl EffectsCore {
         }
     }
 
-    async fn commit_framework_effect_event(&self, event: ChainEvent) -> Result<(), EffectError> {
+    async fn commit_framework_event(&self, event: ChainEvent) -> Result<(), EffectError> {
         let cursor = event
             .effect_provenance
             .as_ref()
@@ -3093,19 +3099,18 @@ impl EffectsCore {
                         true,
                     ))
                 }
+                EffectFailureDetail::SourceRead(_) => None,
             },
             _ => None,
         }
     }
 
-    fn live_effect_contexts(
+    fn port_views(
         &self,
         declaration: &EffectDeclaration,
-        cursor: &EffectCursor,
-    ) -> Result<(EffectPortMetadataContext, EffectContext), EffectError> {
+    ) -> Result<super::ports::EffectPortViews, EffectError> {
         let binding = declaration.binding();
-        let views = self
-            .ctx
+        self.ctx
             .stage
             .effect_ports
             .scoped_view(binding.registration, binding.slots())
@@ -3126,7 +3131,16 @@ impl EffectsCore {
                     }
                 };
                 EffectError::BindingAuthority { fault }
-            })?;
+            })
+    }
+
+
+    fn live_effect_contexts(
+        &self,
+        declaration: &EffectDeclaration,
+        cursor: &EffectCursor,
+    ) -> Result<(EffectPortMetadataContext, EffectContext), EffectError> {
+        let views = self.port_views(declaration)?;
         let metadata_context = EffectPortMetadataContext {
             metadata: views.metadata,
         };
@@ -3611,7 +3625,7 @@ impl EffectsCore {
             })
             .await?;
             self.mark_lineage(&mut event, RowLineage::Reproduced(Some(history)));
-            self.commit_framework_effect_event(event).await?;
+            self.commit_framework_event(event).await?;
             if let Some(control_events) = history.escape_control_batches.get(&started.attempt) {
                 self.commit_escape_control_group(
                     cursor,

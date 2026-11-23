@@ -3,11 +3,11 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
-use obzenflow_runtime::stages::common::handlers::source::{ContinuousRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::{
+    Continuous, ContinuousRead, InputReadiness, SourceRead,
+};
 use obzenflow_runtime::stages::common::handlers::TypedInfiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
 use serde::de::DeserializeOwned;
@@ -22,13 +22,13 @@ pub struct NextPreloaded;
 
 #[obzenflow_runtime::effects::port]
 #[async_trait]
-pub trait PreloadedFeed {
-    #[effect(type = "replay_testkit.preloaded.take", at_most_once, records = reply)]
+pub trait PreloadedFeed: InputReadiness {
+    #[query(type = "replay_testkit.preloaded.take")]
     async fn take(
         &self,
         from: &NextPreloaded,
-        ctx: &EffectContext,
-    ) -> Result<ContinuousRead<Value, NextPreloaded>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<ContinuousRead<Value, NextPreloaded>, obzenflow_runtime::queries::QueryError>;
 }
 
 type Queue = Arc<Mutex<VecDeque<Value>>>;
@@ -37,14 +37,24 @@ struct Preloaded {
     values: Queue,
 }
 
+#[async_trait]
+impl InputReadiness for Preloaded {
+    async fn ready(&self) -> Result<(), SourceError> {
+        if self.values.lock().expect("preloaded values").is_empty() {
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+}
+
 #[obzenflow_runtime::effects::system("preloaded")]
 #[async_trait]
 impl PreloadedFeed for Preloaded {
     async fn take(
         &self,
         _from: &NextPreloaded,
-        _ctx: &EffectContext,
-    ) -> Result<ContinuousRead<Value, NextPreloaded>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<ContinuousRead<Value, NextPreloaded>, obzenflow_runtime::queries::QueryError> {
         let value = self.values.lock().expect("preloaded values").pop_front();
         Ok(ContinuousRead {
             records: value.into_iter().collect(),
@@ -54,8 +64,7 @@ impl PreloadedFeed for Preloaded {
 }
 
 pub struct PreloadedInput<T> {
-    port: Port<dyn PreloadedFeed>,
-    values: Queue,
+    port: obzenflow_runtime::queries::QueryPort<dyn PreloadedFeed>,
     output: PhantomData<fn() -> T>,
 }
 
@@ -70,11 +79,7 @@ where
             .collect(),
     ));
     PreloadedInput {
-        port: Port::to(Preloaded {
-            values: values.clone(),
-        })
-        .own_instance(),
-        values,
+        port: obzenflow_runtime::queries::QueryPort::to(Preloaded { values }),
         output: PhantomData,
     }
 }
@@ -85,26 +90,11 @@ where
 {
     type Output = T;
 
-    fn read(&self) -> SourceRead<T> {
-        let values = self.values.clone();
-        SourceRead::continuous(
-            self.port.clone(),
-            NextPreloaded,
-            move || {
-                let ready = !values.lock().expect("preloaded values").is_empty();
-                Box::pin(async move {
-                    if !ready {
-                        std::future::pending::<()>().await;
-                    }
-                    Ok(())
-                })
-            },
-            ReattachGuarantee::AtMostOnce,
-            |value| {
-                serde_json::from_value(value).map_err(|_| {
-                    SourceError::Deserialization(SourceDiagnosticReason::MalformedInput.into())
-                })
-            },
-        )
+    fn read(&self) -> SourceRead<T, Continuous> {
+        SourceRead::continuous(self.port.clone(), NextPreloaded, |value| {
+            serde_json::from_value(value).map_err(|_| {
+                SourceError::Deserialization(SourceDiagnosticReason::MalformedInput.into())
+            })
+        })
     }
 }

@@ -27,5 +27,5 @@ advertise_url = "http://127.0.0.1:9091"
 # The same inputs and output as obzenflow.toml.
 [app]
 customers_csv = "examples/csv_demo_support_sla/fixtures/customers.csv"
-tickets_csv = "examples/csv_demo_support_sla/fixtures/tickets.csv"
+tickets = { file = "examples/csv_demo_support_sla/fixtures/tickets.csv" }
 output_csv = "target/csv-demo-support-sla/outputs/enriched_tickets.csv"

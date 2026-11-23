@@ -7,11 +7,12 @@ use crate::journal::disk_journals;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use obzenflow_adapters::sources::ValuesSource;
-use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_dsl::{flow, sink, source};
 use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
 use obzenflow_runtime::pipeline::PipelineState;
-use obzenflow_runtime::stages::common::handlers::source::{ContinuousRead, FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::{
+    Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
+};
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
@@ -41,12 +42,12 @@ struct NextInput;
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait TestInput {
-    #[effect(type = "flow_application.input.read", exactly_once, records = reply)]
+    #[query(type = "flow_application.input.read")]
     async fn read(
         &self,
         from: &NextInput,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<IdlePayload, NextInput>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<IdlePayload, NextInput>, obzenflow_runtime::queries::QueryError>;
 }
 
 struct ScriptedInput {
@@ -60,8 +61,8 @@ impl TestInput for ScriptedInput {
     async fn read(
         &self,
         _from: &NextInput,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<IdlePayload, NextInput>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<IdlePayload, NextInput>, obzenflow_runtime::queries::QueryError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if self.ends {
             Ok(FiniteRead::EndOfInput)
@@ -71,11 +72,11 @@ impl TestInput for ScriptedInput {
     }
 }
 
-struct FiniteInput(Port<dyn TestInput>);
+struct FiniteInput(obzenflow_runtime::queries::QueryPort<dyn TestInput>);
 
 impl FiniteInput {
     fn new(ends: bool, reads: Arc<AtomicUsize>) -> Self {
-        Self(Port::to(ScriptedInput { ends, reads }).own_instance())
+        Self(obzenflow_runtime::queries::QueryPort::to(ScriptedInput { ends, reads }))
     }
 
     fn waiting() -> Self {
@@ -96,16 +97,27 @@ struct NextLiveInput;
 
 #[obzenflow_runtime::effects::port]
 #[async_trait]
-trait TestLiveInput {
-    #[effect(type = "flow_application.live_input.take", at_most_once, records = reply)]
+trait TestLiveInput: InputReadiness {
+    #[query(type = "flow_application.live_input.take")]
     async fn take(
         &self,
         from: &NextLiveInput,
-        ctx: &EffectContext,
-    ) -> Result<ContinuousRead<IdlePayload, NextLiveInput>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<ContinuousRead<IdlePayload, NextLiveInput>, obzenflow_runtime::queries::QueryError>;
 }
 
-struct NoLiveInput;
+type Readiness = Arc<dyn Fn() -> BoxFuture<'static, Result<(), SourceError>> + Send + Sync>;
+
+struct NoLiveInput {
+    ready: Readiness,
+}
+
+#[async_trait]
+impl InputReadiness for NoLiveInput {
+    async fn ready(&self) -> Result<(), SourceError> {
+        (self.ready)().await
+    }
+}
 
 #[obzenflow_runtime::effects::system("no-live-input")]
 #[async_trait]
@@ -113,8 +125,8 @@ impl TestLiveInput for NoLiveInput {
     async fn take(
         &self,
         _from: &NextLiveInput,
-        _ctx: &EffectContext,
-    ) -> Result<ContinuousRead<IdlePayload, NextLiveInput>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<ContinuousRead<IdlePayload, NextLiveInput>, obzenflow_runtime::queries::QueryError> {
         Ok(ContinuousRead {
             records: Vec::new(),
             next: NextLiveInput,
@@ -122,11 +134,8 @@ impl TestLiveInput for NoLiveInput {
     }
 }
 
-type Readiness = Arc<dyn Fn() -> BoxFuture<'static, Result<(), SourceError>> + Send + Sync>;
-
 struct IdleInfiniteSource {
-    port: Port<dyn TestLiveInput>,
-    ready: Readiness,
+    port: obzenflow_runtime::queries::QueryPort<dyn TestLiveInput>,
 }
 
 impl IdleInfiniteSource {
@@ -138,8 +147,10 @@ impl IdleInfiniteSource {
         ready: impl Fn() -> BoxFuture<'static, Result<(), SourceError>> + Send + Sync + 'static,
     ) -> Self {
         Self {
-            port: Port::to(NoLiveInput).own_instance(),
-            ready: Arc::new(ready),
+            port: obzenflow_runtime::queries::QueryPort::to(NoLiveInput {
+                ready: Arc::new(ready),
+            })
+            ,
         }
     }
 }
@@ -147,15 +158,8 @@ impl IdleInfiniteSource {
 impl TypedInfiniteSourceHandler for IdleInfiniteSource {
     type Output = IdlePayload;
 
-    fn read(&self) -> SourceRead<IdlePayload> {
-        let ready = self.ready.clone();
-        SourceRead::continuous(
-            self.port.clone(),
-            NextLiveInput,
-            move || ready(),
-            ReattachGuarantee::AtMostOnce,
-            Ok,
-        )
+    fn read(&self) -> SourceRead<IdlePayload, Continuous> {
+        SourceRead::continuous(self.port.clone(), NextLiveInput, Ok)
     }
 }
 

@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::application::lifecycle_observation::{Progress, Reader};
-use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::{
     PipelineCancellationCause, PipelineLifecycleEvent as Lifecycle, PipelineStopAdmission,
     SystemEvent, SystemPayload,
@@ -13,10 +12,13 @@ use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_runtime::effects::{perform, EffectContext, EffectError, Port, SystemName};
-use obzenflow_runtime::stages::common::handlers::source::{ContinuousRead, FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::{
+    Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
+};
 use obzenflow_runtime::stages::common::handlers::{
     TypedAsyncFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
+use obzenflow_runtime::stages::SourceError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
@@ -52,6 +54,14 @@ impl SystemName for PendingSource {
     const NAME: &'static str = "pending";
 }
 
+#[async_trait::async_trait]
+impl InputReadiness for PendingSource {
+    async fn ready(&self) -> Result<(), SourceError> {
+        self.poll().await;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct PendingRead {
     emitted: bool,
@@ -60,12 +70,12 @@ struct PendingRead {
 #[obzenflow_runtime::effects::port]
 #[async_trait::async_trait]
 trait PendingInput {
-    #[effect(type = "test.observation_pending.read", exactly_once, records = reply)]
+    #[query(type = "test.observation_pending.read")]
     async fn read(
         &self,
         from: &PendingRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<Payload, PendingRead>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<Payload, PendingRead>, obzenflow_runtime::queries::QueryError>;
 }
 
 #[async_trait::async_trait]
@@ -73,8 +83,8 @@ impl PendingInput for PendingSource {
     async fn read(
         &self,
         from: &PendingRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<Payload, PendingRead>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<Payload, PendingRead>, obzenflow_runtime::queries::QueryError> {
         if from.emitted {
             return Ok(FiniteRead::EndOfInput);
         }
@@ -91,13 +101,13 @@ struct PendingTake;
 
 #[obzenflow_runtime::effects::port]
 #[async_trait::async_trait]
-trait PendingLiveInput {
-    #[effect(type = "test.observation_pending.take", exactly_once, records = reply)]
+trait PendingLiveInput: InputReadiness {
+    #[query(type = "test.observation_pending.take")]
     async fn take(
         &self,
         from: &PendingTake,
-        ctx: &EffectContext,
-    ) -> Result<ContinuousRead<Payload, PendingTake>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<ContinuousRead<Payload, PendingTake>, obzenflow_runtime::queries::QueryError>;
 }
 
 #[async_trait::async_trait]
@@ -105,8 +115,8 @@ impl PendingLiveInput for PendingSource {
     async fn take(
         &self,
         _from: &PendingTake,
-        _ctx: &EffectContext,
-    ) -> Result<ContinuousRead<Payload, PendingTake>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<ContinuousRead<Payload, PendingTake>, obzenflow_runtime::queries::QueryError> {
         Ok(ContinuousRead {
             records: Vec::new(),
             next: PendingTake,
@@ -114,7 +124,7 @@ impl PendingLiveInput for PendingSource {
     }
 }
 
-struct PendingFinite(Port<dyn PendingInput>);
+struct PendingFinite(obzenflow_runtime::queries::QueryPort<dyn PendingInput>);
 
 #[async_trait::async_trait]
 impl TypedAsyncFiniteSourceHandler for PendingFinite {
@@ -130,28 +140,14 @@ impl TypedAsyncFiniteSourceHandler for PendingFinite {
 }
 
 struct PendingLive {
-    port: Port<dyn PendingLiveInput>,
-    source: PendingSource,
+    port: obzenflow_runtime::queries::QueryPort<dyn PendingLiveInput>,
 }
 
 impl TypedInfiniteSourceHandler for PendingLive {
     type Output = Payload;
 
-    fn read(&self) -> SourceRead<Payload> {
-        let source = self.source.clone();
-        SourceRead::continuous(
-            self.port.clone(),
-            PendingTake,
-            move || {
-                let source = source.clone();
-                Box::pin(async move {
-                    source.poll().await;
-                    Ok(())
-                })
-            },
-            ReattachGuarantee::AtMostOnce,
-            Ok,
-        )
+    fn read(&self) -> SourceRead<Payload, Continuous> {
+        SourceRead::continuous(self.port.clone(), PendingTake, Ok)
     }
 }
 
@@ -199,8 +195,7 @@ async fn pending_flow(infinite: bool) -> (Arc<FlowHandle>, PendingSource, Counti
     let flow = FlowDefinition::materialize(move |_| {
         Ok(if infinite {
             let source_handler = PendingLive {
-                port: Port::to(source_handler.clone()),
-                source: source_handler,
+                port: obzenflow_runtime::queries::QueryPort::to(source_handler),
             };
             flow! {
                 name: "observation_infinite", journals: crate::journal::memory_journals(),
@@ -208,7 +203,7 @@ async fn pending_flow(infinite: bool) -> (Arc<FlowHandle>, PendingSource, Counti
                 topology: { src |> snk; }
             }
         } else {
-            let source_handler = PendingFinite(Port::to(source_handler));
+            let source_handler = PendingFinite(obzenflow_runtime::queries::QueryPort::to(source_handler));
             flow! {
                 name: "observation_finite", journals: crate::journal::memory_journals(),
                 stages: { src = source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },

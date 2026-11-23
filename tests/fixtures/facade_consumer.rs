@@ -15,7 +15,7 @@ extern crate serde;
 extern crate std;
 
 use self::async_trait::async_trait;
-use self::of::effects::{Effects, Port, StageCompletion};
+use self::of::effects::{Effects, StageCompletion};
 use self::of::prelude::*;
 use self::of::schema::{outcome, Outcome, OutcomeFacts, Outcomes};
 use self::of::stages::stateful::fold;
@@ -95,12 +95,12 @@ struct NextFact;
 #[of::port(effects = of::effects)]
 #[async_trait]
 trait FactInput {
-    #[effect(type = "facade_consumer.facts.read", exactly_once, records = reply)]
+    #[query(type = "facade_consumer.facts.read")]
     async fn read(
         &self,
         from: &NextFact,
-        ctx: &of::effects::EffectContext,
-    ) -> Result<sources::FiniteRead<Fact, NextFact>, of::effects::EffectError>;
+        ctx: &of::queries::QueryContext,
+    ) -> Result<sources::FiniteRead<Fact, NextFact>, of::queries::QueryError>;
 }
 
 struct PureInput;
@@ -111,13 +111,13 @@ impl FactInput for PureInput {
     async fn read(
         &self,
         _from: &NextFact,
-        _ctx: &of::effects::EffectContext,
-    ) -> Result<sources::FiniteRead<Fact, NextFact>, of::effects::EffectError> {
+        _ctx: &of::queries::QueryContext,
+    ) -> Result<sources::FiniteRead<Fact, NextFact>, of::queries::QueryError> {
         Ok(sources::FiniteRead::EndOfInput)
     }
 }
 
-struct PureSource(Port<dyn FactInput>);
+struct PureSource(of::queries::QueryPort<dyn FactInput>);
 
 impl sources::TypedFiniteSourceHandler for PureSource {
     type Output = Fact;
@@ -365,7 +365,7 @@ fn renamed_facade_macros_and_constructors_compile() {
     join!(catalog input: Fact, Fact -> Fact => priced);
     let point_in_time = joins::AsOfJoin::new(PointInTime);
     of::flow::join!(catalog input: Fact, Fact -> Fact => point_in_time);
-    let pure = PureSource(Port::to(PureInput));
+    let pure = PureSource(of::queries::QueryPort::to(PureInput));
     source!(Fact => pure);
     let values = sources::ValuesSource::new(vec![Fact(1)]);
     of::flow::source!(Fact => values);

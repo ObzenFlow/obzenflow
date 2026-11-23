@@ -67,12 +67,12 @@ struct SeedRead(u8);
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait SeedInput {
-    #[effect(type = "cycle_convergence.seed.read", exactly_once, records = reply)]
+    #[query(type = "cycle_convergence.seed.read")]
     async fn read(
         &self,
         from: &SeedRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<SeedEvent, SeedRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError>;
 }
 
 struct SeedThenEof {
@@ -86,8 +86,8 @@ impl SeedInput for SeedThenEof {
     async fn read(
         &self,
         from: &SeedRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<SeedEvent, SeedRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError> {
         if from.0 == 0 {
             return Ok(FiniteRead::Batch {
                 records: vec![seed(self.target)],
@@ -99,11 +99,11 @@ impl SeedInput for SeedThenEof {
     }
 }
 
-struct SeedThenEofSource(Port<dyn SeedInput>);
+struct SeedThenEofSource(obzenflow::queries::QueryPort<dyn SeedInput>);
 
 impl SeedThenEofSource {
     fn new(target: u64, iteration_started: Arc<Notify>) -> Self {
-        Self(Port::to(SeedThenEof {
+        Self(obzenflow::queries::QueryPort::to(SeedThenEof {
             target,
             iteration_started,
         }))
@@ -556,7 +556,7 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let sink = perform(seed_kind).through(Port::to(DoneCounter {
         done_events: done_count.clone(),
     }));
-    let (seed_input, seeds) = tokio::sync::mpsc::channel(1);
+    let (seed_input, seeds) = obzenflow::stages::sources::source_channel(1);
     seed_input
         .try_send(seed(target_iterations))
         .expect("the channel holds the seed");

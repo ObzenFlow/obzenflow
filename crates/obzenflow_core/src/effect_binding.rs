@@ -57,13 +57,38 @@ pub struct SystemBinding {
     location: Option<SystemLocation>,
 }
 
+/// `SystemLocation` is the place that a framework system reads and the format
+/// configuration that it reads with. It holds no credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "format", content = "location", rename_all = "lowercase")]
+#[serde(tag = "format", rename_all = "snake_case")]
 pub enum SystemLocation {
-    Csv(std::path::PathBuf),
-    Tsv(std::path::PathBuf),
-    Yaml(std::path::PathBuf),
-    Json(HttpEndpoint),
+    /// `Delimited` is a file of delimited text records, such as CSV or TSV.
+    Delimited {
+        path: std::path::PathBuf,
+        delimiter: char,
+        headers: DelimitedHeaders,
+    },
+    Yaml {
+        path: std::path::PathBuf,
+    },
+    Json {
+        endpoint: HttpEndpoint,
+    },
+    Application { configuration: serde_json::Value },
+    /// `Ingress` is the ingress key of a hosted endpoint.
+    Ingress {
+        key: String,
+    },
+}
+
+/// `DelimitedHeaders` tells where the column names of a delimited file come from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelimitedHeaders {
+    /// The first row of the file names the columns.
+    FirstRow,
+    /// The configuration names the columns, and each row of the file is a record.
+    Given(Vec<String>),
 }
 
 /// `HttpEndpoint` is the base URL of an HTTP API with no credentials, query or fragment.
@@ -129,7 +154,7 @@ impl SystemBinding {
     }
 
     /// `format` returns the format that the system reads at its location.
-    pub fn format(&self) -> Option<&'static str> {
+    pub fn format(&self) -> Option<String> {
         self.location.as_ref().map(SystemLocation::format)
     }
 }
@@ -137,17 +162,36 @@ impl SystemBinding {
 impl SystemLocation {
     fn place(&self) -> String {
         match self {
-            Self::Csv(path) | Self::Tsv(path) | Self::Yaml(path) => path.display().to_string(),
-            Self::Json(endpoint) => endpoint.0.clone(),
+            Self::Delimited { path, .. } | Self::Yaml { path } => path.display().to_string(),
+            Self::Json { endpoint } => endpoint.0.clone(),
+            Self::Ingress { key } => key.clone(),
+            Self::Application { configuration } => configuration.to_string(),
         }
     }
 
-    fn format(&self) -> &'static str {
+    fn format(&self) -> String {
         match self {
-            Self::Csv(_) => "CSV",
-            Self::Tsv(_) => "TSV",
-            Self::Yaml(_) => "YAML",
-            Self::Json(_) => "JSON",
+            Self::Delimited {
+                delimiter, headers, ..
+            } => {
+                let text = match delimiter {
+                    ',' => "CSV".to_owned(),
+                    '\t' => "TSV".to_owned(),
+                    other => format!("text delimited by '{other}'"),
+                };
+                match headers {
+                    DelimitedHeaders::FirstRow => text,
+                    DelimitedHeaders::Given(columns) => {
+                        let columns: Vec<String> =
+                            columns.iter().map(|column| format!("'{column}'")).collect();
+                        format!("{text} with the columns {}", columns.join(", "))
+                    }
+                }
+            }
+            Self::Yaml { .. } => "YAML".to_owned(),
+            Self::Json { .. } => "JSON".to_owned(),
+            Self::Ingress { .. } => "submissions".to_owned(),
+            Self::Application { .. } => "application configuration".to_owned(),
         }
     }
 }
@@ -181,7 +225,10 @@ impl SystemBindingEvidence {
     fn new(system: &str, location: Option<SystemLocation>) -> Result<Self, BindingEvidenceError> {
         let binding = SystemBinding {
             system: system.to_owned(),
-            location,
+            location: location.map(|location| match location {
+                SystemLocation::Application { configuration } => SystemLocation::Application { configuration: crate::source::canonicalize(configuration) },
+                other => other,
+            }),
         };
         let canonical =
             serde_json::to_vec(&binding).map_err(|_| BindingEvidenceError::InvalidLocation)?;

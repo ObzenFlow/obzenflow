@@ -1033,7 +1033,9 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                 &mut ctx.pending_outputs,
                             );
                             self.pending_idle_delay =
-                                poll_error_backoff(&error, &mut self.idle_backoff);
+                                poll_error_backoff(&error, &mut self.idle_backoff).map(|delay| {
+                                    poll.retry_after.map_or(delay, |floor| delay.max(floor))
+                                });
                             Ok(EventLoopDirective::Continue)
                         }
                         SourcePollResult::Fatal(fatal) => {

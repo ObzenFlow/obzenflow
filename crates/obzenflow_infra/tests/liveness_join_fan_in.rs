@@ -64,12 +64,12 @@ struct StreamRead {
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait StreamInput {
-    #[effect(type = "liveness_join.stream.read", exactly_once, records = reply)]
+    #[query(type = "liveness_join.stream.read")]
     async fn read(
         &self,
         from: &StreamRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<LiveEvent, StreamRead>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<LiveEvent, StreamRead>, obzenflow_runtime::queries::QueryError>;
 }
 
 struct DelayedStream;
@@ -80,8 +80,8 @@ impl StreamInput for DelayedStream {
     async fn read(
         &self,
         from: &StreamRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<LiveEvent, StreamRead>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<LiveEvent, StreamRead>, obzenflow_runtime::queries::QueryError> {
         if from.emitted {
             return Ok(FiniteRead::EndOfInput);
         }
@@ -96,7 +96,7 @@ impl StreamInput for DelayedStream {
     }
 }
 
-struct DelayedStreamSource(Port<dyn StreamInput>);
+struct DelayedStreamSource(obzenflow_runtime::queries::QueryPort<dyn StreamInput>);
 
 impl TypedFiniteSourceHandler for DelayedStreamSource {
     type Output = LiveEvent;
@@ -181,7 +181,7 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
             kind: "ref".to_string(),
             value: 1,
         }]);
-        let stream_source = DelayedStreamSource(Port::to(DelayedStream));
+        let stream_source = DelayedStreamSource(obzenflow_runtime::queries::QueryPort::to(DelayedStream));
         let slow_join = SlowJoin {
             release: join_release,
         };

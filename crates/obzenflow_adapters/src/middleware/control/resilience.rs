@@ -2111,8 +2111,8 @@ fn prepare_retry_context(
     ctx: &mut crate::middleware::MiddlewareContext,
 ) {
     ctx.remove::<CircuitBreakerRetryAfterMs>();
-    if let Err(EffectError::RateLimited { retry_after, .. }) = result {
-        ctx.insert::<CircuitBreakerRetryAfterMs>(duration_ms(*retry_after));
+    if let Some(retry_after) = result.as_ref().err().and_then(EffectError::retry_after) {
+        ctx.insert::<CircuitBreakerRetryAfterMs>(duration_ms(retry_after));
     }
 }
 
@@ -2154,6 +2154,7 @@ fn error_has_health_observation(error: &EffectError) -> bool {
         | EffectError::Domain(_)
         | EffectError::Execution(_)
         | EffectError::DependencyFailed { .. } => true,
+        EffectError::SourceRead { error, .. } => error_has_health_observation(error),
         EffectError::RecordedFailure { error_type, .. } => matches!(
             error_type.as_str(),
             "timeout"
@@ -2190,6 +2191,9 @@ fn error_has_health_observation(error: &EffectError) -> bool {
 }
 
 fn retryable_error(error: &EffectError) -> bool {
+    if let EffectError::SourceRead { error, .. } = error {
+        return retryable_error(error);
+    }
     matches!(
         error,
         EffectError::Timeout(_)
@@ -2207,10 +2211,7 @@ fn retry_delay(retry: &Retry, completed_attempts: u32, error: &EffectError) -> D
         .policy
         .calculate_delay(completed_attempts.saturating_sub(1) as usize)
         .min(retry.limits.max_single_delay);
-    let provider_floor = match error {
-        EffectError::RateLimited { retry_after, .. } => *retry_after,
-        _ => Duration::ZERO,
-    };
+    let provider_floor = error.retry_after().unwrap_or(Duration::ZERO);
     generated.max(provider_floor)
 }
 

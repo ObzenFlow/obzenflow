@@ -250,12 +250,12 @@ struct BatchRead {
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait BatchInput {
-    #[effect(type = "rate_limiter.batches.read", exactly_once, records = reply)]
+    #[query(type = "rate_limiter.batches.read")]
     async fn read(
         &self,
         from: &BatchRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<RateLimiterTestEvent, BatchRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<RateLimiterTestEvent, BatchRead>, obzenflow::queries::QueryError>;
 }
 
 struct Batches {
@@ -268,8 +268,8 @@ impl BatchInput for Batches {
     async fn read(
         &self,
         from: &BatchRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<RateLimiterTestEvent, BatchRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<RateLimiterTestEvent, BatchRead>, obzenflow::queries::QueryError> {
         let Some(size) = self.sizes.get(from.batch).copied() else {
             return Ok(FiniteRead::EndOfInput);
         };
@@ -285,11 +285,11 @@ impl BatchInput for Batches {
     }
 }
 
-struct BatchedSource(Port<dyn BatchInput>);
+struct BatchedSource(obzenflow::queries::QueryPort<dyn BatchInput>);
 
 impl BatchedSource {
     fn new(sizes: Vec<u64>) -> Self {
-        Self(Port::to(Batches { sizes }))
+        Self(obzenflow::queries::QueryPort::to(Batches { sizes }))
     }
 }
 
@@ -324,12 +324,12 @@ struct ScriptRead {
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait ScriptedInput {
-    #[effect(type = "rate_limiter.scripted.read", exactly_once, records = reply)]
+    #[query(type = "rate_limiter.scripted.read")]
     async fn read(
         &self,
         from: &ScriptRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<RateLimiterTestEvent, ScriptRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<RateLimiterTestEvent, ScriptRead>, obzenflow::queries::QueryError>;
 }
 
 struct Script {
@@ -343,8 +343,8 @@ impl ScriptedInput for Script {
     async fn read(
         &self,
         from: &ScriptRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<RateLimiterTestEvent, ScriptRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<RateLimiterTestEvent, ScriptRead>, obzenflow::queries::QueryError> {
         let step = self
             .steps
             .get(self.played.fetch_add(1, Ordering::SeqCst))
@@ -363,7 +363,7 @@ impl ScriptedInput for Script {
                 records: Vec::new(),
                 next: from.clone(),
             }),
-            SourceStep::Err => Err(EffectError::Transport("scripted source error".into())),
+            SourceStep::Err => Err(obzenflow::queries::QueryError::recoverable(obzenflow::queries::SourcePollErrorKind::Transport,obzenflow::queries::SourceDiagnosticReason::InputUnavailable)),
             SourceStep::Done => Ok(FiniteRead::EndOfInput),
         }
     }
@@ -371,7 +371,7 @@ impl ScriptedInput for Script {
 
 fn script(steps: Vec<SourceStep>) -> SourceRead<RateLimiterTestEvent> {
     SourceRead::finite(
-        Port::to(Script {
+        obzenflow::queries::QueryPort::to(Script {
             steps,
             played: AtomicUsize::new(0),
         }),

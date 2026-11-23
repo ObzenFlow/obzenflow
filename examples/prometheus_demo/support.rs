@@ -48,12 +48,12 @@ struct SequencePosition {
 #[obzenflow::port]
 #[async_trait]
 trait RequestSequence {
-    #[effect(type = "prometheus_demo.requests.read", exactly_once, records = reply)]
+    #[query(type = "prometheus_demo.requests.read")]
     async fn read(
         &self,
         from: &SequencePosition,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<usize, SequencePosition>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<usize, SequencePosition>, obzenflow::queries::QueryError>;
 }
 
 struct HighVolumeGenerator {
@@ -68,8 +68,8 @@ impl RequestSequence for HighVolumeGenerator {
     async fn read(
         &self,
         from: &SequencePosition,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<usize, SequencePosition>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<usize, SequencePosition>, obzenflow::queries::QueryError> {
         let id = from.next_id;
         if id >= self.total_events {
             println!("🏁 Source complete: Generated {id} total events");
@@ -86,7 +86,7 @@ impl RequestSequence for HighVolumeGenerator {
                 attempt,
                 "Simulated source outage: circuit breaker will wait five seconds before probing"
             );
-            return Err(EffectError::Timeout("simulated source outage".into()));
+            return Err(obzenflow::queries::QueryError::recoverable(obzenflow::queries::SourcePollErrorKind::Timeout,obzenflow::queries::SourceDiagnosticReason::TimedOut));
         }
 
         self.outage_failures.store(0, Ordering::SeqCst);
@@ -101,7 +101,7 @@ impl RequestSequence for HighVolumeGenerator {
 }
 
 struct HighVolumeSource {
-    port: Port<dyn RequestSequence>,
+    port: obzenflow::queries::QueryPort<dyn RequestSequence>,
 }
 
 impl TypedFiniteSourceHandler for HighVolumeSource {
@@ -203,7 +203,7 @@ pub(crate) fn flow_definition_with_options(
     );
     FlowDefinition::materialize(move |_runtime_config| {
         let high_volume_source_handler = HighVolumeSource {
-            port: Port::to(HighVolumeGenerator {
+            port: obzenflow::queries::QueryPort::to(HighVolumeGenerator {
                 total_events,
                 outage_interval,
                 outage_failures: AtomicU8::new(0),

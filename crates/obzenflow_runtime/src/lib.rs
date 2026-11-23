@@ -14,6 +14,7 @@ pub(crate) mod classified_de;
 pub mod contracts;
 pub mod control_plane;
 pub mod effects;
+pub mod queries;
 pub mod errors;
 pub mod execution;
 pub mod feed_plan;

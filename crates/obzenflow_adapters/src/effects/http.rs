@@ -55,7 +55,7 @@ pub fn unclaimed(response: &HttpResponse) -> EffectError {
     }
 }
 
-fn retry_after(response: &HttpResponse) -> Duration {
+pub fn retry_after(response: &HttpResponse) -> Duration {
     response
         .header("retry-after")
         .and_then(|value| value.trim().parse::<u64>().ok())

@@ -981,11 +981,6 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler for DummySource {
-        fn read_declaration(
-            &self,
-        ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError> {
-            unreachable!("the state projection makes no read")
-        }
 
         fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
 
@@ -1004,11 +999,6 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler for DummySource {
-        fn read_declaration(
-            &self,
-        ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError> {
-            unreachable!("the state projection makes no read")
-        }
 
         fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
 

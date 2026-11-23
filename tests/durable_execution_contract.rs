@@ -29,6 +29,8 @@ pub mod flash_sale_demo;
 
 #[path = "../examples/csv_demo_support_sla/domain.rs"]
 pub mod support_sla_demo;
+#[path = "../examples/csv_demo_support_sla/scripted.rs"]
+mod scripted_tickets;
 
 #[path = "support/fake_ai.rs"]
 pub mod fake_ai;
@@ -655,16 +657,33 @@ fn durable_execution_contract_child() {
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::tickets_input(scenario),
+                source_ports::ticket_store(source_ports::tickets_input(scenario)).port().unwrap(),
                 plan.hold,
             )),
         Graph::SourcePortTicketCopy => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_copy(scenario),
+                source_ports::ticket_store(source_ports::ticket_copy(scenario)).port().unwrap(),
                 plan.hold,
             )),
+        Graph::SourcePortTicketDelimiter => app
+            .with_config_file(source_ports::tickets_config(scenario))
+            .run_blocking(source_ports::tickets_flow(
+                scenario,
+                source_ports::ticket_store(source_ports::tickets_input(scenario)).delimiter(b';').port().unwrap(),
+                plan.hold,
+            )),
+        Graph::SourcePortTicketHeaders => app
+            .with_config_file(source_ports::tickets_config(scenario))
+            .run_blocking(source_ports::tickets_flow(
+                scenario,
+                source_ports::ticket_store(source_ports::tickets_input(scenario))
+                    .headers(source_ports::TICKET_COLUMNS).port().unwrap(),
+                plan.hold,
+            )),
+        Graph::SourcePortTicketFixture(count) => app.with_config_file(source_ports::tickets_config(scenario))
+            .run_blocking(source_ports::tickets_flow(scenario, obzenflow::queries::QueryPort::located(scripted_tickets::TicketFixture {count}).unwrap(), plan.hold)),
         Graph::SourcePortOwned => app.run_blocking(source_ports::owned_flow(
             scenario,
             source_ports::owned_values(),
@@ -717,7 +736,10 @@ enum Graph {
     SourcePortReattach,
     SourcePortCsv,
     SourcePortTickets,
+    SourcePortTicketFixture(u32),
     SourcePortTicketCopy,
+    SourcePortTicketDelimiter,
+    SourcePortTicketHeaders,
     SourcePortOwned,
     SourcePortOwnedKept,
 }
@@ -1359,21 +1381,11 @@ impl Archive {
 
     /// Admitted orders with their recorded identities, in journal order.
     fn read_orders(&self) -> Vec<String> {
-        self.rows("web_orders", RunJournalKind::Data)
-            .filter(|row| row.event_type() == "effect.execution_succeeded")
-            .flat_map(|row| {
-                row.payload()["outcome"]["output"]["records"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|member| {
-                        member["fact"]["payload"]["order_id"]
-                            .as_str()
-                            .map(str::to_owned)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect()
+        self.rows("web_orders", RunJournalKind::Data).filter_map(|row| {
+            let ChainPayload::Execution(ExecutionPayload::SourceInput(record))=&row.payload else {return None};
+            let obzenflow_core::query::SourceInput::IngressMember {member}=&record.input else {return None};
+            member["fact"]["payload"]["order_id"].as_str().map(str::to_owned)
+        }).collect()
     }
 
     fn admitted(&self) -> Vec<(String, EventId)> {
@@ -2404,7 +2416,7 @@ async fn durable_execution_contract() {
         let started = |event: &str| opening.iter().position(|row| row.contains(event));
         let (declared, read) = (
             started("runtime.source.binding_declared"),
-            started("effect.execution_succeeded"),
+            started("query.answered"),
         );
         assert!(declared.is_some() && declared < read, "{name}: {opening:?}");
         let web_calls_after: Vec<String> = scenario
@@ -2783,7 +2795,7 @@ mod then_live {
     use super::*;
     use obzenflow::flow::{join, merge};
     use obzenflow::middleware::rate_limit;
-    use obzenflow::stages::sources::ChannelSource;
+    use obzenflow::stages::sources::{source_channel, ChannelSource, SourceSender};
     use obzenflow::stages::{joins, merges};
     use obzenflow_core::event::payloads::execution_payload::{JoinPhaseFact, StageLifecycleFact};
     use obzenflow_core::StageKey;
@@ -2877,7 +2889,7 @@ mod then_live {
         std::fs::rename(staged, live_entries_input(scenario)).expect("publish the live entries");
     }
 
-    fn send_live_entries(path: PathBuf, sender: tokio::sync::mpsc::Sender<Entry>) {
+    fn send_live_entries(path: PathBuf, sender: SourceSender<Entry>) {
         std::thread::spawn(move || {
             while !path.exists() {
                 std::thread::sleep(Duration::from_millis(10));
@@ -3016,8 +3028,8 @@ mod then_live {
     pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
         let batch_accounts_input = yaml(AccountYaml, accounts_input(scenario), "/accounts");
         let batch_tx_input = yaml(EntryYaml, entries_input(scenario), "/entries");
-        let (account_sender, live_accounts_input) = tokio::sync::mpsc::channel::<Account>(1);
-        let (entry_sender, live_tx_input) = tokio::sync::mpsc::channel::<Entry>(1);
+        let (account_sender, live_accounts_input) = source_channel::<Account>(1);
+        let (entry_sender, live_tx_input) = source_channel::<Entry>(1);
         Box::leak(Box::new(account_sender));
         send_live_entries(live_entries_input(scenario), entry_sender);
         let live_accounts_input = ChannelSource::new(live_accounts_input);
@@ -5960,12 +5972,12 @@ mod ai_digest {
     #[obzenflow::port]
     #[async_trait]
     trait ItemsInput {
-        #[effect(type = "durable_contract.ai.items_read", exactly_once, records = reply)]
+        #[query(type = "durable_contract.ai.items_read")]
         async fn read(
             &self,
             from: &NextItem,
-            ctx: &EffectContext,
-        ) -> Result<FiniteRead<Item, NextItem>, EffectError>;
+            ctx: &obzenflow::queries::QueryContext,
+        ) -> Result<FiniteRead<Item, NextItem>, obzenflow::queries::QueryError>;
     }
 
     #[derive(Clone, Debug)]
@@ -5980,8 +5992,8 @@ mod ai_digest {
         async fn read(
             &self,
             from: &NextItem,
-            _ctx: &EffectContext,
-        ) -> Result<FiniteRead<Item, NextItem>, EffectError> {
+            _ctx: &obzenflow::queries::QueryContext,
+        ) -> Result<FiniteRead<Item, NextItem>, obzenflow::queries::QueryError> {
             if self.holds_after.is_some_and(|after| from.0 >= after) && !self.release.exists() {
                 return Ok(FiniteRead::Batch {
                     records: Vec::new(),
@@ -5998,7 +6010,7 @@ mod ai_digest {
         }
     }
 
-    struct ItemRows(effects::Port<dyn ItemsInput>);
+    struct ItemRows(obzenflow::queries::QueryPort<dyn ItemsInput>);
 
     impl TypedFiniteSourceHandler for ItemRows {
         type Output = Item;
@@ -6009,7 +6021,7 @@ mod ai_digest {
     }
 
     pub(super) fn build_flow(scenario: &Scenario, hold: Option<Hold>) -> FlowDefinition {
-        let items = ItemRows(effects::Port::to(Items {
+        let items = ItemRows(obzenflow::queries::QueryPort::to(Items {
             holds_after: match hold {
                 Some(Hold::AiSourceAfter(after)) => Some(after),
                 _ => None,
@@ -7175,11 +7187,11 @@ mod source_ports {
     use obzenflow::effects::EffectPortResolutionError;
     use obzenflow::middleware::rate_limit;
     use obzenflow::stages::sources::{
-        ContinuousRead, CsvDecoder, CsvSource, FiniteRead, ReattachGuarantee,
-        SourceDiagnosticReason, SourceError, SourceRead, TypedFiniteSourceHandler,
+        Continuous, ContinuousRead, CsvDecoder, CsvFileSystem, CsvSource, FiniteRead,
+        InputReadiness, SourceDiagnosticReason, SourceError, SourceRead, TypedFiniteSourceHandler,
         TypedInfiniteSourceHandler, ValuesSource,
     };
-    use obzenflow_core::effect_binding::{SystemBinding, SystemLocation};
+    use obzenflow_core::effect_binding::{DelimitedHeaders, SystemBinding, SystemLocation};
     use obzenflow_core::SystemBindingEvidence;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -7218,12 +7230,12 @@ mod source_ports {
     #[obzenflow::port]
     #[async_trait::async_trait]
     trait TickInput {
-        #[effect(type = "durable_contract.source_ports.ticks.read", exactly_once, records = reply)]
+        #[query(type = "durable_contract.source_ports.ticks.read")]
         async fn read(
             &self,
             from: &NextTick,
-            ctx: &effects::EffectContext,
-        ) -> Result<FiniteRead<Tick, NextTick>, effects::EffectError>;
+            ctx: &obzenflow::queries::QueryContext,
+        ) -> Result<FiniteRead<Tick, NextTick>, obzenflow::queries::QueryError>;
     }
 
     struct CountedTicks {
@@ -7236,10 +7248,10 @@ mod source_ports {
         async fn read(
             &self,
             from: &NextTick,
-            _ctx: &effects::EffectContext,
-        ) -> Result<FiniteRead<Tick, NextTick>, effects::EffectError> {
+            _ctx: &obzenflow::queries::QueryContext,
+        ) -> Result<FiniteRead<Tick, NextTick>, obzenflow::queries::QueryError> {
             note(&self.root, "polls", from.0 + 1)
-                .map_err(|_| effects::EffectError::Validation("note the read".into()))?;
+                .map_err(|_| obzenflow::queries::QueryError::terminal(obzenflow::queries::SourcePollErrorKind::Validation,obzenflow::queries::SourceDiagnosticReason::InvalidValue))?;
             if from.0 >= TICKS {
                 return Ok(FiniteRead::EndOfInput);
             }
@@ -7250,7 +7262,7 @@ mod source_ports {
         }
     }
 
-    struct CountedSource(effects::Port<dyn TickInput>);
+    struct CountedSource(obzenflow::queries::QueryPort<dyn TickInput>);
 
     impl TypedFiniteSourceHandler for CountedSource {
         type Output = Tick;
@@ -7262,7 +7274,7 @@ mod source_ports {
 
     pub(super) fn replay_flow(scenario: &Scenario) -> FlowDefinition {
         let root = scenario.root.clone();
-        let counted = effects::Port::deferred(move || {
+        let counted = obzenflow::queries::QueryPort::deferred(move || {
             append_line(&root.join("builds.jsonl"), &1_u64)
                 .map_err(|_| EffectPortResolutionError::ClientConstructionFailed)?;
             Ok(CountedTicks { root: root.clone() })
@@ -7292,13 +7304,13 @@ mod source_ports {
 
     #[obzenflow::port]
     #[async_trait::async_trait]
-    trait LiveTicks {
-        #[effect(type = "durable_contract.source_ports.ticks.take", at_most_once, records = reply)]
+    trait LiveTicks: InputReadiness {
+        #[query(type = "durable_contract.source_ports.ticks.take")]
         async fn take(
             &self,
             from: &NextLiveTick,
-            ctx: &effects::EffectContext,
-        ) -> Result<ContinuousRead<Tick, NextLiveTick>, effects::EffectError>;
+            ctx: &obzenflow::queries::QueryContext,
+        ) -> Result<ContinuousRead<Tick, NextLiveTick>, obzenflow::queries::QueryError>;
     }
 
     fn next_tick(emitted: &AtomicU64) -> ContinuousRead<Tick, NextLiveTick> {
@@ -7310,7 +7322,21 @@ mod source_ports {
         }
     }
 
+    async fn ticks_left(emitted: &AtomicU64) -> Result<(), SourceError> {
+        if emitted.load(Ordering::SeqCst) >= TICKS {
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+
     struct ScriptedTicks(Arc<AtomicU64>);
+
+    #[async_trait::async_trait]
+    impl InputReadiness for ScriptedTicks {
+        async fn ready(&self) -> Result<(), SourceError> {
+            ticks_left(&self.0).await
+        }
+    }
 
     #[obzenflow::system("scripted-ticks")]
     #[async_trait::async_trait]
@@ -7318,13 +7344,20 @@ mod source_ports {
         async fn take(
             &self,
             _from: &NextLiveTick,
-            _ctx: &effects::EffectContext,
-        ) -> Result<ContinuousRead<Tick, NextLiveTick>, effects::EffectError> {
+            _ctx: &obzenflow::queries::QueryContext,
+        ) -> Result<ContinuousRead<Tick, NextLiveTick>, obzenflow::queries::QueryError> {
             Ok(next_tick(&self.0))
         }
     }
 
     struct ReplacementTicks(Arc<AtomicU64>);
+
+    #[async_trait::async_trait]
+    impl InputReadiness for ReplacementTicks {
+        async fn ready(&self) -> Result<(), SourceError> {
+            ticks_left(&self.0).await
+        }
+    }
 
     #[obzenflow::system("replacement-ticks")]
     #[async_trait::async_trait]
@@ -7332,48 +7365,32 @@ mod source_ports {
         async fn take(
             &self,
             _from: &NextLiveTick,
-            _ctx: &effects::EffectContext,
-        ) -> Result<ContinuousRead<Tick, NextLiveTick>, effects::EffectError> {
+            _ctx: &obzenflow::queries::QueryContext,
+        ) -> Result<ContinuousRead<Tick, NextLiveTick>, obzenflow::queries::QueryError> {
             Ok(next_tick(&self.0))
         }
     }
 
     struct ReattachingTicks {
-        port: effects::Port<dyn LiveTicks>,
-        emitted: Arc<AtomicU64>,
+        port: obzenflow::queries::QueryPort<dyn LiveTicks>,
     }
 
     impl TypedInfiniteSourceHandler for ReattachingTicks {
         type Output = Tick;
 
-        fn read(&self) -> SourceRead<Tick> {
-            let emitted = self.emitted.clone();
-            SourceRead::continuous(
-                self.port.clone(),
-                NextLiveTick,
-                move || {
-                    let ready = emitted.load(Ordering::SeqCst) < TICKS;
-                    Box::pin(async move {
-                        if !ready {
-                            std::future::pending::<()>().await;
-                        }
-                        Ok(())
-                    })
-                },
-                ReattachGuarantee::AtMostOnce,
-                Ok,
-            )
+        fn read(&self) -> SourceRead<Tick, Continuous> {
+            SourceRead::continuous(self.port.clone(), NextLiveTick, Ok)
         }
     }
 
     pub(super) fn reattaching_flow(scenario: &Scenario, replaced: bool) -> FlowDefinition {
         let emitted = Arc::new(AtomicU64::new(0));
-        let port: effects::Port<dyn LiveTicks> = if replaced {
-            effects::Port::to(ReplacementTicks(emitted.clone()))
+        let port: obzenflow::queries::QueryPort<dyn LiveTicks> = if replaced {
+            obzenflow::queries::QueryPort::to(ReplacementTicks(emitted.clone()))
         } else {
-            effects::Port::to(ScriptedTicks(emitted.clone()))
+            obzenflow::queries::QueryPort::to(ScriptedTicks(emitted.clone()))
         };
-        let reattaching = ReattachingTicks { port, emitted };
+        let reattaching = ReattachingTicks { port };
         let journals = scenario.journals();
         FlowDefinition::materialize(move |_runtime_config| {
             let discard = DiscardSink::<Tick>::new();
@@ -7525,17 +7542,24 @@ mod source_ports {
     }
 
     fn csv_binding(scenario: &Scenario) -> SystemBinding {
-        SystemBindingEvidence::located("file-system", SystemLocation::Csv(rows_input(scenario)))
-            .expect("the tick file fits binding evidence")
-            .binding()
-            .clone()
+        SystemBindingEvidence::located(
+            "file-system",
+            SystemLocation::Delimited {
+                path: rows_input(scenario),
+                delimiter: ',',
+                headers: DelimitedHeaders::FirstRow,
+            },
+        )
+        .expect("the tick file fits binding evidence")
+        .binding()
+        .clone()
     }
 
     fn live_reads(archive: &Archive, stage: &str) -> u64 {
         archive
             .rows(stage, RunJournalKind::Data)
             .filter(|row| {
-                row.event_type() == "effect.execution_succeeded"
+                row.event_type() == "query.answered"
                     && row.envelope.provenance.event.replay_context.is_none()
             })
             .count() as u64
@@ -7551,7 +7575,7 @@ mod source_ports {
     fn recorded_reads(archive: &Archive, stage: &str) -> u64 {
         archive
             .rows(stage, RunJournalKind::Data)
-            .filter(|row| row.event_type() == "effect.execution_succeeded")
+            .filter(|row| row.event_type() == "query.answered")
             .count() as u64
     }
 
@@ -7718,7 +7742,11 @@ mod source_ports {
         let live = Child::spawn(&scenario, Vec::new(), None).completed().await;
         let recorded = Archive::read(&live).await;
         assert_eq!(declared_bindings(&recorded, "items"), [in_memory_binding()]);
-        assert_eq!(live_reads(&recorded, "items"), TICKS + 1);
+        assert_eq!(
+            live_reads(&recorded, "items"),
+            2,
+            "{name}: one read takes the values and one read ends the input"
+        );
         assert_eq!(unclonables(&recorded, "items"), [1, 2, 3, 4]);
 
         let kept = Scenario {
@@ -7749,7 +7777,7 @@ mod source_ports {
         let relived = Archive::read(relived).await;
         assert_eq!(
             live_reads(&relived, "items"),
-            TICKS + 1,
+            2,
             "{name}: the kept clone reads the original input"
         );
         assert_eq!(
@@ -7832,14 +7860,26 @@ mod source_ports {
         }
     }
 
+    pub(super) const TICKET_COLUMNS: [&str; 5] = [
+        "ticket_id",
+        "customer_id",
+        "created_at",
+        "priority",
+        "category",
+    ];
+
+    pub(super) fn ticket_store(input: PathBuf) -> CsvFileSystem {
+        CsvFileSystem::at(input)
+    }
+
     pub(super) fn tickets_flow(
         scenario: &Scenario,
-        input: PathBuf,
+        ticket_store: obzenflow::queries::QueryPort<dyn obzenflow::stages::sources::CsvFile>,
         hold: Option<Hold>,
     ) -> FlowDefinition {
         let tickets = CsvSource::builder(TicketCsv)
-            .path(input)
             .chunk_size(BATCH as usize)
+            .through(ticket_store)
             .build()
             .expect("the ticket file is configured");
         let desk = effects::perform(delivery_for).through(effects::Port::to(TicketDesk {
@@ -7881,10 +7921,9 @@ mod source_ports {
     fn ticket_reads(archive: &Archive) -> Vec<(u64, &JournalRecord<ChainPayload>)> {
         archive
             .rows("tickets", RunJournalKind::Data)
-            .filter(|row| row.event_type() == "effect.execution_succeeded")
-            .filter_map(|row| {
-                let provenance = row.envelope.provenance.event.effect_provenance.as_ref()?;
-                Some((provenance.cursor.input_seq.get(), row))
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::SourceInput(input)) if row.event_type()=="query.answered" => Some((input.number,row)),
+                _ => None,
             })
             .collect()
     }
@@ -7905,6 +7944,33 @@ mod source_ports {
         child.signal(Signal::Kill);
         assert!(!child.exit().await.success(), "{name}: the kill lands");
         run
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn csv_supplier_binding_selects_rows() {
+        let file=fresh_tickets("csv_supplier_binding");
+        let fixture=Scenario { graph:Graph::SourcePortTicketFixture(100), ..file.clone() };
+        for (scenario,expected) in [(&file,("CUST-002","P2","bug")),(&fixture,("CUST-001","P0","billing"))] {
+            let path=Child::spawn(scenario,Vec::new(),None).completed().await;
+            let archive=Archive::read(&path).await;
+            let (_,ticket)=archive.facts::<Ticket>("tickets").nth(1).unwrap();
+            assert_eq!(ticket.ticket_id, "TKT-000002");
+            assert_eq!((ticket.customer_id.as_str(),ticket.priority.as_str(),ticket.category.as_str()),expected);
+            assert_eq!(ticket_reads(&archive).len(),5);
+        }
+        let interrupted=interrupted_tickets(&fixture,"csv_supplier_binding").await;
+        let changed=Scenario {graph:Graph::SourcePortTicketFixture(99),..fixture.clone()};
+        let runs=fixture.runs();
+        for args in [replay(&interrupted),resume(&interrupted)] {
+            let mut args=args;
+            args.push("--allow-incomplete-archive".into());
+            let child=Child::spawn(&changed,args,None);
+            let log=child.log.clone();
+            assert!(!child.exit().await.success());
+            let message=read_log(&log);
+            assert!(message.contains("scripted-tickets") && message.contains("100") && message.contains("99"),"{message}");
+            assert_eq!(fixture.runs(),runs);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7989,12 +8055,7 @@ mod source_ports {
         let second_read = rows
             .iter()
             .position(|row| {
-                row.envelope
-                    .provenance
-                    .event
-                    .effect_provenance
-                    .as_ref()
-                    .is_some_and(|provenance| provenance.cursor.input_seq.get() == 2)
+                matches!(&row.payload, ChainPayload::Execution(ExecutionPayload::SourceInput(input)) if input.number == 2)
             })
             .expect("the second read");
         assert!(
@@ -8107,6 +8168,43 @@ mod source_ports {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn ticket_format_change_refused() {
+        let name = "source_port_ticket_format";
+        let recorded = fresh_tickets(name);
+        let run = interrupted_tickets(&recorded, name).await;
+        for (graph, configured) in [
+            (Graph::SourcePortTicketDelimiter, "text delimited by ';'"),
+            (
+                Graph::SourcePortTicketHeaders,
+                "CSV with the columns 'ticket_id'",
+            ),
+        ] {
+            let changed = Scenario {
+                graph,
+                ..recorded.clone()
+            };
+            let existing_runs = recorded.runs();
+            let mut replay_args = replay(&run);
+            replay_args.push("--allow-incomplete-archive".into());
+            for (verb, arguments) in [("replay", replay_args), ("resume", resume(&run))] {
+                let child = Child::spawn(&changed, arguments, None);
+                let log = child.log.clone();
+                assert!(!child.exit().await.success(), "{verb}: {configured}");
+                let message = std::fs::read_to_string(log).expect("read refusal");
+                for expected in [verb, "'tickets'", "(CSV)", configured] {
+                    assert!(message.contains(expected), "{expected}: {message}");
+                }
+                assert_eq!(recorded.runs(), existing_runs, "{verb} created a run");
+                assert!(
+                    !run.join("run_continuation.json").exists(),
+                    "{verb} claimed {}",
+                    run.display()
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn ticket_copy_elsewhere_refused() {
         let name = "source_port_ticket_copy";
         let recorded = fresh_tickets(name);
@@ -8182,7 +8280,11 @@ mod source_ports {
             declared_bindings(&archive, "tickets"),
             [SystemBindingEvidence::located(
                 "file-system",
-                SystemLocation::Csv(tickets_input(&declared))
+                SystemLocation::Delimited {
+                    path: tickets_input(&declared),
+                    delimiter: ',',
+                    headers: DelimitedHeaders::FirstRow,
+                }
             )
             .expect("the ticket file fits binding evidence")
             .binding()

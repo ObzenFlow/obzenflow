@@ -4,18 +4,26 @@
 
 use super::csv::CsvPosition;
 use super::file_version::FileVersion;
-use super::yaml::{read_yaml, YamlLine, YamlRead};
+use super::yaml::{read_yaml_page, YamlPage, YamlRead};
 use crate::sinks::blocking::blocking_io;
 use async_trait::async_trait;
 use csv::{ReaderBuilder, StringRecord};
-use obzenflow_core::effect_binding::SystemLocation;
-use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
-use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
-use obzenflow_runtime::effects::{EffectContext, EffectError, Port, SystemName};
+use obzenflow_core::effect_binding::{DelimitedHeaders, SystemLocation};
+use obzenflow_core::event::payloads::execution_payload::{
+    SourcePollContinuation, SourcePollErrorKind,
+};
+use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceReadFailure};
+use obzenflow_core::BindingEvidenceError;
+use obzenflow_runtime::effects::{
+    EffectError, EffectPortResolutionError, LocatedSystem, SystemName,
+};
 use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
+use obzenflow_runtime::queries::{QueryBookmark, QueryContext, QueryError, QueryPort};
+use std::num::NonZeroUsize;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 /// `FileSystem` is the framework system that reads a file at a configured path.
 pub struct FileSystem {
@@ -39,38 +47,101 @@ pub(crate) struct CsvFormat {
     pub(crate) headers: Option<Vec<String>>,
 }
 
-impl FileSystem {
-    pub(crate) fn csv_port(path: PathBuf, format: CsvFormat) -> anyhow::Result<Port<dyn CsvFile>> {
-        let location = if format.delimiter == b'\t' {
-            SystemLocation::Tsv(path.clone())
-        } else {
-            SystemLocation::Csv(path.clone())
-        };
-        Port::deferred(move || {
-            Ok(FileSystem {
-                path: path.clone(),
-                format: FileFormat::Csv(format.clone()),
-            })
-        })
-        .with_system_location(location)
-        .map(Port::own_instance)
-        .map_err(|error| {
-            anyhow::anyhow!("the binding evidence cannot record the file location: {error}")
-        })
+/// `CsvFileSystem` configures the `file-system` system to read a CSV or TSV file.
+/// The binding of its port records the path, the delimiter and where the column
+/// names come from, and the system reads with the same configuration.
+#[derive(Clone)]
+pub struct CsvFileSystem {
+    path: PathBuf,
+    format: CsvFormat,
+}
+
+impl CsvFileSystem {
+    /// `CsvFileSystem::at` reads the CSV file at `path`. The first row of the file
+    /// names the columns.
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            format: CsvFormat {
+                delimiter: b',',
+                headers: None,
+            },
+        }
     }
 
-    pub(crate) fn yaml_port(path: PathBuf) -> anyhow::Result<Port<dyn YamlFile>> {
-        let location = SystemLocation::Yaml(path.clone());
-        Port::deferred(move || {
-            Ok(FileSystem {
-                path: path.clone(),
-                format: FileFormat::Yaml,
-            })
+    /// `delimiter` sets the byte between the fields of a record.
+    pub fn delimiter(mut self, delimiter: u8) -> Self {
+        self.format.delimiter = delimiter;
+        self
+    }
+
+    /// `headers` names the columns. Each row of the file is then a record.
+    pub fn headers<I, S>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.format.headers = Some(headers.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// `port` returns a port whose system reads this file when a live read needs it.
+    pub fn port(self) -> Result<QueryPort<dyn CsvFile>, BindingEvidenceError> {
+        QueryPort::located(self)
+    }
+
+    pub(crate) fn new(path: PathBuf, format: CsvFormat) -> Self {
+        Self { path, format }
+    }
+}
+
+impl LocatedSystem for CsvFileSystem {
+    type System = FileSystem;
+
+    fn location(&self) -> SystemLocation {
+        SystemLocation::Delimited {
+            path: self.path.clone(),
+            delimiter: char::from(self.format.delimiter),
+            headers: match &self.format.headers {
+                None => DelimitedHeaders::FirstRow,
+                Some(headers) => DelimitedHeaders::Given(headers.clone()),
+            },
+        }
+    }
+
+    fn build(&self) -> Result<FileSystem, EffectPortResolutionError> {
+        Ok(FileSystem {
+            path: self.path.clone(),
+            format: FileFormat::Csv(self.format.clone()),
         })
-        .with_system_location(location)
-        .map(Port::own_instance)
-        .map_err(|error| {
-            anyhow::anyhow!("the binding evidence cannot record the file location: {error}")
+    }
+}
+
+#[derive(Clone)]
+pub struct YamlFileSystem {
+    path: PathBuf,
+}
+
+impl YamlFileSystem {
+    pub fn at(path: impl Into<PathBuf>) -> Self { Self { path: path.into() } }
+    pub fn port(self) -> Result<QueryPort<dyn YamlFile>, BindingEvidenceError> {
+        QueryPort::located(self)
+    }
+}
+
+impl LocatedSystem for YamlFileSystem {
+    type System = FileSystem;
+
+    fn location(&self) -> SystemLocation {
+        SystemLocation::Yaml {
+            path: self.path.clone(),
+        }
+    }
+
+    fn build(&self) -> Result<FileSystem, EffectPortResolutionError> {
+        Ok(FileSystem {
+            path: self.path.clone(),
+            format: FileFormat::Yaml,
         })
     }
 }
@@ -79,12 +150,12 @@ impl FileSystem {
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 pub trait YamlFile: Send + Sync {
-    #[effect(type = "obzenflow.file_system.yaml_read", exactly_once, records = reply)]
+    #[query(type = "obzenflow.yaml.read")]
     async fn read(
         &self,
         from: &YamlRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<YamlLine, YamlRead>, EffectError>;
+        ctx: &QueryContext,
+    ) -> Result<YamlPage, QueryError>;
 }
 
 #[async_trait]
@@ -92,11 +163,11 @@ impl YamlFile for FileSystem {
     async fn read(
         &self,
         from: &YamlRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<YamlLine, YamlRead>, EffectError> {
+        _ctx: &QueryContext,
+    ) -> Result<YamlPage, QueryError> {
         let path = self.path.clone();
         let from = from.clone();
-        blocking_io(move || read_yaml(&path, from)).await
+        blocking_io(move || read_yaml_page(&path, from)).await.map_err(file_query_error)?
     }
 }
 
@@ -104,19 +175,33 @@ impl YamlFile for FileSystem {
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 pub trait CsvFile: Send + Sync {
-    #[effect(type = "obzenflow.file_system.csv_read", exactly_once, records = reply)]
+    #[query(type = "obzenflow.csv.read")]
     async fn read(
         &self,
         from: &CsvRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<CsvLine, CsvRead>, EffectError>;
+        ctx: &QueryContext,
+    ) -> Result<CsvPage, QueryError>;
 }
 
-/// `CsvRead` is the argument of one CSV read. It holds the read settings and, after
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CsvRead {
+    pub limit: NonZeroUsize,
+    pub skip_rows: usize,
+    pub columns: Option<Vec<String>>,
+    pub after: Option<QueryBookmark>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CsvPage {
+    Batch { headers: Vec<String>, records: Vec<CsvLine>, next: QueryBookmark },
+    EndOfInput,
+}
+
+/// `FileCsvRead` is the argument of one CSV read. It holds the read settings and, after
 /// the first read, the position, columns and file version that the previous reply
 /// recorded.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CsvRead {
+struct FileCsvRead {
     chunk: usize,
     skip_rows: usize,
     columns: Option<Vec<String>>,
@@ -129,9 +214,11 @@ struct CsvAt {
     version: FileVersion,
     headers: Vec<String>,
     selected: Option<Vec<usize>>,
+    width: usize,
 }
 
-impl CsvRead {
+#[cfg(test)]
+impl FileCsvRead {
     pub(crate) fn first(chunk: usize, skip_rows: usize, columns: Option<Vec<String>>) -> Self {
         Self {
             chunk,
@@ -146,7 +233,7 @@ impl CsvRead {
     }
 }
 
-/// A `CsvLine` is one record as the file held it, a malformed record, a refused
+/// A `CsvLine` is one record as the file held it, a rejected record, a refused
 /// file, or a file that changed after a recorded read.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CsvLine {
@@ -158,6 +245,7 @@ pub enum CsvLine {
     Malformed {
         index: u64,
         line: u64,
+        reason: SourceDiagnosticReason,
     },
     Refused {
         kind: SourcePollErrorKind,
@@ -168,28 +256,98 @@ pub enum CsvLine {
 
 #[async_trait]
 impl CsvFile for FileSystem {
-    async fn read(
-        &self,
-        from: &CsvRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<CsvLine, CsvRead>, EffectError> {
+    async fn read(&self, from: &CsvRead, _: &QueryContext) -> Result<CsvPage,QueryError> {
         let FileFormat::Csv(format) = self.format.clone() else {
-            return Err(EffectError::Permanent(format!(
-                "the file at '{}' is not configured for CSV",
-                self.path.display()
-            )));
+            return Err(QueryError::terminal(SourcePollErrorKind::Validation,SourceDiagnosticReason::UnexpectedShape));
         };
-        let path = self.path.clone();
-        let from = from.clone();
-        blocking_io(move || read_csv(&path, &format, from)).await?
+        let seek = FileCsvRead { chunk: from.limit.get(), skip_rows: from.skip_rows, columns: from.columns.clone(),
+            at: from.after.as_ref().map(QueryBookmark::decode).transpose()? };
+        let path=self.path.clone();
+        match blocking_io(move || read_csv(&path,&format,seek)).await.map_err(file_query_error)?.map_err(file_query_error)? {
+            FiniteRead::EndOfInput => Ok(CsvPage::EndOfInput),
+            FiniteRead::Batch { records,next } => {
+                match records.as_slice() {
+                    [CsvLine::Refused {kind, diagnostic}] => return Err(QueryError::terminal(*kind,diagnostic.clone())),
+                    [CsvLine::Changed] => return Err(QueryError::terminal(SourcePollErrorKind::Transport,SourceDiagnosticReason::InputChanged)),
+                    _ => {}
+                }
+                let at=next.at.ok_or_else(|| QueryError::terminal(SourcePollErrorKind::Other,SourceDiagnosticReason::UnexpectedShape))?;
+                Ok(CsvPage::Batch {next:QueryBookmark::encode(&at)?,headers:at.headers,records})
+            }
+        }
+    }
+}
+
+fn file_query_error(error: EffectError) -> QueryError {
+    match error {
+        EffectError::SourceRead {failure,..} => QueryError {failure:*failure,retry_after:None},
+        _ => QueryError::terminal(SourcePollErrorKind::Transport, SourceDiagnosticReason::InputUnavailable)
+    }
+}
+
+fn read_failure(
+    path: &Path,
+    category: SourcePollErrorKind,
+    reason: SourceDiagnosticReason,
+) -> EffectError {
+    EffectError::SourceRead {
+        error: Box::new(EffectError::Transport(format!(
+            "the file at '{}' cannot be read",
+            path.display()
+        ))),
+        failure: Box::new(SourceReadFailure {
+            category,
+            continuation: SourcePollContinuation::Terminal,
+            diagnostic: reason.into(),
+        }),
+    }
+}
+
+fn unreadable(path: &Path) -> EffectError {
+    read_failure(
+        path,
+        SourcePollErrorKind::Transport,
+        SourceDiagnosticReason::InputUnavailable,
+    )
+}
+
+fn record_failure(path: &Path, error: &csv::Error) -> Option<EffectError> {
+    match error.kind() {
+        csv::ErrorKind::Utf8 { .. } => None,
+        csv::ErrorKind::Io(_) => Some(unreadable(path)),
+        _ => Some(read_failure(
+            path,
+            SourcePollErrorKind::Other,
+            SourceDiagnosticReason::Unclassified,
+        )),
     }
 }
 
 fn read_csv(
-    path: &PathBuf,
+    path: &Path,
     format: &CsvFormat,
-    from: CsvRead,
-) -> Result<FiniteRead<CsvLine, CsvRead>, EffectError> {
+    from: FileCsvRead,
+) -> Result<FiniteRead<CsvLine, FileCsvRead>, EffectError> {
+    let Ok(file) = File::open(path) else {
+        return Ok(FiniteRead::Batch {
+            records: vec![CsvLine::Refused {
+                kind: SourcePollErrorKind::Transport,
+                diagnostic: SourceDiagnosticReason::InputUnavailable.into(),
+            }],
+            next: from,
+        });
+    };
+    let version = FileVersion::of(&file).map_err(|_| unreadable(path))?;
+    read_open_csv(file, version, path, format, from)
+}
+
+fn read_open_csv(
+    file: File,
+    version: FileVersion,
+    path: &Path,
+    format: &CsvFormat,
+    from: FileCsvRead,
+) -> Result<FiniteRead<CsvLine, FileCsvRead>, EffectError> {
     let refused = |kind, reason: SourceDiagnosticReason| {
         Ok(FiniteRead::Batch {
             records: vec![CsvLine::Refused {
@@ -199,34 +357,25 @@ fn read_csv(
             next: from.clone(),
         })
     };
-    let Ok(file) = File::open(path) else {
-        return refused(
-            SourcePollErrorKind::Transport,
-            SourceDiagnosticReason::InputUnavailable,
-        );
+    let changed = || {
+        Ok(FiniteRead::Batch {
+            records: vec![CsvLine::Changed],
+            next: from.clone(),
+        })
     };
-    let version = FileVersion::of(&file).map_err(|_| {
-        EffectError::Transport(format!("the file at '{}' cannot be read", path.display()))
-    })?;
     let mut reader = ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
         .delimiter(format.delimiter)
         .from_reader(file);
-    let unreadable =
-        |_| EffectError::Transport(format!("the file at '{}' cannot be read", path.display()));
-    let mut at = match from.at {
+    let mut at = match from.at.clone() {
         Some(at) => {
             if at.version != version {
-                return Ok(FiniteRead::Batch {
-                    records: vec![CsvLine::Changed],
-                    next: CsvRead {
-                        at: Some(at),
-                        ..from
-                    },
-                });
+                return changed();
             }
-            reader.seek(at.position.parser()).map_err(unreadable)?;
+            reader
+                .seek(at.position.parser())
+                .map_err(|_| unreadable(path))?;
             at
         }
         None => {
@@ -234,12 +383,27 @@ fn read_csv(
                 Some(headers) => headers.clone(),
                 None => {
                     let mut record = StringRecord::new();
-                    if !reader.read_record(&mut record).map_err(unreadable)? {
-                        return Ok(FiniteRead::EndOfInput);
+                    match reader.read_record(&mut record) {
+                        Ok(true) => record.iter().map(str::to_owned).collect(),
+                        Ok(false) => {
+                            return refused(
+                                SourcePollErrorKind::Validation,
+                                SourceDiagnosticReason::UnexpectedShape,
+                            )
+                        }
+                        Err(error) => {
+                            if let Some(failure) = record_failure(path, &error) {
+                                return Err(failure);
+                            }
+                            return refused(
+                                SourcePollErrorKind::Deserialization,
+                                SourceDiagnosticReason::MalformedInput,
+                            );
+                        }
                     }
-                    record.iter().map(str::to_owned).collect()
                 }
             };
+            let width = headers.len();
             let (headers, selected) = match &from.columns {
                 None => (headers, None),
                 Some(columns) => {
@@ -258,66 +422,114 @@ fn read_csv(
             };
             let mut skipped = 0;
             let mut record = StringRecord::new();
-            while skipped < from.skip_rows && reader.read_record(&mut record).map_err(unreadable)? {
-                skipped += 1;
+            while skipped < from.skip_rows {
+                match reader.read_record(&mut record) {
+                    Ok(true) => skipped += 1,
+                    Ok(false) => break,
+                    Err(error) => match record_failure(path, &error) {
+                        Some(failure) => return Err(failure),
+                        None => skipped += 1,
+                    },
+                }
             }
             CsvAt {
                 position: CsvPosition::at(reader.position(), skipped, 0),
                 version,
                 headers,
                 selected,
+                width,
             }
         }
     };
-    let mut records = Vec::with_capacity(from.chunk);
-    let mut record = StringRecord::new();
-    let mut ended = false;
-    let mut index = at.position.row_index();
-    while records.len() < from.chunk {
-        match reader.read_record(&mut record) {
-            Ok(true) => {
-                let values = match &at.selected {
-                    None => record.iter().map(str::to_owned).collect(),
-                    Some(indices) => indices
-                        .iter()
-                        .map(|index| record.get(*index).unwrap_or_default().to_owned())
-                        .collect(),
-                };
-                records.push(CsvLine::Values {
-                    index,
-                    line: record.position().map_or(0, csv::Position::line),
-                    values,
-                });
-            }
-            Ok(false) => {
-                ended = true;
-                break;
-            }
-            Err(error) if matches!(error.kind(), csv::ErrorKind::Io(_)) => {
-                return Err(unreadable(error));
-            }
-            Err(error) => records.push(CsvLine::Malformed {
-                index,
-                line: error.position().map_or(0, csv::Position::line),
-            }),
-        }
-        index = index.saturating_add(1);
+    let rows = read_rows(&mut reader, &at, from.chunk, path);
+    if FileVersion::of(reader.get_ref()).ok() != Some(at.version) {
+        return changed();
     }
-    if records.is_empty() && ended {
+    let Rows {
+        records,
+        after,
+        ended,
+        failure,
+        index,
+    } = rows;
+    if let Some(failure) = failure {
+        if records.is_empty() {
+            return Err(failure);
+        }
+    } else if records.is_empty() && ended {
         return Ok(FiniteRead::EndOfInput);
     }
-    at.position = CsvPosition::at(
-        reader.position(),
-        usize::try_from(index).unwrap_or(usize::MAX),
-        0,
-    );
+    at.position = CsvPosition::at(&after, usize::try_from(index).unwrap_or(usize::MAX), 0);
     Ok(FiniteRead::Batch {
         records,
-        next: CsvRead {
+        next: FileCsvRead {
             at: Some(at),
             ..from
         },
     })
+}
+
+struct Rows {
+    records: Vec<CsvLine>,
+    after: csv::Position,
+    ended: bool,
+    failure: Option<EffectError>,
+    index: u64,
+}
+
+fn read_rows<R: Read>(reader: &mut csv::Reader<R>, at: &CsvAt, chunk: usize, path: &Path) -> Rows {
+    let mut rows = Rows {
+        records: Vec::with_capacity(chunk.min(1024)),
+        after: reader.position().clone(),
+        ended: false,
+        failure: None,
+        index: at.position.row_index(),
+    };
+    let mut record = StringRecord::new();
+    while rows.records.len() < chunk {
+        match reader.read_record(&mut record) {
+            Ok(true) => {
+                let line = record.position().map_or(0, csv::Position::line);
+                rows.records.push(if record.len() == at.width {
+                    CsvLine::Values {
+                        index: rows.index,
+                        line,
+                        values: match &at.selected {
+                            None => record.iter().map(str::to_owned).collect(),
+                            Some(indices) => indices
+                                .iter()
+                                .map(|column| record[*column].to_owned())
+                                .collect(),
+                        },
+                    }
+                } else {
+                    CsvLine::Malformed {
+                        index: rows.index,
+                        line,
+                        reason: SourceDiagnosticReason::UnexpectedShape,
+                    }
+                });
+            }
+            Ok(false) => {
+                rows.ended = true;
+                break;
+            }
+            Err(error) => match record_failure(path, &error) {
+                Some(failure) => {
+                    rows.failure = Some(failure);
+                    break;
+                }
+                None => rows.records.push(CsvLine::Malformed {
+                    index: rows.index,
+                    line: error.position().map_or(0, csv::Position::line),
+                    reason: SourceDiagnosticReason::MalformedInput,
+                }),
+            },
+        }
+        rows.after = reader.position().clone();
+        rows.index = rows.index.saturating_add(1);
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -338,7 +550,7 @@ mod tests {
         }
     }
 
-    fn batch(read: FiniteRead<CsvLine, CsvRead>) -> (Vec<Vec<String>>, CsvRead) {
+    fn batch(read: FiniteRead<CsvLine, FileCsvRead>) -> (Vec<Vec<String>>, FileCsvRead) {
         match read {
             FiniteRead::Batch { records, next } => (
                 records
@@ -360,7 +572,7 @@ mod tests {
     fn csv_read_chunked_file_reaches_end() {
         let input = file("name\nAda\nGrace\nEdsger\n");
         let path = input.path().to_path_buf();
-        let (first, next) = batch(read_csv(&path, &csv(), CsvRead::first(2, 0, None)).unwrap());
+        let (first, next) = batch(read_csv(&path, &csv(), FileCsvRead::first(2, 0, None)).unwrap());
         assert_eq!(first, [["Ada"], ["Grace"]]);
         assert_eq!(next.headers(), ["name"]);
         let (second, next) = batch(read_csv(&path, &csv(), next).unwrap());
@@ -375,7 +587,7 @@ mod tests {
     fn csv_record_index_continues_across_chunks() {
         let input = file("name\nskipped\nAda\nGrace\nEdsger\n");
         let path = input.path().to_path_buf();
-        let indexes = |read: FiniteRead<CsvLine, CsvRead>| match read {
+        let indexes = |read: FiniteRead<CsvLine, FileCsvRead>| match read {
             FiniteRead::Batch { records, next } => (
                 records
                     .into_iter()
@@ -388,7 +600,7 @@ mod tests {
             ),
             FiniteRead::EndOfInput => panic!("end of input"),
         };
-        let (first, next) = indexes(read_csv(&path, &csv(), CsvRead::first(2, 1, None)).unwrap());
+        let (first, next) = indexes(read_csv(&path, &csv(), FileCsvRead::first(2, 1, None)).unwrap());
         let (second, _) = indexes(read_csv(&path, &csv(), next).unwrap());
         assert_eq!((first, second), (vec![1, 2], vec![3]));
     }
@@ -400,14 +612,8 @@ mod tests {
             delimiter: b'\t',
             headers: None,
         };
-        let (rows, _) = batch(
-            read_csv(
-                &input.path().to_path_buf(),
-                &format,
-                CsvRead::first(10, 0, None),
-            )
-            .unwrap(),
-        );
+        let (rows, _) =
+            batch(read_csv(input.path(), &format, FileCsvRead::first(10, 0, None)).unwrap());
         assert_eq!(rows, [["Ada", "London"]]);
     }
 
@@ -418,14 +624,8 @@ mod tests {
             delimiter: b',',
             headers: Some(vec!["name".into(), "city".into()]),
         };
-        let (rows, next) = batch(
-            read_csv(
-                &input.path().to_path_buf(),
-                &format,
-                CsvRead::first(10, 0, None),
-            )
-            .unwrap(),
-        );
+        let (rows, next) =
+            batch(read_csv(input.path(), &format, FileCsvRead::first(10, 0, None)).unwrap());
         assert_eq!(rows, [["Ada", "London"]]);
         assert_eq!(next.headers(), ["name", "city"]);
     }
@@ -433,8 +633,8 @@ mod tests {
     #[test]
     fn csv_read_selection_returns_chosen_columns() {
         let input = file("name,city,year\nskipped,x,0\nAda,London,1815\n");
-        let read = CsvRead::first(10, 1, Some(vec!["year".into(), "name".into()]));
-        let (rows, next) = batch(read_csv(&input.path().to_path_buf(), &csv(), read).unwrap());
+        let read = FileCsvRead::first(10, 1, Some(vec!["year".into(), "name".into()]));
+        let (rows, next) = batch(read_csv(input.path(), &csv(), read).unwrap());
         assert_eq!(rows, [["1815", "Ada"]]);
         assert_eq!(next.headers(), ["year", "name"]);
     }
@@ -443,7 +643,7 @@ mod tests {
     fn csv_read_changed_file_records_change() {
         let mut input = file("name\nAda\nGrace\n");
         let path = input.path().to_path_buf();
-        let (_, next) = batch(read_csv(&path, &csv(), CsvRead::first(1, 0, None)).unwrap());
+        let (_, next) = batch(read_csv(&path, &csv(), FileCsvRead::first(1, 0, None)).unwrap());
         input.write_all(b"Edsger\n").unwrap();
         input.flush().unwrap();
         match read_csv(&path, &csv(), next).unwrap() {
@@ -462,7 +662,7 @@ mod tests {
         let read = read_csv(
             &PathBuf::from("/nonexistent/obzenflow/tickets.csv"),
             &csv(),
-            CsvRead::first(1, 0, None),
+            FileCsvRead::first(1, 0, None),
         )
         .unwrap();
         match read {
@@ -476,5 +676,100 @@ mod tests {
             ),
             FiniteRead::EndOfInput => panic!("end of input"),
         }
+    }
+
+    fn lines(read: FiniteRead<CsvLine, FileCsvRead>) -> Vec<CsvLine> {
+        match read {
+            FiniteRead::Batch { records, .. } => records,
+            FiniteRead::EndOfInput => panic!("end of input"),
+        }
+    }
+
+    #[test]
+    fn short_row_rejected_between_valid_rows() {
+        let input = file("a,b\n1,2\n3\n4,5\n");
+        let read = read_csv(input.path(), &csv(), FileCsvRead::first(10, 0, None)).unwrap();
+        match lines(read).as_slice() {
+            [CsvLine::Values { values: first, .. }, CsvLine::Malformed {
+                index: 1, reason, ..
+            }, CsvLine::Values { values: last, .. }] => {
+                assert_eq!(*first, ["1", "2"]);
+                assert_eq!(*last, ["4", "5"]);
+                assert_eq!(*reason, SourceDiagnosticReason::UnexpectedShape);
+            }
+            other => panic!("unexpected lines {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_header_row_refused() {
+        let input = file("");
+        let read = read_csv(input.path(), &csv(), FileCsvRead::first(10, 0, None)).unwrap();
+        assert!(
+            matches!(
+                lines(read).as_slice(),
+                [CsvLine::Refused { kind: SourcePollErrorKind::Validation, diagnostic }]
+                    if diagnostic.reason() == SourceDiagnosticReason::UnexpectedShape
+            ),
+            "an empty file has no header row"
+        );
+    }
+
+    #[test]
+    fn edit_during_read_records_change() {
+        let mut input = file("name\nAda\nGrace\n");
+        let path = input.path().to_path_buf();
+        let opened = File::open(&path).unwrap();
+        let version = FileVersion::of(&opened).unwrap();
+        input.write_all(b"Edsger\n").unwrap();
+        input.flush().unwrap();
+        let read =
+            read_open_csv(opened, version, &path, &csv(), FileCsvRead::first(10, 0, None)).unwrap();
+        assert!(
+            matches!(lines(read).as_slice(), [CsvLine::Changed]),
+            "no row read from an edited file is published"
+        );
+    }
+
+    struct FailingAfter(std::io::Cursor<Vec<u8>>);
+
+    impl Read for FailingAfter {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.read(buf)? {
+                0 => Err(std::io::Error::other("disk read failed")),
+                read => Ok(read),
+            }
+        }
+    }
+
+    #[test]
+    fn read_io_failure_stops_without_eof() {
+        let at = CsvAt {
+            position: CsvPosition::at(&csv::Position::new(), 0, 0),
+            version: FileVersion::of(&File::open(file("x").path()).unwrap()).unwrap(),
+            headers: vec!["a".into(), "b".into()],
+            selected: None,
+            width: 2,
+        };
+        let path = PathBuf::from("/data/rows.csv");
+        let mut reader = ReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .from_reader(FailingAfter(std::io::Cursor::new(b"1,2\n".to_vec())));
+        let rows = read_rows(&mut reader, &at, 10, &path);
+        assert_eq!(rows.records.len(), 1);
+        assert!(!rows.ended);
+        let failure = rows.failure.expect("the read failure is kept");
+        let Some(obzenflow_core::event::EffectFailureDetail::SourceRead(failure)) =
+            failure.failure_detail()
+        else {
+            panic!("the failure carries its source diagnostic");
+        };
+        assert_eq!(failure.continuation, SourcePollContinuation::Terminal);
+        assert_eq!(failure.category, SourcePollErrorKind::Transport);
+        assert_eq!(
+            failure.diagnostic.reason(),
+            SourceDiagnosticReason::InputUnavailable
+        );
     }
 }

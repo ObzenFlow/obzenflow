@@ -4,7 +4,7 @@
 
 use super::domain::{HnStory, HnStoryId};
 use async_trait::async_trait;
-use obzenflow::effects::{EffectContext, EffectError, Port};
+use obzenflow::queries::{QueryContext, QueryError, QueryPort};
 use obzenflow::stages::sources::{
     FiniteRead, HttpApi, SourceDiagnosticReason, SourceError, SourceRead,
     TypedAsyncFiniteSourceHandler,
@@ -29,12 +29,12 @@ pub type StoryReply = FiniteRead<Value, StoryPosition>;
 #[obzenflow::port]
 #[async_trait]
 pub trait StoriesPort {
-    #[effect(type = "hn.stories.read", at_least_once, records = reply)]
+    #[query(type = "hn.stories.read")]
     async fn read(
         &self,
         from: &StoryPosition,
-        ctx: &EffectContext,
-    ) -> Result<StoryReply, EffectError>;
+        ctx: &QueryContext,
+    ) -> Result<StoryReply, QueryError>;
 }
 
 pub fn selection(ids: Vec<HnStoryId>) -> StoryReply {
@@ -64,8 +64,8 @@ impl StoriesPort for HttpApi {
     async fn read(
         &self,
         from: &StoryPosition,
-        ctx: &EffectContext,
-    ) -> Result<StoryReply, EffectError> {
+        ctx: &QueryContext,
+    ) -> Result<StoryReply, QueryError> {
         match from {
             StoryPosition::Start { limit } => {
                 let mut ids: Vec<HnStoryId> = self.get_json("v0/topstories.json", ctx).await?;
@@ -84,7 +84,7 @@ impl StoriesPort for HttpApi {
 }
 
 pub struct HnStories {
-    pub port: Port<dyn StoriesPort>,
+    pub port: QueryPort<dyn StoriesPort>,
     pub max_stories: usize,
     pub poll_timeout: Duration,
 }

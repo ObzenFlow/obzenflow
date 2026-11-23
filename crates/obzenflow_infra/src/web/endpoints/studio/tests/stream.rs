@@ -1439,7 +1439,7 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     let path = directory.path().to_path_buf();
     let definition = FlowDefinition::materialize(move |_| {
         let input_handler = CountedSource {
-            port: Port::to(FlakyCount {
+            port: obzenflow_runtime::queries::QueryPort::to(FlakyCount {
                 end: 1000,
                 fails_at: 1,
                 failed: std::sync::atomic::AtomicBool::new(false),
@@ -1762,12 +1762,12 @@ struct Position(usize);
 #[obzenflow_runtime::effects::port]
 #[async_trait::async_trait]
 trait CountedInput {
-    #[effect(type = "studio_stream.counted.read", exactly_once, records = reply)]
+    #[query(type = "studio_stream.counted.read")]
     async fn read(
         &self,
         from: &Position,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<usize, Position>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<usize, Position>, obzenflow_runtime::queries::QueryError>;
 }
 
 struct FlakyCount {
@@ -1782,13 +1782,13 @@ impl CountedInput for FlakyCount {
     async fn read(
         &self,
         from: &Position,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<usize, Position>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<usize, Position>, obzenflow_runtime::queries::QueryError> {
         if from.0 >= self.end {
             return Ok(FiniteRead::EndOfInput);
         }
         if from.0 == self.fails_at && !self.failed.swap(true, Ordering::SeqCst) {
-            return Err(EffectError::Timeout("scripted timeout".into()));
+            return Err(obzenflow_runtime::queries::QueryError::recoverable(obzenflow_runtime::queries::SourcePollErrorKind::Timeout,obzenflow_runtime::queries::SourceDiagnosticReason::TimedOut));
         }
         Ok(FiniteRead::Batch {
             records: vec![from.0],
@@ -1809,8 +1809,8 @@ impl CountedInput for GatedInput {
     async fn read(
         &self,
         from: &Position,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<usize, Position>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<usize, Position>, obzenflow_runtime::queries::QueryError> {
         if from.0 > 0 {
             self.progress.sources[self.index].store(3, Ordering::Relaxed);
             return Ok(FiniteRead::EndOfInput);
@@ -1827,7 +1827,7 @@ impl CountedInput for GatedInput {
 }
 
 struct CountedSource<T> {
-    port: Port<dyn CountedInput>,
+    port: obzenflow_runtime::queries::QueryPort<dyn CountedInput>,
     item: fn(usize) -> T,
 }
 
@@ -1956,12 +1956,12 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
         for index in 0..stages - 1 {
             let name = format!("source_{index:03}");
             let handler = CountedSource {
-                port: Port::to(GatedInput {
+                port: obzenflow_runtime::queries::QueryPort::to(GatedInput {
                     gate: gate.clone(),
                     index,
                     progress: progress.clone(),
                 })
-                .own_instance(),
+                ,
                 item: |_| Item,
             };
             let mut descriptor = source!(Item => handler);

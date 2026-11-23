@@ -36,7 +36,7 @@ use std::{
 use tokio::runtime::Runtime;
 
 struct Source {
-    port: InputPort<dyn NumberFeed>,
+    port: obzenflow_runtime::queries::QueryPort<dyn NumberFeed>,
     origin: Instant,
 }
 

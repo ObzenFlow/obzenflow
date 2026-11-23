@@ -122,12 +122,12 @@ struct OrderRead(usize);
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait OrderInput {
-    #[effect(type = "observer_interception.orders.read", exactly_once, records = reply)]
+    #[query(type = "observer_interception.orders.read")]
     async fn read(
         &self,
         from: &OrderRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<OrderAccepted, OrderRead>, EffectError>;
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<OrderAccepted, OrderRead>, obzenflow_runtime::queries::QueryError>;
 }
 
 struct Orders {
@@ -140,8 +140,8 @@ impl OrderInput for Orders {
     async fn read(
         &self,
         from: &OrderRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<OrderAccepted, OrderRead>, EffectError> {
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<OrderAccepted, OrderRead>, obzenflow_runtime::queries::QueryError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if from.0 == ORDER_COUNT {
             return Ok(FiniteRead::EndOfInput);
@@ -155,7 +155,7 @@ impl OrderInput for Orders {
     }
 }
 
-struct OrderSource(Port<dyn OrderInput>);
+struct OrderSource(obzenflow_runtime::queries::QueryPort<dyn OrderInput>);
 
 impl TypedFiniteSourceHandler for OrderSource {
     type Output = OrderAccepted;
@@ -317,7 +317,7 @@ pub(crate) fn build_flow(
     probe: Probe,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let orders = OrderSource(Port::to(Orders {
+        let orders = OrderSource(obzenflow_runtime::queries::QueryPort::to(Orders {
             reads: probe.source_polls.clone(),
         }));
         let shipping_handoff = perform(|order: &ShippingReady| HandOffRequest {

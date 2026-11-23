@@ -21,6 +21,7 @@ use obzenflow::flow::FlowBuildError;
 use obzenflow::flow::{ai, flow, sink, source, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry};
+use obzenflow::queries::QueryPort;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sources::HttpApi;
 use obzenflow::stages::transforms;
@@ -319,10 +320,10 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         } = inputs;
         let HnFlowOptions { journal_base } = options;
 
-        let stories_port: Port<dyn StoriesPort> = match stories {
-            Stories::Scripted => Port::deferred(|| Ok(ScriptedStories)),
+        let stories_port: QueryPort<dyn StoriesPort> = match stories {
+            Stories::Scripted => QueryPort::deferred(|| Ok(ScriptedStories)),
             Stories::HackerNews => HttpApi::json(base_url)
-                .and_then(|endpoint| endpoint.deferred_port())
+                .and_then(QueryPort::located)
                 .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?,
         };
         let source_system = stories_port.binding().to_string();

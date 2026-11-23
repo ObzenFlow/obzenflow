@@ -1,0 +1,4 @@
+[app]
+customers_csv = "examples/csv_demo_support_sla/fixtures/customers.csv"
+tickets = { fixture = { count = 100 } }
+output_csv = "target/csv-demo-support-sla/outputs/enriched_tickets.csv"

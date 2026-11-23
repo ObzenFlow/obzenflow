@@ -467,9 +467,8 @@ fn stories_then_eof(rows: &[JournalRecord<ChainPayload>]) -> Vec<u64> {
 #[tokio::test]
 async fn scripted_polls_return_single_stories() {
     use decoder::{StoriesPort, StoryPosition};
-    use obzenflow::effects::EffectContext;
     use obzenflow::stages::sources::FiniteRead;
-    let ctx = EffectContext::for_test(obzenflow_core::FlowId::new(), "hn_stories", 1);
+    let ctx = obzenflow::queries::QueryContext::for_test("stories", 1);
     let system = scripted::ScriptedStories;
     let mut position = StoryPosition::Start { limit: 60 };
     let mut ids = Vec::new();
@@ -2358,16 +2357,15 @@ async fn hn_replay_reconstructs_digest() {
         declared_systems(&replay_stories),
         declared_systems(&live_stories)
     );
-    let reads = stable_sink_calls(&live_stories);
-    assert_eq!(
-        reads.len(),
-        live_source_requests + 1,
-        "one selection, one read per selected item, one terminal read"
-    );
-    assert!(reads
-        .iter()
-        .all(|read| read.effect_type == "hn.stories.read"));
-    assert_eq!(stable_sink_calls(&replay_stories), reads);
+    let answers = |rows: &[JournalRecord<ChainPayload>]| rows.iter().filter_map(|row| {
+        let ChainPayload::Execution(ExecutionPayload::SourceInput(record))=&row.payload else { return None };
+        let obzenflow_core::query::SourceInput::QueryAnswered{query_type,request,answer}=&record.input else {panic!("expected a query answer")};
+        assert_eq!(query_type,"hn.stories.read");
+        Some((record.number,*row.id(),request.clone(),answer.clone()))
+    }).collect::<Vec<_>>();
+    let reads = answers(&live_stories);
+    assert_eq!(reads.len(),live_source_requests + 1);
+    assert_eq!(answers(&replay_stories),reads);
     let live_story_ids = stories_then_eof(&live_stories);
     assert!(!live_story_ids.is_empty());
     assert_eq!(stories_then_eof(&replay_stories), live_story_ids);
@@ -2693,12 +2691,12 @@ struct Offset(u64);
 #[obzenflow_runtime::effects::port]
 #[async_trait::async_trait]
 trait ItemFeed {
-    #[effect(type = "hn_digest_fixture.items.read", exactly_once, records = reply)]
+    #[query(type = "hn_digest_fixture.items.read")]
     async fn read(
         &self,
         from: &Offset,
-        ctx: &obzenflow_runtime::effects::EffectContext,
-    ) -> Result<FiniteRead<DigestItem, Offset>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<DigestItem, Offset>, obzenflow::queries::QueryError>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2722,8 +2720,8 @@ impl ItemFeed for ContinuableItems {
     async fn read(
         &self,
         from: &Offset,
-        _ctx: &obzenflow_runtime::effects::EffectContext,
-    ) -> Result<FiniteRead<DigestItem, Offset>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<DigestItem, Offset>, obzenflow::queries::QueryError> {
         let end = self.holds_after.unwrap_or(self.last);
         if from.0 >= end {
             if self.holds_after.is_some() {
@@ -2740,7 +2738,7 @@ impl ItemFeed for ContinuableItems {
     }
 }
 
-struct KeyedItems(Port<dyn ItemFeed>);
+struct KeyedItems(obzenflow::queries::QueryPort<dyn ItemFeed>);
 
 impl TypedFiniteSourceHandler for KeyedItems {
     type Output = DigestItem;
@@ -2755,7 +2753,7 @@ fn build_keyed_flow(
     outputs: Arc<Mutex<Vec<DigestOut>>>,
     keyed_items: ContinuableItems,
 ) -> FlowDefinition {
-    let keyed_items = KeyedItems(Port::to(keyed_items));
+    let keyed_items = KeyedItems(obzenflow::queries::QueryPort::to(keyed_items));
     FlowDefinition::materialize(move |_| {
         let by_parity = ai::map(MapRole::default())
             .key_by(parity)

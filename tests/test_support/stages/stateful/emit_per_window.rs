@@ -40,12 +40,12 @@ struct WindowRead(u64);
 #[obzenflow_runtime::effects::port]
 #[async_trait::async_trait]
 trait WindowFeed {
-    #[effect(type = "emit_per_window.input.read", exactly_once, records = reply)]
+    #[query(type = "emit_per_window.input.read")]
     async fn read(
         &self,
         from: &WindowRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<WindowInput, WindowRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<WindowInput, WindowRead>, obzenflow::queries::QueryError>;
 }
 
 struct DelayedSequence {
@@ -59,8 +59,8 @@ impl WindowFeed for DelayedSequence {
     async fn read(
         &self,
         from: &WindowRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<WindowInput, WindowRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<WindowInput, WindowRead>, obzenflow::queries::QueryError> {
         if from.0 >= self.max {
             return Ok(FiniteRead::EndOfInput);
         }
@@ -72,11 +72,11 @@ impl WindowFeed for DelayedSequence {
     }
 }
 
-struct DelayedSequenceSource(Port<dyn WindowFeed>);
+struct DelayedSequenceSource(obzenflow::queries::QueryPort<dyn WindowFeed>);
 
 impl DelayedSequenceSource {
     fn new(max: u64, per_event_delay: Duration) -> Self {
-        Self(Port::to(DelayedSequence {
+        Self(obzenflow::queries::QueryPort::to(DelayedSequence {
             max,
             per_event_delay,
         }))

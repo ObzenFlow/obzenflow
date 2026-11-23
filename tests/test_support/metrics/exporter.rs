@@ -58,12 +58,12 @@ struct MetricRead(u8);
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait MetricInput {
-    #[effect(type = "metrics_exporter.input.read", exactly_once, records = reply)]
+    #[query(type = "metrics_exporter.input.read")]
     async fn read(
         &self,
         from: &MetricRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<MetricEvent, MetricRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<MetricEvent, MetricRead>, obzenflow::queries::QueryError>;
 }
 
 struct ErrorAfterFirst {
@@ -76,26 +76,26 @@ impl MetricInput for ErrorAfterFirst {
     async fn read(
         &self,
         from: &MetricRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<MetricEvent, MetricRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<MetricEvent, MetricRead>, obzenflow::queries::QueryError> {
         match from.0 {
             0 => Ok(FiniteRead::Batch {
                 records: vec![MetricEvent { index: 0 }],
                 next: MetricRead(1),
             }),
             _ if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) => {
-                Err(EffectError::Timeout("scripted timeout".into()))
+                Err(obzenflow::queries::QueryError::recoverable(obzenflow::queries::SourcePollErrorKind::Timeout,obzenflow::queries::SourceDiagnosticReason::TimedOut))
             }
             _ => Ok(FiniteRead::EndOfInput),
         }
     }
 }
 
-struct ErrorAfterFirstSource(Port<dyn MetricInput>);
+struct ErrorAfterFirstSource(obzenflow::queries::QueryPort<dyn MetricInput>);
 
 impl ErrorAfterFirstSource {
     fn new() -> Self {
-        Self(Port::to(ErrorAfterFirst {
+        Self(obzenflow::queries::QueryPort::to(ErrorAfterFirst {
             failed: std::sync::atomic::AtomicBool::new(false),
         }))
     }

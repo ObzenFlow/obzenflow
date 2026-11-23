@@ -38,12 +38,12 @@ struct RowRead(usize);
 #[obzenflow_runtime::effects::port]
 #[async_trait::async_trait]
 trait RowInput {
-    #[effect(type = "join_parity.rows.read", exactly_once, records = reply)]
+    #[query(type = "join_parity.rows.read")]
     async fn read(
         &self,
         from: &RowRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<serde_json::Value, RowRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<serde_json::Value, RowRead>, obzenflow::queries::QueryError>;
 }
 
 struct Rows {
@@ -57,8 +57,8 @@ impl RowInput for Rows {
     async fn read(
         &self,
         from: &RowRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<serde_json::Value, RowRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<serde_json::Value, RowRead>, obzenflow::queries::QueryError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         Ok(match self.rows.get(from.0) {
             Some(row) => FiniteRead::Batch {
@@ -71,7 +71,7 @@ impl RowInput for Rows {
 }
 
 struct CountedSource<T> {
-    port: Port<dyn RowInput>,
+    port: obzenflow::queries::QueryPort<dyn RowInput>,
     output: std::marker::PhantomData<fn() -> T>,
 }
 
@@ -82,7 +82,7 @@ impl<T: Serialize> CountedSource<T> {
             .map(|row| serde_json::to_value(row).expect("a row serializes"))
             .collect();
         Self {
-            port: Port::to(Rows { rows, reads }).own_instance(),
+            port: obzenflow::queries::QueryPort::to(Rows { rows, reads }),
             output: std::marker::PhantomData,
         }
     }

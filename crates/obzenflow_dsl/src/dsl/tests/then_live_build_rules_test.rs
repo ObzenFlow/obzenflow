@@ -195,7 +195,7 @@ fn batch_accounts() -> Box<dyn StageDescriptor> {
     crate::source!(Account => placeholder!())
 }
 fn live_input<T: TypedPayload + Send + Sync + 'static>() -> ChannelSource<T> {
-    ChannelSource::new(tokio::sync::mpsc::channel(1).1)
+    ChannelSource::new(obzenflow_runtime::stages::common::handlers::source::source_channel(1).1)
 }
 
 fn live_accounts() -> Box<dyn StageDescriptor> {

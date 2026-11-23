@@ -38,12 +38,12 @@ struct CompRead(u64);
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait CompFeed {
-    #[effect(type = "circuit_breaker_composition.inputs.read", exactly_once, records = reply)]
+    #[query(type = "circuit_breaker_composition.inputs.read")]
     async fn read(
         &self,
         from: &CompRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<CompInput, CompRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<CompInput, CompRead>, obzenflow::queries::QueryError>;
 }
 
 struct CompInputs {
@@ -56,8 +56,8 @@ impl CompFeed for CompInputs {
     async fn read(
         &self,
         from: &CompRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<CompInput, CompRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<CompInput, CompRead>, obzenflow::queries::QueryError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if from.0 >= 3 {
             return Ok(FiniteRead::EndOfInput);
@@ -69,11 +69,11 @@ impl CompFeed for CompInputs {
     }
 }
 
-struct CompSource(Port<dyn CompFeed>);
+struct CompSource(obzenflow::queries::QueryPort<dyn CompFeed>);
 
 impl CompSource {
     fn new(calls: Arc<AtomicUsize>) -> Self {
-        Self(Port::to(CompInputs { calls }))
+        Self(obzenflow::queries::QueryPort::to(CompInputs { calls }))
     }
 }
 

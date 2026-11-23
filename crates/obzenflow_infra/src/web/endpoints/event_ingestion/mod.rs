@@ -368,7 +368,9 @@ where
 }
 
 type HostedSystem<T> = fn(
-    tokio::sync::mpsc::Receiver<obzenflow_runtime::stages::HostedSubmission<T>>,
+    obzenflow_runtime::stages::common::handlers::source::SourceReceiver<
+        obzenflow_runtime::stages::HostedSubmission<T>,
+    >,
     HostedIngressBindingSlot,
 ) -> HostedSource<T>;
 

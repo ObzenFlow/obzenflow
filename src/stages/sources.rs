@@ -18,7 +18,7 @@
 //! | Input | Handler | System |
 //! |---|---|---|
 //! | Values in this process | [`ValuesSource::new`] | `in-memory` |
-//! | Tokio receiver | [`ChannelSource::new`] | `channel` |
+//! | Source channel | [`ChannelSource::new`] | `channel` |
 //! | CSV or TSV file | [`CsvSource::builder`] | `file-system` |
 //! | YAML document | [`YamlSource::builder`] | `file-system` |
 //! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` | `http-ingress` |
@@ -27,21 +27,24 @@
 //! An application source handler implements [`TypedFiniteSourceHandler`],
 //! [`TypedAsyncFiniteSourceHandler`], [`TypedInfiniteSourceHandler`] or
 //! [`TypedAsyncInfiniteSourceHandler`]. Its `read` returns a [`SourceRead`].
-//! Build it with [`SourceRead::finite`] for input that ends, or with
-//! [`SourceRead::continuous`] for input that stays open. The port method replies
-//! with a [`FiniteRead`] or a [`ContinuousRead`]. Each reply gives the records
-//! and the argument of the next read, or ends a finite input. The handler maps
-//! each recorded record to its output.
+//! A finite handler builds it with [`SourceRead::finite`] for input that ends,
+//! and an infinite handler builds it with [`SourceRead::continuous`] for input
+//! that stays open. The port method replies with a [`FiniteRead`] or a
+//! [`ContinuousRead`]. Each reply gives the records and the argument of the
+//! next read, or ends a finite input. The handler maps each recorded record to
+//! its output. A continuous port has [`InputReadiness`] as a supertrait, so each
+//! system behind it tells the framework when it holds input. A continuous read
+//! continues after a resume under the guarantee of its port method.
 //!
 //! ## In-process sources
 //!
-//! A [`ValuesSource`] reads its values through the `in-memory` system, one value
-//! in each read. Only this process holds the values, so ObzenFlow refuses to
-//! resume a run that did not read all of them. A [`ChannelSource`] reads a Tokio
-//! receiver through the `channel` system. A closed channel is a source error.
-//! Use topology fan-out for more than one consumer. Values that are still in the
-//! channel when a run stops are lost, so a resumed run continues its live reads
-//! with [`ReattachGuarantee::AtMostOnce`].
+//! A [`ValuesSource`] reads its values through the `in-memory` system, up to 1,000
+//! values in each read. Only this process holds the values, so ObzenFlow refuses
+//! to resume a run that did not read all of them. A [`ChannelSource`] reads a
+//! channel that [`source_channel`] makes, through the `channel` system. A closed
+//! channel is a source error. Use topology fan-out for more than one consumer.
+//! Values that are still in the channel when a run stops are lost, so a resumed
+//! run continues its live reads with [`ReattachGuarantee::AtMostOnce`].
 //!
 //! ## Source errors
 //!
@@ -221,15 +224,18 @@ pub use obzenflow_adapters::sources::{
     CsvSourceBuilder,
 };
 
-/// These items are the framework file system, its CSV read types and its YAML port.
-pub use obzenflow_adapters::sources::{CsvFile, CsvLine, CsvRead, FileSystem, YamlFile};
+/// These items are the framework file system, its CSV configuration and read types, and
+/// its YAML port.
+pub use obzenflow_adapters::sources::{
+    CsvFile, CsvFileSystem, CsvLine, CsvPage, CsvRead, FileSystem, YamlFile, YamlFileSystem,
+};
 
-/// In-process sources owning values or a channel receiver.
+/// These items are the in-process sources, which own values or a source channel.
 pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 
 /// Finite YAML source and its application decoder contract.
 pub use obzenflow_adapters::sources::{
-    YamlDecodeError, YamlDecoder, YamlLine, YamlNode, YamlRead, YamlRecord, YamlSelection,
+    YamlDecodeError, YamlDecoder, YamlLine, YamlNode, YamlPage, YamlRead, YamlRecord, YamlSelection,
     YamlSource, YamlSourceBuilder,
 };
 
@@ -249,7 +255,8 @@ pub use obzenflow_infra::clients::http::{HttpApi, HttpClientFactoryError};
 
 pub use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 pub use obzenflow_runtime::stages::common::handlers::source::{
-    ContinuousRead, FiniteRead, SourceRead,
+    source_channel, Continuous, ContinuousRead, Finite, FiniteRead, InputReadiness, ReadLifetime,
+    SourceClosed, SourcePermit, SourceRead, SourceReceiver, SourceSender,
 };
 pub use obzenflow_runtime::stages::common::handlers::{
     SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,

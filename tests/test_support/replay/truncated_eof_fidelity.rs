@@ -39,12 +39,12 @@ struct TickRead(u64);
 #[obzenflow_runtime::effects::port]
 #[async_trait::async_trait]
 trait TickInput {
-    #[effect(type = "truncated_fidelity.ticks.read", exactly_once, records = reply)]
+    #[query(type = "truncated_fidelity.ticks.read")]
     async fn read(
         &self,
         from: &TickRead,
-        ctx: &EffectContext,
-    ) -> Result<FiniteRead<Tick, TickRead>, EffectError>;
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<Tick, TickRead>, obzenflow::queries::QueryError>;
 }
 
 struct TickFeed {
@@ -58,8 +58,8 @@ impl TickInput for TickFeed {
     async fn read(
         &self,
         from: &TickRead,
-        _ctx: &EffectContext,
-    ) -> Result<FiniteRead<Tick, TickRead>, EffectError> {
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<Tick, TickRead>, obzenflow::queries::QueryError> {
         if from.0 < self.emit {
             return Ok(FiniteRead::Batch {
                 records: vec![Tick { n: from.0 + 1 }],
@@ -73,15 +73,15 @@ impl TickInput for TickFeed {
     }
 }
 
-struct Ticks(Port<dyn TickInput>);
+struct Ticks(obzenflow::queries::QueryPort<dyn TickInput>);
 
 impl Ticks {
     fn stalling(emit: u64) -> Self {
-        Self(Port::to(TickFeed { emit, seal: false }).own_instance())
+        Self(obzenflow::queries::QueryPort::to(TickFeed { emit, seal: false }))
     }
 
     fn sealing(emit: u64) -> Self {
-        Self(Port::to(TickFeed { emit, seal: true }).own_instance())
+        Self(obzenflow::queries::QueryPort::to(TickFeed { emit, seal: true }))
     }
 }
 

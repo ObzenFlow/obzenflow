@@ -33,25 +33,40 @@ pub enum ErasedSourceOutcome {
 #[derive(Debug)]
 pub struct ErasedSourceInvocation {
     outcome: ErasedSourceOutcome,
+    retry_after: Option<Duration>,
 }
 
 impl ErasedSourceInvocation {
     pub(crate) fn completed(completion: ErasedSourceCompletion) -> Self {
         Self {
             outcome: ErasedSourceOutcome::Completed(completion),
+            retry_after: None,
         }
     }
 
     pub(crate) fn handler_error(error: SourceError) -> Self {
         Self {
             outcome: ErasedSourceOutcome::HandlerError(error),
+            retry_after: None,
+        }
+    }
+
+    pub(crate) fn rate_limited(error: SourceError, retry_after: Option<Duration>) -> Self {
+        Self {
+            outcome: ErasedSourceOutcome::HandlerError(error),
+            retry_after,
         }
     }
 
     pub(crate) fn fatal(fatal: StageFatal) -> Self {
         Self {
             outcome: ErasedSourceOutcome::Fatal(fatal),
+            retry_after: None,
         }
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
     }
 
     pub fn into_outcome(self) -> ErasedSourceOutcome {
@@ -80,9 +95,6 @@ pub trait UnifiedAsyncFiniteSourceHandler: sealed::AsyncFinite + Send + Sync {
     fn supervisor_kind(&self) -> SupervisorKind {
         SupervisorKind::AsyncFiniteSource
     }
-    fn read_declaration(
-        &self,
-    ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>;
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext);
     fn poll_cancelled(&mut self) {}
     fn poll_timeout(&self) -> Option<Duration>;
@@ -102,9 +114,6 @@ pub trait UnifiedAsyncInfiniteSourceHandler: sealed::AsyncInfinite + Send + Sync
     fn supervisor_kind(&self) -> SupervisorKind {
         SupervisorKind::AsyncInfiniteSource
     }
-    fn read_declaration(
-        &self,
-    ) -> Result<crate::effects::EffectDeclaration, crate::effects::StageEffectsError>;
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext);
     fn poll_cancelled(&mut self) {}
     async fn cross_to_live(
