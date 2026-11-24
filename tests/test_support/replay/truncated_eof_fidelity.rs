@@ -12,7 +12,6 @@
 //! matches under whole-run verification. A `Completed` archive still replays
 //! as `Natural` and finalizes.
 
-use obzenflow::effects::Port;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::{TypedPayload, WriterId};
@@ -30,7 +29,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::replay_testkit;
-use obzenflow_runtime::effects::{EffectContext, EffectError};
 use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,11 +75,17 @@ struct Ticks(obzenflow::queries::QueryPort<dyn TickInput>);
 
 impl Ticks {
     fn stalling(emit: u64) -> Self {
-        Self(obzenflow::queries::QueryPort::to(TickFeed { emit, seal: false }))
+        Self(obzenflow::queries::QueryPort::to(TickFeed {
+            emit,
+            seal: false,
+        }))
     }
 
     fn sealing(emit: u64) -> Self {
-        Self(obzenflow::queries::QueryPort::to(TickFeed { emit, seal: true }))
+        Self(obzenflow::queries::QueryPort::to(TickFeed {
+            emit,
+            seal: true,
+        }))
     }
 }
 

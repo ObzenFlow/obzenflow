@@ -3,11 +3,11 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::SystemName;
-use obzenflow_runtime::queries::{QueryRequest,QueryContext,QueryError,QueryPort};
-use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
+use obzenflow_runtime::queries::{QueryContext, QueryError, QueryPort, QueryRequest};
 use obzenflow_runtime::stages::common::handlers::source::{
     Continuous, FiniteRead, SourceRead, SourceReceiver,
 };
@@ -22,8 +22,6 @@ use std::marker::PhantomData;
 use std::sync::{Mutex, PoisonError};
 
 const VALUES_PER_READ: usize = 1000;
-
-
 
 /// `ValuesSource` is a finite source that transfers its values into one live
 /// execution. Its `in-memory` system creates the iterator at the first live read
@@ -119,7 +117,10 @@ where
                 return Ok(reply.clone());
             }
             if from.at < *at {
-                return Err(QueryError::terminal(SourcePollErrorKind::Validation,SourceDiagnosticReason::InvalidValue));
+                return Err(QueryError::terminal(
+                    SourcePollErrorKind::Validation,
+                    SourceDiagnosticReason::InvalidValue,
+                ));
             }
         }
         let mut iter = match std::mem::replace(&mut feed.values, ValuesState::Exhausted) {
@@ -135,10 +136,12 @@ where
         }
         let mut records = Vec::new();
         for item in iter.by_ref().take(VALUES_PER_READ) {
-            records.push(
-                serde_json::to_value(&item)
-                    .map_err(|_| QueryError::terminal(SourcePollErrorKind::Other,SourceDiagnosticReason::UnrepresentableValue))?,
-            );
+            records.push(serde_json::to_value(&item).map_err(|_| {
+                QueryError::terminal(
+                    SourcePollErrorKind::Other,
+                    SourceDiagnosticReason::UnrepresentableValue,
+                )
+            })?);
         }
         let read = records.len() as u64;
         feed.taken += read;
@@ -204,34 +207,64 @@ where
 
 #[derive(Clone)]
 struct SelectedValues<R: QueryRequest, T> {
-    port: QueryPort<R::Port>, first:R, output:PhantomData<fn()->T>,
+    port: QueryPort<R::Port>,
+    first: R,
+    output: PhantomData<fn() -> T>,
 }
-impl<R:QueryRequest,T:TypedPayload> SourceTyping for SelectedValues<R,T> { type Output=T; }
-impl<R,T> TypedFiniteSourceHandler for SelectedValues<R,T>
-where T:TypedPayload + Send + Sync + 'static, R:QueryRequest<Answer=FiniteRead<T,R>> {
-    type Output=T;
-    fn read(&self)->SourceRead<T>{SourceRead::finite(self.port.clone(),self.first.clone(),Ok)}
+impl<R: QueryRequest, T: TypedPayload> SourceTyping for SelectedValues<R, T> {
+    type Output = T;
 }
-impl<T:TypedPayload + Send + Sync + 'static> ValuesSource<std::iter::Empty<T>> {
-    pub fn through<R>(port:QueryPort<R::Port>,first:R)->impl TypedFiniteSourceHandler<Output=T> + SourceTyping<Output=T>
-    where R:QueryRequest<Answer=FiniteRead<T,R>> {
-        SelectedValues {port,first,output:PhantomData}
+impl<R, T> TypedFiniteSourceHandler for SelectedValues<R, T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+    R: QueryRequest<Answer = FiniteRead<T, R>>,
+{
+    type Output = T;
+    fn read(&self) -> SourceRead<T> {
+        SourceRead::finite(self.port.clone(), self.first.clone(), Ok)
+    }
+}
+impl<T: TypedPayload + Send + Sync + 'static> ValuesSource<std::iter::Empty<T>> {
+    pub fn through<R>(
+        port: QueryPort<R::Port>,
+        first: R,
+    ) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T>
+    where
+        R: QueryRequest<Answer = FiniteRead<T, R>>,
+    {
+        SelectedValues {
+            port,
+            first,
+            output: PhantomData,
+        }
     }
 }
 
 /// A source for sender-initiated events on a bounded in-process channel.
-pub struct ChannelSource<T> { receiver: std::sync::Arc<SourceReceiver<T>> }
+pub struct ChannelSource<T> {
+    receiver: std::sync::Arc<SourceReceiver<T>>,
+}
 impl<T> fmt::Debug for ChannelSource<T> {
-    fn fmt(&self,f:&mut fmt::Formatter<'_>)->fmt::Result { f.debug_struct("ChannelSource").finish_non_exhaustive() }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChannelSource").finish_non_exhaustive()
+    }
 }
 impl<T> ChannelSource<T> {
-    pub fn new(receiver:SourceReceiver<T>)->Self { Self {receiver:std::sync::Arc::new(receiver)} }
+    pub fn new(receiver: SourceReceiver<T>) -> Self {
+        Self {
+            receiver: std::sync::Arc::new(receiver),
+        }
+    }
 }
-impl<T:TypedPayload> SourceTyping for ChannelSource<T> { type Output=T; }
+impl<T: TypedPayload> SourceTyping for ChannelSource<T> {
+    type Output = T;
+}
 #[async_trait]
 impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler for ChannelSource<T> {
-    type Output=T;
-    fn read(&self)->SourceRead<T,Continuous> {SourceRead::channel(self.receiver.clone())}
+    type Output = T;
+    fn read(&self) -> SourceRead<T, Continuous> {
+        SourceRead::channel(self.receiver.clone())
+    }
 }
 
 #[cfg(test)]

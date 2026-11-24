@@ -17,7 +17,6 @@ use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId, TypedPa
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
-use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;

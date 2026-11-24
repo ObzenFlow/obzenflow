@@ -448,7 +448,8 @@ impl ControlledInput for Controlled {
         &self,
         _from: &NextControlled,
         _ctx: &obzenflow_runtime::queries::QueryContext,
-    ) -> Result<FiniteRead<IdlePayload, NextControlled>, obzenflow_runtime::queries::QueryError> {
+    ) -> Result<FiniteRead<IdlePayload, NextControlled>, obzenflow_runtime::queries::QueryError>
+    {
         self.entered.send(()).expect("source observation is alive");
         Ok(match self.input.lock().await.recv().await {
             Some(event) => FiniteRead::Batch {

@@ -6,7 +6,6 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow::effects::Port;
 use obzenflow::stages::sources::ValuesSource;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
@@ -22,7 +21,6 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalRecord, TypedPayload, WriterId};
 use obzenflow_dsl::{sink, source, test_flow};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{EffectContext, EffectError};
 use obzenflow_runtime::stages::common::handlers::source::{
     Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
 };
@@ -153,7 +151,12 @@ impl PollInput for ScriptedInput {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(FiniteRead::EndOfInput)
             }
-            Script::LiveOnce { .. } | Script::Idle { .. } => Err(obzenflow::queries::QueryError::terminal(obzenflow::queries::SourcePollErrorKind::Validation,obzenflow::queries::SourceDiagnosticReason::InvalidValue)),
+            Script::LiveOnce { .. } | Script::Idle { .. } => {
+                Err(obzenflow::queries::QueryError::terminal(
+                    obzenflow::queries::SourcePollErrorKind::Validation,
+                    obzenflow::queries::SourceDiagnosticReason::InvalidValue,
+                ))
+            }
         }
     }
 
@@ -184,7 +187,10 @@ impl PollInput for ScriptedInput {
                 Vec::new()
             }
             _ => {
-                return Err(obzenflow::queries::QueryError::terminal(obzenflow::queries::SourcePollErrorKind::Validation,obzenflow::queries::SourceDiagnosticReason::InvalidValue))
+                return Err(obzenflow::queries::QueryError::terminal(
+                    obzenflow::queries::SourcePollErrorKind::Validation,
+                    obzenflow::queries::SourceDiagnosticReason::InvalidValue,
+                ))
             }
         };
         Ok(ContinuousRead {
@@ -202,7 +208,9 @@ fn finite(port: &obzenflow::queries::QueryPort<dyn PollInput>) -> SourceRead<Pol
     SourceRead::finite(port.clone(), PollRead(0), Ok)
 }
 
-fn live(port: &obzenflow::queries::QueryPort<dyn PollInput>) -> SourceRead<PollingEvent, Continuous> {
+fn live(
+    port: &obzenflow::queries::QueryPort<dyn PollInput>,
+) -> SourceRead<PollingEvent, Continuous> {
     SourceRead::continuous(port.clone(), PollTake, Ok)
 }
 

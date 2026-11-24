@@ -20,7 +20,7 @@ use document::Node;
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::OneFactOutcome;
-use obzenflow_runtime::queries::{QueryPort, QueryError, QueryBookmark};
+use obzenflow_runtime::queries::{QueryBookmark, QueryError, QueryPort};
 use obzenflow_runtime::stages::common::handlers::source::{
     FiniteRead, SourceRead, TypedFiniteSourceHandler,
 };
@@ -143,7 +143,10 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
         self
     }
 
-    pub fn through(mut self, port: QueryPort<dyn YamlFile>) -> Self { self.port=Some(port); self }
+    pub fn through(mut self, port: QueryPort<dyn YamlFile>) -> Self {
+        self.port = Some(port);
+        self
+    }
 
     pub fn selection(mut self, selection: YamlSelection) -> Self {
         self.selection = selection;
@@ -166,11 +169,11 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
 
     /// Validates local configuration only; the file is not touched.
     pub fn build(self) -> anyhow::Result<YamlSource<D>> {
-        let port = match (self.path,self.port) {
-            (Some(path),None) => YamlFileSystem::at(path).port()?,
-            (None,Some(port)) => port,
-            (None,None) => anyhow::bail!("yaml source: path required"),
-            (Some(_),Some(_)) => anyhow::bail!("a YAML source takes a path or a port"),
+        let port = match (self.path, self.port) {
+            (Some(path), None) => YamlFileSystem::at(path).port()?,
+            (None, Some(port)) => port,
+            (None, None) => anyhow::bail!("yaml source: path required"),
+            (Some(_), Some(_)) => anyhow::bail!("a YAML source takes a path or a port"),
         };
         anyhow::ensure!(
             self.batch_size > 0,
@@ -240,12 +243,26 @@ impl<D: YamlDecoder> TypedFiniteSourceHandler for YamlSource<D> {
         let decoder = self.decoder.clone();
         SourceRead::pages(
             self.port.clone(),
-            YamlRead {limit:std::num::NonZeroUsize::new(self.batch_size).expect("validated batch size"),selection:self.selection.clone(),max_bytes:self.max_bytes,after:None},
-            |from,page| Ok(match page {
-                YamlPage::EndOfInput => None,
-                YamlPage::Batch {records,next} => Some(((),records,YamlRead{after:Some(next),..from.clone()}))
-            }),
-            move |_, line| decode_line(&decoder,line),
+            YamlRead {
+                limit: std::num::NonZeroUsize::new(self.batch_size).expect("validated batch size"),
+                selection: self.selection.clone(),
+                max_bytes: self.max_bytes,
+                after: None,
+            },
+            |from, page| {
+                Ok(match page {
+                    YamlPage::EndOfInput => None,
+                    YamlPage::Batch { records, next } => Some((
+                        (),
+                        records,
+                        YamlRead {
+                            after: Some(next),
+                            ..from.clone()
+                        },
+                    )),
+                })
+            },
+            move |_, line| decode_line(&decoder, line),
         )
     }
 }
@@ -263,7 +280,7 @@ fn decode_line<D: YamlDecoder>(decoder: &D, line: YamlLine) -> Result<D::Output,
     }
 }
 
-#[derive(Clone,Debug,Serialize,Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct YamlRead {
     pub limit: std::num::NonZeroUsize,
     pub selection: YamlSelection,
@@ -271,25 +288,47 @@ pub struct YamlRead {
     pub after: Option<QueryBookmark>,
 }
 
-#[derive(Clone,Debug,Serialize,Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum YamlPage {
-    Batch { records: Vec<YamlLine>, next: QueryBookmark },
+    Batch {
+        records: Vec<YamlLine>,
+        next: QueryBookmark,
+    },
     EndOfInput,
 }
 
-pub(crate) fn read_yaml_page(path:&Path, from:YamlRead)->Result<YamlPage,QueryError>{
-    let read=FileYamlRead { batch:from.limit.get(),selection:from.selection,max_bytes:from.max_bytes,
-        at:from.after.as_ref().map(QueryBookmark::decode).transpose()? };
-    match read_yaml(path,read) {
+pub(crate) fn read_yaml_page(path: &Path, from: YamlRead) -> Result<YamlPage, QueryError> {
+    let read = FileYamlRead {
+        batch: from.limit.get(),
+        selection: from.selection,
+        max_bytes: from.max_bytes,
+        at: from.after.as_ref().map(QueryBookmark::decode).transpose()?,
+    };
+    match read_yaml(path, read) {
         FiniteRead::EndOfInput => Ok(YamlPage::EndOfInput),
-        FiniteRead::Batch { records,next } => {
+        FiniteRead::Batch { records, next } => {
             match records.as_slice() {
-                [YamlLine::Refused {kind,diagnostic}] => return Err(QueryError::terminal(*kind,diagnostic.clone())),
-                [YamlLine::Changed] => return Err(QueryError::terminal(SourcePollErrorKind::Transport, SourceDiagnosticReason::InputChanged)),
+                [YamlLine::Refused { kind, diagnostic }] => {
+                    return Err(QueryError::terminal(*kind, diagnostic.clone()))
+                }
+                [YamlLine::Changed] => {
+                    return Err(QueryError::terminal(
+                        SourcePollErrorKind::Transport,
+                        SourceDiagnosticReason::InputChanged,
+                    ))
+                }
                 _ => {}
             }
-            let at=next.at.ok_or_else(||QueryError::terminal(SourcePollErrorKind::Other,SourceDiagnosticReason::UnexpectedShape))?;
-            Ok(YamlPage::Batch {records,next:QueryBookmark::encode(&at)?})
+            let at = next.at.ok_or_else(|| {
+                QueryError::terminal(
+                    SourcePollErrorKind::Other,
+                    SourceDiagnosticReason::UnexpectedShape,
+                )
+            })?;
+            Ok(YamlPage::Batch {
+                records,
+                next: QueryBookmark::encode(&at)?,
+            })
         }
     }
 }
@@ -330,8 +369,10 @@ pub enum YamlLine {
 #[serde(transparent)]
 pub struct YamlNode(Node);
 impl YamlNode {
-    pub fn parse(bytes: &[u8]) -> Result<Self,QueryError> {
-        document::parse(bytes).map(Self).map_err(|e|QueryError::terminal(e.kind(),e.diagnostic().clone()))
+    pub fn parse(bytes: &[u8]) -> Result<Self, QueryError> {
+        document::parse(bytes)
+            .map(Self)
+            .map_err(|e| QueryError::terminal(e.kind(), e.diagnostic().clone()))
     }
 }
 

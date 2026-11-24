@@ -274,9 +274,19 @@ impl EffectCursorHistory {
     }
 }
 
-pub(super) fn source_cursor(input: &obzenflow_core::query::SourceInputRecord) -> Result<EffectCursor, EffectError> {
-    let ordinal = input.attempt.checked_sub(1).ok_or_else(|| EffectError::ReplayArchive("source input attempt zero".into()))?;
-    Ok(EffectCursor::new(input.recorded_flow_id.clone(), input.stage_key.clone(), input.number, EffectOrdinal::new(ordinal)))
+pub(super) fn source_cursor(
+    input: &obzenflow_core::query::SourceInputRecord,
+) -> Result<EffectCursor, EffectError> {
+    let ordinal = input
+        .attempt
+        .checked_sub(1)
+        .ok_or_else(|| EffectError::ReplayArchive("source input attempt zero".into()))?;
+    Ok(EffectCursor::new(
+        input.recorded_flow_id.clone(),
+        input.stage_key.clone(),
+        input.number,
+        EffectOrdinal::new(ordinal),
+    ))
 }
 
 impl EffectHistory {
@@ -364,8 +374,14 @@ impl EffectHistory {
         let mut history = Self::from_cursor_histories(recorded_flow_id, histories);
         history.source_inputs = self.source_inputs;
         for (cursor, row) in &newer.source_inputs {
-            if history.source_inputs.get(cursor).is_some_and(|prior| prior.payload != row.payload || prior.id != row.id) {
-                return Err(EffectError::ReplayArchive(format!("source input {cursor:?} differs between archives")));
+            if history
+                .source_inputs
+                .get(cursor)
+                .is_some_and(|prior| prior.payload != row.payload || prior.id != row.id)
+            {
+                return Err(EffectError::ReplayArchive(format!(
+                    "source input {cursor:?} differs between archives"
+                )));
             }
             history.source_inputs.insert(cursor.clone(), row.clone());
         }
@@ -384,7 +400,10 @@ impl EffectHistory {
     }
 
     fn holds_evidence(&self) -> bool {
-        !(self.source_inputs.is_empty() && self.index.is_empty() && self.attempts.is_empty() && self.abandonments.is_empty())
+        !(self.source_inputs.is_empty()
+            && self.index.is_empty()
+            && self.attempts.is_empty()
+            && self.abandonments.is_empty())
     }
 
     /// Index validated cursor histories, as one run's history would be.
@@ -523,9 +542,15 @@ impl EffectHistory {
             actions.observe(&event)?;
             if let ChainPayload::Execution(ExecutionPayload::SourceInput(input)) = &event.payload {
                 let cursor = source_cursor(input)?;
-                if input.stage_key != stage_key || archive.recorded_flow_id().is_some_and(|namespace| input.recorded_flow_id != namespace)
-                    || source_inputs.insert(cursor, event.clone()).is_some() {
-                    return Err(EffectError::ReplayArchive(format!("invalid or duplicate source input at stage {stage_key}")));
+                if input.stage_key != stage_key
+                    || archive
+                        .recorded_flow_id()
+                        .is_some_and(|namespace| input.recorded_flow_id != namespace)
+                    || source_inputs.insert(cursor, event.clone()).is_some()
+                {
+                    return Err(EffectError::ReplayArchive(format!(
+                        "invalid or duplicate source input at stage {stage_key}"
+                    )));
                 }
             }
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
@@ -705,7 +730,8 @@ impl EffectHistory {
             |cursor| {
                 history.index.contains_key(cursor)
                     || history.attempts.contains_key(cursor)
-                    || history.abandonments.contains_key(cursor) || history.source_inputs.contains_key(cursor)
+                    || history.abandonments.contains_key(cursor)
+                    || history.source_inputs.contains_key(cursor)
             },
             |cursor| !history.index.contains_key(cursor),
         );

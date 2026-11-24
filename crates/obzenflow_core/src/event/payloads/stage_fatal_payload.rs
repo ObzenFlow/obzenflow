@@ -91,7 +91,10 @@ pub struct Departure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DepartureAction {
-    SourceInput { number: u64, attempt: u32 },
+    SourceInput {
+        number: u64,
+        attempt: u32,
+    },
     /// An effect call, at its input and ordinal.
     Effect {
         effect_type: EffectType,
@@ -104,7 +107,9 @@ pub enum DepartureAction {
         event_id: EventId,
     },
     /// An input settled without an effect, a capture or a fact.
-    Settlement { input_position: EffectInputPosition },
+    Settlement {
+        input_position: EffectInputPosition,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

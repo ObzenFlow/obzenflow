@@ -15,7 +15,6 @@ use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
-use obzenflow_runtime::effects::Port as InputPort;
 use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;

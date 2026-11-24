@@ -4,8 +4,10 @@
 
 use async_trait::async_trait;
 use obzenflow::queries::{QueryBinding, QueryBookmark, QueryContext, QueryError};
-use obzenflow::stages::sources::{CsvFile, CsvLine,CsvPage,CsvRead,SourceDiagnosticReason, SourcePollErrorKind};
-use serde::{Serialize,Deserialize};
+use obzenflow::stages::sources::{
+    CsvFile, CsvLine, CsvPage, CsvRead, SourceDiagnosticReason, SourcePollErrorKind,
+};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TicketFixture {
@@ -33,17 +35,28 @@ impl QueryBinding for TicketFixture {
 #[async_trait]
 impl CsvFile for ScriptedTickets {
     async fn read(&self, from: &CsvRead, _: &QueryContext) -> Result<CsvPage, QueryError> {
-        let columns = ["ticket_id", "customer_id", "created_at", "priority", "category"];
-        let headers = from.columns.clone().unwrap_or_else(|| {
-            columns.iter().map(|name| (*name).to_owned()).collect()
-        });
+        let columns = [
+            "ticket_id",
+            "customer_id",
+            "created_at",
+            "priority",
+            "category",
+        ];
+        let headers = from
+            .columns
+            .clone()
+            .unwrap_or_else(|| columns.iter().map(|name| (*name).to_owned()).collect());
         let mut selected = Vec::with_capacity(headers.len());
         for header in &headers {
-            let index = columns.iter().position(|name| *name == header.as_str())
-                .ok_or_else(|| QueryError::terminal(
-                    SourcePollErrorKind::Validation,
-                    SourceDiagnosticReason::UnexpectedShape,
-                ))?;
+            let index = columns
+                .iter()
+                .position(|name| *name == header.as_str())
+                .ok_or_else(|| {
+                    QueryError::terminal(
+                        SourcePollErrorKind::Validation,
+                        SourceDiagnosticReason::UnexpectedShape,
+                    )
+                })?;
             selected.push(index);
         }
 
@@ -60,8 +73,17 @@ impl CsvFile for ScriptedTickets {
         let mut records = Vec::new();
         for index in first..end {
             let ticket_id = format!("TKT-{:06}", index + 1);
-            let fields = [ticket_id.as_str(), "CUST-001", "2026-01-01T00:00:00Z", "P0", "billing"];
-            let values = selected.iter().map(|&column| fields[column].to_owned()).collect();
+            let fields = [
+                ticket_id.as_str(),
+                "CUST-001",
+                "2026-01-01T00:00:00Z",
+                "P0",
+                "billing",
+            ];
+            let values = selected
+                .iter()
+                .map(|&column| fields[column].to_owned())
+                .collect();
             records.push(CsvLine::Values {
                 index: u64::from(index),
                 line: u64::from(index) + 2,

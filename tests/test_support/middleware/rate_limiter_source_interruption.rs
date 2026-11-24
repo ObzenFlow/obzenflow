@@ -14,7 +14,6 @@
 //! test would time out.
 
 use anyhow::{anyhow, Result};
-use obzenflow::stages::sources::ValuesSource;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
@@ -119,11 +118,8 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
     let journal_base = unique_journal_dir("source_rate_limiter_interruption");
     let journal_base_for_flow = journal_base.clone();
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = ValuesSource::new(
-            (0..10_000)
-                .map(|index| DripEvent { index })
-                .collect::<Vec<_>>(),
-        );
+        let source =
+            crate::replay_testkit::single_values((0..10_000).map(|index| DripEvent { index }));
         let sink = NoopSink::new();
 
         Ok(flow! {

@@ -3504,7 +3504,7 @@ macro_rules! sink {
 /// handler.
 ///
 /// ```
-/// # use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
+/// # use obzenflow_runtime::queries::{QueryContext, QueryError, QueryPort};
 /// # use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 /// # use obzenflow_runtime::stages::source::TypedFiniteSourceHandler;
 /// # use obzenflow_runtime::stages::{HostedSource, HostedSubmission};
@@ -3517,12 +3517,12 @@ macro_rules! sink {
 /// #[obzenflow_runtime::effects::port]
 /// #[async_trait::async_trait]
 /// trait FactInput {
-///     #[effect(type = "grammar.facts.read", exactly_once, records = reply)]
+///     #[query(type = "grammar.facts.read")]
 ///     async fn read(
 ///         &self,
 ///         from: &NextFact,
-///         ctx: &EffectContext,
-///     ) -> Result<FiniteRead<Fact, NextFact>, EffectError>;
+///         ctx: &QueryContext,
+///     ) -> Result<FiniteRead<Fact, NextFact>, QueryError>;
 /// }
 ///
 /// struct FactFile;
@@ -3533,13 +3533,13 @@ macro_rules! sink {
 ///     async fn read(
 ///         &self,
 ///         _from: &NextFact,
-///         _ctx: &EffectContext,
-///     ) -> Result<FiniteRead<Fact, NextFact>, EffectError> {
+///         _ctx: &QueryContext,
+///     ) -> Result<FiniteRead<Fact, NextFact>, QueryError> {
 ///         Ok(FiniteRead::EndOfInput)
 ///     }
 /// }
 ///
-/// struct Facts(Port<dyn FactInput>);
+/// struct Facts(QueryPort<dyn FactInput>);
 ///
 /// impl TypedFiniteSourceHandler for Facts {
 ///     type Output = Fact;
@@ -3548,7 +3548,7 @@ macro_rules! sink {
 ///     }
 /// }
 ///
-/// let facts = Facts(Port::to(FactFile));
+/// let facts = Facts(QueryPort::to(FactFile));
 /// # let (_, submissions) =
 /// #     obzenflow_runtime::stages::common::handlers::source::source_channel::<
 /// #         HostedSubmission<Fact>,
@@ -3564,7 +3564,7 @@ macro_rules! sink {
 /// A port is not a source handler, so the compiler refuses it.
 ///
 /// ```compile_fail,E0277
-/// # use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
+/// # use obzenflow_runtime::queries::{QueryContext, QueryError, QueryPort};
 /// # use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
@@ -3574,12 +3574,12 @@ macro_rules! sink {
 /// # #[obzenflow_runtime::effects::port]
 /// # #[async_trait::async_trait]
 /// # trait FactInput {
-/// #     #[effect(type = "grammar.facts.read", exactly_once, records = reply)]
+/// #     #[query(type = "grammar.facts.read")]
 /// #     async fn read(
 /// #         &self,
 /// #         from: &NextFact,
-/// #         ctx: &EffectContext,
-/// #     ) -> Result<FiniteRead<Fact, NextFact>, EffectError>;
+/// #         ctx: &QueryContext,
+/// #     ) -> Result<FiniteRead<Fact, NextFact>, QueryError>;
 /// # }
 /// # struct FactFile;
 /// # #[obzenflow_runtime::effects::system("fact-file")]
@@ -3588,12 +3588,12 @@ macro_rules! sink {
 /// #     async fn read(
 /// #         &self,
 /// #         _from: &NextFact,
-/// #         _ctx: &EffectContext,
-/// #     ) -> Result<FiniteRead<Fact, NextFact>, EffectError> {
+/// #         _ctx: &QueryContext,
+/// #     ) -> Result<FiniteRead<Fact, NextFact>, QueryError> {
 /// #         Ok(FiniteRead::EndOfInput)
 /// #     }
 /// # }
-/// let fact_file: Port<dyn FactInput> = Port::to(FactFile);
+/// let fact_file: QueryPort<dyn FactInput> = QueryPort::to(FactFile);
 /// let read = obzenflow_dsl::source!(Fact => fact_file);
 /// ```
 #[macro_export]

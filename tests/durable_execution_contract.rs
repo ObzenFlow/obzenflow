@@ -27,10 +27,10 @@ pub mod gateway_demo;
 #[path = "../examples/flash_sale_allocation/support.rs"]
 pub mod flash_sale_demo;
 
-#[path = "../examples/csv_demo_support_sla/domain.rs"]
-pub mod support_sla_demo;
 #[path = "../examples/csv_demo_support_sla/scripted.rs"]
 mod scripted_tickets;
+#[path = "../examples/csv_demo_support_sla/domain.rs"]
+pub mod support_sla_demo;
 
 #[path = "support/fake_ai.rs"]
 pub mod fake_ai;
@@ -657,21 +657,28 @@ fn durable_execution_contract_child() {
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::tickets_input(scenario)).port().unwrap(),
+                source_ports::ticket_store(source_ports::tickets_input(scenario))
+                    .port()
+                    .unwrap(),
                 plan.hold,
             )),
         Graph::SourcePortTicketCopy => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::ticket_copy(scenario)).port().unwrap(),
+                source_ports::ticket_store(source_ports::ticket_copy(scenario))
+                    .port()
+                    .unwrap(),
                 plan.hold,
             )),
         Graph::SourcePortTicketDelimiter => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::tickets_input(scenario)).delimiter(b';').port().unwrap(),
+                source_ports::ticket_store(source_ports::tickets_input(scenario))
+                    .delimiter(b';')
+                    .port()
+                    .unwrap(),
                 plan.hold,
             )),
         Graph::SourcePortTicketHeaders => app
@@ -679,11 +686,19 @@ fn durable_execution_contract_child() {
             .run_blocking(source_ports::tickets_flow(
                 scenario,
                 source_ports::ticket_store(source_ports::tickets_input(scenario))
-                    .headers(source_ports::TICKET_COLUMNS).port().unwrap(),
+                    .headers(source_ports::TICKET_COLUMNS)
+                    .port()
+                    .unwrap(),
                 plan.hold,
             )),
-        Graph::SourcePortTicketFixture(count) => app.with_config_file(source_ports::tickets_config(scenario))
-            .run_blocking(source_ports::tickets_flow(scenario, obzenflow::queries::QueryPort::located(scripted_tickets::TicketFixture {count}).unwrap(), plan.hold)),
+        Graph::SourcePortTicketFixture(count) => app
+            .with_config_file(source_ports::tickets_config(scenario))
+            .run_blocking(source_ports::tickets_flow(
+                scenario,
+                obzenflow::queries::QueryPort::located(scripted_tickets::TicketFixture { count })
+                    .unwrap(),
+                plan.hold,
+            )),
         Graph::SourcePortOwned => app.run_blocking(source_ports::owned_flow(
             scenario,
             source_ports::owned_values(),
@@ -1381,11 +1396,21 @@ impl Archive {
 
     /// Admitted orders with their recorded identities, in journal order.
     fn read_orders(&self) -> Vec<String> {
-        self.rows("web_orders", RunJournalKind::Data).filter_map(|row| {
-            let ChainPayload::Execution(ExecutionPayload::SourceInput(record))=&row.payload else {return None};
-            let obzenflow_core::query::SourceInput::IngressMember {member}=&record.input else {return None};
-            member["fact"]["payload"]["order_id"].as_str().map(str::to_owned)
-        }).collect()
+        self.rows("web_orders", RunJournalKind::Data)
+            .filter_map(|row| {
+                let ChainPayload::Execution(ExecutionPayload::SourceInput(record)) = &row.payload
+                else {
+                    return None;
+                };
+                let obzenflow_core::query::SourceInput::IngressMember { member } = &record.input
+                else {
+                    return None;
+                };
+                member["fact"]["payload"]["order_id"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect()
     }
 
     fn admitted(&self) -> Vec<(String, EventId)> {
@@ -7250,8 +7275,12 @@ mod source_ports {
             from: &NextTick,
             _ctx: &obzenflow::queries::QueryContext,
         ) -> Result<FiniteRead<Tick, NextTick>, obzenflow::queries::QueryError> {
-            note(&self.root, "polls", from.0 + 1)
-                .map_err(|_| obzenflow::queries::QueryError::terminal(obzenflow::queries::SourcePollErrorKind::Validation,obzenflow::queries::SourceDiagnosticReason::InvalidValue))?;
+            note(&self.root, "polls", from.0 + 1).map_err(|_| {
+                obzenflow::queries::QueryError::terminal(
+                    obzenflow::queries::SourcePollErrorKind::Validation,
+                    obzenflow::queries::SourceDiagnosticReason::InvalidValue,
+                )
+            })?;
             if from.0 >= TICKS {
                 return Ok(FiniteRead::EndOfInput);
             }
@@ -7922,7 +7951,11 @@ mod source_ports {
         archive
             .rows("tickets", RunJournalKind::Data)
             .filter_map(|row| match &row.payload {
-                ChainPayload::Execution(ExecutionPayload::SourceInput(input)) if row.event_type()=="query.answered" => Some((input.number,row)),
+                ChainPayload::Execution(ExecutionPayload::SourceInput(input))
+                    if row.event_type() == "query.answered" =>
+                {
+                    Some((input.number, row))
+                }
                 _ => None,
             })
             .collect()
@@ -7948,28 +7981,49 @@ mod source_ports {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn csv_supplier_binding_selects_rows() {
-        let file=fresh_tickets("csv_supplier_binding");
-        let fixture=Scenario { graph:Graph::SourcePortTicketFixture(100), ..file.clone() };
-        for (scenario,expected) in [(&file,("CUST-002","P2","bug")),(&fixture,("CUST-001","P0","billing"))] {
-            let path=Child::spawn(scenario,Vec::new(),None).completed().await;
-            let archive=Archive::read(&path).await;
-            let (_,ticket)=archive.facts::<Ticket>("tickets").nth(1).unwrap();
+        let file = fresh_tickets("csv_supplier_binding");
+        let fixture = Scenario {
+            graph: Graph::SourcePortTicketFixture(100),
+            ..file.clone()
+        };
+        for (scenario, expected) in [
+            (&file, ("CUST-002", "P2", "bug")),
+            (&fixture, ("CUST-001", "P0", "billing")),
+        ] {
+            let path = Child::spawn(scenario, Vec::new(), None).completed().await;
+            let archive = Archive::read(&path).await;
+            let (_, ticket) = archive.facts::<Ticket>("tickets").nth(1).unwrap();
             assert_eq!(ticket.ticket_id, "TKT-000002");
-            assert_eq!((ticket.customer_id.as_str(),ticket.priority.as_str(),ticket.category.as_str()),expected);
-            assert_eq!(ticket_reads(&archive).len(),5);
+            assert_eq!(
+                (
+                    ticket.customer_id.as_str(),
+                    ticket.priority.as_str(),
+                    ticket.category.as_str()
+                ),
+                expected
+            );
+            assert_eq!(ticket_reads(&archive).len(), 5);
         }
-        let interrupted=interrupted_tickets(&fixture,"csv_supplier_binding").await;
-        let changed=Scenario {graph:Graph::SourcePortTicketFixture(99),..fixture.clone()};
-        let runs=fixture.runs();
-        for args in [replay(&interrupted),resume(&interrupted)] {
-            let mut args=args;
+        let interrupted = interrupted_tickets(&fixture, "csv_supplier_binding").await;
+        let changed = Scenario {
+            graph: Graph::SourcePortTicketFixture(99),
+            ..fixture.clone()
+        };
+        let runs = fixture.runs();
+        for args in [replay(&interrupted), resume(&interrupted)] {
+            let mut args = args;
             args.push("--allow-incomplete-archive".into());
-            let child=Child::spawn(&changed,args,None);
-            let log=child.log.clone();
+            let child = Child::spawn(&changed, args, None);
+            let log = child.log.clone();
             assert!(!child.exit().await.success());
-            let message=read_log(&log);
-            assert!(message.contains("scripted-tickets") && message.contains("100") && message.contains("99"),"{message}");
-            assert_eq!(fixture.runs(),runs);
+            let message = read_log(&log);
+            assert!(
+                message.contains("scripted-tickets")
+                    && message.contains("100")
+                    && message.contains("99"),
+                "{message}"
+            );
+            assert_eq!(fixture.runs(), runs);
         }
     }
 

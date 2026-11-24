@@ -729,7 +729,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         Some(self.source.system().clone())
     }
 
-
     fn stage_middleware_names(&self) -> Vec<String> {
         self.stage_middleware_factories()
             .into_iter()
@@ -885,7 +884,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
     fn source_system(&self) -> Option<SourceSystem> {
         Some(self.source.system().clone())
     }
-
 
     fn stage_middleware_names(&self) -> Vec<String> {
         self.stage_middleware_factories()

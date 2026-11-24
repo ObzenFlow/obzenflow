@@ -3134,7 +3134,6 @@ impl EffectsCore {
             })
     }
 
-
     fn live_effect_contexts(
         &self,
         declaration: &EffectDeclaration,

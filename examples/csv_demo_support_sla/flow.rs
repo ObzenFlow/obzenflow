@@ -5,18 +5,16 @@
 use super::domain::{
     due_bucket, plan_sla_cap_hours, triage_ticket, Customer, EnrichedTicket, Ticket, TriagedTicket,
 };
-use anyhow::Result;
 use super::scripted::TicketFixture;
+use anyhow::Result;
 use obzenflow::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{flow, join, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow::journal::disk_journals;
+use obzenflow::queries::QueryPort;
 use obzenflow::stages::joins::{JoinReferenceView, TypedJoinHandler};
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
-use obzenflow::queries::QueryPort;
-use obzenflow::stages::sources::{
-    CsvDecoder, CsvFile, CsvFileSystem, CsvSource,
-};
+use obzenflow::stages::sources::{CsvDecoder, CsvFile, CsvFileSystem, CsvSource};
 use obzenflow::stages::transforms::TypedTransformHandler;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;

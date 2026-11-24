@@ -237,7 +237,10 @@ pub struct SourceSystem {
 
 impl SourceSystem {
     pub(crate) fn event(evidence: obzenflow_core::SystemBindingEvidence) -> Self {
-        Self { binding: evidence.binding().clone(), system: None }
+        Self {
+            binding: evidence.binding().clone(),
+            system: None,
+        }
     }
 
     pub(crate) fn query<P: ?Sized + Send + Sync + 'static>(
@@ -245,17 +248,34 @@ impl SourceSystem {
         resolve: impl Fn() -> Result<Arc<P>, crate::queries::QueryError> + Send + Sync + 'static,
     ) -> Self {
         let recipe = SystemPort::deferred(Arc::new(move || Ok(Arc::new(resolve()))));
-        Self { binding: evidence.binding().clone(), system: Some(Arc::new(recipe)) }
+        Self {
+            binding: evidence.binding().clone(),
+            system: Some(Arc::new(recipe)),
+        }
     }
 
     pub(crate) fn resolve_query<P: ?Sized + Send + Sync + 'static>(
-        &self, registry: &EffectPortRegistry,
+        &self,
+        registry: &EffectPortRegistry,
     ) -> Result<Result<Arc<P>, crate::queries::QueryError>, super::EffectError> {
-        let system = self.system.as_ref().ok_or_else(|| super::EffectError::ReplayArchive(format!("source {} has no query supplier", self.name())))?;
-        let entry = registry.resolve_at(system.coordinate)
-            .map_err(|fault| super::EffectError::ReplayArchive(format!("source binding {}: {fault:?}", self.name())))?;
-        let result = entry.port.downcast_ref::<Arc<Result<Arc<P>, crate::queries::QueryError>>>()
-            .ok_or_else(|| super::EffectError::ReplayArchive(format!("source binding {} has a different port type", self.name())))?;
+        let system = self.system.as_ref().ok_or_else(|| {
+            super::EffectError::ReplayArchive(format!(
+                "source {} has no query supplier",
+                self.name()
+            ))
+        })?;
+        let entry = registry.resolve_at(system.coordinate).map_err(|fault| {
+            super::EffectError::ReplayArchive(format!("source binding {}: {fault:?}", self.name()))
+        })?;
+        let result = entry
+            .port
+            .downcast_ref::<Arc<Result<Arc<P>, crate::queries::QueryError>>>()
+            .ok_or_else(|| {
+                super::EffectError::ReplayArchive(format!(
+                    "source binding {} has a different port type",
+                    self.name()
+                ))
+            })?;
         Ok(result.as_ref().clone())
     }
 

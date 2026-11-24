@@ -74,7 +74,9 @@ pub enum SystemLocation {
     Json {
         endpoint: HttpEndpoint,
     },
-    Application { configuration: serde_json::Value },
+    Application {
+        configuration: serde_json::Value,
+    },
     /// `Ingress` is the ingress key of a hosted endpoint.
     Ingress {
         key: String,
@@ -226,7 +228,9 @@ impl SystemBindingEvidence {
         let binding = SystemBinding {
             system: system.to_owned(),
             location: location.map(|location| match location {
-                SystemLocation::Application { configuration } => SystemLocation::Application { configuration: crate::source::canonicalize(configuration) },
+                SystemLocation::Application { configuration } => SystemLocation::Application {
+                    configuration: crate::source::canonicalize(configuration),
+                },
                 other => other,
             }),
         };

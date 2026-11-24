@@ -595,7 +595,6 @@ where
         self.reads.replayed
     }
 
-
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
         self.reads.context = Some(context);
     }
@@ -640,7 +639,6 @@ where
     fn has_pending_records(&self) -> bool {
         self.reads.has_pending()
     }
-
 
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
         self.reads.context = Some(context);
@@ -747,7 +745,6 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceH
         SYNC_IDLE_BACKOFF_CAP
     }
 
-
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
         self.reads.context = Some(context);
     }
@@ -827,7 +824,6 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncFiniteSourceHan
     fn idle_backoff_cap(&self) -> Duration {
         SYNC_IDLE_BACKOFF_CAP
     }
-
 
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
         self.reads.context = Some(context);

@@ -11,7 +11,7 @@ use obzenflow_core::event::{
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
-use obzenflow_runtime::effects::{perform, EffectContext, EffectError, Port, SystemName};
+use obzenflow_runtime::effects::{perform, EffectError, Port, SystemName};
 use obzenflow_runtime::stages::common::handlers::source::{
     Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
 };

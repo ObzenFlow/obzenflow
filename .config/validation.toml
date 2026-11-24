@@ -370,27 +370,6 @@ rationale = "Temporary configuration and disk evidence cover host admission and 
 
 [[prerequisites]]
 binary = "obzenflow_infra"
-test = "clients::http::reqwest_client::replay_tests::abort_during_initialization_cancels_the_waiter_before_request_send"
-lanes = ["production-features"]
-capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
-rationale = "Isolated child controls process-global client state; owned HTTP peer and disk archive distinguish live, cancelled and replayed requests."
-
-[[prerequisites]]
-binary = "obzenflow_infra"
-test = "clients::http::reqwest_client::replay_tests::resume_initializes_only_after_the_recorded_prefix_crosses_continue_live"
-lanes = ["production-features"]
-capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
-rationale = "Isolated child controls process-global client state; owned HTTP peer and disk archive distinguish live, cancelled and replayed requests."
-
-[[prerequisites]]
-binary = "obzenflow_infra"
-test = "clients::http::reqwest_client::replay_tests::strict_replay_keeps_the_default_source_client_cold"
-lanes = ["production-features"]
-capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
-rationale = "Isolated child controls process-global client state; owned HTTP peer and disk archive distinguish live, cancelled and replayed requests."
-
-[[prerequisites]]
-binary = "obzenflow_infra"
 test = "clients::http::reqwest_client::tests::cancelled_waiter_does_not_repeat_setup_or_send_a_request"
 lanes = ["production-features"]
 capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]

@@ -11,8 +11,8 @@ use super::read::FiniteRead;
 use super::typed::{configuration_fatal, protocol_fatal};
 use super::SourceContinuation;
 use crate::effects::{EffectInvocationContext, EffectsCore, SystemName};
-use crate::queries::{ask, QueryContext, QueryError, QueryPort};
 use crate::messaging::upstream_subscription::StageInputPosition;
+use crate::queries::{ask, QueryContext, QueryError, QueryPort};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -74,7 +74,6 @@ impl SealAsyncFinite for PlaceholderRows {}
 
 #[async_trait]
 impl UnifiedAsyncFiniteSourceHandler for PlaceholderRows {
-
     fn install_read_context(&mut self, context: EffectInvocationContext) {
         self.context = Some(context);
     }

@@ -13,8 +13,8 @@ mod tests {
     use obzenflow_core::OneFactOutcome;
     use obzenflow_core::{outcome, ChainEvent, StageId, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
-    use obzenflow_runtime::effects::{EffectContext, EffectError, SystemName};
-    use obzenflow_runtime::effects::{Effects, Port, StageCompletion};
+    use obzenflow_runtime::effects::SystemName;
+    use obzenflow_runtime::effects::{Effects, StageCompletion};
     use obzenflow_runtime::feed_plan::{
         payload_key_from_type_hint, FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed,
         OutcomeContract, PayloadTypeDescriptor,
@@ -159,7 +159,8 @@ mod tests {
             &self,
             _from: &NextInput,
             _ctx: &obzenflow_runtime::queries::QueryContext,
-        ) -> Result<FiniteRead<InputEvent, NextInput>, obzenflow_runtime::queries::QueryError> {
+        ) -> Result<FiniteRead<InputEvent, NextInput>, obzenflow_runtime::queries::QueryError>
+        {
             Ok(FiniteRead::EndOfInput)
         }
 
@@ -167,7 +168,8 @@ mod tests {
             &self,
             _from: &NextLiveInput,
             _ctx: &obzenflow_runtime::queries::QueryContext,
-        ) -> Result<ContinuousRead<InputEvent, NextLiveInput>, obzenflow_runtime::queries::QueryError> {
+        ) -> Result<ContinuousRead<InputEvent, NextLiveInput>, obzenflow_runtime::queries::QueryError>
+        {
             Ok(ContinuousRead {
                 records: Vec::new(),
                 next: NextLiveInput,
@@ -178,15 +180,21 @@ mod tests {
     fn finite_read<O: OneFactOutcome + Send + Sync + 'static>(
         output: fn(InputEvent) -> O,
     ) -> SourceRead<O> {
-        SourceRead::finite(obzenflow_runtime::queries::QueryPort::to(NoInput), NextInput, move |event| Ok(output(event)))
+        SourceRead::finite(
+            obzenflow_runtime::queries::QueryPort::to(NoInput),
+            NextInput,
+            move |event| Ok(output(event)),
+        )
     }
 
     fn live_read<O: OneFactOutcome + Send + Sync + 'static>(
         output: fn(InputEvent) -> O,
     ) -> SourceRead<O, Continuous> {
-        SourceRead::continuous(obzenflow_runtime::queries::QueryPort::to(NoInput), NextLiveInput, move |event| {
-            Ok(output(event))
-        })
+        SourceRead::continuous(
+            obzenflow_runtime::queries::QueryPort::to(NoInput),
+            NextLiveInput,
+            move |event| Ok(output(event)),
+        )
     }
 
     fn live_input<T: TypedPayload + Send + Sync + 'static>(
@@ -580,7 +588,7 @@ mod tests {
             ),
         ];
         let reattach = Some(SourceContinuation::Reattach {
-            guarantee: ReattachGuarantee::AtMostOnce,
+            guarantee: ReattachGuarantee::LatestState,
         });
         assert_eq!(
             read.map(|descriptor| descriptor.source_continuation()),

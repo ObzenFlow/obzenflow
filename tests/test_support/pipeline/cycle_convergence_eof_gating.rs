@@ -43,7 +43,6 @@ const KIND_SEED: &str = "seed";
 const KIND_ITER: &str = "iter";
 const KIND_DONE: &str = "done";
 use obzenflow::stages::sources::{ChannelSource, ValuesSource};
-use obzenflow_runtime::effects::EffectContext;
 use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;

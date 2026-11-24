@@ -4,9 +4,9 @@
 
 //! Replay-safe user effects.
 
-use async_trait::async_trait;
 #[doc(hidden)]
 pub use crate::queries as __queries;
+use async_trait::async_trait;
 pub use obzenflow_core::event::payloads::effect_payload::{
     effect_escape_controls_group_id, effect_outcome_group_id, effect_recovery_progress_group_id,
     is_framework_effect_event_type, CanonicalInputHash, EffectAttemptOrdinal, EffectAttemptStarted,
@@ -99,6 +99,7 @@ pub use call::{
     AtLeastOnce, AtMostOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey,
     Transactional,
 };
+pub(crate) use command::checked_system_name;
 #[doc(hidden)]
 pub use command::{
     assert_command, assert_handler_performs_no_ai_effect, assert_port_answer,
@@ -109,7 +110,6 @@ pub use command::{
     PortList, PortMark, PortReply, PortServesRequest, ServesPort, StageEffectsError, Unused, Used,
     WholePort,
 };
-pub(crate) use command::checked_system_name;
 pub use command::{Command, LocatedSystem, Port, StagePort, SystemName};
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;

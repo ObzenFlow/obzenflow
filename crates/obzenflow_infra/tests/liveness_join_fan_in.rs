@@ -10,7 +10,6 @@ use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::Port;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -181,7 +180,8 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
             kind: "ref".to_string(),
             value: 1,
         }]);
-        let stream_source = DelayedStreamSource(obzenflow_runtime::queries::QueryPort::to(DelayedStream));
+        let stream_source =
+            DelayedStreamSource(obzenflow_runtime::queries::QueryPort::to(DelayedStream));
         let slow_join = SlowJoin {
             release: join_release,
         };
@@ -305,6 +305,5 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
 
 use crate::liveness_observations;
 use obzenflow_adapters::sources::ValuesSource;
-use obzenflow_runtime::effects::{EffectContext, EffectError};
 use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;

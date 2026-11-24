@@ -232,7 +232,6 @@ struct Journals {
     error: Arc<dyn Journal<ChainEvent>>,
 }
 
-
 fn admitted<F, H>(
     handler: H,
 ) -> (
@@ -508,9 +507,7 @@ where
     journals
 }
 
-fn source_inputs(
-    rows: &Rows,
-) -> Vec<obzenflow_core::query::SourceInputRecord> {
+fn source_inputs(rows: &Rows) -> Vec<obzenflow_core::query::SourceInputRecord> {
     rows.iter()
         .filter_map(|row| match &row.payload {
             ChainPayload::Execution(ExecutionPayload::SourceInput(record)) => {
@@ -541,13 +538,11 @@ fn attempt_starts(rows: &Rows) -> usize {
         .count()
 }
 
-fn reply<T: serde::de::DeserializeOwned>(
-    record: &obzenflow_core::query::SourceInputRecord,
-) -> T {
+fn reply<T: serde::de::DeserializeOwned>(record: &obzenflow_core::query::SourceInputRecord) -> T {
     match &record.input {
-        obzenflow_core::query::SourceInput::QueryAnswered {
-            answer: output, ..
-        } => serde_json::from_value(output.clone()).expect("the recorded reply decodes"),
+        obzenflow_core::query::SourceInput::QueryAnswered { answer: output, .. } => {
+            serde_json::from_value(output.clone()).expect("the recorded reply decodes")
+        }
         other => panic!("expected a recorded reply, got {other:?}"),
     }
 }
@@ -618,10 +613,7 @@ async fn port_read_records_system_binding() {
     assert_eq!(declared.name(), "lifecycle-script");
     let reads = source_inputs(&data);
     assert_eq!(
-        reads
-            .iter()
-            .map(|read| read.number)
-            .collect::<Vec<_>>(),
+        reads.iter().map(|read| read.number).collect::<Vec<_>>(),
         [1, 2, 3],
         "the empty answer and the end of input have their own read numbers"
     );
@@ -658,7 +650,9 @@ trait GuardedTake: InputReadiness + Send + Sync {
 }
 
 #[derive(Clone, Default)]
-struct Guarded { calls:Arc<AtomicUsize> }
+struct Guarded {
+    calls: Arc<AtomicUsize>,
+}
 
 impl SystemName for Guarded {
     const NAME: &'static str = "guarded-take";
@@ -734,19 +728,17 @@ async fn pending_query_records_completed_answers() {
         .await
         .expect("source terminates")
         .unwrap();
-    let rows=journals.data.read_all_unordered().await.unwrap();
-    assert_eq!(source_inputs(&rows).len(),2);
-    assert_eq!(facts(&rows),2);
-    assert_eq!(attempt_starts(&rows),0);
-
+    let rows = journals.data.read_all_unordered().await.unwrap();
+    assert_eq!(source_inputs(&rows).len(), 2);
+    assert_eq!(facts(&rows), 2);
+    assert_eq!(attempt_starts(&rows), 0);
 }
 
 #[tokio::test]
 async fn readiness_wait_issues_no_call() {
     let fixture = Fixture::new(Reading::NeverReady);
-    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncInfiniteSourceHandler, _>(
-        WaitingRows(deferred(&fixture)),
-    );
+    let (source, ports, declarations) =
+        admitted::<dyn UnifiedAsyncInfiniteSourceHandler, _>(WaitingRows(deferred(&fixture)));
     let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
     let config = infinite::InfiniteSourceConfig::new(stage, "input", "lifecycle");
     let handle = infinite::AsyncInfiniteSourceBuilder::new(source, config, resources)
@@ -820,7 +812,10 @@ fn placed<N>(at: u32, next: fn(u32) -> N) -> FiniteRead<Marker, N> {
 #[obzenflow_runtime::effects::port]
 trait InlineInput: Send + Sync {
     #[query(type = "source.lifecycle.inline_read")]
-    fn read(&self, from: &NextInline) -> Result<FiniteRead<Marker, NextInline>, obzenflow_runtime::queries::QueryError>;
+    fn read(
+        &self,
+        from: &NextInline,
+    ) -> Result<FiniteRead<Marker, NextInline>, obzenflow_runtime::queries::QueryError>;
 }
 
 #[derive(Clone, Default)]
@@ -831,7 +826,10 @@ impl SystemName for Inline {
 }
 
 impl InlineInput for Inline {
-    fn read(&self, from: &NextInline) -> Result<FiniteRead<Marker, NextInline>, obzenflow_runtime::queries::QueryError> {
+    fn read(
+        &self,
+        from: &NextInline,
+    ) -> Result<FiniteRead<Marker, NextInline>, obzenflow_runtime::queries::QueryError> {
         self.0.record(std::thread::current().id());
         Ok(placed(from.0, NextInline))
     }
@@ -892,7 +890,12 @@ impl BlockingInput for Blocking {
     ) -> Result<FiniteRead<Marker, NextBlocking>, obzenflow_runtime::queries::QueryError> {
         let thread = tokio::task::spawn_blocking(|| std::thread::current().id())
             .await
-            .map_err(|_| crate::queries::QueryError::terminal(SourcePollErrorKind::Other,SourceDiagnosticReason::InputUnavailable))?;
+            .map_err(|_| {
+                crate::queries::QueryError::terminal(
+                    SourcePollErrorKind::Other,
+                    SourceDiagnosticReason::InputUnavailable,
+                )
+            })?;
         self.0.record(thread);
         Ok(placed(from.0, NextBlocking))
     }
@@ -1040,16 +1043,17 @@ async fn shared_cold_port_resolves_once() {
     let builds = Arc::new(AtomicUsize::new(0));
     let script = Script(Arc::new(vec![vec![Marker::Row], vec![Marker::Row]]));
     let counted = builds.clone();
-    let port: obzenflow_runtime::queries::QueryPort<dyn ScriptedInput> = obzenflow_runtime::queries::QueryPort::deferred(move || {
-        counted.fetch_add(1, Ordering::SeqCst);
-        Ok(script.clone())
-    });
+    let port: obzenflow_runtime::queries::QueryPort<dyn ScriptedInput> =
+        obzenflow_runtime::queries::QueryPort::deferred(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(script.clone())
+        });
     let left =
         AdmitSource::<dyn UnifiedAsyncFiniteSourceHandler>::admit(ScriptedRows(port.clone()));
     let right = AdmitSource::<dyn UnifiedAsyncFiniteSourceHandler>::admit(ScriptedRows(port));
-    let left_declarations=Vec::new();
-    let right_declarations=Vec::new();
-    let mut ports=EffectPortRegistry::new();
+    let left_declarations = Vec::new();
+    let right_declarations = Vec::new();
+    let mut ports = EffectPortRegistry::new();
     ports.install_source_system(left.system());
     ports.install_source_system(right.system());
 
@@ -1159,7 +1163,11 @@ impl LimitedInput for Limited {
             calls.len()
         };
         match (call, from.0) {
-            (1, _) => Err(crate::queries::QueryError::recoverable(SourcePollErrorKind::Transport,SourceDiagnosticReason::RateLimited).with_retry_after(LIMITED_DELAY)),
+            (1, _) => Err(crate::queries::QueryError::recoverable(
+                SourcePollErrorKind::Transport,
+                SourceDiagnosticReason::RateLimited,
+            )
+            .with_retry_after(LIMITED_DELAY)),
             (_, 0) => Ok(FiniteRead::Batch {
                 records: vec![Marker::Row],
                 next: NextLimited(1),
@@ -1204,12 +1212,7 @@ async fn rate_limited_retry_keeps_read_number() {
     let data = journals.data.read_all_unordered().await.unwrap();
     let cursors: Vec<(u64, u32)> = source_inputs(&data)
         .iter()
-        .map(|record| {
-            (
-                record.number,
-                record.attempt,
-            )
-        })
+        .map(|record| (record.number, record.attempt))
         .collect();
     assert_eq!(cursors, [(1, 1), (1, 2), (2, 1)]);
     assert_eq!(facts(&data), 1);
@@ -1255,9 +1258,7 @@ async fn continuous_read_second_system_supplies_rows() {
             rows: AtomicUsize::new(2),
         }),
     };
-    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncInfiniteSourceHandler, _>(
-        rows,
-    );
+    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncInfiniteSourceHandler, _>(rows);
     let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
     let config = infinite::InfiniteSourceConfig::new(stage, "input", "lifecycle");
     let handle = infinite::AsyncInfiniteSourceBuilder::new(source, config, resources)

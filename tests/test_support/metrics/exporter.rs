@@ -37,19 +37,13 @@ struct MetricEvent {
 impl TypedPayload for MetricEvent {
     const EVENT_TYPE: &'static str = "metric.sample";
 }
-use obzenflow::stages::sources::ValuesSource;
-use obzenflow_runtime::effects::EffectContext;
 use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::time::{sleep, Duration};
 
 fn burst(total: usize) -> impl TypedFiniteSourceHandler<Output = MetricEvent> {
-    ValuesSource::new(
-        (0..total as u64)
-            .map(|index| MetricEvent { index })
-            .collect::<Vec<_>>(),
-    )
+    crate::replay_testkit::single_values((0..total as u64).map(|index| MetricEvent { index }))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,7 +78,10 @@ impl MetricInput for ErrorAfterFirst {
                 next: MetricRead(1),
             }),
             _ if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) => {
-                Err(obzenflow::queries::QueryError::recoverable(obzenflow::queries::SourcePollErrorKind::Timeout,obzenflow::queries::SourceDiagnosticReason::TimedOut))
+                Err(obzenflow::queries::QueryError::recoverable(
+                    obzenflow::queries::SourcePollErrorKind::Timeout,
+                    obzenflow::queries::SourceDiagnosticReason::TimedOut,
+                ))
             }
             _ => Ok(FiniteRead::EndOfInput),
         }

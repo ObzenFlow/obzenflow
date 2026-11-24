@@ -17,12 +17,12 @@ use obzenflow_core::BindingEvidenceError;
 use obzenflow_runtime::effects::{
     EffectError, EffectPortResolutionError, LocatedSystem, SystemName,
 };
-use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
 use obzenflow_runtime::queries::{QueryBookmark, QueryContext, QueryError, QueryPort};
-use std::num::NonZeroUsize;
+use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 /// `FileSystem` is the framework system that reads a file at a configured path.
@@ -123,7 +123,9 @@ pub struct YamlFileSystem {
 }
 
 impl YamlFileSystem {
-    pub fn at(path: impl Into<PathBuf>) -> Self { Self { path: path.into() } }
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
     pub fn port(self) -> Result<QueryPort<dyn YamlFile>, BindingEvidenceError> {
         QueryPort::located(self)
     }
@@ -151,23 +153,17 @@ impl LocatedSystem for YamlFileSystem {
 #[async_trait]
 pub trait YamlFile: Send + Sync {
     #[query(type = "obzenflow.yaml.read")]
-    async fn read(
-        &self,
-        from: &YamlRead,
-        ctx: &QueryContext,
-    ) -> Result<YamlPage, QueryError>;
+    async fn read(&self, from: &YamlRead, ctx: &QueryContext) -> Result<YamlPage, QueryError>;
 }
 
 #[async_trait]
 impl YamlFile for FileSystem {
-    async fn read(
-        &self,
-        from: &YamlRead,
-        _ctx: &QueryContext,
-    ) -> Result<YamlPage, QueryError> {
+    async fn read(&self, from: &YamlRead, _ctx: &QueryContext) -> Result<YamlPage, QueryError> {
         let path = self.path.clone();
         let from = from.clone();
-        blocking_io(move || read_yaml_page(&path, from)).await.map_err(file_query_error)?
+        blocking_io(move || read_yaml_page(&path, from))
+            .await
+            .map_err(file_query_error)?
     }
 }
 
@@ -176,11 +172,7 @@ impl YamlFile for FileSystem {
 #[async_trait]
 pub trait CsvFile: Send + Sync {
     #[query(type = "obzenflow.csv.read")]
-    async fn read(
-        &self,
-        from: &CsvRead,
-        ctx: &QueryContext,
-    ) -> Result<CsvPage, QueryError>;
+    async fn read(&self, from: &CsvRead, ctx: &QueryContext) -> Result<CsvPage, QueryError>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -193,7 +185,11 @@ pub struct CsvRead {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CsvPage {
-    Batch { headers: Vec<String>, records: Vec<CsvLine>, next: QueryBookmark },
+    Batch {
+        headers: Vec<String>,
+        records: Vec<CsvLine>,
+        next: QueryBookmark,
+    },
     EndOfInput,
 }
 
@@ -256,23 +252,50 @@ pub enum CsvLine {
 
 #[async_trait]
 impl CsvFile for FileSystem {
-    async fn read(&self, from: &CsvRead, _: &QueryContext) -> Result<CsvPage,QueryError> {
+    async fn read(&self, from: &CsvRead, _: &QueryContext) -> Result<CsvPage, QueryError> {
         let FileFormat::Csv(format) = self.format.clone() else {
-            return Err(QueryError::terminal(SourcePollErrorKind::Validation,SourceDiagnosticReason::UnexpectedShape));
+            return Err(QueryError::terminal(
+                SourcePollErrorKind::Validation,
+                SourceDiagnosticReason::UnexpectedShape,
+            ));
         };
-        let seek = FileCsvRead { chunk: from.limit.get(), skip_rows: from.skip_rows, columns: from.columns.clone(),
-            at: from.after.as_ref().map(QueryBookmark::decode).transpose()? };
-        let path=self.path.clone();
-        match blocking_io(move || read_csv(&path,&format,seek)).await.map_err(file_query_error)?.map_err(file_query_error)? {
+        let seek = FileCsvRead {
+            chunk: from.limit.get(),
+            skip_rows: from.skip_rows,
+            columns: from.columns.clone(),
+            at: from.after.as_ref().map(QueryBookmark::decode).transpose()?,
+        };
+        let path = self.path.clone();
+        match blocking_io(move || read_csv(&path, &format, seek))
+            .await
+            .map_err(file_query_error)?
+            .map_err(file_query_error)?
+        {
             FiniteRead::EndOfInput => Ok(CsvPage::EndOfInput),
-            FiniteRead::Batch { records,next } => {
+            FiniteRead::Batch { records, next } => {
                 match records.as_slice() {
-                    [CsvLine::Refused {kind, diagnostic}] => return Err(QueryError::terminal(*kind,diagnostic.clone())),
-                    [CsvLine::Changed] => return Err(QueryError::terminal(SourcePollErrorKind::Transport,SourceDiagnosticReason::InputChanged)),
+                    [CsvLine::Refused { kind, diagnostic }] => {
+                        return Err(QueryError::terminal(*kind, diagnostic.clone()))
+                    }
+                    [CsvLine::Changed] => {
+                        return Err(QueryError::terminal(
+                            SourcePollErrorKind::Transport,
+                            SourceDiagnosticReason::InputChanged,
+                        ))
+                    }
                     _ => {}
                 }
-                let at=next.at.ok_or_else(|| QueryError::terminal(SourcePollErrorKind::Other,SourceDiagnosticReason::UnexpectedShape))?;
-                Ok(CsvPage::Batch {next:QueryBookmark::encode(&at)?,headers:at.headers,records})
+                let at = next.at.ok_or_else(|| {
+                    QueryError::terminal(
+                        SourcePollErrorKind::Other,
+                        SourceDiagnosticReason::UnexpectedShape,
+                    )
+                })?;
+                Ok(CsvPage::Batch {
+                    next: QueryBookmark::encode(&at)?,
+                    headers: at.headers,
+                    records,
+                })
             }
         }
     }
@@ -280,8 +303,14 @@ impl CsvFile for FileSystem {
 
 fn file_query_error(error: EffectError) -> QueryError {
     match error {
-        EffectError::SourceRead {failure,..} => QueryError {failure:*failure,retry_after:None},
-        _ => QueryError::terminal(SourcePollErrorKind::Transport, SourceDiagnosticReason::InputUnavailable)
+        EffectError::SourceRead { failure, .. } => QueryError {
+            failure,
+            retry_after: None,
+        },
+        _ => QueryError::terminal(
+            SourcePollErrorKind::Transport,
+            SourceDiagnosticReason::InputUnavailable,
+        ),
     }
 }
 
@@ -600,7 +629,8 @@ mod tests {
             ),
             FiniteRead::EndOfInput => panic!("end of input"),
         };
-        let (first, next) = indexes(read_csv(&path, &csv(), FileCsvRead::first(2, 1, None)).unwrap());
+        let (first, next) =
+            indexes(read_csv(&path, &csv(), FileCsvRead::first(2, 1, None)).unwrap());
         let (second, _) = indexes(read_csv(&path, &csv(), next).unwrap());
         assert_eq!((first, second), (vec![1, 2], vec![3]));
     }
@@ -723,8 +753,14 @@ mod tests {
         let version = FileVersion::of(&opened).unwrap();
         input.write_all(b"Edsger\n").unwrap();
         input.flush().unwrap();
-        let read =
-            read_open_csv(opened, version, &path, &csv(), FileCsvRead::first(10, 0, None)).unwrap();
+        let read = read_open_csv(
+            opened,
+            version,
+            &path,
+            &csv(),
+            FileCsvRead::first(10, 0, None),
+        )
+        .unwrap();
         assert!(
             matches!(lines(read).as_slice(), [CsvLine::Changed]),
             "no row read from an edited file is published"

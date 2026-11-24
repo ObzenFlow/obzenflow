@@ -235,8 +235,8 @@ pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 
 /// Finite YAML source and its application decoder contract.
 pub use obzenflow_adapters::sources::{
-    YamlDecodeError, YamlDecoder, YamlLine, YamlNode, YamlPage, YamlRead, YamlRecord, YamlSelection,
-    YamlSource, YamlSourceBuilder,
+    YamlDecodeError, YamlDecoder, YamlLine, YamlNode, YamlPage, YamlRead, YamlRecord,
+    YamlSelection, YamlSource, YamlSourceBuilder,
 };
 
 /// These items are the hosted source handler and the application-owned decoder contract

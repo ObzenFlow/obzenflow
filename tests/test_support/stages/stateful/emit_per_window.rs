@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use anyhow::{anyhow, Result};
-use obzenflow::effects::Port;
 use obzenflow::stages::sinks::DiscardSink;
 use obzenflow::stages::sources::ValuesSource;
 use obzenflow::stages::stateful::{self, emit};
@@ -14,8 +13,6 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::EffectContext;
-use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{

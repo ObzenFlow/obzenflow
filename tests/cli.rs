@@ -23,7 +23,6 @@ mod replay_testkit {
     pub use self::{discard::*, stage_journal::*, unsynced_application::*, unsynced_context::*};
 }
 
-use obzenflow::effects::{EffectContext, EffectError, Port};
 use obzenflow::flow::{flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;

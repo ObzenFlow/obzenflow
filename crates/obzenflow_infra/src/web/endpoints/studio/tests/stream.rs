@@ -21,7 +21,6 @@ use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{web::SseFrame, EventId, FlowId, JournalOwner, StageId};
-use obzenflow_runtime::effects::{EffectContext, EffectError, Port};
 use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1788,7 +1787,10 @@ impl CountedInput for FlakyCount {
             return Ok(FiniteRead::EndOfInput);
         }
         if from.0 == self.fails_at && !self.failed.swap(true, Ordering::SeqCst) {
-            return Err(obzenflow_runtime::queries::QueryError::recoverable(obzenflow_runtime::queries::SourcePollErrorKind::Timeout,obzenflow_runtime::queries::SourceDiagnosticReason::TimedOut));
+            return Err(obzenflow_runtime::queries::QueryError::recoverable(
+                obzenflow_runtime::queries::SourcePollErrorKind::Timeout,
+                obzenflow_runtime::queries::SourceDiagnosticReason::TimedOut,
+            ));
         }
         Ok(FiniteRead::Batch {
             records: vec![from.0],
@@ -1960,8 +1962,7 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
                     gate: gate.clone(),
                     index,
                     progress: progress.clone(),
-                })
-                ,
+                }),
                 item: |_| Item,
             };
             let mut descriptor = source!(Item => handler);

@@ -4,7 +4,6 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow::effects::Port;
 use obzenflow::testing::CountingSink;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::journal::Journal;
@@ -30,7 +29,6 @@ impl TypedPayload for RateLimiterTestEvent {
     const EVENT_TYPE: &'static str = "rate_limiter.event";
 }
 use obzenflow::stages::sources::ValuesSource;
-use obzenflow_runtime::effects::{EffectContext, EffectError};
 use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -234,11 +232,7 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
 
 /// Source step in the FLOWIP-114m no-charge tests. `Done` ends the source.
 fn sequence(total: u64) -> impl TypedFiniteSourceHandler<Output = RateLimiterTestEvent> {
-    ValuesSource::new(
-        (0..total)
-            .map(|index| RateLimiterTestEvent { index })
-            .collect::<Vec<_>>(),
-    )
+    crate::replay_testkit::single_values((0..total).map(|index| RateLimiterTestEvent { index }))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -363,7 +357,10 @@ impl ScriptedInput for Script {
                 records: Vec::new(),
                 next: from.clone(),
             }),
-            SourceStep::Err => Err(obzenflow::queries::QueryError::recoverable(obzenflow::queries::SourcePollErrorKind::Transport,obzenflow::queries::SourceDiagnosticReason::InputUnavailable)),
+            SourceStep::Err => Err(obzenflow::queries::QueryError::recoverable(
+                obzenflow::queries::SourcePollErrorKind::Transport,
+                obzenflow::queries::SourceDiagnosticReason::InputUnavailable,
+            )),
             SourceStep::Done => Ok(FiniteRead::EndOfInput),
         }
     }

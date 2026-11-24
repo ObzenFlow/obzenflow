@@ -13,7 +13,6 @@ use super::typed::{configuration_fatal, preserve_recorded, protocol_fatal};
 use super::SourceContinuation;
 use super::SourceError;
 use crate::effects::{EffectError, EffectInvocationContext, EffectsCore, SourceSystem};
-use obzenflow_core::query::SourceInput;
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::StageFatal;
 use async_trait::async_trait;
@@ -24,6 +23,7 @@ use obzenflow_core::ingress::{
     HostedIngressBindingSlot, IngressAttemptSeq, IngressContentDigest, IngressContext,
     IngressReceipt, IngressRequestId,
 };
+use obzenflow_core::query::SourceInput;
 use obzenflow_core::{ChainEvent, EventId, EventType, OneFactOutcome};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
@@ -136,9 +136,15 @@ impl<T> QueueState<T> {
 
 impl<T: OneFactOutcome> QueueState<T> {
     fn member(&self, submission: HostedSubmission<T>) -> Result<HostedMember, EffectError> {
-        let fact=HostedFact::of(submission.value).map_err(EffectError::Serialization)?;
-        self.receipts.lock().unwrap_or_else(PoisonError::into_inner).insert(receipt_key(&submission.context),submission.receipt);
-        Ok(HostedMember {fact,context:submission.context})
+        let fact = HostedFact::of(submission.value).map_err(EffectError::Serialization)?;
+        self.receipts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(receipt_key(&submission.context), submission.receipt);
+        Ok(HostedMember {
+            fact,
+            context: submission.context,
+        })
     }
 }
 
@@ -197,8 +203,11 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedSource<T> {
             rx,
             receipts: Mutex::new(HashMap::new()),
         });
-        let location = obzenflow_core::effect_binding::SystemLocation::Ingress { key:slot.ingress_key().as_str().to_owned() };
-        let evidence = obzenflow_core::SystemBindingEvidence::located(name,location).expect("an ingress key fits the binding evidence bound");
+        let location = obzenflow_core::effect_binding::SystemLocation::Ingress {
+            key: slot.ingress_key().as_str().to_owned(),
+        };
+        let evidence = obzenflow_core::SystemBindingEvidence::located(name, location)
+            .expect("an ingress key fits the binding evidence bound");
         Self {
             system: SourceSystem::event(evidence),
             queue,
@@ -343,31 +352,50 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
                         .unwrap_or_else(|| protocol_fatal(error.to_string())),
                 ));
             }
-            if self.admission.pending.is_empty() { self.slot.set_restoring(false); }
+            if self.admission.pending.is_empty() {
+                self.slot.set_restoring(false);
+            }
             if self.pending.is_empty() {
                 if self.queue.rx.ready().await.is_err() {
-                    return Some(ErasedSourceInvocation::handler_error(SourceError::Transport(SourceDiagnosticReason::InputClosed.into())));
+                    return Some(ErasedSourceInvocation::handler_error(
+                        SourceError::Transport(SourceDiagnosticReason::InputClosed.into()),
+                    ));
                 }
                 self.pending.extend(self.queue.rx.take(self.batch));
             }
         }
-        let outcome = effects.source_input(|input| matches!(input,SourceInput::IngressMember{..}), || async {
-            let submission=self.pending.pop_front().ok_or_else(||EffectError::Execution("ready ingress held no member".into()))?;
-            let member=self.queue.member(submission)?;
-            let member=serde_json::to_value(member).map_err(|e|EffectError::Serialization(e.to_string()))?;
-            Ok(SourceInput::IngressMember{member})
-        }).await;
+        let outcome = effects
+            .source_input(
+                |input| matches!(input, SourceInput::IngressMember { .. }),
+                || async {
+                    let submission = self.pending.pop_front().ok_or_else(|| {
+                        EffectError::Execution("ready ingress held no member".into())
+                    })?;
+                    let member = self.queue.member(submission)?;
+                    let member = serde_json::to_value(member)
+                        .map_err(|e| EffectError::Serialization(e.to_string()))?;
+                    Ok(SourceInput::IngressMember { member })
+                },
+            )
+            .await;
         self.reproduced = reproduced;
         match outcome {
-            Ok(SourceInput::IngressMember {member}) => {
+            Ok(SourceInput::IngressMember { member }) => {
                 let member = match serde_json::from_value::<HostedMember>(member) {
-                    Ok(member)=>member, Err(error)=>return Some(ErasedSourceInvocation::fatal(protocol_fatal(error.to_string()))),
+                    Ok(member) => member,
+                    Err(error) => {
+                        return Some(ErasedSourceInvocation::fatal(protocol_fatal(
+                            error.to_string(),
+                        )))
+                    }
                 };
                 self.number = number;
                 self.attempt =
                     obzenflow_core::event::payloads::effect_payload::EffectOrdinal::new(0);
                 if !reproduced {
-                    if let Some(fatal) = self.admission.foreign_member(std::slice::from_ref(&member)) {
+                    if let Some(fatal) =
+                        self.admission.foreign_member(std::slice::from_ref(&member))
+                    {
                         return Some(ErasedSourceInvocation::fatal(fatal));
                     }
                 }
@@ -379,8 +407,14 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
                 self.effects = Some(effects);
                 None
             }
-            Ok(_) => Some(ErasedSourceInvocation::fatal(protocol_fatal("ingress expected a member"))),
-            Err(error) => Some(ErasedSourceInvocation::fatal(effects.authoring_halt_fatal().unwrap_or_else(||protocol_fatal(error.to_string())))),
+            Ok(_) => Some(ErasedSourceInvocation::fatal(protocol_fatal(
+                "ingress expected a member",
+            ))),
+            Err(error) => Some(ErasedSourceInvocation::fatal(
+                effects
+                    .authoring_halt_fatal()
+                    .unwrap_or_else(|| protocol_fatal(error.to_string())),
+            )),
         }
     }
 
@@ -408,8 +442,19 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
                     .unwrap_or_else(|| protocol_fatal(error.to_string())))
             }
         };
-        if self.reproduced && self.context.as_ref().is_some_and(|stage| super::read::recording_ends_before(stage, self.number, &event.id)) {
-            effects.reproduce_trailing_crossing().await.map_err(|error| effects.authoring_halt_fatal().unwrap_or_else(|| protocol_fatal(error.to_string())))?;
+        if self.reproduced
+            && self.context.as_ref().is_some_and(|stage| {
+                super::read::recording_ends_before(stage, self.number, &event.id)
+            })
+        {
+            effects
+                .reproduce_trailing_crossing()
+                .await
+                .map_err(|error| {
+                    effects
+                        .authoring_halt_fatal()
+                        .unwrap_or_else(|| protocol_fatal(error.to_string()))
+                })?;
             return Ok(None);
         }
         let accepted_at_ns = context.accepted_at_ns;
@@ -430,9 +475,9 @@ impl<T: OneFactOutcome + Send + Sync + 'static> SealAsyncInfinite for HostedRead
 impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandler
     for HostedReadAdapter<T>
 {
-
     fn install_read_context(&mut self, context: EffectInvocationContext) {
-        self.slot.set_restoring(context.stage.runtime_execution.resume_control().is_some());
+        self.slot
+            .set_restoring(context.stage.runtime_execution.resume_control().is_some());
         self.context = Some(context);
     }
 
@@ -470,10 +515,15 @@ impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandle
         let mut effects = EffectsCore::new(context);
         match effects.cross_to_live().await {
             Ok(()) => {
-                let live = matches!(execution.source_phase_for(stage_id), crate::execution::SourceExecutionPhase::Live);
-                if live { self.slot.set_restoring(false); }
+                let live = matches!(
+                    execution.source_phase_for(stage_id),
+                    crate::execution::SourceExecutionPhase::Live
+                );
+                if live {
+                    self.slot.set_restoring(false);
+                }
                 Ok(live)
-            },
+            }
             Err(error) => Err(effects
                 .authoring_halt_fatal()
                 .unwrap_or_else(|| protocol_fatal(error.to_string()))),
@@ -903,12 +953,16 @@ mod tests {
         ))
         .await
         .expect("the queue has space");
-        queue.rx.ready().await.expect("the queue holds a submission");
+        queue
+            .rx
+            .ready()
+            .await
+            .expect("the queue holds a submission");
         assert_eq!(queue.rx.len(), 1, "readiness takes nothing");
         assert_eq!(tx.capacity(), 1, "readiness frees no slot");
-        let submission=queue.rx.take(1).pop().unwrap();
-        let member=queue.member(submission).unwrap();
-        assert_eq!(member.context.attempt_seq,IngressAttemptSeq(1));
+        let submission = queue.rx.take(1).pop().unwrap();
+        let member = queue.member(submission).unwrap();
+        assert_eq!(member.context.attempt_seq, IngressAttemptSeq(1));
         assert_eq!(tx.capacity(), 2, "the read frees the slot");
     }
 

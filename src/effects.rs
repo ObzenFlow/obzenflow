@@ -5,8 +5,6 @@
 //! Replay-safe external operations: the requests systems answer, the ports a
 //! command works through, and the systems the flow builder chooses for them.
 
-#[doc(hidden)]
-pub use obzenflow_runtime::queries as __queries;
 pub use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
 pub use obzenflow_runtime::effects::__facade::{command, port, system};
 pub use obzenflow_runtime::effects::{
@@ -24,6 +22,8 @@ pub use obzenflow_runtime::effects::{
     EffectPortResolutionError, EffectSet, Effects, IdempotencyKey, RetryDisposition,
     StageCompletion,
 };
+#[doc(hidden)]
+pub use obzenflow_runtime::queries as __queries;
 
 #[doc(hidden)]
 pub use obzenflow_runtime::effects::{

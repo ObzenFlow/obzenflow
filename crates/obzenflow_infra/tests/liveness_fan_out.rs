@@ -10,7 +10,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{Effects, Port, StageCompletion};
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -212,9 +212,11 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let numbers_handler = DelayedTwoEventSource(obzenflow_runtime::queries::QueryPort::to(DelayedTwoEvents {
-            finish_gate: source_finish_gate,
-        }));
+        let numbers_handler = DelayedTwoEventSource(obzenflow_runtime::queries::QueryPort::to(
+            DelayedTwoEvents {
+                finish_gate: source_finish_gate,
+            },
+        ));
         let slow_handler = SlowTransform::new();
         let fast_handler = FastTransform::new();
         let slow_sink_handler = NoopSink::<SlowProbeEvent>::new();
@@ -377,6 +379,5 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
 }
 
 use crate::liveness_observations;
-use obzenflow_runtime::effects::{EffectContext, EffectError};
 use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;

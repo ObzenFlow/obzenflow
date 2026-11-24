@@ -34,7 +34,6 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::EffectContext;
 use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -424,7 +423,7 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
     });
     expected_inf.push(MixedRow::Reattached(SourceReattachedFact {
         generation: 1,
-        guarantee: ReattachGuarantee::AtMostOnce,
+        guarantee: ReattachGuarantee::LatestState,
     }));
     expected_inf.extend(tick_rows("i", 105..=106));
     assert_eq!(
@@ -640,7 +639,10 @@ fn build_stalling_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let finite_handler = StallingFiniteSource(obzenflow_runtime::queries::QueryPort::to(StallingTicks { polls }));
+        let finite_handler =
+            StallingFiniteSource(obzenflow_runtime::queries::QueryPort::to(StallingTicks {
+                polls,
+            }));
         let infinite_handler =
             replay_testkit::preloaded_input((101..103).map(|value| ChannelTick {
                 channel: "i".to_string(),
@@ -1035,8 +1037,8 @@ async fn source_rows(run: &Path) -> Vec<SourceRow> {
             ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(_)) => {
                 Some(SourceRow::Declared)
             }
-            ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) => {
-                Some(SourceRow::Read(record.cursor.input_seq.get()))
+            ChainPayload::Execution(ExecutionPayload::SourceInput(record)) => {
+                Some(SourceRow::Read(record.number))
             }
             ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. }) => {
                 Some(SourceRow::CatchUp)
@@ -1332,9 +1334,9 @@ async fn unread_csv_source_resume_reads_input() -> Result<()> {
         resume_csv_run(&journal_base, &input, &failed_run, OrderCsv).await?;
     outcome?;
     let mut expected = vec![SourceRow::Declared, SourceRow::Read(1), SourceRow::CatchUp];
-    expected.extend((1..=ORDERS).flat_map(|id| [SourceRow::Read(id + 1), SourceRow::Order(id)]));
+    expected.extend(orders(1..=ORDERS));
     expected.extend([
-        SourceRow::Read(ORDERS + 2),
+        SourceRow::Read(ORDERS + 1),
         SourceRow::Eof(EofKind::Natural),
     ]);
     assert_eq!(source_rows(&resumed_run).await, expected);

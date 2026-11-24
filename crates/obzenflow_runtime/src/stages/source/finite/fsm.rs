@@ -981,7 +981,6 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler for DummySource {
-
         fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
 
         fn poll_timeout(&self) -> Option<std::time::Duration> {
@@ -999,7 +998,6 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler for DummySource {
-
         fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
 
         fn poll_timeout(&self) -> Option<std::time::Duration> {

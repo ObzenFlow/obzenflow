@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::effects::Port;
 use obzenflow::stages::stateful::{self, emit};
 use obzenflow::testing::CountingSink;
 use obzenflow_core::event::ChainEvent;
@@ -32,7 +31,6 @@ impl TypedPayload for SeedEvent {
     const EVENT_TYPE: &'static str = "cycle.seed_event";
 }
 use obzenflow::stages::sources::ValuesSource;
-use obzenflow_runtime::effects::{EffectContext, EffectError};
 use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use std::fs;
 use std::path::{Path, PathBuf};

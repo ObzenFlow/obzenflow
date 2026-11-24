@@ -6,18 +6,12 @@ use super::default_http_client;
 
 use obzenflow_core::effect_binding::{HttpEndpoint, SystemLocation};
 use obzenflow_core::event::observability::{HttpPullMeasurements, ObservationRecord};
-use obzenflow_core::event::payloads::execution_payload::{
-    SourcePollErrorKind,
-};
-use obzenflow_core::event::{
-    SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode,
-};
+use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
+use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::http_client::{HttpClient, HttpClientError, HttpRequest, HttpResponse, Url};
 use obzenflow_core::BindingEvidenceError;
+use obzenflow_runtime::effects::{EffectPortResolutionError, LocatedSystem, SystemName};
 use obzenflow_runtime::queries::{QueryContext, QueryError};
-use obzenflow_runtime::effects::{
-    EffectPortResolutionError, LocatedSystem, SystemName,
-};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,19 +51,24 @@ impl HttpApi {
         path: &str,
         ctx: &QueryContext,
     ) -> Result<T, QueryError> {
-        let url = self
-            .base
-            .join(path)
-            .map_err(|_| QueryError::terminal(SourcePollErrorKind::Validation,SourceDiagnosticReason::InvalidValue))?;
+        let url = self.base.join(path).map_err(|_| {
+            QueryError::terminal(
+                SourcePollErrorKind::Validation,
+                SourceDiagnosticReason::InvalidValue,
+            )
+        })?;
         let response = self.client.send(HttpRequest::get(url)).await;
         self.observe(&response, ctx);
         let response = response.map_err(unsent)?;
         if !response.is_success() {
             return Err(rejected(&response));
         }
-        response
-            .json()
-            .map_err(|_| QueryError::terminal(SourcePollErrorKind::Deserialization,with_status(SourceDiagnosticReason::MalformedInput,response.status)))
+        response.json().map_err(|_| {
+            QueryError::terminal(
+                SourcePollErrorKind::Deserialization,
+                with_status(SourceDiagnosticReason::MalformedInput, response.status),
+            )
+        })
     }
 
     fn observe(&self, response: &Result<HttpResponse, HttpClientError>, ctx: &QueryContext) {
@@ -110,20 +109,41 @@ fn with_status(reason: SourceDiagnosticReason, status: u16) -> SourceDiagnostic 
 
 fn unsent(error: HttpClientError) -> QueryError {
     match error {
-        HttpClientError::Unencodable(_) => QueryError::terminal(SourcePollErrorKind::Validation,SourceDiagnosticReason::InvalidValue),
-        HttpClientError::Timeout(_) => QueryError::recoverable(SourcePollErrorKind::Timeout,SourceDiagnosticReason::TimedOut),
-        _ => QueryError::recoverable(SourcePollErrorKind::Transport,SourceDiagnosticReason::InputUnavailable),
+        HttpClientError::Unencodable(_) => QueryError::terminal(
+            SourcePollErrorKind::Validation,
+            SourceDiagnosticReason::InvalidValue,
+        ),
+        HttpClientError::Timeout(_) => QueryError::recoverable(
+            SourcePollErrorKind::Timeout,
+            SourceDiagnosticReason::TimedOut,
+        ),
+        _ => QueryError::recoverable(
+            SourcePollErrorKind::Transport,
+            SourceDiagnosticReason::InputUnavailable,
+        ),
     }
 }
 
 fn rejected(response: &HttpResponse) -> QueryError {
     let status = response.status;
     match status {
-        429 => QueryError::recoverable(SourcePollErrorKind::Transport, with_status(SourceDiagnosticReason::RateLimited,status))
-            .with_retry_after(obzenflow_adapters::effects::http::retry_after(response)),
-        408 => QueryError::recoverable(SourcePollErrorKind::Timeout,with_status(SourceDiagnosticReason::TimedOut,status)),
-        409 | 500..=599 => QueryError::recoverable(SourcePollErrorKind::Transport,with_status(SourceDiagnosticReason::RemoteFailed,status)),
-        _ => QueryError::terminal(SourcePollErrorKind::Validation,with_status(SourceDiagnosticReason::RemoteRejected,status)),
+        429 => QueryError::recoverable(
+            SourcePollErrorKind::Transport,
+            with_status(SourceDiagnosticReason::RateLimited, status),
+        )
+        .with_retry_after(obzenflow_adapters::effects::http::retry_after(response)),
+        408 => QueryError::recoverable(
+            SourcePollErrorKind::Timeout,
+            with_status(SourceDiagnosticReason::TimedOut, status),
+        ),
+        409 | 500..=599 => QueryError::recoverable(
+            SourcePollErrorKind::Transport,
+            with_status(SourceDiagnosticReason::RemoteFailed, status),
+        ),
+        _ => QueryError::terminal(
+            SourcePollErrorKind::Validation,
+            with_status(SourceDiagnosticReason::RemoteRejected, status),
+        ),
     }
 }
 
@@ -158,7 +178,6 @@ mod tests {
 
     use obzenflow_core::http_client::{HeaderMap, MockHttpClient};
 
-
     fn api(outcome: Result<HttpResponse, HttpClientError>) -> HttpApi {
         let client = MockHttpClient::new();
         match outcome {
@@ -173,13 +192,10 @@ mod tests {
 
     async fn failure(outcome: Result<HttpResponse, HttpClientError>) -> SourceReadFailure {
         let error = api(outcome)
-            .get_json::<serde_json::Value>(
-                "v0/item.json",
-                &QueryContext::for_test("stories", 1),
-            )
+            .get_json::<serde_json::Value>("v0/item.json", &QueryContext::for_test("stories", 1))
             .await
             .expect_err("the read fails");
-        error.failure
+        *error.failure
     }
 
     fn response(status: u16, body: &str) -> Result<HttpResponse, HttpClientError> {

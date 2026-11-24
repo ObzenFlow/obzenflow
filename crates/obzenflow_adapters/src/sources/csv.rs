@@ -8,7 +8,7 @@
 //! records each reply. The handler decodes each recorded record. The handler
 //! reports each row that the decoder rejects. The read then continues.
 
-use super::file_system::{CsvFile, CsvFileSystem, CsvPage, CsvFormat, CsvLine, CsvRead};
+use super::file_system::{CsvFile, CsvFileSystem, CsvFormat, CsvLine, CsvPage, CsvRead};
 use super::file_version::input_changed;
 use anyhow::{anyhow, bail, Result};
 use csv::StringRecord;
@@ -365,11 +365,29 @@ impl<D: CsvDecoder> TypedFiniteSourceHandler for CsvSource<D> {
         let decoder = self.decoder.clone();
         SourceRead::pages(
             self.port.clone(),
-            CsvRead { limit: std::num::NonZeroUsize::new(self.chunk_size).expect("validated chunk size"), skip_rows: self.skip_rows, columns: self.select_columns.clone(), after: None },
-            |from, page| Ok(match page {
-                CsvPage::EndOfInput => None,
-                CsvPage::Batch {headers,records,next} => Some((StringRecord::from(headers), records, CsvRead { after:Some(next), ..from.clone() })),
-            }),
+            CsvRead {
+                limit: std::num::NonZeroUsize::new(self.chunk_size).expect("validated chunk size"),
+                skip_rows: self.skip_rows,
+                columns: self.select_columns.clone(),
+                after: None,
+            },
+            |from, page| {
+                Ok(match page {
+                    CsvPage::EndOfInput => None,
+                    CsvPage::Batch {
+                        headers,
+                        records,
+                        next,
+                    } => Some((
+                        StringRecord::from(headers),
+                        records,
+                        CsvRead {
+                            after: Some(next),
+                            ..from.clone()
+                        },
+                    )),
+                })
+            },
             move |headers, line| decode_line(&decoder, headers, line),
         )
     }
@@ -452,7 +470,9 @@ mod tests {
         }
     }
 
-    fn after_header() -> StringRecord { StringRecord::from(vec!["name","city"]) }
+    fn after_header() -> StringRecord {
+        StringRecord::from(vec!["name", "city"])
+    }
 
     fn values(fields: &[&str]) -> CsvLine {
         CsvLine::Values {
@@ -515,7 +535,9 @@ mod tests {
         type Output = TierRow;
     }
 
-    fn tier_headers() -> StringRecord { StringRecord::from(vec!["tier"]) }
+    fn tier_headers() -> StringRecord {
+        StringRecord::from(vec!["tier"])
+    }
 
     #[test]
     fn unknown_csv_variant_returns_invalid_record() {

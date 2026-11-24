@@ -6,7 +6,6 @@
 //! test that runs the same flow under `cargo test`.
 
 use async_trait::async_trait;
-use obzenflow::effects::{EffectContext, EffectError, Port};
 use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit};
@@ -86,7 +85,10 @@ impl RequestSequence for HighVolumeGenerator {
                 attempt,
                 "Simulated source outage: circuit breaker will wait five seconds before probing"
             );
-            return Err(obzenflow::queries::QueryError::recoverable(obzenflow::queries::SourcePollErrorKind::Timeout,obzenflow::queries::SourceDiagnosticReason::TimedOut));
+            return Err(obzenflow::queries::QueryError::recoverable(
+                obzenflow::queries::SourcePollErrorKind::Timeout,
+                obzenflow::queries::SourceDiagnosticReason::TimedOut,
+            ));
         }
 
         self.outage_failures.store(0, Ordering::SeqCst);

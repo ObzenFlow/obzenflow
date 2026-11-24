@@ -67,23 +67,25 @@ impl StoriesPort for ScriptedStories {
             )),
             StoryPosition::Selected { ids, next_index } => match ids.get(*next_index) {
                 Some(id) => {
-                    let offset = id
-                        .0
-                        .checked_sub(100)
-                        .and_then(|offset| usize::try_from(offset).ok())
-                        .filter(|offset| *offset < LISTED_STORIES)
-                        .ok_or_else(|| {
-                            QueryError::terminal(SourcePollErrorKind::Validation, SourceDiagnosticReason::InvalidValue)
-                        })?;
+                    let offset =
+                        id.0.checked_sub(100)
+                            .and_then(|offset| usize::try_from(offset).ok())
+                            .filter(|offset| *offset < LISTED_STORIES)
+                            .ok_or_else(|| {
+                                QueryError::terminal(
+                                    SourcePollErrorKind::Validation,
+                                    SourceDiagnosticReason::InvalidValue,
+                                )
+                            })?;
                     let record = if (offset + 1) % DELETED_EVERY_NTH == 0 {
                         None
                     } else {
-                        Some(
-                            serde_json::to_value(scripted_story(offset))
-                                .map_err(|_| QueryError::terminal(
-                                    SourcePollErrorKind::Other, SourceDiagnosticReason::UnrepresentableValue,
-                                ))?,
-                        )
+                        Some(serde_json::to_value(scripted_story(offset)).map_err(|_| {
+                            QueryError::terminal(
+                                SourcePollErrorKind::Other,
+                                SourceDiagnosticReason::UnrepresentableValue,
+                            )
+                        })?)
                     };
                     Ok(item(ids, *next_index, record))
                 }

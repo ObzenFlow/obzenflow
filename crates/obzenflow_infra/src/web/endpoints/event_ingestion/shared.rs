@@ -479,7 +479,8 @@ impl<T> IngestionState<T> {
     /// `resume_live` returns true while the runtime reports the hosted source as live.
     /// `is_ready` returns true only when this value and `pipeline_running` are both true.
     pub fn resume_live(&self) -> bool {
-        matches!(self.source_phase(), Some(SourceExecutionPhase::Live)) && !self.ingress_slot.is_restoring()
+        matches!(self.source_phase(), Some(SourceExecutionPhase::Live))
+            && !self.ingress_slot.is_restoring()
     }
 
     fn source_phase(&self) -> Option<SourceExecutionPhase> {

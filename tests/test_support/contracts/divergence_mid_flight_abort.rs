@@ -62,17 +62,11 @@ struct SeedEvent {
 impl TypedPayload for SeedEvent {
     const EVENT_TYPE: &'static str = "divergence.seed";
 }
-use obzenflow::stages::sources::ValuesSource;
 use std::time::Duration;
 use tokio::time::sleep;
 
 fn seeds(count: u64) -> impl TypedFiniteSourceHandler<Output = SeedEvent> {
-    ValuesSource::new(
-        (0..count)
-            .rev()
-            .map(|n| SeedEvent { n, looped: false })
-            .collect::<Vec<_>>(),
-    )
+    crate::replay_testkit::single_values((0..count).rev().map(|n| SeedEvent { n, looped: false }))
 }
 
 /// Test-only source-boundary policy that contributes a deliberately unhealthy

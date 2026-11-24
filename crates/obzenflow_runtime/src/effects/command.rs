@@ -228,7 +228,6 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         }
     }
 
-
     /// The name of the system behind this port, as its evidence and diagnostics
     /// record it.
     pub fn system_name(&self) -> &str {
@@ -242,43 +241,6 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// `binding` returns the system binding that this port records when it answers a call.
     pub fn binding(&self) -> &obzenflow_core::effect_binding::SystemBinding {
         self.evidence.binding()
-    }
-
-    /// `Port::located` makes a port whose system `config` builds when a live call needs
-    /// it, at most once per run. The binding records the system's name and the
-    /// location in `config`, so the recorded location is the one that the system reads.
-    pub fn located<C>(config: C) -> Result<Self, obzenflow_core::BindingEvidenceError>
-    where
-        C: LocatedSystem,
-        PortImpl<C::System>: ServesPort<P, C::System>,
-    {
-        let location = config.location();
-        let mut port = Self::deferred(move || config.build());
-        port.locate(location)?;
-        Ok(port)
-    }
-
-
-    fn locate(
-        &mut self,
-        location: obzenflow_core::effect_binding::SystemLocation,
-    ) -> Result<(), obzenflow_core::BindingEvidenceError> {
-        self.evidence = SystemBindingEvidence::located(self.evidence.binding().name(), location)?;
-        self.name = LogicalEffectBindingName::for_resource(&self.evidence);
-        Ok(())
-    }
-
-
-    #[doc(hidden)]
-    pub fn own_instance(self) -> Self
-    where
-        P: PortEffects,
-    {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let instance = NEXT
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .to_string();
-        self.instance(&instance)
     }
 
     /// The same port bound under `system.instance`, for a framework system
@@ -385,8 +347,8 @@ pub trait SystemName {
 }
 
 /// `LocatedSystem` is the configuration of a framework system that reads at a
-/// location. [`Port::located`] records the location and builds the system from the
-/// same value.
+/// location. [`QueryPort::located`](crate::queries::QueryPort::located) records the
+/// location and builds the system from the same value.
 pub trait LocatedSystem: Send + Sync + 'static {
     type System: SystemName + Send + Sync + 'static;
 

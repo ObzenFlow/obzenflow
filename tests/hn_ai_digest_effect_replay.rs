@@ -2357,15 +2357,29 @@ async fn hn_replay_reconstructs_digest() {
         declared_systems(&replay_stories),
         declared_systems(&live_stories)
     );
-    let answers = |rows: &[JournalRecord<ChainPayload>]| rows.iter().filter_map(|row| {
-        let ChainPayload::Execution(ExecutionPayload::SourceInput(record))=&row.payload else { return None };
-        let obzenflow_core::query::SourceInput::QueryAnswered{query_type,request,answer}=&record.input else {panic!("expected a query answer")};
-        assert_eq!(query_type,"hn.stories.read");
-        Some((record.number,*row.id(),request.clone(),answer.clone()))
-    }).collect::<Vec<_>>();
+    let answers = |rows: &[JournalRecord<ChainPayload>]| {
+        rows.iter()
+            .filter_map(|row| {
+                let ChainPayload::Execution(ExecutionPayload::SourceInput(record)) = &row.payload
+                else {
+                    return None;
+                };
+                let obzenflow_core::query::SourceInput::QueryAnswered {
+                    query_type,
+                    request,
+                    answer,
+                } = &record.input
+                else {
+                    panic!("expected a query answer")
+                };
+                assert_eq!(query_type, "hn.stories.read");
+                Some((record.number, *row.id(), request.clone(), answer.clone()))
+            })
+            .collect::<Vec<_>>()
+    };
     let reads = answers(&live_stories);
-    assert_eq!(reads.len(),live_source_requests + 1);
-    assert_eq!(answers(&replay_stories),reads);
+    assert_eq!(reads.len(), live_source_requests + 1);
+    assert_eq!(answers(&replay_stories), reads);
     let live_story_ids = stories_then_eof(&live_stories);
     assert!(!live_story_ids.is_empty());
     assert_eq!(stories_then_eof(&replay_stories), live_story_ids);

@@ -12,11 +12,11 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_adapters::sinks::DiscardSink;
     use obzenflow_core::{ChainEvent, TypedPayload};
+    use obzenflow_runtime::effects::SystemName;
     use obzenflow_runtime::effects::{
         EffectCommitHandle, EffectError, EffectPortResolutionError, EffectSafety, Effects, Port,
         StageCompletion,
     };
-    use obzenflow_runtime::effects::{EffectContext, SystemName};
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
 
     use obzenflow_runtime::stages::common::handlers::source::{
@@ -97,7 +97,8 @@ mod tests {
             &self,
             _from: &NextLiveOut,
             _ctx: &obzenflow_runtime::queries::QueryContext,
-        ) -> Result<ContinuousRead<Out, NextLiveOut>, obzenflow_runtime::queries::QueryError> {
+        ) -> Result<ContinuousRead<Out, NextLiveOut>, obzenflow_runtime::queries::QueryError>
+        {
             Ok(ContinuousRead {
                 records: Vec::new(),
                 next: NextLiveOut,
@@ -109,7 +110,9 @@ mod tests {
         obzenflow_runtime::queries::QueryPort::to(NoOut)
     }
 
-    fn live_read(port: &obzenflow_runtime::queries::QueryPort<dyn OutInput>) -> SourceRead<Out, Continuous> {
+    fn live_read(
+        port: &obzenflow_runtime::queries::QueryPort<dyn OutInput>,
+    ) -> SourceRead<Out, Continuous> {
         SourceRead::continuous(port.clone(), NextLiveOut, Ok)
     }
 
