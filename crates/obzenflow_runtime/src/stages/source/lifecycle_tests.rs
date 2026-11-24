@@ -626,11 +626,7 @@ async fn port_read_records_system_binding() {
         matches!(&replies[1], FiniteRead::Batch { records, next } if records.is_empty() && next.0 == 2)
     );
     assert!(matches!(replies[2], FiniteRead::EndOfInput));
-    assert_eq!(
-        attempt_starts(&data),
-        0,
-        "an exactly_once read starts no attempt"
-    );
+    assert_eq!(attempt_starts(&data), 0, "a query starts no attempt");
     assert_eq!(facts(&data), 1);
     assert!(has_eof(&data));
 }

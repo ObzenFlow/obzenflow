@@ -457,8 +457,10 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<(Vec<u8>, FileVersion),
 mod tests {
     use super::*;
     use obzenflow_core::TypedPayload;
+    use obzenflow_runtime::queries::QueryContext;
     use serde::{Deserialize, Serialize};
     use std::io::Write;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -520,6 +522,77 @@ mod tests {
             .into_iter()
             .find_map(|line| decode_line(&OrderYaml, line).err())
             .expect("the input is refused")
+    }
+
+    struct ScriptedOrders(&'static [&'static str]);
+
+    impl obzenflow_runtime::effects::SystemName for ScriptedOrders {
+        const NAME: &'static str = "scripted-orders";
+    }
+
+    #[async_trait::async_trait]
+    impl YamlFile for ScriptedOrders {
+        async fn read(&self, from: &YamlRead, _ctx: &QueryContext) -> Result<YamlPage, QueryError> {
+            let start: usize = match &from.after {
+                Some(bookmark) => bookmark.decode()?,
+                None => 0,
+            };
+            let end = start.saturating_add(from.limit.get()).min(self.0.len());
+            let mut records = Vec::new();
+            for (index, text) in self.0.iter().enumerate().take(end).skip(start) {
+                records.push(YamlLine::Record {
+                    index: index as u64,
+                    node: YamlNode::parse(text.as_bytes())?,
+                });
+            }
+            if records.is_empty() {
+                return Ok(YamlPage::EndOfInput);
+            }
+            Ok(YamlPage::Batch {
+                records,
+                next: QueryBookmark::encode(&end)?,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn through_port_yaml_decodes_supplier_records() {
+        use obzenflow_runtime::__private::AdmitSource;
+        use obzenflow_runtime::stages::common::handlers::source::SyncFiniteReads;
+
+        let supplier = Arc::new(ScriptedOrders(&[
+            "{order_id: s-1, amount_cents: 700}",
+            "{order_id: s-2, amount_cents: 900}",
+            "{order_id: s-3, amount_cents: 1100}",
+        ]));
+        let port = QueryPort::to(supplier.clone());
+        let binding = port.binding().clone();
+        let source = YamlSource::builder(OrderYaml)
+            .through(port)
+            .batch_size(2)
+            .build()
+            .expect("a port supplies the records");
+        let admitted = AdmitSource::<SyncFiniteReads>::admit(source);
+        assert_eq!(admitted.system().binding(), &binding);
+        assert_eq!(binding.name(), "scripted-orders");
+
+        let ctx = QueryContext::for_test("orders", 0);
+        let mut from = YamlRead {
+            limit: std::num::NonZeroUsize::new(2).unwrap(),
+            selection: YamlSelection::Document,
+            max_bytes: DEFAULT_MAX_BYTES,
+            after: None,
+        };
+        let mut orders = Vec::new();
+        while let YamlPage::Batch { records, next } = supplier.read(&from, &ctx).await.unwrap() {
+            for line in records {
+                orders.push(decode_line(&OrderYaml, line).unwrap());
+            }
+            from.after = Some(next);
+        }
+        let ids: Vec<&str> = orders.iter().map(|order| order.order_id.as_str()).collect();
+        assert_eq!(ids, ["s-1", "s-2", "s-3"]);
+        assert_eq!(orders[1].amount_cents, 900);
     }
 
     #[test]

@@ -20,8 +20,6 @@ use std::sync::Arc;
 /// port type, in a `#[port]` field or through `through`, and performs requests
 /// through `fx` without ever seeing the system.
 ///
-/// A source handler declares the read that its bound port supplies.
-///
 /// A port trait is `Send` and `Sync`, so a system that isn't thread-safe is
 /// refused at its own `impl`:
 ///

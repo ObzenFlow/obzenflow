@@ -7,7 +7,7 @@ use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::SystemName;
-use obzenflow_runtime::queries::{QueryContext, QueryError, QueryPort, QueryRequest};
+use obzenflow_runtime::queries::{QueryContext, QueryError, QueryPort};
 use obzenflow_runtime::stages::common::handlers::source::{
     Continuous, FiniteRead, SourceRead, SourceReceiver,
 };
@@ -18,19 +18,18 @@ use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::iter::Fuse;
-use std::marker::PhantomData;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 const VALUES_PER_READ: usize = 1000;
 
 /// `ValuesSource` is a finite source that transfers its values into one live
 /// execution. Its `in-memory` system creates the iterator at the first live read
-/// and answers each read with up to 1,000 items. A read at the position of the
-/// previous read gets the same items again. After the last item, each read ends
-/// the input. `ValuesSource` does not clone the input or its items.
+/// and answers each read with up to 1,000 items, or up to the number that
+/// `chunk_size` sets. A read at the position of the previous read gets the same
+/// items again. After the last item, each read ends the input. `ValuesSource`
+/// does not clone the input or its items.
 pub struct ValuesSource<I: IntoIterator> {
-    port: QueryPort<dyn ValueFeed>,
-    values: PhantomData<fn() -> I>,
+    system: Arc<InMemory<I>>,
 }
 
 impl<I> ValuesSource<I>
@@ -40,25 +39,34 @@ where
     I::Item: TypedPayload + Send + Sync + 'static,
 {
     pub fn new(values: I) -> Self {
-        let system = InMemory {
-            feed: Mutex::new(Feed {
-                values: ValuesState::Ready(values),
-                taken: 0,
-                last: None,
-            }),
-        };
         Self {
-            port: QueryPort::to(system),
-            values: PhantomData,
+            system: Arc::new(InMemory {
+                feed: Mutex::new(Feed {
+                    values: ValuesState::Ready(values),
+                    taken: 0,
+                    last: None,
+                    per_read: VALUES_PER_READ,
+                }),
+            }),
         }
+    }
+
+    /// `chunk_size` sets the maximum number of items in one read. Zero gives one
+    /// item. A rate limit on the source counts reads.
+    pub fn chunk_size(self, chunk_size: usize) -> Self {
+        self.system
+            .feed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .per_read = chunk_size.max(1);
+        self
     }
 }
 
 impl<I: IntoIterator> Clone for ValuesSource<I> {
     fn clone(&self) -> Self {
         Self {
-            port: self.port.clone(),
-            values: PhantomData,
+            system: self.system.clone(),
         }
     }
 }
@@ -90,6 +98,7 @@ struct Feed<I: IntoIterator> {
     values: ValuesState<I>,
     taken: u64,
     last: Option<(u64, FiniteRead<serde_json::Value, ValuesRead>)>,
+    per_read: usize,
 }
 
 enum ValuesState<I: IntoIterator> {
@@ -135,7 +144,7 @@ where
             feed.taken += 1;
         }
         let mut records = Vec::new();
-        for item in iter.by_ref().take(VALUES_PER_READ) {
+        for item in iter.by_ref().take(feed.per_read) {
             records.push(serde_json::to_value(&item).map_err(|_| {
                 QueryError::terminal(
                     SourcePollErrorKind::Other,
@@ -197,46 +206,12 @@ where
     type Output = I::Item;
 
     fn read(&self) -> SourceRead<Self::Output> {
-        SourceRead::finite(self.port.clone(), ValuesRead { at: 0 }, |value| {
+        let port = QueryPort::<dyn ValueFeed>::to(self.system.clone());
+        SourceRead::finite(port, ValuesRead { at: 0 }, |value| {
             serde_json::from_value(value)
                 .map_err(|_| SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into()))
         })
         .in_process()
-    }
-}
-
-#[derive(Clone)]
-struct SelectedValues<R: QueryRequest, T> {
-    port: QueryPort<R::Port>,
-    first: R,
-    output: PhantomData<fn() -> T>,
-}
-impl<R: QueryRequest, T: TypedPayload> SourceTyping for SelectedValues<R, T> {
-    type Output = T;
-}
-impl<R, T> TypedFiniteSourceHandler for SelectedValues<R, T>
-where
-    T: TypedPayload + Send + Sync + 'static,
-    R: QueryRequest<Answer = FiniteRead<T, R>>,
-{
-    type Output = T;
-    fn read(&self) -> SourceRead<T> {
-        SourceRead::finite(self.port.clone(), self.first.clone(), Ok)
-    }
-}
-impl<T: TypedPayload + Send + Sync + 'static> ValuesSource<std::iter::Empty<T>> {
-    pub fn through<R>(
-        port: QueryPort<R::Port>,
-        first: R,
-    ) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T>
-    where
-        R: QueryRequest<Answer = FiniteRead<T, R>>,
-    {
-        SelectedValues {
-            port,
-            first,
-            output: PhantomData,
-        }
     }
 }
 
@@ -273,7 +248,6 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::source_channel;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
     struct Item(u64);
@@ -291,6 +265,7 @@ mod tests {
                 values: ValuesState::Ready(values),
                 taken: 0,
                 last: None,
+                per_read: VALUES_PER_READ,
             }),
         }
     }
@@ -323,6 +298,25 @@ mod tests {
         let (last, next) = items(feed.take(&ValuesRead { at: next }).unwrap()).unwrap();
         assert_eq!((last.len(), next), (500, 2_500));
         assert!(items(feed.take(&ValuesRead { at: next }).unwrap()).is_none());
+    }
+
+    #[test]
+    fn chunk_size_bounds_items_per_read() {
+        let source = ValuesSource::new((0..5).map(Item)).chunk_size(2);
+        let (first, next) = items(source.system.take(&ValuesRead { at: 0 }).unwrap()).unwrap();
+        assert_eq!((first.len(), next), (2, 2));
+        let (second, next) = items(source.system.take(&ValuesRead { at: next }).unwrap()).unwrap();
+        assert_eq!((second.len(), next), (2, 4));
+        let (last, next) = items(source.system.take(&ValuesRead { at: next }).unwrap()).unwrap();
+        assert_eq!((last, next), (vec![serde_json::json!(4)], 5));
+        assert!(items(source.system.take(&ValuesRead { at: next }).unwrap()).is_none());
+    }
+
+    #[test]
+    fn chunk_size_zero_reads_one_item() {
+        let source = ValuesSource::new((0..2).map(Item)).chunk_size(0);
+        let (first, next) = items(source.system.take(&ValuesRead { at: 0 }).unwrap()).unwrap();
+        assert_eq!((first, next), (vec![serde_json::json!(0)], 1));
     }
 
     #[test]

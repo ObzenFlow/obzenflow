@@ -2589,7 +2589,7 @@ async fn durable_execution_contract_over_http() {
     let at_kill = Archive::read(&first).await;
     assert!(
         at_kill.read_orders().contains(&uncommitted),
-        "H1: the read reply of {uncommitted} commits"
+        "H1: the member of {uncommitted} is recorded"
     );
     assert!(
         at_kill

@@ -9,11 +9,11 @@
 //!
 //! ## Source handlers
 //!
-//! A `source!` row takes a source handler. The handler declares one read
-//! through a bound port. The framework performs each read through the effect
-//! runtime. The system behind the port does the physical I/O. The journal
-//! records the binding of the system and each reply. A replay uses only the
-//! recorded replies.
+//! A `source!` row takes a source handler. A handler that pulls its input
+//! declares one query through a bound port. The source stage asks each query,
+//! and the system behind the port does the physical I/O. A handler that receives
+//! pushed input records each admitted event. The journal records the binding of
+//! the system and each answer or event. A replay uses only those records.
 //!
 //! | Input | Handler | System |
 //! |---|---|---|
@@ -29,20 +29,23 @@
 //! [`TypedAsyncInfiniteSourceHandler`]. Its `read` returns a [`SourceRead`].
 //! A finite handler builds it with [`SourceRead::finite`] for input that ends,
 //! and an infinite handler builds it with [`SourceRead::continuous`] for input
-//! that stays open. The port method replies with a [`FiniteRead`] or a
-//! [`ContinuousRead`]. Each reply gives the records and the argument of the
-//! next read, or ends a finite input. The handler maps each recorded record to
-//! its output. A continuous port has [`InputReadiness`] as a supertrait, so each
-//! system behind it tells the framework when it holds input. A continuous read
-//! continues after a resume under the guarantee of its port method.
+//! that stays open. The `#[query]` method of the port answers with a
+//! [`FiniteRead`] or a [`ContinuousRead`]. Each answer gives the records and the
+//! argument of the next read, or ends a finite input. The handler maps each
+//! recorded record to its output. A continuous port has [`InputReadiness`] as a
+//! supertrait, so each system behind it tells the framework when it holds input.
+//! A resumed run continues a continuous read and can read the latest state of
+//! the system again.
 //!
 //! ## In-process sources
 //!
 //! A [`ValuesSource`] reads its values through the `in-memory` system, up to 1,000
-//! values in each read. Only this process holds the values, so ObzenFlow refuses
-//! to resume a run that did not read all of them. A [`ChannelSource`] reads a
-//! channel that [`source_channel`] makes, through the `channel` system. A closed
-//! channel is a source error. Use topology fan-out for more than one consumer.
+//! values in each read. [`ValuesSource::chunk_size`] sets a smaller number. Only
+//! this process holds the values, so ObzenFlow refuses to resume a run that did
+//! not read all of them. A [`ChannelSource`] receives the values that a sender
+//! puts on a channel from [`source_channel`]. Its system is `channel`, and the
+//! stage records each value before it publishes it. A closed channel is a source
+//! error. Use topology fan-out for more than one consumer.
 //! Values that are still in the channel when a run stops are lost, so a resumed
 //! run continues its live reads with [`ReattachGuarantee::AtMostOnce`].
 //!
@@ -201,8 +204,8 @@
 //!
 //! Register the decoder through `FlowApplication::builder().http_ingress(decoder,
 //! config)`, or through `.ingress` for another transport. Each call returns the
-//! [`HostedSource`] handler for a `source!` stage. The handler reads the queue of
-//! the endpoint. The journal records each read. For custom hosting, compose the
+//! [`HostedSource`] handler for a `source!` stage. The journal records each
+//! admitted submission before its row commits. For custom hosting, compose the
 //! bundles with
 //! [`crate::application::ingress::ingress_source`] or
 //! [`crate::application::ingress::http_ingress`]. Hosted ingress acknowledges a
