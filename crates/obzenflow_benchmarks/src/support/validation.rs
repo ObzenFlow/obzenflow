@@ -28,6 +28,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 const ARCHIVE_DEADLINE: Duration = Duration::from_secs(300);
+const TICKS_PER_READ: u64 = 500;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Tick {
@@ -54,7 +55,7 @@ impl TypedFiniteSourceHandler for Ticks {
 
 fn definition(base: PathBuf, count: u64) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let input = Ticks(crate::numbers::Numbers::counting(count, 500).port());
+        let input = Ticks(crate::numbers::Numbers::counting(count, TICKS_PER_READ).port());
         let output = DiscardTicks::new();
         Ok(flow! {
             name: "validation_benchmark",
@@ -83,6 +84,7 @@ pub struct Archive {
     pub replay: Option<PathBuf>,
     pub records: Vec<serde_json::Value>,
     pub inputs: u64,
+    pub reads: u64,
     pub directory: tempfile::TempDir,
 }
 impl Archive {
@@ -159,6 +161,27 @@ impl Archive {
             assert_eq!(payload["n"], index as u64, "source identity/order");
             assert_eq!(payload["body"].as_str().unwrap().len(), 256);
         }
+        let reads = read
+            .iter()
+            .filter(|row| {
+                matches!(
+                    &row.record,
+                    RunRecordData::Chain(record) if matches!(
+                        record.payload,
+                        ChainPayload::Execution(ExecutionPayload::SourceInput(_))
+                    )
+                ) && row
+                    .journal
+                    .stage
+                    .as_ref()
+                    .is_some_and(|stage| stage.key == "ticks")
+            })
+            .count() as u64;
+        assert_eq!(
+            reads,
+            inputs.div_ceil(TICKS_PER_READ) + 1,
+            "fixture records every read, the read that ends the input included"
+        );
         assert_eq!(
             read.iter()
                 .filter(|row| matches!(
@@ -185,6 +208,7 @@ impl Archive {
             replay,
             records,
             inputs,
+            reads,
             directory,
         }
     }

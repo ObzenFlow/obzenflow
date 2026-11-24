@@ -281,6 +281,7 @@ enum Hold {
     PartnerNotice(String),
     RegisterWrite(usize),
     Ticket(String),
+    Processor,
 }
 
 async fn hold_until(release: &Path) {
@@ -505,7 +506,8 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
             | Hold::AiCall(_)
             | Hold::PartnerNotice(_)
             | Hold::RegisterWrite(_)
-            | Hold::Ticket(_),
+            | Hold::Ticket(_)
+            | Hold::Processor,
         )
         | None => (None, None),
     };
@@ -625,9 +627,14 @@ fn durable_execution_contract_child() {
         | Graph::ThenLiveTwoBatch => app.run_blocking(then_live::build_flow(scenario)),
         Graph::Concat => app.run_blocking(concat::build_flow(scenario)),
         Graph::AsOfLoading | Graph::AsOfPricing => app.run_blocking(as_of::build_flow(scenario)),
-        Graph::PaymentDemo => app
-            .with_presentation(payment_demo::presentation())
-            .run_blocking(payment_demo::build_flow(scenario)),
+        Graph::PaymentDemo => {
+            let app = app.with_presentation(payment_demo::presentation());
+            match plan.hold {
+                Some(Hold::Processor) => app.with_config_file(payment_config(scenario)),
+                _ => app,
+            }
+            .run_blocking(payment_demo::build_flow(scenario, plan.hold))
+        }
         Graph::TwoEffects => {
             app.run_blocking(two_effects::build_flow(scenario, plan.hold, plan.fix))
         }
@@ -4033,6 +4040,7 @@ mod payment_demo {
     use super::*;
     use gateway_demo::domain::{PaymentAuthorizationUnavailable, TrafficPhase};
     use gateway_demo::fixtures;
+    use gateway_demo::gateway::{AuthorizeRequest, PaymentGatewayPort, SimulatedProcessor};
     use obzenflow::application::{Banner, Presentation};
     use obzenflow::effects::EffectCursor;
     use obzenflow_core::event::payloads::execution_payload::RecoveryFact;
@@ -4055,14 +4063,42 @@ mod payment_demo {
         Presentation::new(Banner::new(BANNER))
     }
 
-    pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
+    struct HeldProcessor {
+        processor: SimulatedProcessor,
+        release: PathBuf,
+    }
+
+    #[obzenflow::system("simulated-processor")]
+    #[async_trait]
+    impl PaymentGatewayPort for HeldProcessor {
+        async fn authorize(
+            &self,
+            request: &AuthorizeRequest,
+            key: &IdempotencyKey,
+            ctx: &EffectContext,
+        ) -> Result<outcome![PaymentAuthorized | PaymentDeclined], EffectError> {
+            hold_until(&self.release).await;
+            self.processor.authorize(request, key, ctx).await
+        }
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario, hold: Option<Hold>) -> FlowDefinition {
+        let calls = gateway_calls(scenario);
+        let processor: effects::Port<dyn PaymentGatewayPort> = match hold {
+            Some(Hold::Processor) => effects::Port::to(HeldProcessor {
+                processor: SimulatedProcessor::open(&calls)
+                    .expect("the processor's call log opens"),
+                release: scenario.release(),
+            }),
+            _ => gateway_demo::gateway::simulated_processor(&calls),
+        };
         gateway_demo::flow::assemble_flow(
             fixtures::scripted_web_orders(),
             fixtures::scripted_store_orders(),
             Some(FIRST_RECOVERY_PAUSE),
             GATEWAY_CALLS_PER_SECOND,
             scenario.journals(),
-            gateway_demo::gateway::simulated_processor(&gateway_calls(scenario)),
+            processor,
         )
     }
 
@@ -4330,13 +4366,18 @@ mod payment_demo {
                 && archive.eof("web_orders").is_none()
         };
 
-        let child = Child::spawn(&scenario, Vec::new(), None);
+        let child = Child::spawn(&scenario, Vec::new(), Some(Hold::Processor));
         let killed = child.run().await;
         until(&killed, name, early).await;
         child.signal(Signal::Kill);
         assert!(!child.exit().await.success(), "{name}: the kill lands");
+        assert_eq!(
+            Archive::read(&killed).await.eof("web_orders"),
+            None,
+            "{name}: the kill lands before web_orders ends"
+        );
         let runs = scenario.runs();
-        let refused = Child::spawn(&scenario, resume(&killed), None);
+        let refused = Child::spawn(&scenario, resume(&killed), Some(Hold::Processor));
         let log = refused.log.clone();
         assert_eq!(
             refused.exit().await.code(),
@@ -4363,14 +4404,26 @@ mod payment_demo {
         );
         assert_eq!(scenario.runs(), runs, "{name}: no run directory");
 
-        let child = Child::spawn(&scenario, Vec::new(), None);
+        let child = Child::spawn(&scenario, Vec::new(), Some(Hold::Processor));
         let log = child.log.clone();
         let stopped = child.run().await;
         until(&stopped, name, early).await;
         child.signal(Signal::Interrupt);
+        until(&stopped, name, |archive| {
+            archive
+                .rows("web_orders", RunJournalKind::Data)
+                .any(|row| row.event_type() == "supervisor.stage.web_orders.cancelled")
+        })
+        .await;
+        std::fs::write(scenario.release(), b"").expect("release the held answers");
         assert!(
             child.exit().await.success(),
             "{name}: a Ctrl-C exits cleanly"
+        );
+        assert_ne!(
+            Archive::read(&stopped).await.eof("web_orders"),
+            Some(EofKind::Natural),
+            "{name}: the stop lands before web_orders ends"
         );
         let log = read_log(&log);
         let (_, footer) = log.split_once(BANNER).expect("the banner prints");
