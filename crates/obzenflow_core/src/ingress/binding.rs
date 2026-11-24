@@ -65,14 +65,11 @@ impl std::error::Error for HostedIngressAlreadyBound {}
 pub struct HostedIngressBindingSlot {
     ingress_key: IngressKey,
     cell: Arc<OnceLock<FilledHostedIngress>>,
-    /// FLOWIP-120n F12: whether the linked source admits live input. True
-    /// outside replay; held false from bind until the resume handoff, and for
-    /// the whole of a strict replay.
-    resume_live: Arc<AtomicBool>,
     /// FLOWIP-084l: the configured timing, installed once at hosting.
     timing: Arc<OnceLock<IngressTiming>>,
     /// FLOWIP-084l: identity-index entries, published by the source's writer.
     idempotency_entries: Arc<AtomicU64>,
+    restoring: Arc<AtomicBool>,
 }
 
 impl HostedIngressBindingSlot {
@@ -80,9 +77,9 @@ impl HostedIngressBindingSlot {
         Self {
             ingress_key: ingress_key.into(),
             cell: Arc::new(OnceLock::new()),
-            resume_live: Arc::new(AtomicBool::new(true)),
             timing: Arc::new(OnceLock::new()),
             idempotency_entries: Arc::new(AtomicU64::new(0)),
+            restoring: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -117,25 +114,6 @@ impl HostedIngressBindingSlot {
         self.cell.get().is_some()
     }
 
-    /// FLOWIP-120n F12: hold ingress admission until the linked source goes
-    /// live. Applied at DSL bind time under `--resume-from` and
-    /// `--replay-from`; a strict replay never goes live (FLOWIP-084l).
-    pub fn hold_until_live(&self) {
-        self.resume_live.store(false, Ordering::Release);
-    }
-
-    /// FLOWIP-120n F12: mark the linked source live. The source supervisor
-    /// calls this at the catch-up handoff.
-    pub fn mark_resume_live(&self) {
-        self.resume_live.store(true, Ordering::Release);
-    }
-
-    /// Whether the linked source admits live input (always true outside
-    /// replay).
-    pub fn is_resume_live(&self) -> bool {
-        self.resume_live.load(Ordering::Acquire)
-    }
-
     /// Install the configured timing once; a second install returns it back.
     pub fn install_timing(&self, timing: IngressTiming) -> Result<(), IngressTiming> {
         self.timing.set(timing)
@@ -144,6 +122,15 @@ impl HostedIngressBindingSlot {
     /// The installed timing, or the defaults when hosting installed none.
     pub fn timing(&self) -> IngressTiming {
         self.timing.get().copied().unwrap_or_default()
+    }
+
+    /// Hold admission until the source restores its committed identities.
+    pub fn set_restoring(&self, restoring: bool) {
+        self.restoring.store(restoring, Ordering::Release);
+    }
+
+    pub fn is_restoring(&self) -> bool {
+        self.restoring.load(Ordering::Acquire)
     }
 
     /// Publish the source's current identity-index size.
@@ -165,18 +152,5 @@ mod tests {
         let slot = HostedIngressBindingSlot::new("orders");
         assert!(slot.same_binding(&slot.clone()));
         assert!(!slot.same_binding(&HostedIngressBindingSlot::new("orders")));
-    }
-
-    #[test]
-    fn resume_live_defaults_true_and_flag_is_shared_across_clones() {
-        let slot = HostedIngressBindingSlot::new("orders");
-        let surface_half = slot.clone();
-        assert!(surface_half.is_resume_live());
-
-        slot.hold_until_live();
-        assert!(!surface_half.is_resume_live());
-
-        slot.mark_resume_live();
-        assert!(surface_half.is_resume_live());
     }
 }

@@ -4,34 +4,37 @@
 
 //! Source handler components
 
-pub(crate) mod continuation;
+mod channel;
 mod erased;
 mod hosted;
-mod positioned;
+pub(crate) mod placeholder;
 pub(crate) mod prepared;
+pub(crate) mod read;
 mod record_de;
+pub use channel::{source_channel, SourceClosed, SourcePermit, SourceReceiver, SourceSender};
+pub use read::{
+    Continuous, ContinuousRead, Finite, FiniteRead, InputReadiness, ReadLifetime, SourceRead,
+};
 #[doc(hidden)]
 pub mod traits;
 pub(crate) mod typed;
 
-pub use continuation::{
-    AsyncFiniteContinuation, AsyncInfiniteContinuation, AtMostOnce, FiniteContinuation,
-    InfiniteContinuation, LatestState, LiveGuarantee, Reattach, Refuse, Seek,
-};
-#[doc(hidden)]
-pub use continuation::{RefusedBy, ResumeRefusal, SourceContinuation};
 #[doc(hidden)]
 pub use erased::{
-    ErasedSourceCompletion, ErasedSourceInvocation, ErasedSourceOutcome, SourceResumeError,
-    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
-    UnifiedInfiniteSourceHandler,
+    ErasedSourceCompletion, ErasedSourceInvocation, ErasedSourceOutcome,
+    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
 };
-pub use hosted::{HostedIngressSource, HostedSubmission, IngressReceiptSender};
-pub use positioned::{PositionedFiniteReader, SeekableSource, SourceRecord};
+#[cfg(test)]
+pub(crate) use erased::{SealAsyncFinite, SealAsyncInfinite};
+pub use hosted::{HostedSource, HostedSubmission, IngressReceiptSender};
+#[doc(hidden)]
+pub use obzenflow_core::source::{ResumeRefusal, SourceContinuation};
 pub use record_de::RecordDeError;
 pub use traits::SourceError;
 pub use typed::{
-    prove_journal_form, IngressDecodeError, IngressDecoder, IngressRecord, SourceObservationSink,
+    prove_journal_form, IngressDecodeError, IngressDecoder, IngressRecord,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
 };
+#[doc(hidden)]
+pub use typed::{FiniteReadAdapter, InfiniteReadAdapter, SyncFiniteReads, SyncInfiniteReads};

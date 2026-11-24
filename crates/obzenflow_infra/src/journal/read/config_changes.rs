@@ -176,10 +176,12 @@ mod tests {
     use super::*;
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::execution_payload::{
-        SourceContinuationRefusal, SourceContinuationRefusedFact,
+        SourcePollContinuation, SourcePollFailedFact,
     };
+    use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::{
-        StageFatalCode, StageFatalReason, StageFatalRecorded, StageFatalSeverity,
+        SourceDiagnosticReason, StageFatalCode, StageFatalReason, StageFatalRecorded,
+        StageFatalSeverity,
     };
     use obzenflow_core::StageId;
 
@@ -198,8 +200,13 @@ mod tests {
         })
     }
 
-    fn source_refused(refusal: SourceContinuationRefusal) -> ExecutionPayload {
-        ExecutionPayload::SourceContinuationRefused(SourceContinuationRefusedFact { refusal })
+    fn source_failed(reason: SourceDiagnosticReason) -> ExecutionPayload {
+        ExecutionPayload::SourcePollFailed(SourcePollFailedFact {
+            kind: ErrorKind::Remote,
+            detail: String::new(),
+            continuation: SourcePollContinuation::Terminal,
+            diagnostic: reason.into(),
+        })
     }
 
     fn stage(key: &str, logic: &str) -> (String, RunManifestStage) {
@@ -244,16 +251,14 @@ mod tests {
         assert_eq!(
             configuration_refusal(
                 Some(&accounts),
-                &source_refused(SourceContinuationRefusal::InputChanged {
-                    part: "file".to_string()
-                })
+                &source_failed(SourceDiagnosticReason::InputChanged)
             ),
             Some("accounts")
         );
         for code_only in [
             fatal("score", StageFatalReason::ReplayDivergence),
             fatal("score", StageFatalReason::RecordingEnded),
-            source_refused(SourceContinuationRefusal::PositionUnreadable),
+            source_failed(SourceDiagnosticReason::RemoteFailed),
         ] {
             assert_eq!(
                 configuration_refusal(Some(&accounts), &code_only),

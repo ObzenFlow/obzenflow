@@ -7,12 +7,11 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::source_poll_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
 use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the async-finite source stage test. The JSON
@@ -42,6 +41,9 @@ impl CountReceived {
         Ok(())
     }
 }
+use obzenflow::stages::sources::ValuesSource;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -54,17 +56,17 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("target").join(format!("{prefix}_{suffix}"))
 }
 
-#[derive(Clone, Debug)]
 struct TestAsyncEventSource {
-    emitted: usize,
-    drain_calls: Arc<AtomicU64>,
+    events: ValuesSource<Vec<AsyncTestEvent>>,
 }
 
 impl TestAsyncEventSource {
-    fn new(drain_calls: Arc<AtomicU64>) -> Self {
+    fn new() -> Self {
         Self {
-            emitted: 0,
-            drain_calls,
+            events: ValuesSource::new(vec![
+                AsyncTestEvent { index: 0 },
+                AsyncTestEvent { index: 1 },
+            ]),
         }
     }
 }
@@ -73,22 +75,8 @@ impl TestAsyncEventSource {
 impl TypedAsyncFiniteSourceHandler for TestAsyncEventSource {
     type Output = AsyncTestEvent;
 
-    async fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted < 2 {
-            let index = self.emitted;
-            self.emitted += 1;
-            tokio::task::yield_now().await;
-            Ok(Some(vec![AsyncTestEvent {
-                index: index as u64,
-            }]))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), SourceError> {
-        self.drain_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+    fn read(&self) -> SourceRead<AsyncTestEvent> {
+        TypedFiniteSourceHandler::read(&self.events)
     }
 }
 
@@ -111,25 +99,23 @@ impl SourcePollObserver for CountSourcePollObserver {
 
 #[tokio::test]
 async fn async_finite_source_applies_stage_middleware() -> Result<()> {
-    let drain_calls = Arc::new(AtomicU64::new(0));
     let events = Arc::new(AtomicU64::new(0));
     let sink = perform(|_: &AsyncTestEvent| Received).through(Port::to(CountReceived {
         received: events.clone(),
     }));
     let observer_calls = Arc::new(AtomicU64::new(0));
     let journal_root = unique_journal_dir("async_finite_source_middleware");
-    let drain_calls_for_flow = Arc::clone(&drain_calls);
     let observer_calls_for_flow = Arc::clone(&observer_calls);
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestAsyncEventSource::new(drain_calls_for_flow);
+        let source = TestAsyncEventSource::new();
 
         Ok(flow! {
             name: "async_finite_source_middleware_test",
             journals: disk_journals(journal_root),
 
             stages: {
-                source = async_source!(AsyncTestEvent with { source_poll_observer(
+                source = source!(AsyncTestEvent with { source_poll_observer(
                         "count_source_poll_data",
                         CountSourcePollObserver { calls: observer_calls_for_flow }
                     ) } => source);

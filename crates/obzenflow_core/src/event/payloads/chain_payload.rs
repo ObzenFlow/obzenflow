@@ -68,7 +68,6 @@ impl ChainPayload {
                 (EventKind::CompositeData, event_type) => {
                     CompositeDataPayload::schema_version_of(event_type).map_or(1, NonZeroU32::get)
                 }
-                (EventKind::Execution, "runtime.source.cleanup_failed") => 2,
                 _ => 1,
             };
             if payload_schema_version.get() != expected {
@@ -198,24 +197,16 @@ impl ChainPayload {
         match self {
             ChainPayload::Fact(_) | ChainPayload::CompositeData(_) => ReplayDisposition::ReAdmit,
             ChainPayload::Execution(payload) => match payload {
-                // These two previously position-bearing source rows must retain
-                // their disposition; the history loader also inspects them.
                 ExecutionPayload::StageFatalRecorded(_)
                 | ExecutionPayload::EffectAttemptStarted(_)
                 | ExecutionPayload::EffectRecoveryAbandoned(_) => ReplayDisposition::ReAdmit,
-                ExecutionPayload::SourceInputPinned(_) => ReplayDisposition::Preserve,
-                ExecutionPayload::SourcePositioned(_)
-                | ExecutionPayload::SourceStartedOnResume(_)
+                ExecutionPayload::SourceBindingDeclared(_) => ReplayDisposition::Preserve,
+                ExecutionPayload::SourceInput(_)
                 | ExecutionPayload::SourceReattached(_)
-                | ExecutionPayload::SourceContinuationRefused(_)
-                | ExecutionPayload::SourceSeekFailed(_)
                 | ExecutionPayload::EffectRecord(_)
                 | ExecutionPayload::ReplayLifecycle(_)
                 | ExecutionPayload::SupervisorRegistered { .. }
                 | ExecutionPayload::SupervisorCommandDiscarded { .. }
-                | ExecutionPayload::SourceReaderAcquired(_)
-                | ExecutionPayload::SourceCleanupSucceeded(_)
-                | ExecutionPayload::SourceCleanupFailed(_)
                 | ExecutionPayload::ContractStatus { .. }
                 | ExecutionPayload::ContractResult { .. }
                 | ExecutionPayload::StageLifecycle(_)
@@ -226,8 +217,6 @@ impl ChainPayload {
                 | ExecutionPayload::StageProcessingFailed(_)
                 | ExecutionPayload::SourceRecordRejected(_)
                 | ExecutionPayload::SourcePollFailed(_)
-                | ExecutionPayload::SourceOpenFailed(_)
-                | ExecutionPayload::HttpPullState(_)
                 | ExecutionPayload::AiChunkingPlanned(_)
                 | ExecutionPayload::AccumulatorProgress { .. }
                 | ExecutionPayload::JoinReferenceProgress { .. }

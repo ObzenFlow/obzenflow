@@ -102,23 +102,17 @@ impl JournalPayload for ChainPayload {
                 _ => {}
             }
         }
-        match self {
-            Self::Execution(ExecutionPayload::HttpPullState(_)) => {
-                visit(MetricsTailKey::HttpPull(stage))
+        if let Self::Execution(ExecutionPayload::CircuitBreaker(fact)) = self {
+            use super::execution_payload::CircuitBreakerFact;
+            if matches!(
+                fact,
+                CircuitBreakerFact::Opened { .. }
+                    | CircuitBreakerFact::Closed { .. }
+                    | CircuitBreakerFact::HalfOpen { .. }
+                    | CircuitBreakerFact::StateChanged { .. }
+            ) {
+                visit(MetricsTailKey::CircuitBreaker(stage));
             }
-            Self::Execution(ExecutionPayload::CircuitBreaker(fact)) => {
-                use super::execution_payload::CircuitBreakerFact;
-                if matches!(
-                    fact,
-                    CircuitBreakerFact::Opened { .. }
-                        | CircuitBreakerFact::Closed { .. }
-                        | CircuitBreakerFact::HalfOpen { .. }
-                        | CircuitBreakerFact::StateChanged { .. }
-                ) {
-                    visit(MetricsTailKey::CircuitBreaker(stage));
-                }
-            }
-            _ => {}
         }
     }
 
@@ -141,12 +135,6 @@ impl JournalPayload for ChainPayload {
                 .validate(&provenance.writer_id)
                 .map_err(<serde_json::Error as serde::de::Error>::custom)?;
         }
-        // Only a source fact carries the position after itself (FLOWIP-134i B11).
-        if provenance.source_progress.is_some() && !matches!(self, ChainPayload::Fact(_)) {
-            return Err(<serde_json::Error as serde::de::Error>::custom(
-                "source progress rides only on source facts",
-            ));
-        }
         if self.kind() != provenance.event_kind
             || self
                 .framework_schema_version()
@@ -168,9 +156,6 @@ impl JournalPayload for ChainPayload {
             }
             ChainPayload::Execution(ExecutionPayload::SourcePollFailed(failure)) => {
                 Some(failure.kind.clone())
-            }
-            ChainPayload::Execution(ExecutionPayload::SourceOpenFailed(failure)) => {
-                Some(failure.error_type.processing_error_kind())
             }
             ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => {
                 Some(failure.kind.clone())

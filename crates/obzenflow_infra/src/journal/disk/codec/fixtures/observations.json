@@ -303,12 +303,7 @@
           "responses_2xx": 1,
           "responses_4xx": 2,
           "responses_5xx": 3,
-          "rate_limited_total": 4,
-          "retries_total": 5,
-          "events_decoded_total": 6,
-          "wait_seconds_rate_limit": -0.0,
-          "wait_seconds_poll_interval": 0.25,
-          "wait_seconds_backoff": 0.5
+          "rate_limited_total": 4
         },
         {
           "observation_type": "ai_chunking_work",

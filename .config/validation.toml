@@ -16,7 +16,7 @@ test_program_build_jobs = 2
 
 [[ignored]]
 binary = "obzenflow_infra"
-test = "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records"
+test = "journal::disk::codec::tests::codec_current_schema_reproduces_fixtures"
 owner = "journal-fixtures lane"
 
 [[ignored]]
@@ -370,27 +370,6 @@ rationale = "Temporary configuration and disk evidence cover host admission and 
 
 [[prerequisites]]
 binary = "obzenflow_infra"
-test = "clients::http::reqwest_client::replay_tests::abort_during_initialization_cancels_the_waiter_before_request_send"
-lanes = ["production-features"]
-capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
-rationale = "Isolated child controls process-global client state; owned HTTP peer and disk archive distinguish live, cancelled and replayed requests."
-
-[[prerequisites]]
-binary = "obzenflow_infra"
-test = "clients::http::reqwest_client::replay_tests::resume_initializes_only_after_the_recorded_prefix_crosses_continue_live"
-lanes = ["production-features"]
-capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
-rationale = "Isolated child controls process-global client state; owned HTTP peer and disk archive distinguish live, cancelled and replayed requests."
-
-[[prerequisites]]
-binary = "obzenflow_infra"
-test = "clients::http::reqwest_client::replay_tests::strict_replay_keeps_the_default_source_client_cold"
-lanes = ["production-features"]
-capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
-rationale = "Isolated child controls process-global client state; owned HTTP peer and disk archive distinguish live, cancelled and replayed requests."
-
-[[prerequisites]]
-binary = "obzenflow_infra"
 test = "clients::http::reqwest_client::tests::cancelled_waiter_does_not_repeat_setup_or_send_a_request"
 lanes = ["production-features"]
 capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
@@ -440,7 +419,7 @@ rationale = "Each generated case writes two source journals to a temporary direc
 
 [[prerequisites]]
 binary = "obzenflow_infra"
-test = "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records"
+test = "journal::disk::codec::tests::codec_current_schema_reproduces_fixtures"
 lanes = ["journal-fixtures"]
 capabilities = ["temp-files"]
 rationale = "Cold decode, relocation and byte preservation use temporary on-disk copies of the checked-in codec fixtures."

@@ -25,17 +25,13 @@ use obzenflow_core::event::vocabulary;
 use obzenflow_core::event::{ChainPayload, JournalRecord, ReplayLifecycleEvent};
 use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    TypedInfiniteSourceHandler, TypedTransformHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
 use obzenflow_runtime::stages::observer::{HandlerObserver, HandlerObserverContext};
-use obzenflow_runtime::stages::SourceError;
-use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -60,39 +56,6 @@ struct Doubled {
 
 impl TypedPayload for Doubled {
     const EVENT_TYPE: &'static str = "resume_linear.doubled";
-}
-
-/// An infinite source that emits `count` ticks starting at `first_n`, then
-/// idles forever; the test stops the flow externally. Under resume the live
-/// handler is only polled after archive exhaustion, so the resumed run's
-/// instance produces exactly the live tail.
-#[derive(Clone, Debug)]
-struct BoundedTicker {
-    next_n: u64,
-    remaining: u64,
-}
-
-impl BoundedTicker {
-    fn new(first_n: u64, count: u64) -> Self {
-        Self {
-            next_n: first_n,
-            remaining: count,
-        }
-    }
-}
-
-impl TypedInfiniteSourceHandler for BoundedTicker {
-    type Output = Tick;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(Vec::new());
-        }
-        self.remaining -= 1;
-        let n = self.next_n;
-        self.next_n += 1;
-        Ok(vec![Tick { n }])
-    }
 }
 
 /// Pure 1:1 transform: one `Doubled` per consumed tick, so the delivered
@@ -137,7 +100,8 @@ fn build_flow_with_observer(
     observer_calls: Option<Arc<AtomicU64>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = ReattachingSource(BoundedTicker::new(first_n, count));
+        let source_handler =
+            replay_testkit::preloaded_input((first_n..first_n + count).map(|n| Tick { n }));
         let transform_handler = DoubleTransform::new();
         let sink_handler = CountingSink::<Doubled>::new(delivered);
         let transformed = match observer_calls {
@@ -153,7 +117,7 @@ fn build_flow_with_observer(
             journals: disk_journals(journal_base),
 
             stages: {
-                src = infinite_source!(Tick => source_handler);
+                src = source!(Tick => source_handler);
                 xform = transformed;
                 snk = sink!(Doubled => sink_handler);
             },
@@ -239,7 +203,8 @@ async fn run_until_delivered_with_observer(
 /// consume a located archive as input).
 fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = ReattachingSource(BoundedTicker::new(first_n, count));
+        let source_handler =
+            replay_testkit::preloaded_input((first_n..first_n + count).map(|n| Tick { n }));
         let transform_handler = DoubleTransform::new();
         let sink_handler = CountingSink::<Doubled>::new(delivered);
 
@@ -248,7 +213,7 @@ fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> Flo
             journals: memory_journals(),
 
             stages: {
-                src = infinite_source!(Tick => source_handler);
+                src = source!(Tick => source_handler);
                 xform = transform!(Tick -> Doubled => transform_handler);
                 snk = sink!(Doubled => sink_handler);
             },
@@ -456,7 +421,7 @@ fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
     envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {
-            payload if payload.consumes_data_credit() => {
+            ChainPayload::Fact(_) | ChainPayload::CompositeData(_) => {
                 Some(ResumeRow::Data(envelope.payload().clone()))
             }
             ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
@@ -481,7 +446,7 @@ fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
 fn data_payloads(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<serde_json::Value> {
     envelopes
         .iter()
-        .filter(|envelope| envelope.consumes_data_credit())
+        .filter(|envelope| envelope.is_typed_input())
         .map(|envelope| envelope.payload().clone())
         .collect()
 }

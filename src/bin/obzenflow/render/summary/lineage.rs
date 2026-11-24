@@ -8,9 +8,7 @@
 
 use super::*;
 use continuation::{RecordingEnd, SourceContinuation};
-use obzenflow_core::event::payloads::execution_payload::{
-    ReattachGuarantee, SourceContinuationRefusal,
-};
+use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use std::path::PathBuf;
 
@@ -198,9 +196,6 @@ fn continuation_text(continued: Option<&SourceContinuation>) -> String {
         Some(SourceContinuation::Positioned { generation }) => {
             format!("continued in generation {generation} after its committed input")
         }
-        Some(SourceContinuation::Started { generation }) => {
-            format!("started in generation {generation} (the interrupted run failed to open it)")
-        }
         Some(SourceContinuation::Reattached {
             generation,
             guarantee,
@@ -210,10 +205,9 @@ fn continuation_text(continued: Option<&SourceContinuation>) -> String {
                 guarantee_label(*guarantee)
             )
         }
-        Some(SourceContinuation::Refused(refusal)) => {
-            format!("refused: {}", refusal_text(refusal))
+        Some(SourceContinuation::InputChanged) => {
+            "refused: its input changed since the recorded run read it".into()
         }
-        Some(SourceContinuation::SeekFailed) => "failed to seek past its committed input".into(),
         None => "catch-up incomplete".into(),
     }
 }
@@ -232,23 +226,6 @@ fn eof_label(kind: EofKind) -> &'static str {
         EofKind::Natural => "natural",
         EofKind::Poison => "poison",
         EofKind::Truncated => "truncated",
-    }
-}
-
-fn refusal_text(refusal: &SourceContinuationRefusal) -> String {
-    match refusal {
-        SourceContinuationRefusal::InputChanged { part } => {
-            format!("its input changed since it was pinned ({part})")
-        }
-        SourceContinuationRefusal::MissingEvidence => {
-            "its archive lacks the recorded position of an admitted record".into()
-        }
-        SourceContinuationRefusal::PositionUnreadable => {
-            "its recorded position was written by another version of its connector".into()
-        }
-        SourceContinuationRefusal::Unpositioned => {
-            "its connector does not position its input".into()
-        }
     }
 }
 
@@ -387,8 +364,12 @@ mod tests {
             "journal-only (natural EOF in the recorded run)"
         );
         assert_eq!(
-            continuation_text(Some(&SourceContinuation::Started { generation: 1 })),
-            "started in generation 1 (the interrupted run failed to open it)"
+            continuation_text(Some(&SourceContinuation::InputChanged)),
+            "refused: its input changed since the recorded run read it"
+        );
+        assert_eq!(
+            continuation_text(Some(&SourceContinuation::Positioned { generation: 1 })),
+            "continued in generation 1 after its committed input"
         );
         for (guarantee, label) in [
             (ReattachGuarantee::SenderRedelivers, "sender redelivers"),

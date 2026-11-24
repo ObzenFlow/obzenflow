@@ -213,7 +213,10 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     }
 
     fn answered_by<T: SystemName>(port: SystemPort) -> Self {
-        let name = checked_system_name::<T>();
+        Self::named(checked_system_name::<T>(), port)
+    }
+
+    fn named(name: &'static str, port: SystemPort) -> Self {
         Self {
             name: LogicalEffectBindingName::of_system(name),
             evidence: SystemBindingEvidence::named(name)
@@ -226,33 +229,52 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// The name of the system behind this port, as its evidence and diagnostics
     /// record it.
     pub fn system_name(&self) -> &str {
-        self.name.as_str()
+        if self.binding().location().is_some() {
+            self.binding().name()
+        } else {
+            self.name.as_str()
+        }
+    }
+
+    /// `binding` returns the system binding that this port records when it answers a call.
+    pub fn binding(&self) -> &obzenflow_core::effect_binding::SystemBinding {
+        self.evidence.binding()
     }
 
     /// The same port bound under `system.instance`, for a framework system
     /// whose instances each hold their own destination, such as one file each.
     /// Characters a binding name can't hold become `_`.
     #[doc(hidden)]
-    pub fn instance(mut self, instance: &str) -> Self {
-        let qualified: String = format!("{}.{instance}", self.name.as_str())
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-                    character
-                } else {
-                    '_'
-                }
-            })
-            .take(64)
-            .collect();
-        if let Ok(name) = LogicalEffectBindingName::new(qualified) {
+    pub fn instance(mut self, instance: &str) -> Self
+    where
+        P: PortEffects,
+    {
+        if let Ok(name) = LogicalEffectBindingName::new(instance_name(self.name.as_str(), instance))
+        {
             self.name = name;
         }
         self
     }
 }
 
-const fn checked_system_name<T: SystemName>() -> &'static str {
+fn instance_name(base: &str, instance: &str) -> String {
+    let valid = |character: char| {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+            character
+        } else {
+            '_'
+        }
+    };
+    let suffix: String = format!(".{instance}").chars().map(valid).take(63).collect();
+    let base: String = base
+        .chars()
+        .map(valid)
+        .take(64 - suffix.chars().count())
+        .collect();
+    format!("{base}{suffix}")
+}
+
+pub(crate) const fn checked_system_name<T: SystemName>() -> &'static str {
     const {
         assert!(
             is_system_name(T::NAME),
@@ -312,7 +334,9 @@ const fn checked_system_name<T: SystemName>() -> &'static str {
 /// impl CaseSystemPort for Vendor {}
 /// ```
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
+    message = "`{Self}` has no system name",
+    note = "put `#[obzenflow::system(\"…\")]` above its `impl` of the port trait",
+    note = "if `{Self}` is its own port, put `system = \"…\"` on its `#[obzenflow::port]` block",
     label = "this system does not name itself",
     note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]
@@ -320,10 +344,25 @@ pub trait SystemName {
     const NAME: &'static str;
 }
 
+/// `LocatedSystem` is the configuration of a framework system that reads at a
+/// location. [`QueryPort::located`](crate::queries::QueryPort::located) records the
+/// location and builds the system from the same value.
+pub trait LocatedSystem: Send + Sync + 'static {
+    type System: SystemName + Send + Sync + 'static;
+
+    /// `location` returns the place and the format configuration that the system reads.
+    fn location(&self) -> obzenflow_core::effect_binding::SystemLocation;
+
+    /// `build` makes the system for a live call.
+    fn build(&self) -> Result<Self::System, EffectPortResolutionError>;
+}
+
 /// A built system, by value or in an `Arc`, as [`Port::to`] takes it.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name; put `#[obzenflow::system(\"…\")]` above its `impl` of the port, or `system = \"…\"` on its `#[obzenflow::port]` block if it serves as its own port",
+    message = "`{Self}` has no system name",
+    note = "put `#[obzenflow::system(\"…\")]` above its `impl` of the port trait",
+    note = "if `{Self}` is its own port, put `system = \"…\"` on its `#[obzenflow::port]` block",
     label = "this system does not name itself",
     note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
 )]
@@ -863,7 +902,7 @@ pub trait AnswersEffect<E: Effect> {
 
 impl<P, R> AnswersEffect<Call<R>> for Port<P>
 where
-    P: ?Sized + Send + Sync + 'static,
+    P: ?Sized + PortEffects + Send + Sync + 'static,
     R: CallRequest<Port = P>,
 {
     fn declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {
@@ -1077,4 +1116,20 @@ where
     >>::Marked: EveryPortAnswers,
 {
     declare_stage_effects::<H::AllowedEffects, H::Ports, Index>(&handler.ports())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::instance_name;
+
+    #[test]
+    fn long_base_instance_keeps_suffix() {
+        let base = format!("r{}", "a".repeat(63));
+        let one = instance_name(&base, "1");
+        let two = instance_name(&base, "2");
+        assert_ne!(one, two);
+        assert_eq!(one.len(), 64);
+        assert!(one.ends_with(".1"), "{one}");
+        assert_eq!(instance_name("in-memory", "7"), "in-memory.7");
+    }
 }

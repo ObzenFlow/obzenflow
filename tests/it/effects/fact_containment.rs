@@ -6,6 +6,7 @@
 //! effectful stage, before live I/O.
 
 use async_trait::async_trait;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
 use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
@@ -16,10 +17,7 @@ use obzenflow_runtime::effects::{
     effectful_transform_effects, EffectDeclaration, EffectError, Effects, Port, StageEffectsError,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedFiniteSourceHandler,
-};
-use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -66,29 +64,6 @@ impl ValueService {
         Ok(ContainmentEffectValue {
             value: request.value,
         })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct OneShotSource {
-    emitted: bool,
-}
-
-impl OneShotSource {
-    fn new() -> Self {
-        Self { emitted: false }
-    }
-}
-
-impl TypedFiniteSourceHandler for OneShotSource {
-    type Output = ContainmentInput;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![ContainmentInput { value: 1 }]))
     }
 }
 
@@ -178,7 +153,7 @@ fn missing_effect_fact_descriptor() -> Box<dyn StageDescriptor> {
 /// arrow.
 fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = OneShotSource::new();
+        let inputs_handler = ValuesSource::new([ContainmentInput { value: 1 }]);
         let drops_handler = DropSink::<ContainmentOutput>::new();
 
         Ok(flow! {
@@ -355,7 +330,7 @@ fn colliding_effect_descriptor() -> Box<dyn StageDescriptor> {
 
 fn colliding_event_type_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = OneShotSource::new();
+        let inputs_handler = ValuesSource::new([ContainmentInput { value: 1 }]);
         let drops_handler = DropSink::<ColliderA>::new();
 
         Ok(flow! {

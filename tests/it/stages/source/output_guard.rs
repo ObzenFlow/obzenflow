@@ -12,8 +12,6 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let csv = fs::read_to_string(root.join("crates/obzenflow_adapters/src/sources/csv.rs"))
         .expect("read CSV source");
-    let pull = fs::read_to_string(root.join("crates/obzenflow_adapters/src/sources/http_pull.rs"))
-        .expect("read HTTP pull source");
     let ingress = fs::read_to_string(
         root.join("crates/obzenflow_infra/src/web/endpoints/event_ingestion/mod.rs"),
     )
@@ -43,12 +41,6 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
             "retired CSV source API returned: {retired}"
         );
     }
-
-    assert!(pull.contains("pub trait PullDecoder"));
-    assert!(pull.contains("pub trait CursorlessPullDecoder"));
-    assert!(!pull.contains("type Item: TypedPayload"));
-    assert!(!pull.contains("D::Item"));
-    assert!(!pull.contains("fn event_type(&self)"));
 
     assert!(ingress.contains("pub fn ingress_source<D>(decoder: D"));
     assert!(ingress.contains("pub fn http_ingress<D>(decoder: D"));

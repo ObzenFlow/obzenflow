@@ -19,6 +19,7 @@ use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
@@ -28,6 +29,119 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RowRead(usize);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait RowInput {
+    #[query(type = "join_parity.rows.read")]
+    async fn read(
+        &self,
+        from: &RowRead,
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<serde_json::Value, RowRead>, obzenflow::queries::QueryError>;
+}
+
+struct Rows {
+    rows: Vec<serde_json::Value>,
+    reads: Arc<AtomicUsize>,
+}
+
+#[obzenflow_runtime::effects::system("rows")]
+#[async_trait::async_trait]
+impl RowInput for Rows {
+    async fn read(
+        &self,
+        from: &RowRead,
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<serde_json::Value, RowRead>, obzenflow::queries::QueryError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(match self.rows.get(from.0) {
+            Some(row) => FiniteRead::Batch {
+                records: vec![row.clone()],
+                next: RowRead(from.0 + 1),
+            },
+            None => FiniteRead::EndOfInput,
+        })
+    }
+}
+
+struct CountedSource<T> {
+    port: obzenflow::queries::QueryPort<dyn RowInput>,
+    output: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: Serialize> CountedSource<T> {
+    fn new(rows: Vec<T>, reads: Arc<AtomicUsize>) -> Self {
+        let rows = rows
+            .iter()
+            .map(|row| serde_json::to_value(row).expect("a row serializes"))
+            .collect();
+        Self {
+            port: obzenflow::queries::QueryPort::to(Rows { rows, reads }),
+            output: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> TypedFiniteSourceHandler for CountedSource<T>
+where
+    T: TypedPayload + serde::de::DeserializeOwned + Send + Sync + 'static,
+{
+    type Output = T;
+
+    fn read(&self) -> SourceRead<T> {
+        SourceRead::finite(self.port.clone(), RowRead(0), |row| {
+            serde_json::from_value(row).map_err(|_| {
+                SourceError::Deserialization(
+                    obzenflow_core::event::SourceDiagnosticReason::MalformedInput.into(),
+                )
+            })
+        })
+    }
+}
+
+fn reference_source(reads: Arc<AtomicUsize>) -> CountedSource<ReferenceItem> {
+    CountedSource::new(
+        vec![
+            ReferenceItem {
+                key: "k1".to_string(),
+                version: "old".to_string(),
+            },
+            ReferenceItem {
+                key: "k1".to_string(),
+                version: "new".to_string(),
+            },
+            ReferenceItem {
+                key: "k2".to_string(),
+                version: "terminal".to_string(),
+            },
+        ],
+        reads,
+    )
+}
+
+fn stream_source(reads: Arc<AtomicUsize>) -> CountedSource<StreamItem> {
+    CountedSource::new(
+        vec![
+            StreamItem {
+                key: "k1".to_string(),
+                reject: false,
+            },
+            StreamItem {
+                key: "foreign-error".to_string(),
+                reject: true,
+            },
+            StreamItem {
+                key: "k2".to_string(),
+                reject: false,
+            },
+        ],
+        reads,
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ReferenceItem {
@@ -59,92 +173,6 @@ struct JoinedFact {
 
 impl TypedPayload for JoinedFact {
     const EVENT_TYPE: &'static str = "flowip_134f.joined";
-}
-
-#[derive(Clone, Debug)]
-struct ReferenceSource {
-    rows: Vec<ReferenceItem>,
-    next: usize,
-    reads: Arc<AtomicUsize>,
-}
-
-impl ReferenceSource {
-    fn new(reads: Arc<AtomicUsize>) -> Self {
-        Self {
-            rows: vec![
-                ReferenceItem {
-                    key: "k1".to_string(),
-                    version: "old".to_string(),
-                },
-                ReferenceItem {
-                    key: "k1".to_string(),
-                    version: "new".to_string(),
-                },
-                ReferenceItem {
-                    key: "k2".to_string(),
-                    version: "terminal".to_string(),
-                },
-            ],
-            next: 0,
-            reads,
-        }
-    }
-}
-
-impl TypedFiniteSourceHandler for ReferenceSource {
-    type Output = ReferenceItem;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        let Some(row) = self.rows.get(self.next).cloned() else {
-            return Ok(None);
-        };
-        self.next += 1;
-        Ok(Some(vec![row]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct StreamSource {
-    rows: Vec<StreamItem>,
-    next: usize,
-    reads: Arc<AtomicUsize>,
-}
-
-impl StreamSource {
-    fn new(reads: Arc<AtomicUsize>) -> Self {
-        Self {
-            rows: vec![
-                StreamItem {
-                    key: "k1".to_string(),
-                    reject: false,
-                },
-                StreamItem {
-                    key: "foreign-error".to_string(),
-                    reject: true,
-                },
-                StreamItem {
-                    key: "k2".to_string(),
-                    reject: false,
-                },
-            ],
-            next: 0,
-            reads,
-        }
-    }
-}
-
-impl TypedFiniteSourceHandler for StreamSource {
-    type Output = StreamItem;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        let Some(row) = self.rows.get(self.next).cloned() else {
-            return Ok(None);
-        };
-        self.next += 1;
-        Ok(Some(vec![row]))
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -259,8 +287,8 @@ fn build_flow(
     join_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let references = ReferenceSource::new(reference_reads.clone());
-        let streams = StreamSource::new(stream_reads.clone());
+        let references = reference_source(reference_reads.clone());
+        let streams = stream_source(stream_reads.clone());
         let reference_validate = IdentityReference;
         let stream_validate = RejectMarkedStream;
         let joined = ExactJoin {
@@ -655,9 +683,9 @@ async fn invalid_authored_join_forms_fail_before_journal_provider_evaluation() {
             let providers = providers.clone();
             let reads = reads.clone();
             FlowDefinition::materialize(move |_| {
-                let catalog = ReferenceSource::new(reads.clone());
-                let stream = ReferenceSource::new(reads.clone());
-                let other = ReferenceSource::new(reads);
+                let catalog = reference_source(reads.clone());
+                let stream = reference_source(reads.clone());
+                let other = reference_source(reads);
                 let joiner = obzenflow::stages::joins::inner(
                     |row: &ReferenceItem| row.key.clone(),
                     |row: &ReferenceItem| row.key.clone(),
@@ -726,8 +754,8 @@ async fn invalid_authored_join_forms_fail_before_journal_provider_evaluation() {
 #[tokio::test]
 async fn test_flow_rejects_plain_join_input_before_journal_provider_evaluation() {
     let providers = Arc::new(AtomicUsize::new(0));
-    let reference = ReferenceSource::new(Arc::new(AtomicUsize::new(0)));
-    let stream = StreamSource::new(Arc::new(AtomicUsize::new(0)));
+    let reference = reference_source(Arc::new(AtomicUsize::new(0)));
+    let stream = stream_source(Arc::new(AtomicUsize::new(0)));
     let joiner = ExactJoin {
         calls: Arc::new(AtomicUsize::new(0)),
     };

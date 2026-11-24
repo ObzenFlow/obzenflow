@@ -162,6 +162,14 @@ pub enum EffectError {
     #[error("effect call domain failure: {0}")]
     Domain(String),
 
+    /// A source read failed. `error` classifies the call, and `failure` is the
+    /// diagnostic that the source reports, live and on reconstruction.
+    #[error("{error}")]
+    SourceRead {
+        error: Box<EffectError>,
+        failure: Box<obzenflow_core::event::SourceReadFailure>,
+    },
+
     #[error("effect replay archive failed: {0}")]
     ReplayArchive(String),
 }
@@ -329,14 +337,26 @@ impl EffectError {
     /// a dependency failure marked retryable. Repeating a definite no cannot
     /// duplicate work, whatever the effect's safety.
     pub fn is_definite_no(&self) -> bool {
-        matches!(
-            self,
-            EffectError::RateLimited { .. }
-                | EffectError::DependencyFailed {
-                    retry: RetryDisposition::Retryable,
-                    ..
-                }
-        )
+        match self {
+            EffectError::SourceRead { error, .. } => error.is_definite_no(),
+            _ => matches!(
+                self,
+                EffectError::RateLimited { .. }
+                    | EffectError::DependencyFailed {
+                        retry: RetryDisposition::Retryable,
+                        ..
+                    }
+            ),
+        }
+    }
+
+    /// `retry_after` returns the minimum delay that a rate-limited call asked for.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            EffectError::RateLimited { retry_after, .. } => Some(*retry_after),
+            EffectError::SourceRead { error, .. } => error.retry_after(),
+            _ => None,
+        }
     }
 
     /// Construct a target-invariant failure from a validated typed slot.
@@ -382,6 +402,7 @@ impl EffectError {
             EffectError::Permanent(_) | EffectError::Validation(_) | EffectError::Domain(_) => {
                 false
             }
+            EffectError::SourceRead { error, .. } => error.recovery_eligible_by_default(),
         }
     }
 
@@ -428,7 +449,7 @@ impl EffectError {
         }
     }
 
-    pub(super) fn error_type(&self) -> EffectFailureKind {
+    pub(crate) fn error_type(&self) -> EffectFailureKind {
         match self {
             EffectError::BindingAuthority { .. } => "binding_authority_fault",
             EffectError::DestinationChanged { .. } => "destination_changed",
@@ -461,6 +482,7 @@ impl EffectError {
             EffectError::Validation(_) => "validation",
             EffectError::Domain(_) => "domain",
             EffectError::ReplayArchive(_) => "replay_archive",
+            EffectError::SourceRead { error, .. } => return error.error_type(),
         }
         .into()
     }
@@ -491,6 +513,7 @@ impl EffectError {
                 std::borrow::Cow::Borrowed(error_message)
             }
             EffectError::RateLimited { message, .. } => std::borrow::Cow::Borrowed(message),
+            EffectError::SourceRead { error, .. } => error.semantic_reason(),
             EffectError::BoundaryRejected { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::DependencyFailed { message, .. }
             | EffectError::RecoveryAbandoned { message, .. } => std::borrow::Cow::Borrowed(message),
@@ -536,6 +559,7 @@ impl EffectError {
                 code: code.clone(),
             }),
             EffectError::RecordedFailure { cause, .. } => cause.clone(),
+            EffectError::SourceRead { error, .. } => error.failure_cause(),
             EffectError::DependencyFailed {
                 failure_source,
                 code,
@@ -563,6 +587,9 @@ impl EffectError {
                 })
             }
             Self::RecordedFailure { detail, .. } => detail.as_deref().cloned(),
+            Self::SourceRead { failure, .. } => {
+                Some(EffectFailureDetail::SourceRead(failure.as_ref().clone()))
+            }
             _ => None,
         }
     }
@@ -704,6 +731,34 @@ mod tests {
             assert_eq!(live.error_kind(), kind, "{live:?}");
             assert_eq!(replayed(&live).error_kind(), kind, "{live:?}");
         }
+    }
+
+    #[test]
+    fn source_read_replay_keeps_detail() {
+        let failure = obzenflow_core::event::SourceReadFailure {
+            category:
+                obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind::Validation,
+            continuation:
+                obzenflow_core::event::payloads::execution_payload::SourcePollContinuation::Terminal,
+            diagnostic: obzenflow_core::event::SourceDiagnosticReason::RemoteRejected.into(),
+        };
+        let live = EffectError::SourceRead {
+            error: Box::new(EffectError::RateLimited {
+                message: "429 Too Many Requests".into(),
+                retry_after: Duration::from_secs(2),
+            }),
+            failure: Box::new(failure.clone()),
+        };
+        assert_eq!(live.error_kind(), ErrorKind::RateLimited);
+        assert_eq!(live.retry_after(), Some(Duration::from_secs(2)));
+        assert!(live.is_definite_no());
+        let replayed = replayed(&live);
+        assert_eq!(replayed.error_kind(), ErrorKind::RateLimited);
+        assert_eq!(
+            replayed.failure_detail(),
+            Some(EffectFailureDetail::SourceRead(failure))
+        );
+        assert_eq!(replayed.semantic_reason(), "429 Too Many Requests");
     }
 
     #[test]

@@ -15,6 +15,5 @@ pub enum MetricsTailKey {
     PipelineLifecycle(WriterId),
     PipelineOutcome(WriterId),
     CircuitBreaker(StageId),
-    HttpPull(StageId),
     Contract(ContractMetricEdgeKey),
 }

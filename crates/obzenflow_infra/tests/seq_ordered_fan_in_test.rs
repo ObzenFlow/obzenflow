@@ -6,30 +6,31 @@ use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
 use obzenflow_adapters::sources::ChannelSource;
+use obzenflow_adapters::sources::ValuesSource;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord, WriterId};
 use obzenflow_core::{EventId, TypedPayload};
-use obzenflow_dsl::{
-    async_infinite_source, flow, join, sink, source, stateful, transform, FlowDefinition,
-};
+use obzenflow_dsl::{flow, join, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::{
+    source_channel, SourceReceiver, SourceSender,
+};
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler,
     TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::join::JoinReferenceMode;
 use obzenflow_runtime::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct AccountRow {
@@ -172,38 +173,22 @@ impl TypedStatefulHandler for Checkbook {
     fn post_emit(&self, _: &mut Self::State) {}
 }
 
-#[derive(Clone, Debug)]
-struct BatchAccounts {
-    rows: Vec<AccountRow>,
-}
-
-impl TypedFiniteSourceHandler for BatchAccounts {
-    type Output = AccountRow;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.rows.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(vec![self.rows.remove(0)]))
-    }
-}
-
 struct LiveInputs<A, B> {
-    first: mpsc::Sender<A>,
-    second: mpsc::Sender<B>,
+    first: SourceSender<A>,
+    second: SourceSender<B>,
 }
 
-fn live_inputs<A, B>() -> (LiveInputs<A, B>, mpsc::Receiver<A>, mpsc::Receiver<B>) {
-    let (first, first_rx) = mpsc::channel(64);
-    let (second, second_rx) = mpsc::channel(64);
+fn live_inputs<A, B>() -> (LiveInputs<A, B>, SourceReceiver<A>, SourceReceiver<B>) {
+    let (first, first_rx) = source_channel(64);
+    let (second, second_rx) = source_channel(64);
     (LiveInputs { first, second }, first_rx, second_rx)
 }
 
 fn live_join_flow(
     journal_base: PathBuf,
     derived_catalog: bool,
-    accounts_rx: mpsc::Receiver<AccountRow>,
-    tx_rx: mpsc::Receiver<TxRow>,
+    accounts_rx: SourceReceiver<AccountRow>,
+    tx_rx: SourceReceiver<TxRow>,
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
@@ -221,8 +206,8 @@ fn live_join_flow(
                 journals: disk_journals(journal_base),
 
                 stages: {
-                    accounts = async_infinite_source!(AccountRow => accounts_source);
-                    tx = async_infinite_source!(TxRow => tx_source);
+                    accounts = source!(AccountRow => accounts_source);
+                    tx = source!(TxRow => tx_source);
                     account_book = transform!(AccountRow -> AccountRow => book);
                     posted = join!(catalog account_book: AccountRow, TxRow -> PostedRow => post_live);
                     checkbook = stateful!(PostedRow -> Snapshot => checkbook);
@@ -242,8 +227,8 @@ fn live_join_flow(
                 journals: disk_journals(journal_base),
 
                 stages: {
-                    accounts = async_infinite_source!(AccountRow => accounts_source);
-                    tx = async_infinite_source!(TxRow => tx_source);
+                    accounts = source!(AccountRow => accounts_source);
+                    tx = source!(TxRow => tx_source);
                     posted = join!(catalog accounts: AccountRow, TxRow -> PostedRow => post_live);
                     checkbook = stateful!(PostedRow -> Snapshot => checkbook);
                     collect = sink!(Snapshot => collect);
@@ -261,9 +246,9 @@ fn live_join_flow(
 
 fn mixed_fold_flow(
     journal_base: PathBuf,
-    accounts_rx: mpsc::Receiver<AccountRow>,
-    tx_rx: mpsc::Receiver<TxRow>,
-    adjustments_rx: mpsc::Receiver<PostedRow>,
+    accounts_rx: SourceReceiver<AccountRow>,
+    tx_rx: SourceReceiver<TxRow>,
+    adjustments_rx: SourceReceiver<PostedRow>,
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
@@ -281,9 +266,9 @@ fn mixed_fold_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                accounts = async_infinite_source!(AccountRow => accounts_source);
-                tx = async_infinite_source!(TxRow => tx_source);
-                adjustments = async_infinite_source!(PostedRow => adjustments_source);
+                accounts = source!(AccountRow => accounts_source);
+                tx = source!(TxRow => tx_source);
+                adjustments = source!(PostedRow => adjustments_source);
                 account_book = transform!(AccountRow -> AccountRow => book);
                 posted = join!(catalog account_book: AccountRow, TxRow -> PostedRow => post_live);
                 checkbook = stateful!(PostedRow -> Snapshot => checkbook);
@@ -303,14 +288,12 @@ fn mixed_fold_flow(
 
 fn hydrating_flow(
     journal_base: PathBuf,
-    quiet_rx: mpsc::Receiver<TxRow>,
-    active_rx: mpsc::Receiver<TxRow>,
+    quiet_rx: SourceReceiver<TxRow>,
+    active_rx: SourceReceiver<TxRow>,
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let accounts_source = BatchAccounts {
-            rows: vec![account("acct-1"), account("acct-2")],
-        };
+        let accounts_source = ValuesSource::new(vec![account("acct-1"), account("acct-2")]);
         let quiet_source = ChannelSource::new(quiet_rx);
         let active_source = ChannelSource::new(active_rx);
         let post_batch = PostEntries {
@@ -324,8 +307,8 @@ fn hydrating_flow(
 
             stages: {
                 accounts = source!(AccountRow => accounts_source);
-                tx_quiet = async_infinite_source!(TxRow => quiet_source);
-                tx_active = async_infinite_source!(TxRow => active_source);
+                tx_quiet = source!(TxRow => quiet_source);
+                tx_active = source!(TxRow => active_source);
                 posted = join!(catalog accounts: AccountRow, TxRow -> PostedRow => post_batch);
                 checkbook = stateful!(PostedRow -> Snapshot => checkbook);
                 collect = sink!(Snapshot => collect);
@@ -341,24 +324,53 @@ fn hydrating_flow(
     })
 }
 
-#[derive(Clone, Debug)]
-struct PausingBatch {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BatchRead(usize);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait BatchInput {
+    #[query(type = "seq_ordered_fan_in.batch.read")]
+    async fn read(
+        &self,
+        from: &BatchRead,
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<TxRow, BatchRead>, obzenflow_runtime::queries::QueryError>;
+}
+
+struct Pausing {
     rows: Vec<TxRow>,
     release: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[obzenflow_runtime::effects::system("pausing-batch")]
+#[async_trait::async_trait]
+impl BatchInput for Pausing {
+    async fn read(
+        &self,
+        from: &BatchRead,
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<TxRow, BatchRead>, obzenflow_runtime::queries::QueryError> {
+        if let Some(row) = self.rows.get(from.0) {
+            return Ok(FiniteRead::Batch {
+                records: vec![row.clone()],
+                next: BatchRead(from.0 + 1),
+            });
+        }
+        while !self.release.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(FiniteRead::EndOfInput)
+    }
+}
+
+struct PausingBatch(obzenflow_runtime::queries::QueryPort<dyn BatchInput>);
+
 impl TypedFiniteSourceHandler for PausingBatch {
     type Output = TxRow;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if !self.rows.is_empty() {
-            return Ok(Some(vec![self.rows.remove(0)]));
-        }
-        if self.release.load(Ordering::SeqCst) {
-            Ok(None)
-        } else {
-            Ok(Some(Vec::new()))
-        }
+    fn read(&self) -> SourceRead<TxRow> {
+        SourceRead::finite(self.0.clone(), BatchRead(0), Ok)
     }
 }
 
@@ -432,14 +444,14 @@ impl TypedStatefulHandler for Tally {
 fn end_of_input_flow(
     journal_base: PathBuf,
     release: Arc<std::sync::atomic::AtomicBool>,
-    live_rx: mpsc::Receiver<Snapshot>,
+    live_rx: SourceReceiver<Snapshot>,
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let batch_source = PausingBatch {
+        let batch_source = PausingBatch(obzenflow_runtime::queries::QueryPort::to(Pausing {
             rows: vec![tx("acct-1", 5), tx("acct-1", 7)],
             release,
-        };
+        }));
         let live_source = ChannelSource::new(live_rx);
         let total = StatefulWithEmission::new(BatchTotal, OnEOF);
         let forward = Forward;
@@ -451,7 +463,7 @@ fn end_of_input_flow(
 
             stages: {
                 batch = source!(TxRow => batch_source);
-                live = async_infinite_source!(Snapshot => live_source);
+                live = source!(Snapshot => live_source);
                 total = stateful!(TxRow -> Snapshot => total);
                 merged = transform!(Snapshot -> Snapshot => forward);
                 tally = stateful!(Snapshot -> Snapshot => tally);
@@ -867,7 +879,7 @@ async fn a_mixed_source_and_derived_fold_records_its_order() -> Result<()> {
 
     let delivered = Arc::new(AtomicUsize::new(0));
     let (inputs, accounts_rx, tx_rx) = live_inputs();
-    let (adjustments, adjustments_rx) = mpsc::channel(8);
+    let (adjustments, adjustments_rx) = source_channel(8);
     let handle = start(mixed_fold_flow(
         journal_base.clone(),
         accounts_rx,
@@ -901,7 +913,7 @@ async fn a_mixed_source_and_derived_fold_records_its_order() -> Result<()> {
     assert_outputs_follow_their_decision_rows(&run, "checkbook").await;
 
     let (_inputs, accounts_rx, tx_rx) = live_inputs();
-    let (_adjustments, adjustments_rx) = mpsc::channel(8);
+    let (_adjustments, adjustments_rx) = source_channel(8);
     let replayed = replay(
         &journal_base,
         &run,
@@ -1090,7 +1102,7 @@ async fn a_folds_end_of_input_output_lands_where_it_was_recorded() -> Result<()>
 
     let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let delivered = Arc::new(AtomicUsize::new(0));
-    let (live, live_rx) = mpsc::channel(8);
+    let (live, live_rx) = source_channel(8);
     let handle = start(end_of_input_flow(
         journal_base.clone(),
         release.clone(),
@@ -1117,7 +1129,7 @@ async fn a_folds_end_of_input_output_lands_where_it_was_recorded() -> Result<()>
     let rows = decision_rows(&run, "merged").await;
     assert_outputs_follow_their_decision_rows(&run, "merged").await;
 
-    let (_live, live_rx) = mpsc::channel(8);
+    let (_live, live_rx) = source_channel(8);
     let replayed = replay(
         &journal_base,
         &run,
@@ -1133,7 +1145,7 @@ async fn a_folds_end_of_input_output_lands_where_it_was_recorded() -> Result<()>
     assert_eq!(decision_rows(&replayed, "merged").await, rows);
 
     let delivered = Arc::new(AtomicUsize::new(0));
-    let (live, live_rx) = mpsc::channel(8);
+    let (live, live_rx) = source_channel(8);
     {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(resume_bootstrap(&run)).await,

@@ -6,6 +6,7 @@ use super::fsm::PipelineFsmEvent;
 use super::termination::{execution_result, PublishedOutcome};
 use super::{FlowStartControlOutcome, FlowStopMode, PipelineControl, PipelineState};
 use crate::errors::FlowError;
+use crate::execution::SourceExecutionPhases;
 use crate::stages::LivenessSnapshots;
 use crate::supervised_base::{StandardHandle, SupervisorHandle};
 use obzenflow_core::event::observability::{ObservationRecorder, ObservationSource};
@@ -30,6 +31,7 @@ pub(crate) struct FlowHandleExtras {
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
     pub ingress_evidence: Option<super::ingress::IngressEvidenceWriter>,
+    pub source_phases: Option<SourceExecutionPhases>,
     pub metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
     pub stage_journals: Vec<(StageId, Arc<dyn Journal<obzenflow_core::ChainEvent>>)>,
     pub system_journals: Vec<Arc<dyn Journal<SystemEvent>>>,
@@ -79,6 +81,7 @@ pub struct FlowHandle {
 
     /// Host ingress evidence published through this pipeline owner.
     ingress_evidence: Option<super::ingress::IngressEvidenceWriter>,
+    source_phases: Option<SourceExecutionPhases>,
     metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
     stage_journals: Vec<(StageId, Arc<dyn Journal<obzenflow_core::ChainEvent>>)>,
     system_journals: Vec<Arc<dyn Journal<SystemEvent>>>,
@@ -108,6 +111,11 @@ impl FlowHandle {
     pub fn ingress_evidence(&self) -> Option<super::ingress::IngressEvidenceWriter> {
         self.ingress_evidence.clone()
     }
+    /// `source_phases` returns the execution phase of each source stage. It returns `None`
+    /// if you built the flow without a runtime execution.
+    pub fn source_phases(&self) -> Option<SourceExecutionPhases> {
+        self.source_phases.clone()
+    }
     /// Live journal handles for presentation consumers. Reading them never participates in coordination.
     pub fn stage_journals(&self) -> Vec<(StageId, Arc<dyn Journal<obzenflow_core::ChainEvent>>)> {
         self.stage_journals.clone()
@@ -134,6 +142,7 @@ impl FlowHandle {
             system_journals,
             metrics_journals,
             ingress_evidence,
+            source_phases,
             pipeline_writer_id,
             observations,
             host_observations,
@@ -157,6 +166,7 @@ impl FlowHandle {
             system_journals,
             metrics_journals,
             ingress_evidence,
+            source_phases,
             pipeline_writer_id,
             observations,
             host_observations,

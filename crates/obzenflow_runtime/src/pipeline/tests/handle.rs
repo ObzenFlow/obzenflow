@@ -20,6 +20,7 @@ fn empty_extras() -> FlowHandleExtras {
         stage_journals: vec![],
         system_journals: vec![],
         ingress_evidence: None,
+        source_phases: None,
         observations: Arc::new(ObservationRegistry::default()),
         host_observations: Arc::new(NoObservations),
         stage_cleanup: Vec::new(),

@@ -39,6 +39,7 @@ pub struct WebSurfaceWiringContext {
     /// journal, in which case a surface with evidence recording enabled fails
     /// startup.
     pub ingress_evidence: Option<obzenflow_runtime::pipeline::ingress::IngressEvidenceWriter>,
+    pub source_phases: Option<obzenflow_runtime::execution::SourceExecutionPhases>,
 }
 
 #[derive(Default)]
@@ -206,6 +207,7 @@ mod tests {
         let wired = wiring(WebSurfaceWiringContext {
             pipeline_state: rx,
             ingress_evidence: None,
+            source_phases: None,
         })
         .unwrap();
         assert_eq!(wired.tasks.len(), 1);

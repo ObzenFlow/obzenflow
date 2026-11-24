@@ -5,9 +5,9 @@
 //! Handle-first ingress plus optional HTTP event ingestion endpoints
 //!
 //! Applications use [`crate::application::FlowApplicationBuilder::http_ingress`]
-//! to register HTTP ingress and receive its source for the flow. The builder owns
-//! hosting and lifecycle wiring. For application-owned protocols, clone a handle
-//! from [`ingress_source`] and pass the bundle to
+//! to register HTTP ingress and receive its hosted source handler for the flow. The
+//! builder hosts the ingress and controls its lifecycle. For an application-owned
+//! protocol, clone a handle from [`ingress_source`]. Then give the bundle to
 //! [`crate::application::FlowApplicationBuilder::ingress`].
 //! HTTP ingress provides the hosted routes:
 //! - `POST {base_path}/events` (single event)
@@ -42,13 +42,14 @@ pub use validation::{
 };
 
 pub use obzenflow_adapters::sources::http::{
-    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord,
+    HostedSource, IngressDecodeError, IngressDecoder, IngressRecord,
 };
 use obzenflow_core::ingress::{
     HostedIngressBindingSlot, IngressAttemptContext, IngressRequestId, OUTCOME_UNKNOWN_RETRY_AFTER,
 };
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::execution::SourceExecutionPhases;
 use obzenflow_runtime::prelude::FlowHandle;
 use settlement::EvidenceState;
 use shared::{admit_typed, AdmittedRequest, EdgeRefusal};
@@ -199,6 +200,7 @@ where
             )));
         }
         install_evidence_writer(&self.state, flow_handle.ingress_evidence(), "handle")?;
+        install_source_phases(&self.state, flow_handle.source_phases(), "handle")?;
         Ok(self
             .state
             .watch_pipeline_state(flow_handle.state_receiver()))
@@ -235,15 +237,32 @@ fn install_evidence_writer<T>(
     }
 }
 
-/// Typed source plus ingress handle for developer-owned ingress protocols.
+fn install_source_phases<T>(
+    state: &IngestionState<T>,
+    phases: Option<SourceExecutionPhases>,
+    kind: &str,
+) -> Result<(), ApplicationError> {
+    match phases {
+        Some(phases) => {
+            state.install_source_phases(phases);
+            Ok(())
+        }
+        None => Err(ApplicationError::FlowBuildFailed(format!(
+            "hosted ingress {kind} '{}' cannot read the execution phase of its source, because the \
+             flow has no runtime execution. Use flow! to build the flow.",
+            state.ingress_key()
+        ))),
+    }
+}
+
+/// `Ingress` holds a hosted source and an ingress handle for an application-owned
+/// protocol.
 pub struct Ingress<D>
 where
     D: IngressDecoder,
 {
-    source: HostedIngressSource<D>,
+    source: HostedSource<D::Output>,
     handle: IngressHandle<D::Output>,
-    /// Maps protocol bodies for a hosted HTTP wrapper; typed handle
-    /// submissions bypass it.
     decoder: D,
 }
 
@@ -251,10 +270,8 @@ impl<D> Ingress<D>
 where
     D: IngressDecoder,
 {
-    /// Consume the bundle into its source and cloneable submission handle.
-    ///
-    /// The receiver transfers once. Use topology fan-out for multiple consumers.
-    /// Splitting preserves the queue and ingress binding without starting execution.
+    /// `into_parts` splits the bundle into its hosted source and its submission handle.
+    /// It does not start a runtime execution. One source stage reads the submissions.
     ///
     /// ```compile_fail,E0382
     /// use obzenflow_infra::web::endpoints::event_ingestion::{Ingress, IngressDecoder};
@@ -264,7 +281,7 @@ where
     ///     let (another_source, _) = ingress.into_parts(); // ingress was consumed
     /// }
     /// ```
-    pub fn into_parts(self) -> (HostedIngressSource<D>, IngressHandle<D::Output>) {
+    pub fn into_parts(self) -> (HostedSource<D::Output>, IngressHandle<D::Output>) {
         (self.source, self.handle)
     }
 
@@ -278,7 +295,7 @@ pub struct HttpIngress<D>
 where
     D: IngressDecoder,
 {
-    source: HostedIngressSource<D>,
+    source: HostedSource<D::Output>,
     attachment: HttpIngressAttachment<D::Output>,
 }
 
@@ -299,10 +316,9 @@ impl<D> HttpIngress<D>
 where
     D: IngressDecoder,
 {
-    /// Consume the bundle into its source and HTTP hosting attachment.
-    ///
-    /// The receiver transfers once. Use topology fan-out for multiple consumers.
-    /// Splitting preserves the queue and ingress binding without starting execution.
+    /// `into_parts` splits the bundle into its hosted source and its HTTP hosting
+    /// attachment. It does not start a runtime execution. One source stage reads the
+    /// submissions.
     ///
     /// ```compile_fail,E0382
     /// use obzenflow_infra::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder};
@@ -312,7 +328,7 @@ where
     ///     let (another_source, _) = ingress.into_parts(); // ingress was consumed
     /// }
     /// ```
-    pub fn into_parts(self) -> (HostedIngressSource<D>, HttpIngressAttachment<D::Output>) {
+    pub fn into_parts(self) -> (HostedSource<D::Output>, HttpIngressAttachment<D::Output>) {
         (self.source, self.attachment)
     }
 
@@ -341,30 +357,42 @@ where
     }
 }
 
-/// Create a typed source plus protocol-neutral ingress handle.
-///
-/// The decoder value owns the source's output type. Clone the bundle's handle for
-/// submission, then pass the bundle to [`crate::application::FlowApplicationBuilder::ingress`]
-/// to register its lifecycle and receive the source.
+/// `ingress_source` creates a hosted source and a protocol-neutral ingress handle. The
+/// source's system is `ingress`. [`crate::application::FlowApplicationBuilder::ingress`]
+/// registers the bundle.
 pub fn ingress_source<D>(decoder: D, config: IngestionConfig) -> Ingress<D>
 where
     D: IngressDecoder,
 {
+    hosted_ingress(decoder, config, HostedSource::ingress)
+}
+
+type HostedSystem<T> = fn(
+    obzenflow_runtime::stages::common::handlers::source::SourceReceiver<
+        obzenflow_runtime::stages::HostedSubmission<T>,
+    >,
+    HostedIngressBindingSlot,
+) -> HostedSource<T>;
+
+fn hosted_ingress<D>(
+    decoder: D,
+    config: IngestionConfig,
+    system: HostedSystem<D::Output>,
+) -> Ingress<D>
+where
+    D: IngressDecoder,
+{
     let (state, rx) = IngestionState::new(config);
-    let source = HostedIngressSource::new(rx, state.ingress_slot());
     Ingress {
-        source,
+        source: system(rx, state.ingress_slot()),
         handle: IngressHandle { state },
         decoder,
     }
 }
 
-/// Create a zero-wiring HTTP ingress bundle.
-///
-/// Prefer [`crate::application::FlowApplicationBuilder::http_ingress`] for application
-/// hosting. This bundle supports explicit source/attachment composition. The
-/// decoder runs once per submission at admission; a configured validator adds
-/// to it and never replaces it.
+/// `http_ingress` creates an HTTP ingress bundle. Use it when you compose the source and
+/// the attachment yourself. The source's system is `http-ingress`. The decoder runs at
+/// admission, together with any configured validator.
 pub fn http_ingress<D>(decoder: D, config: IngestionConfig) -> HttpIngress<D>
 where
     D: IngressDecoder,
@@ -373,7 +401,7 @@ where
         source,
         handle,
         decoder,
-    } = ingress_source(decoder, config);
+    } = hosted_ingress(decoder, config, HostedSource::http);
     let surface = create_ingestion_surface(handle.state(), decoder);
     HttpIngress {
         source,
@@ -403,6 +431,7 @@ where
             // has no system journal fails startup rather than silently dropping
             // replayable evidence.
             install_evidence_writer(&state_for_wiring, ctx.ingress_evidence, "surface")?;
+            install_source_phases(&state_for_wiring, ctx.source_phases, "surface")?;
             let task = state_for_wiring.watch_pipeline_state(ctx.pipeline_state);
             Ok(WebSurfaceWiring::new(vec![task]))
         })

@@ -9,11 +9,13 @@ use super::config::FiniteSourceConfig;
 use super::fsm::{FiniteSourceContext, FiniteSourceContextInit, FiniteSourceState};
 use super::handle::FiniteSourceHandle;
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::handlers::source::prepared::AdmittedSource;
 use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
+use crate::stages::source::supervision::bind_source_system;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, SupervisorBuilder, SupervisorTaskBuilder,
@@ -24,16 +26,20 @@ use std::time::Duration;
 
 /// Builder for creating async finite source stages
 pub struct AsyncFiniteSourceBuilder<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> {
-    handler: H,
+    source: AdmittedSource<H>,
     config: FiniteSourceConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
 impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSourceBuilder<H> {
-    pub fn new(handler: H, config: FiniteSourceConfig, resources: StageResources) -> Self {
+    pub fn new(
+        source: AdmittedSource<H>,
+        config: FiniteSourceConfig,
+        resources: StageResources,
+    ) -> Self {
         Self {
-            handler,
+            source,
             config,
             resources,
             instrumentation: None,
@@ -101,35 +107,36 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
             output_contract: self.resources.output_contract.clone(),
         });
 
-        // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081).
-        let mut handler = self.handler;
-        handler.install_writer_id(WriterId::from(self.config.stage_id));
-        handler.install_observation_recorder(context.instrumentation.observation_recorder());
+        let handler = self.source.handler;
+        let idle_cap = handler.idle_backoff_cap();
+        let kind = handler.supervisor_kind();
 
+        let reads = crate::stages::common::handlers::source::read::read_stage(
+            &self.resources,
+            context.instrumentation.clone(),
+        )
+        .await
+        .map_err(|error| BuilderError::Other(error.to_string()))?;
         let supervisor = AsyncFiniteSourceSupervisor {
+            reads,
+            kind,
             name: self.config.stage_name.clone(),
             handler: Some(handler),
             data_journal: self.resources.data_journal.clone(),
             flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
-            continuation: self.config.continuation,
-            idle_backoff: IdleBackoff::exponential_with_cap(
-                Duration::from_millis(1),
-                Duration::from_millis(50),
-            ),
+            system: bind_source_system(&self.source.system),
+            idle_backoff: IdleBackoff::exponential_with_cap(Duration::from_millis(1), idle_cap),
             pending_idle_delay: None,
             external_events: event_receiver.into(),
             state_watcher: state_watcher.clone(),
             last_state: None,
-            replay_driver: None,
             replay_started_at: None,
             replay_completion: ReplayCompletionGuard::default(),
             source_boundary: self.config.source_boundary,
             pending_boundary_eof: false,
             pending_failure: None,
             pending_boundary_rejected: false,
-            reader_acquired: false,
-            exit: None,
         };
 
         let supervisor_name = format!("async_finite_source_{}", self.config.stage_name);

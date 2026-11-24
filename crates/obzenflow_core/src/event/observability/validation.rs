@@ -110,12 +110,8 @@ impl ObservabilityContext {
                     ..
                 } => utilization_percent.is_finite(),
                 ObservationRecord::ResourceUsage { cpu_percent, .. } => cpu_percent.is_finite(),
-                ObservationRecord::HttpPull(http) => finite(&[
-                    http.wait_seconds_rate_limit,
-                    http.wait_seconds_poll_interval,
-                    http.wait_seconds_backoff,
-                ]),
                 ObservationRecord::Llm { .. }
+                | ObservationRecord::HttpPull(_)
                 | ObservationRecord::BackpressureActivity { .. }
                 | ObservationRecord::AiChunkingWork { .. }
                 | ObservationRecord::StageHeartbeat { .. }

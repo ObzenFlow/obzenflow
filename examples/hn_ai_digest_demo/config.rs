@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::mock_server::spawn_mock_hn_server;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use obzenflow::effects::postgres::PostgresConnection;
 use obzenflow::env::env_var_or;
 use obzenflow::stages::sources::Url;
@@ -16,7 +15,7 @@ pub(crate) const DEFAULT_HN_MAX_STORIES: usize = 60;
 pub(crate) const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
 const DEFAULT_HN_POLL_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_HN_GROUP_MAX_STORIES: usize = 10;
-const HN_LIVE_BASE_URL: &str = "https://hacker-news.firebaseio.com/";
+pub(crate) const HN_API_URL: &str = "https://hacker-news.firebaseio.com/";
 const DEFAULT_HN_DIGEST_POSTGRES_SCHEMA: &str = "obzenflow_example";
 
 #[derive(Clone, Debug)]
@@ -41,11 +40,11 @@ impl HnDigestPostgresConfig {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum HnSource {
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Stories {
     #[default]
-    Mock,
-    Live,
+    Scripted,
+    HackerNews,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -60,7 +59,7 @@ pub(crate) enum DigestOutput {
 #[serde(deny_unknown_fields)]
 pub(crate) struct HnSettings {
     #[serde(default)]
-    source: HnSource,
+    stories: Stories,
     #[serde(default = "default_max_stories")]
     max_stories: usize,
     #[serde(default = "default_poll_timeout_secs")]
@@ -96,29 +95,17 @@ fn default_poll_timeout_secs() -> u64 {
 }
 
 impl HnSettings {
-    pub(crate) fn into_inputs(self) -> Result<HnRunInputs> {
-        let (base_url, mode_label) = match self.source {
-            HnSource::Live => (
-                Url::parse(HN_LIVE_BASE_URL).expect("the HN API URL is valid"),
-                "live",
-            ),
-            HnSource::Mock => (
-                spawn_mock_hn_server()
-                    .context("mock HN server failed to start")?
-                    .detach(),
-                "mock",
-            ),
-        };
-        Ok(HnRunInputs {
+    pub(crate) fn into_inputs(self) -> HnRunInputs {
+        HnRunInputs {
             max_stories: self.max_stories,
             poll_timeout_secs: self.poll_timeout_secs,
             source_rate_limit: DEFAULT_HN_SOURCE_RATE_LIMIT,
             max_stories_per_group: self.digest.group_max_stories,
             interests: self.interests,
-            mode_label: mode_label.to_string(),
-            base_url,
+            stories: self.stories,
+            base_url: Url::parse(HN_API_URL).expect("the HN API URL is valid"),
             output: self.output,
-        })
+        }
     }
 }
 
@@ -129,7 +116,7 @@ pub struct HnRunInputs {
     pub source_rate_limit: f64,
     pub max_stories_per_group: usize,
     pub interests: Option<String>,
-    pub mode_label: String,
+    pub(crate) stories: Stories,
     pub base_url: Url,
     pub(crate) output: DigestOutput,
 }

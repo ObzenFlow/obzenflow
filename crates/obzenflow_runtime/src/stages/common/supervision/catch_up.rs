@@ -28,7 +28,6 @@ pub(crate) enum CatchUpDisposition {
 #[derive(Clone, Debug, PartialEq, StateVariant)]
 pub(crate) enum CatchUpState {
     Rebuilding { crossed: ReaderGeneration },
-    Announcing { crossed: ReaderGeneration },
     Live { crossed: ReaderGeneration },
     Refused { fatal: StageFatal },
     Failed { fatal: StageFatal },
@@ -45,9 +44,7 @@ impl Default for CatchUpState {
 impl CatchUpState {
     fn crossed(&self) -> Option<ReaderGeneration> {
         match self {
-            Self::Rebuilding { crossed }
-            | Self::Announcing { crossed }
-            | Self::Live { crossed } => Some(*crossed),
+            Self::Rebuilding { crossed } | Self::Live { crossed } => Some(*crossed),
             Self::Refused { .. } | Self::Failed { .. } => None,
         }
     }
@@ -64,11 +61,6 @@ pub(crate) enum CatchUpEvent {
         generation: ReaderGeneration,
     },
     RecordedActionsExhausted,
-    RecordedInputEnded {
-        recorded: ReaderGeneration,
-        generation: ReaderGeneration,
-    },
-    HandoffAnnounced,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,6 +177,13 @@ impl CatchUpContext {
         self.execution
             .resume_control()
             .map(|control| control.resume_generation())
+    }
+
+    fn recorded_marker(&self, generation: ReaderGeneration) -> Option<ChainEvent> {
+        let Recorded::Actions(history) = &self.recorded else {
+            return None;
+        };
+        history.actions().recorded_marker(generation).cloned()
     }
 
     fn unreproduced(&self) -> Option<StageFatal> {
@@ -344,35 +343,6 @@ fn step(
                 None => to(state.clone()),
             }
         }
-        (
-            CatchUpState::Rebuilding { crossed },
-            CatchUpEvent::RecordedInputEnded {
-                recorded,
-                generation,
-            },
-        ) => Transition {
-            next_state: CatchUpState::Announcing {
-                crossed: *generation,
-            },
-            actions: ctx
-                .writer
-                .is_some()
-                .then_some(CatchUpAction::AuthorWatermarks {
-                    after: (*crossed).max(*recorded),
-                    through: *generation,
-                })
-                .into_iter()
-                .collect(),
-        },
-        (CatchUpState::Announcing { crossed }, CatchUpEvent::HandoffAnnounced) => Transition {
-            next_state: CatchUpState::Live { crossed: *crossed },
-            actions: resume
-                .map(|_| CatchUpAction::RecordBoundary {
-                    generation: *crossed,
-                })
-                .into_iter()
-                .collect(),
-        },
         _ => to(state.clone()),
     }
 }
@@ -412,11 +382,15 @@ impl FsmAction for CatchUpAction {
                     return Ok(());
                 };
                 for generation in after.0.saturating_add(1)..=through.0 {
-                    let mut marker = ChainEventFactory::catch_up_complete_event(
-                        writer.writer_id,
-                        ReaderGeneration(generation),
-                        ctx.stage_key.clone(),
-                    );
+                    let mut marker = ctx
+                        .recorded_marker(ReaderGeneration(generation))
+                        .unwrap_or_else(|| {
+                            ChainEventFactory::catch_up_complete_event(
+                                writer.writer_id,
+                                ReaderGeneration(generation),
+                                ctx.stage_key.clone(),
+                            )
+                        });
                     marker.flow_context = writer.flow_context.clone();
                     super::output_committer::commit_control_output(
                         &writer.data_journal,
@@ -463,10 +437,6 @@ fn machine(initial: CatchUpState) -> CatchUpMachine {
             on CatchUpEvent::InputsEnded => transition;
             on CatchUpEvent::RecordedCrossingReached => transition;
             on CatchUpEvent::RecordedActionsExhausted => transition;
-            on CatchUpEvent::RecordedInputEnded => transition;
-        }
-        state CatchUpState::Announcing {
-            on CatchUpEvent::HandoffAnnounced => transition;
         }
         state CatchUpState::Live {
             on CatchUpEvent::FrontierReached => transition;
@@ -957,25 +927,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_event_no_stage_sends_in_its_state_fails_the_stage() {
-        let rebuilding = stage(resumed(1), true);
-        match rebuilding
-            .catch_up
-            .send(CatchUpEvent::HandoffAnnounced)
-            .await
-        {
-            CatchUpDisposition::Failed(fatal) => {
-                assert_eq!(fatal.code, StageFatalCode::Coordination);
-                assert_eq!(fatal.reason, StageFatalReason::CoordinationFailure);
-                assert_eq!(
-                    fatal.detail,
-                    "stage 'allocate_stock' received catch-up event HandoffAnnounced while \
-                     Rebuilding"
-                );
-            }
-            other => panic!("an announcement outside a handoff must fail: {other:?}"),
-        }
-        assert!(!live(&rebuilding));
-
         let crossed = self::stage(resumed(1), true);
         assert!(matches!(
             crossed
@@ -985,15 +936,24 @@ mod tests {
             CatchUpDisposition::Crossed
         ));
         assert_eq!(crossed.catch_up.crossed().await, Some(ReaderGeneration(1)));
-        assert!(matches!(
-            crossed
-                .catch_up
-                .send(CatchUpEvent::RecordedCrossingReached {
-                    generation: ReaderGeneration(1),
-                })
-                .await,
-            CatchUpDisposition::Failed(_)
-        ));
+        match crossed
+            .catch_up
+            .send(CatchUpEvent::RecordedCrossingReached {
+                generation: ReaderGeneration(1),
+            })
+            .await
+        {
+            CatchUpDisposition::Failed(fatal) => {
+                assert_eq!(fatal.code, StageFatalCode::Coordination);
+                assert_eq!(fatal.reason, StageFatalReason::CoordinationFailure);
+                assert_eq!(
+                    fatal.detail,
+                    "stage 'allocate_stock' received catch-up event RecordedCrossingReached \
+                     while Live"
+                );
+            }
+            other => panic!("a recorded crossing after going live must fail: {other:?}"),
+        }
         assert_eq!(crossed.journal.markers(), vec![1]);
     }
 
@@ -1025,32 +985,12 @@ mod tests {
             CatchUpDisposition::Refused(_)
         ));
         assert!(matches!(
-            stage.catch_up.send(CatchUpEvent::HandoffAnnounced).await,
-            CatchUpDisposition::Refused(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_source_writes_its_markers_and_goes_live_only_once_announced() {
-        let stage = stage(resumed(3), true);
-        assert!(matches!(
             stage
                 .catch_up
-                .send(CatchUpEvent::RecordedInputEnded {
-                    recorded: ReaderGeneration(1),
-                    generation: ReaderGeneration(3),
-                })
+                .send(CatchUpEvent::RecordedActionsExhausted)
                 .await,
-            CatchUpDisposition::Crossed
+            CatchUpDisposition::Refused(_)
         ));
-        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(3)));
-        assert_eq!(stage.journal.markers(), vec![2, 3]);
-        assert!(!live(&stage));
-        assert!(matches!(
-            stage.catch_up.send(CatchUpEvent::HandoffAnnounced).await,
-            CatchUpDisposition::Consumed
-        ));
-        assert!(live(&stage));
     }
 
     #[tokio::test]

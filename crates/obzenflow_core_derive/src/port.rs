@@ -162,20 +162,34 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
     let mut errors = Vec::new();
     let mut answers = Vec::new();
     let mut declared = Vec::new();
+    let query_port = methods
+        .iter()
+        .any(|(_, attrs)| attrs.iter().any(|a| a.path().is_ident("query")));
     for &(signature, attrs) in &methods {
+        if query_port {
+            match query_method(&effects, &port, signature, attrs) {
+                Ok(tokens) => answers.push(tokens),
+                Err(error) => errors.push(error),
+            }
+            continue;
+        }
         match read_effect(signature, attrs) {
             Ok(Some(method)) => declared.push(method),
             Ok(None) => answers.push(answer_check(&effects, signature, attrs, &mut errors)),
             Err(error) => errors.push(error),
         }
     }
-    let requests = generated_requests(
-        &effects,
-        &quote!(dyn #port),
-        &port.to_token_stream(),
-        declared,
-        &mut errors,
-    );
+    let requests = if query_port {
+        Vec::new()
+    } else {
+        generated_requests(
+            &effects,
+            &quote!(dyn #port),
+            &port.to_token_stream(),
+            declared,
+            &mut errors,
+        )
+    };
     item = thread_safe(stripped_trait(item));
     let errors = errors.into_iter().map(syn::Error::into_compile_error);
     quote! {
@@ -201,6 +215,55 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
     }
 }
 
+fn query_method(
+    effects: &TokenStream,
+    port: &Ident,
+    signature: &Signature,
+    attrs: &[Attribute],
+) -> syn::Result<TokenStream> {
+    let attribute = attrs
+        .iter()
+        .find(|a| a.path().is_ident("query"))
+        .ok_or_else(|| {
+            syn::Error::new_spanned(
+                signature,
+                "each query port method declares #[query(type = \"...\")]",
+            )
+        })?;
+    let mut name: Option<LitStr> = None;
+    attribute.parse_nested_meta(|meta| {
+        if !meta.path.is_ident("type") || name.is_some() {
+            return Err(meta.error("expected one query type"));
+        }
+        name = Some(meta.value()?.parse()?);
+        Ok(())
+    })?;
+    let name = name.ok_or_else(|| syn::Error::new_spanned(attribute, "missing query type"))?;
+    let request = request_type(signature)?;
+    let answer = answer_type(signature)?;
+    let method = &signature.ident;
+    let awaited = signature.asyncness.map(|_| quote!(.await));
+    let ctx = if signature.inputs.len() == 3 {
+        quote!(, ctx)
+    } else {
+        quote!()
+    };
+    let cfgs = cfgs(attrs);
+    Ok(quote! {
+        #(#cfgs)*
+        #[#effects::__async_trait]
+        impl #effects::__queries::QueryRequest for #request {
+            const QUERY_TYPE: &'static str = #name;
+            type Port = dyn #port;
+            type Answer = <#answer as #effects::__queries::QueryResult>::Answer;
+            async fn query(&self, port: &Self::Port, ctx: &#effects::__queries::QueryContext)
+                -> ::core::result::Result<Self::Answer,#effects::__queries::QueryError> {
+                #port::#method(port, self #ctx)#awaited
+            }
+        }
+    })
+}
+
 fn thread_safe(mut item: ItemTrait) -> ItemTrait {
     for marker in ["Send", "Sync"] {
         let written = item.supertraits.iter().any(|supertrait| {
@@ -219,7 +282,9 @@ fn thread_safe(mut item: ItemTrait) -> ItemTrait {
 fn stripped_trait(mut item: ItemTrait) -> ItemTrait {
     for member in &mut item.items {
         if let TraitItem::Fn(method) = member {
-            method.attrs.retain(|attribute| !is_effect(attribute));
+            method
+                .attrs
+                .retain(|attribute| !is_effect(attribute) && !attribute.path().is_ident("query"));
         }
     }
     item

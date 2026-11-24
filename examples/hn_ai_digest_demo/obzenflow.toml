@@ -12,11 +12,12 @@ endpoint = "ollama"
 model = "llama3.1:8b"
 request_timeout_ms = 150000
 
-# `source = "live"` reads the Hacker News API; "mock" serves a loopback fixture.
+# With `stories = "hacker_news"`, the flow reads the Hacker News API.
+# With `stories = "scripted"`, it reads scripted stories.
 # Pacing is `events_per_second` under [middleware.stages.hn_stories.rate_limiter].
 # `output` publishes the digest to the console or, with "postgres", to PostgreSQL.
 [app]
-source = "mock"
+stories = "scripted"
 output = "console"
 max_stories = 60
 poll_timeout_secs = 120

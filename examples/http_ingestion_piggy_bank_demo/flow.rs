@@ -6,14 +6,13 @@ use super::domain::*;
 use super::handlers::{AccountLedger, Assess};
 use super::money::UsdCents;
 use obzenflow::flow::{
-    async_infinite_source, flow, join, merge, sink, source, stateful, transform, FlowBuildError,
-    FlowDefinition,
+    flow, join, merge, sink, source, stateful, transform, FlowBuildError, FlowDefinition,
 };
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::SnapshotTableFormatter;
 use obzenflow::stages::sources::{
-    CsvDecodeError, CsvDecoder, CsvRecord, CsvSource, HostedIngressSource, IngressDecodeError,
+    CsvDecodeError, CsvDecoder, CsvRecord, CsvSource, HostedSource, IngressDecodeError,
     IngressDecoder, IngressRecord, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection,
     YamlSource,
 };
@@ -212,9 +211,9 @@ fn retry_returned_line(returned: &RetryReturned) -> String {
 }
 
 pub fn build_flow(
-    new_accounts_source: HostedIngressSource<AccountIngress>,
-    tx_source: HostedIngressSource<LedgerIngress>,
-    ach_source: HostedIngressSource<AchIngress>,
+    new_accounts_source: HostedSource<AccountOpened>,
+    tx_source: HostedSource<LedgerEntry>,
+    ach_source: HostedSource<AchDebit>,
 ) -> FlowDefinition {
     assemble_flow(
         PathBuf::from(DEMO_JOURNAL_ROOT),
@@ -226,9 +225,9 @@ pub fn build_flow(
 
 pub fn assemble_flow(
     journal_root: PathBuf,
-    new_accounts_source: HostedIngressSource<AccountIngress>,
-    tx_source: HostedIngressSource<LedgerIngress>,
-    ach_source: HostedIngressSource<AchIngress>,
+    new_accounts_source: HostedSource<AccountOpened>,
+    tx_source: HostedSource<LedgerEntry>,
+    ach_source: HostedSource<AchDebit>,
 ) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: PiggyBankSettings| {
         let accounts_source = YamlSource::builder(AccountYaml)
@@ -325,11 +324,9 @@ pub fn assemble_flow(
                 batch_accounts = source!(AccountOpened => accounts_source);
                 batch_tx = source!(LedgerEntry with { rate_limit(2.0) } => ledger_source);
                 batch_ach = source!(AchDebit with { rate_limit(2.0) } => ach_debits_source);
-                live_accounts = async_infinite_source!(AccountOpened => new_accounts_source);
-                live_tx = async_infinite_source!(
-                    LedgerEntry with { rate_limit(50.0) } => tx_source
-                );
-                live_ach = async_infinite_source!(AchDebit => ach_source);
+                live_accounts = source!(AccountOpened => new_accounts_source);
+                live_tx = source!(LedgerEntry with { rate_limit(50.0) } => tx_source);
+                live_ach = source!(AchDebit => ach_source);
 
                 // Processing
                 batch_presentments = transform!(AchDebit -> LedgerEntry => batch_presentments);

@@ -443,10 +443,14 @@ impl OutputCommitter<'_> {
             self.observer_scope,
         )?;
 
-        let capture = self.observation_capture(vec![(
-            u64::from(options.count_output && event.consumes_data_credit()),
-            intent.receives_runtime_data_enrichment(),
-        )]);
+        let capture = if self.source_read_record(&event) {
+            JournalCapture::default()
+        } else {
+            self.observation_capture(vec![(
+                u64::from(options.count_output && event.consumes_data_credit()),
+                intent.receives_runtime_data_enrichment(),
+            )])
+        };
         let written = match crate::supervised_base::publication::append_inline(
             self.data_journal,
             event,
@@ -711,13 +715,16 @@ impl OutputCommitter<'_> {
             reserve_direct_data_rows(self.backpressure_writer, data_count, self.observer_scope)?;
 
         let member_count = metadata.len();
+        let capture = if prepared.iter().all(|event| self.source_read_record(event)) {
+            JournalCapture::default()
+        } else {
+            self.observation_capture(projections)
+        };
         let written = match crate::supervised_base::publication::append_group_inline(
             self.data_journal,
             group_id,
             prepared,
-            parents
-                .append_options()?
-                .with_capture(self.observation_capture(projections)),
+            parents.append_options()?.with_capture(capture),
         )
         .await
         {
@@ -820,6 +827,23 @@ impl OutputCommitter<'_> {
         }
 
         Ok(event)
+    }
+
+    fn source_read_record(&self, event: &ChainEvent) -> bool {
+        matches!(
+            event.payload,
+            ChainPayload::Execution(
+                ExecutionPayload::SourceInput(_)
+                    | ExecutionPayload::EffectRecord(_)
+                    | ExecutionPayload::EffectAttemptStarted(_)
+                    | ExecutionPayload::EffectRecoveryAbandoned(_)
+            )
+        ) && self.flow_context.is_some_and(|flow| {
+            matches!(
+                flow.stage_type,
+                StageType::FiniteSource | StageType::InfiniteSource
+            )
+        })
     }
 
     fn observation_capture<P: Into<CaptureProjection>>(

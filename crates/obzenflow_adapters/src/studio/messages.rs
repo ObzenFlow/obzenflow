@@ -9,7 +9,7 @@ use obzenflow_core::event::observability::{
     CaptureStamp, CircuitBreakerMeasurements, EdgeLivenessState, RateLimiterMeasurements,
 };
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerOpenTrigger, SourceCleanupFailedFact, StageLifecycleFact,
+    CircuitBreakerOpenTrigger, StageLifecycleFact,
 };
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::system_payload::{
@@ -83,15 +83,6 @@ pub(super) enum StudioMessage<'a> {
         disposition: CommandDiscardDisposition,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
-        #[serde(flatten)]
-        at: Observation<'a>,
-    },
-    SourceCleanupFailed {
-        #[serde(serialize_with = "display")]
-        stage_id: StageId,
-        stage_name: &'a str,
-        #[serde(flatten)]
-        failure: &'a SourceCleanupFailedFact,
         #[serde(flatten)]
         at: Observation<'a>,
     },
@@ -197,7 +188,6 @@ impl StudioMessage<'_> {
             Self::StageLifecycle { .. } => "stage_lifecycle",
             Self::FlowLifecycle { .. } => "flow_lifecycle",
             Self::ReplayLifecycle { .. } => "replay_lifecycle",
-            Self::SourceCleanupFailed { .. } => "source_cleanup_failed",
             Self::SupervisorCommandDiscarded { .. } => "supervisor_command_discarded",
             Self::SupervisorRegistered { .. } => "supervisor_registered",
             Self::MiddlewareLifecycle { .. } | Self::MiddlewareMeasurements { .. } => {

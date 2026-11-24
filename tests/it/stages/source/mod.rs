@@ -4,7 +4,6 @@
 
 mod async_finite;
 mod diagnostic_reasons;
-mod http_pull_config;
 mod journal_parity;
 mod output_guard;
 mod witness_guard;

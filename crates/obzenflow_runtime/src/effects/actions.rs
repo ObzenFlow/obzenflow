@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::stages::common::handler_error::StageFatal;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{Departure, DepartureAction, StageFatalCode, StageFatalReason};
 use obzenflow_core::{EventDescriptor, EventType, ReaderGeneration, StageKey};
 use std::collections::HashSet;
@@ -11,6 +12,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordedAction {
+    SourceInput(EffectCursor),
     Effect {
         cursor: EffectCursor,
         effect_type: EffectType,
@@ -44,6 +46,7 @@ impl RecordedAction {
 
     pub(crate) fn key(&self) -> ActionKey {
         match self {
+            Self::SourceInput(cursor) => ActionKey::SourceInput(cursor.clone()),
             Self::Effect { cursor, .. } => ActionKey::Effect(cursor.clone()),
             Self::Fact { id, .. } => ActionKey::Fact(*id),
             Self::Settlement { cursor } => ActionKey::Settlement(cursor.clone()),
@@ -52,7 +55,9 @@ impl RecordedAction {
 
     pub(crate) fn cursor(&self) -> Option<&EffectCursor> {
         match self {
-            Self::Effect { cursor, .. } | Self::Settlement { cursor } => Some(cursor),
+            Self::SourceInput(cursor)
+            | Self::Effect { cursor, .. }
+            | Self::Settlement { cursor } => Some(cursor),
             Self::Fact { .. } => None,
         }
     }
@@ -72,6 +77,10 @@ impl RecordedAction {
                 input_position: cursor.input_seq,
                 effect_ordinal: cursor.effect_ordinal,
             },
+            Self::SourceInput(cursor) => DepartureAction::SourceInput {
+                number: cursor.input_seq.get(),
+                attempt: cursor.effect_ordinal.get() + 1,
+            },
             Self::Fact { id, event_type } => DepartureAction::Fact {
                 event_type: event_type.clone(),
                 event_id: *id,
@@ -86,6 +95,7 @@ impl RecordedAction {
 impl fmt::Display for RecordedAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SourceInput(cursor) => write!(f, "source input {}", cursor.input_seq),
             Self::Effect { effect_type, .. } => {
                 write!(f, "a {} effect", display_name(effect_type.as_str()))
             }
@@ -101,6 +111,7 @@ impl fmt::Display for RecordedAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ActionKey {
+    SourceInput(EffectCursor),
     Effect(EffectCursor),
     Fact(EventId),
     Settlement(EffectCursor),
@@ -108,6 +119,7 @@ pub(crate) enum ActionKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ActionRow {
+    SourceInput(EffectCursor),
     Effect {
         cursor: EffectCursor,
         attempt: Option<EffectAttemptOrdinal>,
@@ -230,6 +242,9 @@ fn write_offered(
     offered: &RecordedAction,
 ) -> fmt::Result {
     match offered {
+        RecordedAction::SourceInput(cursor) => {
+            write!(f, "observed source input {}", cursor.input_seq)
+        }
         RecordedAction::Effect { effect_type, .. } => write!(
             f,
             "would perform {} at input {input}",
@@ -283,6 +298,8 @@ pub(crate) struct RecordedActions {
     actions: Vec<RecordedAction>,
     facts: HashSet<EventId>,
     anchors: HashMap<ActionRow, ReaderGeneration>,
+    markers: HashMap<ReaderGeneration, ChainEvent>,
+    trailing: Option<ReaderGeneration>,
     next: Mutex<usize>,
 }
 
@@ -295,15 +312,33 @@ impl RecordedActions {
             .iter()
             .filter_map(|action| match action {
                 RecordedAction::Fact { id, .. } => Some(*id),
-                RecordedAction::Effect { .. } | RecordedAction::Settlement { .. } => None,
+                RecordedAction::SourceInput(_)
+                | RecordedAction::Effect { .. }
+                | RecordedAction::Settlement { .. } => None,
             })
             .collect();
         Self {
             actions,
             facts,
             anchors,
+            markers: HashMap::new(),
+            trailing: None,
             next: Mutex::new(0),
         }
+    }
+
+    fn with_markers(mut self, markers: HashMap<ReaderGeneration, ChainEvent>) -> Self {
+        self.markers = markers;
+        self
+    }
+
+    fn with_trailing(mut self, trailing: Option<ReaderGeneration>) -> Self {
+        self.trailing = trailing;
+        self
+    }
+
+    pub(crate) fn trailing_crossing(&self) -> Option<ReaderGeneration> {
+        self.trailing
     }
 
     #[cfg(test)]
@@ -317,6 +352,10 @@ impl RecordedActions {
 
     pub(crate) fn crossing_before(&self, row: &ActionRow) -> Option<ReaderGeneration> {
         self.anchors.get(row).copied()
+    }
+
+    pub(crate) fn recorded_marker(&self, generation: ReaderGeneration) -> Option<&ChainEvent> {
+        self.markers.get(&generation)
     }
 
     fn position(&self) -> usize {
@@ -388,7 +427,20 @@ impl RecordedActions {
             let entry = anchors.entry(row.clone()).or_insert(*generation);
             *entry = (*entry).max(*generation);
         }
-        Ok(Self::new(longer.clone(), anchors))
+        let mut markers = self.markers.clone();
+        for (generation, marker) in &newer.markers {
+            markers.entry(*generation).or_insert_with(|| marker.clone());
+        }
+        let trailing = if newer.actions.len() > self.actions.len() {
+            newer.trailing
+        } else if newer.actions.len() < self.actions.len() {
+            self.trailing
+        } else {
+            newer.trailing.max(self.trailing)
+        };
+        Ok(Self::new(longer.clone(), anchors)
+            .with_markers(markers)
+            .with_trailing(trailing))
     }
 
     pub(crate) fn with_in_doubt(self, in_doubt: impl Fn(&EffectCursor) -> bool) -> Self {
@@ -409,6 +461,8 @@ impl RecordedActions {
             })
             .collect();
         Self::new(actions, self.anchors)
+            .with_markers(self.markers)
+            .with_trailing(self.trailing)
     }
 }
 
@@ -418,6 +472,7 @@ pub(crate) struct ActionScan {
     seen: HashSet<EffectCursor>,
     pending: Option<ReaderGeneration>,
     anchors: HashMap<ActionRow, ReaderGeneration>,
+    markers: HashMap<ReaderGeneration, ChainEvent>,
     pass_through: Option<EventDescriptor>,
 }
 
@@ -439,6 +494,9 @@ impl ActionScan {
                 self.pending
                     .map_or(*generation, |held| held.max(*generation)),
             );
+            self.markers
+                .entry(*generation)
+                .or_insert_with(|| event.clone());
             return Ok(());
         }
         if self
@@ -448,35 +506,43 @@ impl ActionScan {
         {
             return Ok(());
         }
-        let row = if EffectAttemptStarted::matches_event_type(&event.event_type()) {
-            let started = EffectAttemptStarted::try_from_event(event)
-                .map_err(|error| EffectError::Serialization(error.to_string()))?;
-            self.effect(started.cursor.clone(), &started.effect_type);
-            Some(ActionRow::Effect {
-                cursor: started.cursor,
-                attempt: Some(started.attempt),
-            })
-        } else if let Some(provenance) = &event.effect_provenance {
-            self.effect(
-                provenance.cursor.clone(),
-                &provenance.descriptor.effect_type,
-            );
-            Some(ActionRow::Effect {
-                cursor: provenance.cursor.clone(),
-                attempt: provenance.attempt,
-            })
-        } else if event.consumes_data_credit() {
-            self.actions.push(RecordedAction::Fact {
-                id: event.id,
-                event_type: EventType::from(event.event_type()),
-            });
-            Some(ActionRow::Fact(event.id))
-        } else {
-            None
-        };
-        if let (Some(row), Some(generation)) = (row, self.pending.take()) {
-            let entry = self.anchors.entry(row).or_insert(generation);
-            *entry = (*entry).max(generation);
+        let row =
+            if let ChainPayload::Execution(ExecutionPayload::SourceInput(row)) = &event.payload {
+                let cursor = super::history::source_cursor(row)?;
+                self.actions
+                    .push(RecordedAction::SourceInput(cursor.clone()));
+                Some(ActionRow::SourceInput(cursor))
+            } else if EffectAttemptStarted::matches_event_type(&event.event_type()) {
+                let started = EffectAttemptStarted::try_from_event(event)
+                    .map_err(|error| EffectError::Serialization(error.to_string()))?;
+                self.effect(started.cursor.clone(), &started.effect_type);
+                Some(ActionRow::Effect {
+                    cursor: started.cursor,
+                    attempt: Some(started.attempt),
+                })
+            } else if let Some(provenance) = &event.effect_provenance {
+                self.effect(
+                    provenance.cursor.clone(),
+                    &provenance.descriptor.effect_type,
+                );
+                Some(ActionRow::Effect {
+                    cursor: provenance.cursor.clone(),
+                    attempt: provenance.attempt,
+                })
+            } else if event.consumes_data_credit() {
+                self.actions.push(RecordedAction::Fact {
+                    id: event.id,
+                    event_type: EventType::from(event.event_type()),
+                });
+                Some(ActionRow::Fact(event.id))
+            } else {
+                None
+            };
+        if let Some(row) = row {
+            if let Some(generation) = self.pending.take() {
+                let entry = self.anchors.entry(row).or_insert(generation);
+                *entry = (*entry).max(generation);
+            }
         }
         Ok(())
     }
@@ -498,7 +564,10 @@ impl ActionScan {
             .into_iter()
             .filter(|action| action.cursor().is_none_or(&holds))
             .collect();
-        RecordedActions::new(actions, self.anchors).with_in_doubt(in_doubt)
+        RecordedActions::new(actions, self.anchors)
+            .with_markers(self.markers)
+            .with_trailing(self.pending)
+            .with_in_doubt(in_doubt)
     }
 }
 
@@ -842,5 +911,40 @@ mod tests {
             Some(ReaderGeneration(1))
         );
         assert_eq!(actions.crossing_before(&ActionRow::Fact(manifest.id)), None);
+    }
+
+    #[test]
+    fn non_action_row_keeps_crossing_anchor() {
+        use obzenflow_core::event::payloads::execution_payload::{
+            ExecutionPayload, ReattachGuarantee, SourceReattachedFact,
+        };
+        use obzenflow_core::event::ChainEventFactory;
+        let writer = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
+        let marker =
+            ChainEventFactory::catch_up_complete_event(writer, ReaderGeneration(1), stage());
+        let reattached = ChainEventFactory::execution_event(
+            writer,
+            ExecutionPayload::SourceReattached(SourceReattachedFact {
+                generation: 1,
+                guarantee: ReattachGuarantee::SenderRedelivers,
+            }),
+        );
+        let order = ChainEventFactory::data_event(
+            writer,
+            "commerce.order",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
+
+        let mut scan = ActionScan::default();
+        scan.observe(&marker).unwrap();
+        scan.observe(&reattached).unwrap();
+        scan.observe(&order).unwrap();
+        let actions = scan.finish(|_| true, |_| false);
+
+        assert_eq!(
+            actions.crossing_before(&ActionRow::Fact(order.id)),
+            Some(ReaderGeneration(1))
+        );
     }
 }

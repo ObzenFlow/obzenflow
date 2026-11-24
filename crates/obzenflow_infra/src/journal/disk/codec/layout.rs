@@ -178,7 +178,6 @@ impl Layout {
                         field("runtime", K::Struct(S::Runtime)),
                         field("composite_activations", K::List(&K::Value)),
                         field("timestamp", K::Unsigned),
-                        field("source_progress", K::Value),
                     ]
                 }
             }

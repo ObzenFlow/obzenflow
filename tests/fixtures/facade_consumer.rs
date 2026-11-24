@@ -59,8 +59,8 @@ fn renamed_facade_ingress_builders_compile() {
             name: "facade_ingress",
             journals: of::journal::memory_journals(),
             stages: {
-                http = async_infinite_source!(Fact => http_source);
-                direct = async_infinite_source!(Fact => direct_source);
+                http = source!(Fact => http_source);
+                direct = source!(Fact => direct_source);
                 output = sink!(Fact => output);
             },
             topology: { http |> output; direct |> output; }
@@ -89,33 +89,40 @@ type NoEffects = <Pure as of::effects::Command>::AllowedEffects;
 #[derive(Clone, Debug)]
 struct Pure;
 
-impl sources::TypedFiniteSourceHandler for Pure {
-    type Output = Fact;
-    fn next(&mut self) -> Result<Option<Vec<Fact>>, sources::SourceError> {
-        Ok(None)
-    }
-}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NextFact;
 
+#[of::port(effects = of::effects)]
 #[async_trait]
-impl sources::TypedAsyncFiniteSourceHandler for Pure {
-    type Output = Fact;
-    async fn next(&mut self) -> Result<Option<Vec<Fact>>, sources::SourceError> {
-        Ok(None)
-    }
+trait FactInput {
+    #[query(type = "facade_consumer.facts.read")]
+    async fn read(
+        &self,
+        from: &NextFact,
+        ctx: &of::queries::QueryContext,
+    ) -> Result<sources::FiniteRead<Fact, NextFact>, of::queries::QueryError>;
 }
 
-impl sources::TypedInfiniteSourceHandler for Pure {
-    type Output = Fact;
-    fn next(&mut self) -> Result<Vec<Fact>, sources::SourceError> {
-        Ok(vec![Fact(1)])
-    }
-}
+struct PureInput;
 
+#[of::system("pure-input", effects = of::effects)]
 #[async_trait]
-impl sources::TypedAsyncInfiniteSourceHandler for Pure {
+impl FactInput for PureInput {
+    async fn read(
+        &self,
+        _from: &NextFact,
+        _ctx: &of::queries::QueryContext,
+    ) -> Result<sources::FiniteRead<Fact, NextFact>, of::queries::QueryError> {
+        Ok(sources::FiniteRead::EndOfInput)
+    }
+}
+
+struct PureSource(of::queries::QueryPort<dyn FactInput>);
+
+impl sources::TypedFiniteSourceHandler for PureSource {
     type Output = Fact;
-    async fn next(&mut self) -> Result<Vec<Fact>, sources::SourceError> {
-        Ok(vec![Fact(1)])
+    fn read(&self) -> sources::SourceRead<Fact> {
+        sources::SourceRead::finite(self.0.clone(), NextFact, Ok)
     }
 }
 
@@ -315,9 +322,7 @@ fn renamed_facade_macros_and_constructors_compile() {
 
     // Placeholder-first authoring works through both prelude and qualified paths.
     source!(Fact => placeholder!());
-    of::flow::async_source!(Fact => placeholder!());
-    infinite_source!(Fact => placeholder!());
-    of::flow::async_infinite_source!(Fact => placeholder!());
+    of::flow::source!(Fact => placeholder!());
     effectful_transform!(Fact -> Fact => Pure);
     of::flow::effectful_stateful!(Fact -> { Fact, Left } => Pure);
     of::flow::transform!(Fact -> Fact => placeholder!());
@@ -360,10 +365,10 @@ fn renamed_facade_macros_and_constructors_compile() {
     join!(catalog input: Fact, Fact -> Fact => priced);
     let point_in_time = joins::AsOfJoin::new(PointInTime);
     of::flow::join!(catalog input: Fact, Fact -> Fact => point_in_time);
-    source!(Fact => Pure);
-    async_source!(Fact => Pure);
-    infinite_source!(Fact => Pure);
-    async_infinite_source!(Fact => Pure);
+    let pure = PureSource(of::queries::QueryPort::to(PureInput));
+    source!(Fact => pure);
+    let values = sources::ValuesSource::new(vec![Fact(1)]);
+    of::flow::source!(Fact => values);
     transform!(Fact -> Fact => Pure);
     stateful!(Fact -> Fact => Pure);
     join!(catalog input: Fact, Fact -> Fact => Pure);

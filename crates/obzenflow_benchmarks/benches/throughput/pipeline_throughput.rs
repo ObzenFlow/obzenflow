@@ -9,10 +9,11 @@
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use obzenflow_benchmarks::case::{declare, Category};
+use obzenflow_benchmarks::numbers::{NextNumber, NumberFeed, Numbers};
 use obzenflow_core::config::{ConfigScope, ConfigSource};
 use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
-use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
 use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
 use obzenflow_runtime::pipeline::FlowHandle;
@@ -21,10 +22,10 @@ use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedAsyncFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
@@ -32,6 +33,39 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::runtime::Runtime;
+
+struct Source {
+    port: obzenflow_runtime::queries::QueryPort<dyn NumberFeed>,
+    origin: Instant,
+}
+
+impl Source {
+    fn new(inputs: u64, origin: Instant, sparse: bool) -> Self {
+        let numbers = if sparse {
+            Numbers::paced(inputs, Duration::from_millis(1))
+        } else {
+            Numbers::counting(inputs, 1)
+        };
+        Self {
+            port: numbers.port(),
+            origin,
+        }
+    }
+}
+
+impl TypedAsyncFiniteSourceHandler for Source {
+    type Output = Input;
+
+    fn read(&self) -> SourceRead<Input> {
+        let origin = self.origin;
+        SourceRead::finite(self.port.clone(), NextNumber(0), move |index| {
+            Ok(Input {
+                index,
+                emitted_ns: origin.elapsed().as_nanos() as u64,
+            })
+        })
+    }
+}
 
 const INPUTS: u64 = 128;
 const EFFECT_INPUTS: [u64; 2] = [2_000, 8_000];
@@ -42,31 +76,6 @@ struct Input {
 }
 impl TypedPayload for Input {
     const EVENT_TYPE: &'static str = "bench.throughput_event";
-}
-#[derive(Clone, Debug)]
-struct Source {
-    index: u64,
-    inputs: u64,
-    origin: Instant,
-    sparse: bool,
-}
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for Source {
-    type Output = Input;
-    async fn next(&mut self) -> Result<Option<Vec<Input>>, SourceError> {
-        if self.index == self.inputs {
-            return Ok(None);
-        }
-        if self.sparse {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        let event = Input {
-            index: self.index,
-            emitted_ns: self.origin.elapsed().as_nanos() as u64,
-        };
-        self.index += 1;
-        Ok(Some(vec![event]))
-    }
 }
 #[derive(Clone, Debug)]
 struct Identity;
@@ -144,12 +153,7 @@ where
     J: FlowJournalFactory + 'static,
 {
     FlowDefinition::materialize(move |_| {
-        let source = Source {
-            index: 0,
-            inputs: INPUTS,
-            origin,
-            sparse,
-        };
+        let source = Source::new(INPUTS, origin, sparse);
         let sink = perform(Input::clone as fn(&Input) -> Input).through(Port::to(Recorder {
             origin,
             delivered,
@@ -159,7 +163,7 @@ where
             flow! {
                 journals: journals,
                 stages: {
-                    src = async_source!(Input => source);
+                    src = source!(Input => source);
                     a = transform!(Input -> Input => Identity);
                     b = transform!(Input -> Input => Identity);
                     c = transform!(Input -> Input => Identity);
@@ -171,7 +175,7 @@ where
             flow! {
                 journals: journals,
                 stages: {
-                    src = async_source!(Input => source);
+                    src = source!(Input => source);
                     a = transform!(Input -> Input => Identity);
                     snk = sink!(Input => sink);
                 },
@@ -301,12 +305,7 @@ async fn build_effectful(
 ) -> FlowHandle {
     let journals = disk_journals(directory.to_owned());
     FlowDefinition::materialize(move |_| {
-        let source = Source {
-            index: 0,
-            inputs,
-            origin: Instant::now(),
-            sparse: false,
-        };
+        let source = Source::new(inputs, Instant::now(), false);
         let sink = perform(Settled::clone as fn(&Settled) -> Settled)
             .through(Port::to(SettledLog { settled }));
         let settle_each = SettleEach {
@@ -315,7 +314,7 @@ async fn build_effectful(
         Ok(flow! {
             journals: journals,
             stages: {
-                src = async_source!(Input => source);
+                src = source!(Input => source);
                 settle = effectful_transform!(Input -> Settled => settle_each);
                 snk = sink!(Settled => sink);
             },

@@ -14,18 +14,15 @@
 //! test would time out.
 
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
 use obzenflow_core::event::{ChainPayload, SystemPayload};
 use obzenflow_core::journal::read::{RunJournalKind, RunRecordData};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -45,36 +42,6 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
         .unwrap_or_else(|_| Duration::from_millis(0))
         .as_nanos();
     std::path::PathBuf::from("target").join(format!("{prefix}_{suffix}"))
-}
-
-/// An async finite source that emits one data event per poll, effectively
-/// without end for the duration of the test (a large finite count). Each poll
-/// returns immediately; the rate limiter is what introduces the wait.
-#[derive(Clone, Debug)]
-struct DripSource {
-    emitted: u64,
-}
-
-impl DripSource {
-    fn new() -> Self {
-        Self { emitted: 0 }
-    }
-}
-
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for DripSource {
-    type Output = DripEvent;
-
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted >= 10_000 {
-            return Ok(None);
-        }
-        let event = DripEvent {
-            index: self.emitted,
-        };
-        self.emitted += 1;
-        Ok(Some(vec![event]))
-    }
 }
 
 type NoopSink = obzenflow::stages::sinks::DiscardSink<DripEvent>;
@@ -151,7 +118,8 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
     let journal_base = unique_journal_dir("source_rate_limiter_interruption");
     let journal_base_for_flow = journal_base.clone();
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = DripSource::new();
+        let source =
+            crate::replay_testkit::single_values((0..10_000).map(|index| DripEvent { index }));
         let sink = NoopSink::new();
 
         Ok(flow! {
@@ -159,7 +127,7 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
             journals: disk_journals(journal_base_for_flow),
 
             stages: {
-                src = async_source!(DripEvent with {
+                src = source!(DripEvent with {
                     rate_limit(0.2).burst_capacity(1.0)
                 } => source);
                 snk = sink!(DripEvent => sink);
@@ -190,6 +158,7 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
         .system_journal()
         .ok_or_else(|| anyhow!("flow handle did not expose system journal"))?;
 
+    let stop_requested = std::time::Instant::now();
     handle
         .stop_graceful(Duration::from_secs(30))
         .await
@@ -205,12 +174,11 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
         })?
         .map_err(|e| anyhow!("flow completion failed: {e}"))?;
 
-    // Canonical verification via the event-sourced journal. The terminal pipeline
-    // lifecycle event carries the wide-event metrics. The second poll's
-    // rate-limiter wait (~5s) was abandoned by the drain interrupt, so only the
-    // first event was admitted: events_in_total == 1. On the pre-FLOWIP-114o
-    // blocking path the in-flight wait runs to completion and a second event is
-    // admitted before drain, so this would be >= 2.
+    assert!(
+        stop_requested.elapsed() < Duration::from_secs(4),
+        "the stop did not interrupt the source rate-limiter wait"
+    );
+
     let tail = system_journal
         .read_last_n(64)
         .await
@@ -235,10 +203,8 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
         })?;
 
     assert_eq!(
-        metrics.events_in_total, 1,
-        "expected exactly 1 admitted event (the second poll's rate-limit wait was interrupted by \
-         drain); events_in_total={} means the in-flight async source wait was not cancelled",
-        metrics.events_in_total
+        metrics.events_in_total, 2,
+        "the drain publishes the recorded second read and admits nothing more"
     );
 
     let run_dir = latest_run_dir(&journal_base);
@@ -250,9 +216,8 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
         .collect();
     assert_eq!(
         source_payload_indices,
-        vec![0],
-        "the second finite source batch was polled but cancelled during after_poll pacing; \
-         it must not be staged in the source data journal"
+        vec![0, 1],
+        "the drain publishes the second read, recorded before its pacing wait"
     );
     assert_eq!(
         delayed_rate_limiter_events(&source_events),

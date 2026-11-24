@@ -6,6 +6,7 @@
 
 use crate::replay_testkit;
 
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -16,13 +17,41 @@ use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
+    StatefulEmission, TypedStatefulHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+fn inputs() -> Vec<Input> {
+    vec![
+        Input {
+            value: 1,
+            key: "a".into(),
+        },
+        Input {
+            value: 2,
+            key: "b".into(),
+        },
+        Input {
+            value: 3,
+            key: "a".into(),
+        },
+        Input {
+            value: 4,
+            key: "b".into(),
+        },
+        Input {
+            value: 5,
+            key: "a".into(),
+        },
+        Input {
+            value: 6,
+            key: "b".into(),
+        },
+    ]
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Input {
@@ -127,58 +156,6 @@ impl TypedPayload for AggregateRanking {
 }
 
 #[derive(Clone, Debug)]
-struct ValuesSource {
-    values: Vec<Input>,
-    next: usize,
-}
-
-impl ValuesSource {
-    fn new() -> Self {
-        Self {
-            values: vec![
-                Input {
-                    value: 1,
-                    key: "a".into(),
-                },
-                Input {
-                    value: 2,
-                    key: "b".into(),
-                },
-                Input {
-                    value: 3,
-                    key: "a".into(),
-                },
-                Input {
-                    value: 4,
-                    key: "b".into(),
-                },
-                Input {
-                    value: 5,
-                    key: "a".into(),
-                },
-                Input {
-                    value: 6,
-                    key: "b".into(),
-                },
-            ],
-            next: 0,
-        }
-    }
-}
-
-impl TypedFiniteSourceHandler for ValuesSource {
-    type Output = Input;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let Some(value) = self.values.get(self.next).cloned() else {
-            return Ok(None);
-        };
-        self.next += 1;
-        Ok(Some(vec![value]))
-    }
-}
-
-#[derive(Clone, Debug)]
 struct RejectThree;
 
 impl TypedTransformHandler for RejectThree {
@@ -196,7 +173,7 @@ impl TypedTransformHandler for RejectThree {
 
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let input_handler = ValuesSource::new();
+        let input_handler = ValuesSource::new(inputs());
         let validate_handler = RejectThree;
         let fold_handler = WindowedFold;
         let grouped = stateful::group_by(

@@ -10,16 +10,12 @@ use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, Outcomes};
-use obzenflow_dsl::{
-    async_source, flow, sink, source, stateful, test_flow, transform, FlowDefinition,
-};
+use obzenflow_dsl::{flow, sink, source, stateful, test_flow, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    StatefulEmission, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedStatefulHandler, TypedTransformHandler,
+    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::{JournalProbe, TestClock};
 use serde::{Deserialize, Serialize};
 
@@ -34,65 +30,73 @@ struct SeedEvent {
 impl TypedPayload for SeedEvent {
     const EVENT_TYPE: &'static str = "cycle.seed_event";
 }
+use obzenflow::stages::sources::ValuesSource;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug)]
-struct TestEventSource {
-    remaining: usize,
+fn seeds(count: u64) -> impl TypedFiniteSourceHandler<Output = SeedEvent> {
+    ValuesSource::new(
+        (0..count)
+            .rev()
+            .map(|n| SeedEvent { n })
+            .collect::<Vec<_>>(),
+    )
 }
 
-impl TestEventSource {
-    fn new(count: usize) -> Self {
-        Self { remaining: count }
-    }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SeedRead(u8);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait SeedInput {
+    #[query(type = "cycle_unified_guard.seed.read")]
+    async fn read(
+        &self,
+        from: &SeedRead,
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError>;
 }
 
-impl TypedFiniteSourceHandler for TestEventSource {
-    type Output = SeedEvent;
-
-    fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(None);
-        }
-
-        self.remaining -= 1;
-        Ok(Some(vec![SeedEvent {
-            n: self.remaining as u64,
-        }]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DelayedEofEventSource {
-    emitted: bool,
+struct DelayedEof {
     eof_delay: Duration,
 }
 
-impl DelayedEofEventSource {
-    fn new(eof_delay: Duration) -> Self {
-        Self {
-            emitted: false,
-            eof_delay,
+#[obzenflow_runtime::effects::system("delayed-eof")]
+#[async_trait]
+impl SeedInput for DelayedEof {
+    async fn read(
+        &self,
+        from: &SeedRead,
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError> {
+        if from.0 == 0 {
+            return Ok(FiniteRead::Batch {
+                records: vec![SeedEvent { n: 0 }],
+                next: SeedRead(1),
+            });
         }
+        tokio::time::sleep(self.eof_delay).await;
+        Ok(FiniteRead::EndOfInput)
     }
 }
 
-#[async_trait]
-impl TypedAsyncFiniteSourceHandler for DelayedEofEventSource {
+struct DelayedEofEventSource(obzenflow::queries::QueryPort<dyn SeedInput>);
+
+impl DelayedEofEventSource {
+    fn new(eof_delay: Duration) -> Self {
+        Self(obzenflow::queries::QueryPort::to(DelayedEof { eof_delay }))
+    }
+}
+
+impl TypedFiniteSourceHandler for DelayedEofEventSource {
     type Output = SeedEvent;
 
-    async fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
-        if !self.emitted {
-            self.emitted = true;
-            return Ok(Some(vec![SeedEvent { n: 0 }]));
-        }
-
-        tokio::time::sleep(self.eof_delay).await; // hang-guard: test-only EOF delay under paused time
-        Ok(None)
+    fn read(&self) -> SourceRead<SeedEvent> {
+        SourceRead::finite(self.0.clone(), SeedRead(0), Ok)
     }
 }
 
@@ -203,7 +207,7 @@ async fn count_journal_records(run_dir: &Path) -> Result<usize> {
 #[tokio::test]
 async fn cycle_guard_rejects_cycles_with_non_transform_members() {
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestEventSource::new(1);
+        let source = seeds(1);
         let stateful = NoopStateful;
         let transform = IdentityTransform::<SeedEvent>::new();
         let (sink, _count) = event_counter_sink::<SeedEvent>();
@@ -251,7 +255,7 @@ async fn cycle_guard_rejects_stateful_emit_per_window_cycle() {
     }
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestEventSource::new(1);
+        let source = seeds(1);
         let window = stateful::reduce(
             WindowCount::default(),
             |acc: &mut WindowCount, _ev: &SeedEvent| acc.count += 1,
@@ -302,7 +306,7 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
     let (counter_sink, counter) = event_counter_sink::<SeedEvent>();
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestEventSource::new(5);
+        let source = seeds(5);
         let transform_a = IdentityTransform::<SeedEvent>::new();
         let transform_b = DropAllTransform;
 
@@ -373,7 +377,7 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
         journals: disk_journals(base_for_flow),
 
         stages: {
-            src = async_source!(SeedEvent => source);
+            src = source!(SeedEvent => source);
             a = transform!(SeedEvent -> SeedEvent => transform_a);
             b = transform!(SeedEvent -> SeedEvent => transform_b);
             snk = sink!(SeedEvent => counter_sink);

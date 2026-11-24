@@ -25,9 +25,8 @@ use obzenflow_core::journal::archive::manifest::RunManifestDirectFactAdmission;
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
-use obzenflow_core::source::RecordedSourceFrontier;
 use obzenflow_core::{FlowId, JournalWriterId, ReaderGeneration, StageId, TypedPayload};
-use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
@@ -36,11 +35,7 @@ use obzenflow_runtime::bootstrap::{
 use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedInfiniteSourceHandler,
-};
-use obzenflow_runtime::stages::SourceError;
-use replay_testkit::ReattachingSource;
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -75,36 +70,6 @@ struct Enriched {
 
 impl TypedPayload for Enriched {
     const EVENT_TYPE: &'static str = "resume_effects.enriched";
-}
-
-/// Emits `count` readings starting at `first_value`, then idles forever.
-#[derive(Clone, Debug)]
-struct BoundedReader {
-    next_value: u64,
-    remaining: u64,
-}
-
-impl BoundedReader {
-    fn new(first_value: u64, count: u64) -> Self {
-        Self {
-            next_value: first_value,
-            remaining: count,
-        }
-    }
-}
-
-impl TypedInfiniteSourceHandler for BoundedReader {
-    type Output = Reading;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(Vec::new());
-        }
-        self.remaining -= 1;
-        let value = self.next_value;
-        self.next_value += 1;
-        Ok(vec![Reading { value }])
-    }
 }
 
 /// Counts real executions via the shared counter; a suppressed catch-up
@@ -172,7 +137,9 @@ fn build_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reader = ReattachingSource(BoundedReader::new(first_value, count));
+        let reader = replay_testkit::preloaded_input(
+            (first_value..first_value + count).map(|value| Reading { value }),
+        );
         let enrich_transform = EnrichTransform {
             counter: Port::to(CallCounter { calls }),
         };
@@ -183,7 +150,7 @@ fn build_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                src = infinite_source!(Reading => reader);
+                src = source!(Reading => reader);
                 enrich = effectful_transform!(
                     Reading -> { Enriched, EffectValue } => enrich_transform);
                 snk = sink!(Enriched => counting_sink);
@@ -548,6 +515,9 @@ fn tear_source_after(r1: &Path, kept: usize) -> Result<()> {
         if path != src {
             return true;
         }
+        if seen.get() >= kept {
+            return false;
+        }
         let facts = records
             .iter()
             .filter(|record| {
@@ -710,8 +680,15 @@ impl ReplayArchive for HistoryReads {
         self.inner.recorded_source_eof(stage_key)
     }
 
-    fn recorded_source_frontier(&self, stage_key: &str) -> RecordedSourceFrontier {
-        self.inner.recorded_source_frontier(stage_key)
+    fn recorded_source_rejections(&self, stage_key: &str) -> u64 {
+        self.inner.recorded_source_rejections(stage_key)
+    }
+
+    fn recorded_source_binding(
+        &self,
+        stage_key: &str,
+    ) -> Option<obzenflow_core::effect_binding::SystemBinding> {
+        self.inner.recorded_source_binding(stage_key)
     }
 
     fn archive_path(&self) -> &Path {
@@ -775,8 +752,8 @@ async fn a_replay_reads_only_the_journals_of_stages_with_an_effect_runtime() -> 
     opened.sort();
     assert_eq!(
         opened,
-        vec!["enrich".to_string(), "snk".to_string()],
-        "the effectful transform and the sink read their archived journals; the source reads none"
+        vec!["enrich".to_string(), "snk".to_string(), "src".to_string()],
+        "the source, the effectful transform and the sink read their archived journals"
     );
     Ok(())
 }

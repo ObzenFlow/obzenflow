@@ -228,6 +228,76 @@ impl SystemPort {
     }
 }
 
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct SourceSystem {
+    binding: obzenflow_core::effect_binding::SystemBinding,
+    system: Option<Arc<SystemPort>>,
+}
+
+impl SourceSystem {
+    pub(crate) fn event(evidence: obzenflow_core::SystemBindingEvidence) -> Self {
+        Self {
+            binding: evidence.binding().clone(),
+            system: None,
+        }
+    }
+
+    pub(crate) fn query<P: ?Sized + Send + Sync + 'static>(
+        evidence: obzenflow_core::SystemBindingEvidence,
+        resolve: impl Fn() -> Result<Arc<P>, crate::queries::QueryError> + Send + Sync + 'static,
+    ) -> Self {
+        let recipe = SystemPort::deferred(Arc::new(move || Ok(Arc::new(resolve()))));
+        Self {
+            binding: evidence.binding().clone(),
+            system: Some(Arc::new(recipe)),
+        }
+    }
+
+    pub(crate) fn resolve_query<P: ?Sized + Send + Sync + 'static>(
+        &self,
+        registry: &EffectPortRegistry,
+    ) -> Result<Result<Arc<P>, crate::queries::QueryError>, super::EffectError> {
+        let system = self.system.as_ref().ok_or_else(|| {
+            super::EffectError::ReplayArchive(format!(
+                "source {} has no query supplier",
+                self.name()
+            ))
+        })?;
+        let entry = registry.resolve_at(system.coordinate).map_err(|fault| {
+            super::EffectError::ReplayArchive(format!("source binding {}: {fault:?}", self.name()))
+        })?;
+        let result = entry
+            .port
+            .downcast_ref::<Arc<Result<Arc<P>, crate::queries::QueryError>>>()
+            .ok_or_else(|| {
+                super::EffectError::ReplayArchive(format!(
+                    "source binding {} has a different port type",
+                    self.name()
+                ))
+            })?;
+        Ok(result.as_ref().clone())
+    }
+
+    pub fn name(&self) -> &str {
+        self.binding.name()
+    }
+
+    pub fn binding(&self) -> &obzenflow_core::effect_binding::SystemBinding {
+        &self.binding
+    }
+}
+
+impl std::fmt::Debug for SourceSystem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceSystem")
+            .field("system", &self.binding)
+            .field("recipe", &"<not disclosed>")
+            .finish()
+    }
+}
+
 enum PendingRegistrationState {
     Pending(Vec<(BindingCoordinate, PortRecipe)>),
     Collected,
@@ -749,18 +819,33 @@ impl EffectPortRegistry {
         &self,
         slot: &BoundEffectPortSlot,
     ) -> Result<ErasedResolvedEffectPort, EffectPortViewBuildError> {
-        let Some(entries) = self.run_entries.as_ref() else {
-            return match self.recipes.get(&slot.coordinate) {
-                Some(PortRecipe::Eager(port)) => Ok(port.clone()),
-                Some(PortRecipe::Deferred(_)) => Err(EffectPortViewBuildError::Resolver {
+        self.resolve_at(slot.coordinate)
+            .map_err(|fault| match fault {
+                PortResolutionFault::MissingRegistration => {
+                    EffectPortViewBuildError::MissingRegistration
+                }
+                PortResolutionFault::Resolver(verdict) => EffectPortViewBuildError::Resolver {
                     slot: slot.requirement.label,
-                    verdict: ResolverVerdictError::NotMaterialised,
-                }),
-                None => Err(EffectPortViewBuildError::MissingRegistration),
+                    verdict,
+                },
+            })
+    }
+
+    fn resolve_at(
+        &self,
+        coordinate: BindingCoordinate,
+    ) -> Result<ErasedResolvedEffectPort, PortResolutionFault> {
+        let Some(entries) = self.run_entries.as_ref() else {
+            return match self.recipes.get(&coordinate) {
+                Some(PortRecipe::Eager(port)) => Ok(port.clone()),
+                Some(PortRecipe::Deferred(_)) => Err(PortResolutionFault::Resolver(
+                    ResolverVerdictError::NotMaterialised,
+                )),
+                None => Err(PortResolutionFault::MissingRegistration),
             };
         };
-        let Some(entry) = entries.get(&slot.coordinate) else {
-            return Err(EffectPortViewBuildError::MissingRegistration);
+        let Some(entry) = entries.get(&coordinate) else {
+            return Err(PortResolutionFault::MissingRegistration);
         };
         match entry {
             RunPortEntry::Eager(port) => Ok(port.clone()),
@@ -772,12 +857,22 @@ impl EffectPortRegistry {
                 })
                 .as_ref()
                 .cloned()
-                .map_err(|error| EffectPortViewBuildError::Resolver {
-                    slot: slot.requirement.label,
-                    verdict: *error,
-                }),
+                .map_err(|error| PortResolutionFault::Resolver(*error)),
         }
     }
+
+    #[doc(hidden)]
+    pub fn install_source_system(&mut self, source: &SourceSystem) {
+        if let Some(system) = &source.system {
+            Arc::make_mut(&mut self.recipes).insert(system.coordinate, system.recipe.clone());
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PortResolutionFault {
+    MissingRegistration,
+    Resolver(ResolverVerdictError),
 }
 
 impl std::fmt::Debug for EffectPortRegistry {

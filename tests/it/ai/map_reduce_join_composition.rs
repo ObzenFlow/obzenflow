@@ -8,6 +8,7 @@ use fake_ai::FakeChatModels;
 use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk, Partials,
 };
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::ai::{
     AiProviderError, AiProviderFailureKind, AiUnavailable, AiUnavailableCause,
 };
@@ -19,9 +20,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
 use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    SourceError, TypedFiniteSourceHandler, TypedTransformHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -79,26 +78,6 @@ struct Row {
 
 impl TypedPayload for Row {
     const EVENT_TYPE: &'static str = "test.ai_join.row";
-}
-
-#[derive(Debug, Default)]
-struct SourceReads(AtomicUsize);
-
-#[derive(Clone, Debug)]
-struct FixtureSource<T> {
-    rows: VecDeque<T>,
-    reads: Arc<SourceReads>,
-}
-
-impl<T: TypedPayload + Clone + Send + Sync + 'static> TypedFiniteSourceHandler
-    for FixtureSource<T>
-{
-    type Output = T;
-
-    fn next(&mut self) -> Result<Option<Vec<T>>, SourceError> {
-        self.reads.0.fetch_add(1, Ordering::SeqCst);
-        Ok(self.rows.pop_front().map(|row| vec![row]))
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -351,15 +330,8 @@ struct TriageRun {
 
 fn build_triage_flow(root: PathBuf, run: TriageRun) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let reads = Arc::new(SourceReads::default());
-        let seeds = FixtureSource {
-            rows: seed_rows(),
-            reads: reads.clone(),
-        };
-        let scales = FixtureSource {
-            rows: scale_rows(),
-            reads,
-        };
+        let seeds = ValuesSource::new(seed_rows());
+        let scales = ValuesSource::new(scale_rows());
         let joined = obzenflow::stages::joins::inner(
             |scale: &Scale| scale.key,
             |seed: &Seed| seed.key,

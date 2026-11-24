@@ -11,8 +11,10 @@ mod replay_testkit {
     mod manifest;
     mod ordered_stage_journal;
     mod prefix_stable;
+    mod preloaded_input;
     mod run_dir;
     mod same_delivered_order;
+    mod single_values;
     mod stage_journal;
     mod stage_writer;
     mod telemetry_rows;
@@ -24,9 +26,10 @@ mod replay_testkit {
     mod verdicts;
     pub use self::{
         count_deliveries::*, delivered_order::*, failures::*, journal::*, manifest::*,
-        ordered_stage_journal::*, prefix_stable::*, run_dir::*, same_delivered_order::*,
-        stage_journal::*, stage_writer::*, telemetry_rows::*, transport_signature::*,
-        unsynced_application::*, unsynced_candidate::*, unsynced_context::*, verdicts::*,
+        ordered_stage_journal::*, prefix_stable::*, preloaded_input::*, run_dir::*,
+        same_delivered_order::*, single_values::*, stage_journal::*, stage_writer::*,
+        telemetry_rows::*, transport_signature::*, unsynced_application::*, unsynced_candidate::*,
+        unsynced_context::*, verdicts::*,
     };
 }
 

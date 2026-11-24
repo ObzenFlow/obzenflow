@@ -20,25 +20,18 @@ use crate::replay_testkit;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::sinks::CountingSink;
-use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedInfiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
-use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,40 +74,6 @@ struct AbortOutput {
 
 impl TypedPayload for AbortOutput {
     const EVENT_TYPE: &'static str = "resume_abort.output";
-}
-
-#[derive(Clone, Debug)]
-struct ChannelTicker {
-    channel: &'static str,
-    next_value: u64,
-    remaining: u64,
-}
-
-impl ChannelTicker {
-    fn new(channel: &'static str, first_value: u64, count: u64) -> Self {
-        Self {
-            channel,
-            next_value: first_value,
-            remaining: count,
-        }
-    }
-}
-
-impl TypedInfiniteSourceHandler for ChannelTicker {
-    type Output = ChannelTick;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(Vec::new());
-        }
-        self.remaining -= 1;
-        let value = self.next_value;
-        self.next_value += 1;
-        Ok(vec![ChannelTick {
-            channel: self.channel.to_string(),
-            value,
-        }])
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -212,8 +171,20 @@ fn build_flow(
     let b_first = ranges.b_first;
     let b_count = ranges.b_count;
     FlowDefinition::materialize(move |_runtime_config| {
-        let channel_a = ReattachingSource(ChannelTicker::new("a", a_first, a_count));
-        let channel_b = ReattachingSource(ChannelTicker::new("b", b_first, b_count));
+        let channel_a =
+            replay_testkit::preloaded_input((a_first..a_first + a_count).map(|value| {
+                ChannelTick {
+                    channel: "a".to_string(),
+                    value,
+                }
+            }));
+        let channel_b =
+            replay_testkit::preloaded_input((b_first..b_first + b_count).map(|value| {
+                ChannelTick {
+                    channel: "b".to_string(),
+                    value,
+                }
+            }));
         let merge_transform = MergeTransform::new();
         let effectful_tail = EffectfulTail {
             counter: Port::to(CallCounter { calls }),
@@ -225,8 +196,8 @@ fn build_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                src_a = infinite_source!(ChannelTick => channel_a);
-                src_b = infinite_source!(ChannelTick => channel_b);
+                src_a = source!(ChannelTick => channel_a);
+                src_b = source!(ChannelTick => channel_b);
                 merge = transform!(ChannelTick -> Merged => merge_transform);
                 effectful = effectful_transform!(
                     Merged -> { AbortOutput, EffectValue } => effectful_tail);
@@ -272,71 +243,6 @@ async fn wait_for_count(counter: &Arc<AtomicU64>, target: u64) -> Result<()> {
             counter.load(Ordering::SeqCst)
         )
     })
-}
-
-/// Wait until the pipeline reports Failed; return the failure reason.
-async fn wait_for_failed(handle: &FlowHandle) -> Result<String> {
-    let mut rx = handle.state_receiver();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if let PipelineState::Failed { reason, .. } = &*rx.borrow() {
-                return Ok::<_, anyhow::Error>(reason.clone());
-            }
-            rx.changed()
-                .await
-                .map_err(|_| anyhow!("pipeline state channel closed"))?;
-        }
-    })
-    .await
-    .map_err(|_| anyhow!("timeout waiting for the resume to fail loudly"))?
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum ResumeRow {
-    Data(serde_json::Value),
-    CatchUp { stage_key: String, generation: u64 },
-}
-
-async fn unsettled_sink_calls(run: &Path) -> u64 {
-    let rows = replay_testkit::read_stage_envelopes_appended(run, "collect").await;
-    let started = rows
-        .iter()
-        .filter(|row| {
-            matches!(
-                row.payload,
-                ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(_))
-            )
-        })
-        .count();
-    let settled = rows
-        .iter()
-        .filter(|row| {
-            matches!(
-                row.payload,
-                ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
-            )
-        })
-        .count();
-    started.saturating_sub(settled) as u64
-}
-
-fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
-    envelopes
-        .iter()
-        .filter_map(|envelope| match &envelope.payload {
-            payload if payload.consumes_data_credit() => {
-                Some(ResumeRow::Data(envelope.payload().clone()))
-            }
-            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
-                generation,
-                stage_key,
-            }) => Some(ResumeRow::CatchUp {
-                stage_key: stage_key.to_string(),
-                generation: generation.0,
-            }),
-            _ => None,
-        })
-        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -403,11 +309,9 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
     )
     .map_err(anyhow::Error::from_boxed)?;
 
-    // Resume: the corrupted source's catch-up must fail loudly, and no live
-    // input may cross the fan-in.
     let calls = Arc::new(AtomicUsize::new(0));
     let delivered = Arc::new(AtomicU64::new(0));
-    let failure_reason = {
+    let failure = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
@@ -416,7 +320,7 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
             })
             .await,
         );
-        let handle = build_flow(
+        build_flow(
             journal_base.clone(),
             &live_ranges,
             calls.clone(),
@@ -424,97 +328,27 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
         )
         .build(replay_testkit::unsynced_context())
         .await
-        .map_err(|e| anyhow!("resume flow failed to build: {e:?}"))?;
-        let reason = wait_for_failed(&handle).await?;
-        // Teardown after failure; stop is an idempotent no-op if the
-        // supervisor already terminated.
-        if let Err(error) = handle.stop().await {
-            eprintln!("teardown stop failed: {error:?}");
-        }
-        if tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
-            .await
-            .is_err()
-        {
-            eprintln!("teardown did not settle within its bound");
-        }
-        reason
+        .err()
+        .ok_or_else(|| anyhow!("a corrupted source archive must refuse the resume"))?
     };
+    let failure_reason = format!("{:?}", failure.error);
     assert!(
         failure_reason.contains("src_b"),
         "the failure must name the corrupted source's stage: {failure_reason}"
     );
-
-    let resumed_run = replay_testkit::latest_run_dir(&journal_base);
-    assert_ne!(recorded_run, resumed_run);
-
-    // No live input was admitted through the fan-in: every merge output is a
-    // recorded-range payload, and the merge never authored a watermark (its
-    // corrupted input never crossed, F5).
-    let merge_rows =
-        resume_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "merge").await);
     assert!(
-        !merge_rows
-            .iter()
-            .any(|row| matches!(row, ResumeRow::CatchUp { .. })),
-        "the fan-in must not author a watermark when one input's catch-up failed: {merge_rows:#?}"
+        failure_reason.contains("checksum mismatch"),
+        "the failure must name the corruption: {failure_reason}"
     );
-    let recorded_payloads: BTreeSet<String> = (1..=4)
-        .map(|value| {
-            json!(Merged {
-                channel: "a".to_string(),
-                value,
-            })
-            .to_string()
-        })
-        .chain((101..=104).map(|value| {
-            json!(Merged {
-                channel: "b".to_string(),
-                value,
-            })
-            .to_string()
-        }))
-        .collect();
-    for row in &merge_rows {
-        let ResumeRow::Data(payload) = row else {
-            continue;
-        };
-        assert!(
-            recorded_payloads.contains(&payload.to_string()),
-            "the fan-in admitted a non-recorded input during a failed catch-up: {payload}"
-        );
-    }
-
-    // The corrupted source never crossed: no watermark and no live rows in
-    // its journal.
-    let src_b_rows =
-        resume_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "src_b").await);
-    assert!(
-        !src_b_rows
-            .iter()
-            .any(|row| matches!(row, ResumeRow::CatchUp { .. })),
-        "a source whose catch-up failed never authors its watermark: {src_b_rows:#?}"
-    );
-    assert!(
-        !src_b_rows.iter().any(|row| {
-            matches!(row, ResumeRow::Data(payload)
-                if payload["value"].as_u64().is_some_and(|value| value >= 105))
-        }),
-        "the corrupted source must not reach its live phase: {src_b_rows:#?}"
-    );
-
-    // Nothing reached the effect boundary as live work: every delivered
-    // position lay inside the recorded prefix, so outcomes read from history.
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
-        "no effect executed during the failed catch-up"
+        "no effect executed for the refused resume"
     );
-    let unsettled = unsettled_sink_calls(&recorded_run).await;
-    assert!(
-        delivered.load(Ordering::SeqCst) <= unsettled,
-        "only a call the recording left unsettled may reach the sink during a failed catch-up \
-         (saw {}, unsettled {unsettled})",
-        delivered.load(Ordering::SeqCst)
+    assert_eq!(
+        delivered.load(Ordering::SeqCst),
+        0,
+        "nothing reached the sink for the refused resume"
     );
 
     Ok(())

@@ -7,3 +7,6 @@ pub mod domain;
 
 #[path = "flow.rs"]
 pub mod flow;
+
+#[path = "scripted.rs"]
+pub mod scripted;

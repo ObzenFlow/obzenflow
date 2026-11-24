@@ -575,6 +575,17 @@ pub enum EffectFailureDetail {
         expected: String,
         observed: String,
     },
+    /// A source read failed. The source reports this diagnostic for it, live and
+    /// when it rebuilds the read from its record.
+    SourceRead(SourceReadFailure),
+}
+
+/// `SourceReadFailure` is the diagnostic that a source reports for a failed read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceReadFailure {
+    pub category: super::execution_payload::SourcePollErrorKind,
+    pub continuation: super::execution_payload::SourcePollContinuation,
+    pub diagnostic: super::source_diagnostic::SourceDiagnostic,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

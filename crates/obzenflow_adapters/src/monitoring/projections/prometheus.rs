@@ -5,7 +5,6 @@
 //! Deterministic Prometheus projection of application and infrastructure observations.
 
 use crate::monitoring::read_model::MetricsReadView;
-use obzenflow_core::event::observability::{HttpPullState, WaitReason};
 use obzenflow_core::event::provenance::RetryCallOutcome;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::metrics::{
@@ -2106,105 +2105,13 @@ impl PrometheusProjection {
             writeln!(output)?;
         }
 
-        // HTTP pull telemetry (FLOWIP-084e).
         if !snapshot.http_pull_metrics.is_empty() {
             writeln!(
                 output,
-                "# HELP http_pull_waiting Indicates the source is waiting (1) or not (0), by reason"
-            )?;
-            writeln!(output, "# TYPE http_pull_waiting gauge")?;
-            for (stage_id, metrics) in &snapshot.http_pull_metrics {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
-                    let stage_labels = format_stage_labels(stage_id, metadata);
-                    if metrics.state.is_none() {
-                        continue;
-                    }
-                    let waiting_reason = if matches!(metrics.state, Some(HttpPullState::Waiting)) {
-                        metrics.wait_reason.as_ref()
-                    } else {
-                        None
-                    };
-
-                    let rate_limit = if matches!(waiting_reason, Some(WaitReason::RateLimit)) {
-                        1
-                    } else {
-                        0
-                    };
-                    let poll_interval = if matches!(waiting_reason, Some(WaitReason::PollInterval))
-                    {
-                        1
-                    } else {
-                        0
-                    };
-                    let backoff = if matches!(waiting_reason, Some(WaitReason::Backoff)) {
-                        1
-                    } else {
-                        0
-                    };
-
-                    writeln!(
-                        output,
-                        "http_pull_waiting{{{stage_labels},reason=\"rate_limit\"}} {rate_limit}"
-                    )?;
-                    writeln!(
-                        output,
-                        "http_pull_waiting{{{stage_labels},reason=\"poll_interval\"}} {poll_interval}"
-                    )?;
-                    writeln!(
-                        output,
-                        "http_pull_waiting{{{stage_labels},reason=\"backoff\"}} {backoff}"
-                    )?;
-                }
-            }
-            writeln!(output)?;
-
-            writeln!(
-                output,
-                "# HELP http_pull_next_wake_unix_seconds Unix timestamp when the source will next attempt activity"
-            )?;
-            writeln!(output, "# TYPE http_pull_next_wake_unix_seconds gauge")?;
-            for (stage_id, metrics) in &snapshot.http_pull_metrics {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
-                    if let Some(next_wake) = metrics.next_wake_unix_secs {
-                        writeln!(
-                            output,
-                            "http_pull_next_wake_unix_seconds{{{}}} {}",
-                            format_stage_labels(stage_id, metadata),
-                            next_wake
-                        )?;
-                    }
-                }
-            }
-            writeln!(output)?;
-
-            writeln!(
-                output,
-                "# HELP http_pull_last_success_unix_seconds Unix timestamp of the last successful fetch"
-            )?;
-            writeln!(output, "# TYPE http_pull_last_success_unix_seconds gauge")?;
-            for (stage_id, metrics) in &snapshot.http_pull_metrics {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
-                    if let Some(last_success) = metrics.last_success_unix_secs {
-                        writeln!(
-                            output,
-                            "http_pull_last_success_unix_seconds{{{}}} {}",
-                            format_stage_labels(stage_id, metadata),
-                            last_success
-                        )?;
-                    }
-                }
-            }
-            writeln!(output)?;
-
-            writeln!(
-                output,
-                "# HELP http_pull_requests_total Total HTTP requests made by the pull source"
+                "# HELP http_pull_requests_total Total HTTP requests sent by the stage's HTTP system"
             )?;
             writeln!(output, "# TYPE http_pull_requests_total counter")?;
             for (stage_id, metrics) in &snapshot.http_pull_metrics {
-                let Some(metrics) = metrics.measurements.as_ref() else {
-                    continue;
-                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
@@ -2222,9 +2129,6 @@ impl PrometheusProjection {
             )?;
             writeln!(output, "# TYPE http_pull_responses_total counter")?;
             for (stage_id, metrics) in &snapshot.http_pull_metrics {
-                let Some(metrics) = metrics.measurements.as_ref() else {
-                    continue;
-                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     let stage_labels = format_stage_labels(stage_id, metadata);
                     writeln!(
@@ -2241,26 +2145,6 @@ impl PrometheusProjection {
                         output,
                         "http_pull_responses_total{{{},status_class=\"5xx\"}} {}",
                         stage_labels, metrics.responses_5xx
-                    )?;
-                }
-            }
-            writeln!(output)?;
-
-            writeln!(
-                output,
-                "# HELP http_pull_events_decoded_total Total decoded events emitted by the pull source"
-            )?;
-            writeln!(output, "# TYPE http_pull_events_decoded_total counter")?;
-            for (stage_id, metrics) in &snapshot.http_pull_metrics {
-                let Some(metrics) = metrics.measurements.as_ref() else {
-                    continue;
-                };
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
-                    writeln!(
-                        output,
-                        "http_pull_events_decoded_total{{{}}} {}",
-                        format_stage_labels(stage_id, metadata),
-                        metrics.events_decoded_total
                     )?;
                 }
             }
@@ -2922,8 +2806,7 @@ fn estimate_bucket_count(histogram: &HistogramSnapshot, bucket_value: f64) -> u6
 mod tests {
     use super::*;
     use obzenflow_core::event::observability::{
-        HttpPullMetricsSnapshot, HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot,
-        WaitReason,
+        HttpPullMeasurements, HttpSurfaceRouteMetricsSnapshot,
     };
     use obzenflow_core::event::payloads::system_payload::{
         ContractName, ContractResultStatusLabel, SystemFeedRole,
@@ -3382,28 +3265,15 @@ mod tests {
             },
         );
 
-        let telemetry = HttpPullTelemetry {
-            state: HttpPullState::Waiting,
-            wait_reason: Some(WaitReason::RateLimit),
-            next_wake_unix_secs: Some(1_700_000_123),
-            last_success_unix_secs: Some(1_700_000_000),
-            requests_total: 10,
-            responses_2xx: 7,
-            responses_4xx: 2,
-            responses_5xx: 1,
-            events_decoded_total: 42,
-            ..Default::default()
-        };
-
         let mut http_pull_metrics = HashMap::new();
         http_pull_metrics.insert(
             stage_id,
-            HttpPullMetricsSnapshot {
-                state: Some(telemetry.state),
-                wait_reason: telemetry.wait_reason,
-                next_wake_unix_secs: telemetry.next_wake_unix_secs,
-                last_success_unix_secs: telemetry.last_success_unix_secs,
-                measurements: Some((&telemetry).into()),
+            HttpPullMeasurements {
+                requests_total: 10,
+                responses_2xx: 7,
+                responses_4xx: 2,
+                responses_5xx: 1,
+                rate_limited_total: 1,
             },
         );
 
@@ -3418,25 +3288,14 @@ mod tests {
         let output = exporter.render(&view).unwrap();
 
         let stage_id = escape_label(&stage_id.to_string());
-        assert!(output.contains("# TYPE http_pull_waiting gauge"));
-        assert!(output.contains(&format!(
-            "http_pull_waiting{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\",reason=\"rate_limit\"}} 1"
-        )));
-        assert!(output.contains(&format!(
-            "http_pull_next_wake_unix_seconds{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\"}} 1700000123"
-        )));
-        assert!(output.contains(&format!(
-            "http_pull_last_success_unix_seconds{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\"}} 1700000000"
-        )));
+        assert!(output.contains("# TYPE http_pull_requests_total counter"));
         assert!(output.contains(&format!(
             "http_pull_requests_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\"}} 10"
         )));
         assert!(output.contains(&format!(
             "http_pull_responses_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\",status_class=\"2xx\"}} 7"
         )));
-        assert!(output.contains(&format!(
-            "http_pull_events_decoded_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\"}} 42"
-        )));
+        assert!(!output.contains("http_pull_waiting"));
     }
 
     #[test]

@@ -14,10 +14,7 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedFiniteSourceHandler,
-};
-use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use serde::{Deserialize, Serialize};
 
 /// File-local payloads for the slow-but-healthy test. The JSON shape is shared,
@@ -39,41 +36,11 @@ struct ProbeOutputEvent {
 impl TypedPayload for ProbeOutputEvent {
     const EVENT_TYPE: &'static str = "liveness.output";
 }
+use obzenflow_adapters::sources::ValuesSource;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
-
-#[derive(Clone, Debug)]
-struct TwoEventSource {
-    next_value: u64,
-    remaining: usize,
-}
-
-impl TwoEventSource {
-    fn new() -> Self {
-        Self {
-            next_value: 1,
-            remaining: 2,
-        }
-    }
-}
-
-impl TypedFiniteSourceHandler for TwoEventSource {
-    type Output = ProbeEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(None);
-        }
-
-        self.remaining = self.remaining.saturating_sub(1);
-        let value = self.next_value;
-        self.next_value = self.next_value.saturating_add(1);
-
-        Ok(Some(vec![ProbeEvent { value }]))
-    }
-}
 
 #[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
@@ -139,7 +106,7 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let numbers_handler = TwoEventSource::new();
+        let numbers_handler = ValuesSource::new([ProbeEvent { value: 1 }, ProbeEvent { value: 2 }]);
         let slow_ai_handler = SlowAiTransform::new();
         let sink_handler = NoopSink::new();
 

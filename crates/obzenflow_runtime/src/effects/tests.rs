@@ -2071,10 +2071,10 @@ impl obzenflow_core::journal::archive::ReplayArchive for ScopeMatrixArchive {
         unreachable!("the execution-scope fixture records no source journals")
     }
 
-    fn recorded_source_frontier(
+    fn recorded_source_binding(
         &self,
         _stage_key: &str,
-    ) -> obzenflow_core::source::RecordedSourceFrontier {
+    ) -> Option<obzenflow_core::effect_binding::SystemBinding> {
         unreachable!("the execution-scope fixture records no source journals")
     }
 

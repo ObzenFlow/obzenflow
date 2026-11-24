@@ -22,17 +22,15 @@ use obzenflow_core::event::payloads::effect_payload::EFFECT_EXECUTION_SUCCEEDED_
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedInfiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
-use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -79,41 +77,6 @@ struct FanInOutput {
 
 impl TypedPayload for FanInOutput {
     const EVENT_TYPE: &'static str = "resume_fan_in.output";
-}
-
-/// Emits `count` channel ticks starting at `first_value`, then idles forever.
-#[derive(Clone, Debug)]
-struct ChannelTicker {
-    channel: &'static str,
-    next_value: u64,
-    remaining: u64,
-}
-
-impl ChannelTicker {
-    fn new(channel: &'static str, first_value: u64, count: u64) -> Self {
-        Self {
-            channel,
-            next_value: first_value,
-            remaining: count,
-        }
-    }
-}
-
-impl TypedInfiniteSourceHandler for ChannelTicker {
-    type Output = ChannelTick;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(Vec::new());
-        }
-        self.remaining -= 1;
-        let value = self.next_value;
-        self.next_value += 1;
-        Ok(vec![ChannelTick {
-            channel: self.channel.to_string(),
-            value,
-        }])
-    }
 }
 
 /// Pure 1:1 fan-in: one `Merged` per consumed tick, so the delivered order is
@@ -217,8 +180,20 @@ fn build_flow(
     let b_first = ranges.b_first;
     let b_count = ranges.b_count;
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a_handler = ReattachingSource(ChannelTicker::new("a", a_first, a_count));
-        let source_b_handler = ReattachingSource(ChannelTicker::new("b", b_first, b_count));
+        let source_a_handler =
+            replay_testkit::preloaded_input((a_first..a_first + a_count).map(|value| {
+                ChannelTick {
+                    channel: "a".to_string(),
+                    value,
+                }
+            }));
+        let source_b_handler =
+            replay_testkit::preloaded_input((b_first..b_first + b_count).map(|value| {
+                ChannelTick {
+                    channel: "b".to_string(),
+                    value,
+                }
+            }));
         let merge_handler = MergeTransform::new();
         let effectful_handler = EffectfulTail {
             counter: Port::to(CallCounter { calls }),
@@ -230,8 +205,8 @@ fn build_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                src_a = infinite_source!(ChannelTick => source_a_handler);
-                src_b = infinite_source!(ChannelTick => source_b_handler);
+                src_a = source!(ChannelTick => source_a_handler);
+                src_b = source!(ChannelTick => source_b_handler);
                 merge = transform!(ChannelTick -> Merged => merge_handler);
                 effectful = effectful_transform!(
                     Merged -> { FanInOutput, EffectValue } => effectful_handler);
@@ -316,7 +291,7 @@ fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
     envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {
-            payload if payload.consumes_data_credit() => {
+            ChainPayload::Fact(_) | ChainPayload::CompositeData(_) => {
                 Some(ResumeRow::Data(envelope.payload().clone()))
             }
             ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {

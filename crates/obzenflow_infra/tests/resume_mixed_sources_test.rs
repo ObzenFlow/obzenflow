@@ -11,15 +11,6 @@
 //! The fan-in must still author its own watermark, counting the EOF-exhausted
 //! input as vacuously crossed (the F17 disjunction), and go live. All
 //! assertions read the event-sourced journals.
-//!
-//! FLOWIP-134i: a finite source continues by its connector's declaration. An
-//! unfinished `Refuse` source refuses at admission; an unfinished CSV source
-//! (`Seek`) continues strictly after its last committed row, refuses a changed
-//! input before any live row, and a source that never pinned starts on resume.
-//!
-//! FLOWIP-122i: a reattaching connector records its declared guarantee after
-//! its watermark and before its first live record, and an interrupted infinite
-//! direct handler refuses at admission until it is rebuilt as a connector.
 
 use crate::replay_testkit;
 
@@ -27,12 +18,12 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_adapters::sinks::CountingSink;
+use obzenflow_adapters::sources::ValuesSource;
 use obzenflow_adapters::sources::{
     ChannelSource, CsvDecodeError, CsvDecoder, CsvRecord, CsvSource,
 };
 use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, ReattachGuarantee, SourceCleanupPhase, SourceCleanupTrigger,
-    SourceContinuationRefusal, SourceOpenIntent, SourceReattachedFact,
+    ExecutionPayload, ReattachGuarantee, SourceReattachedFact,
 };
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{
@@ -40,25 +31,17 @@ use obzenflow_core::event::{
     SystemEvent, SystemPayload,
 };
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{
-    async_infinite_source, effectful_transform, flow, infinite_source, sink, source, transform,
-    FlowDefinition,
-};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{perform, EffectError, Effects, Port};
+use obzenflow_runtime::effects::{EffectError, Effects, Port};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-    TypedTransformHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::source::{
-    FiniteSourceConnector, PositionedFiniteReader, RefusedBy, ResumeRefusal, Seek, SeekableSource,
-    SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
-};
-use obzenflow_runtime::stages::SourceError;
-use replay_testkit::ReattachingSource;
+use obzenflow_runtime::stages::source::ResumeRefusal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -105,78 +88,6 @@ struct MixedOutput {
 
 impl TypedPayload for MixedOutput {
     const EVENT_TYPE: &'static str = "resume_mixed.output";
-}
-
-/// Finite source: emits `count` values starting at `first_value`, then
-/// exhausts naturally (authored EOF).
-#[derive(Clone, Debug)]
-struct FiniteChannelSource {
-    channel: &'static str,
-    next_value: u64,
-    remaining: u64,
-}
-
-impl FiniteChannelSource {
-    fn new(channel: &'static str, first_value: u64, count: u64) -> Self {
-        Self {
-            channel,
-            next_value: first_value,
-            remaining: count,
-        }
-    }
-}
-
-impl TypedFiniteSourceHandler for FiniteChannelSource {
-    type Output = ChannelTick;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(None);
-        }
-        self.remaining -= 1;
-        let value = self.next_value;
-        self.next_value += 1;
-        Ok(Some(vec![ChannelTick {
-            channel: self.channel.to_string(),
-            value,
-        }]))
-    }
-}
-
-/// Infinite source: emits `count` values starting at `first_value`, then
-/// idles forever.
-#[derive(Clone, Debug)]
-struct InfiniteChannelSource {
-    channel: &'static str,
-    next_value: u64,
-    remaining: u64,
-}
-
-impl InfiniteChannelSource {
-    fn new(channel: &'static str, first_value: u64, count: u64) -> Self {
-        Self {
-            channel,
-            next_value: first_value,
-            remaining: count,
-        }
-    }
-}
-
-impl TypedInfiniteSourceHandler for InfiniteChannelSource {
-    type Output = ChannelTick;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(Vec::new());
-        }
-        self.remaining -= 1;
-        let value = self.next_value;
-        self.next_value += 1;
-        Ok(vec![ChannelTick {
-            channel: self.channel.to_string(),
-            value,
-        }])
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -276,9 +187,21 @@ fn build_flow(
     let inf_first = ranges.inf_first;
     let inf_count = ranges.inf_count;
     FlowDefinition::materialize(move |_runtime_config| {
-        let finite_handler = FiniteChannelSource::new("f", fin_first, fin_count);
+        let finite_handler = ValuesSource::new(
+            (fin_first..fin_first + fin_count)
+                .map(|value| ChannelTick {
+                    channel: "f".to_string(),
+                    value,
+                })
+                .collect::<Vec<_>>(),
+        );
         let infinite_handler =
-            ReattachingSource(InfiniteChannelSource::new("i", inf_first, inf_count));
+            replay_testkit::preloaded_input((inf_first..inf_first + inf_count).map(|value| {
+                ChannelTick {
+                    channel: "i".to_string(),
+                    value,
+                }
+            }));
         let merge_handler = MergeTransform::new();
         let effectful_handler = EffectfulTail {
             counter: Port::to(CallCounter { calls }),
@@ -291,7 +214,7 @@ fn build_flow(
 
             stages: {
                 fin = source!(ChannelTick => finite_handler);
-                inf = infinite_source!(ChannelTick => infinite_handler);
+                inf = source!(ChannelTick => infinite_handler);
                 merge = transform!(ChannelTick -> Merged => merge_handler);
                 effectful = effectful_transform!(
                     Merged -> { MixedOutput, EffectValue } => effectful_handler);
@@ -378,7 +301,7 @@ fn mixed_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<MixedRow> {
     envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {
-            payload if payload.consumes_data_credit() => {
+            ChainPayload::Fact(_) | ChainPayload::CompositeData(_) => {
                 Some(MixedRow::Data(envelope.payload().clone()))
             }
             ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
@@ -500,7 +423,7 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
     });
     expected_inf.push(MixedRow::Reattached(SourceReattachedFact {
         generation: 1,
-        guarantee: ReattachGuarantee::AtMostOnce,
+        guarantee: ReattachGuarantee::LatestState,
     }));
     expected_inf.extend(tick_rows("i", 105..=106));
     assert_eq!(
@@ -660,19 +583,53 @@ async fn mixed_sources_resume_flips_when_the_eof_arrives_after_the_watermark() -
     Ok(())
 }
 
-/// Finite source that emits its range, then stalls without exhausting.
-#[derive(Clone, Debug)]
-struct StallingFiniteSource {
-    rows: FiniteChannelSource,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TickRead(u64);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait TickInput {
+    #[query(type = "resume_mixed.ticks.read")]
+    async fn read(
+        &self,
+        from: &TickRead,
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<ChannelTick, TickRead>, obzenflow_runtime::queries::QueryError>;
+}
+
+struct StallingTicks {
     polls: Arc<AtomicUsize>,
 }
+
+#[obzenflow_runtime::effects::system("stalling-finite")]
+#[async_trait::async_trait]
+impl TickInput for StallingTicks {
+    async fn read(
+        &self,
+        from: &TickRead,
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<ChannelTick, TickRead>, obzenflow_runtime::queries::QueryError> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        if from.0 < 3 {
+            return Ok(FiniteRead::Batch {
+                records: vec![ChannelTick {
+                    channel: "f".to_string(),
+                    value: from.0 + 1,
+                }],
+                next: TickRead(from.0 + 1),
+            });
+        }
+        std::future::pending().await
+    }
+}
+
+struct StallingFiniteSource(obzenflow_runtime::queries::QueryPort<dyn TickInput>);
 
 impl TypedFiniteSourceHandler for StallingFiniteSource {
     type Output = ChannelTick;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.polls.fetch_add(1, Ordering::SeqCst);
-        Ok(Some(self.rows.next()?.unwrap_or_default()))
+    fn read(&self) -> SourceRead<ChannelTick> {
+        SourceRead::finite(self.0.clone(), TickRead(0), Ok).in_process()
     }
 }
 
@@ -682,11 +639,15 @@ fn build_stalling_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let finite_handler = StallingFiniteSource {
-            rows: FiniteChannelSource::new("f", 1, 3),
-            polls,
-        };
-        let infinite_handler = ReattachingSource(InfiniteChannelSource::new("i", 101, 2));
+        let finite_handler =
+            StallingFiniteSource(obzenflow_runtime::queries::QueryPort::to(StallingTicks {
+                polls,
+            }));
+        let infinite_handler =
+            replay_testkit::preloaded_input((101..103).map(|value| ChannelTick {
+                channel: "i".to_string(),
+                value,
+            }));
         let merge_handler = MergeTransform::new();
         let collect_handler = CountingSink::<Merged>::new(delivered);
 
@@ -696,7 +657,7 @@ fn build_stalling_flow(
 
             stages: {
                 fin = source!(ChannelTick => finite_handler);
-                inf = infinite_source!(ChannelTick => infinite_handler);
+                inf = source!(ChannelTick => infinite_handler);
                 merge = transform!(ChannelTick -> Merged => merge_handler);
                 collect = sink!(Merged => collect_handler);
             },
@@ -710,10 +671,6 @@ fn build_stalling_flow(
     })
 }
 
-/// FLOWIP-134i B8: a finite direct handler continues as implicit `Refuse`.
-/// Stopped before the end of its input, it refuses the resume at admission,
-/// named, before any run directory exists or any source polls; the infinite
-/// source beside it reattaches and is not named.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -781,12 +738,7 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
             assert_eq!(archive, &recorded_run);
             assert_eq!(
                 refusals,
-                &vec![(
-                    "fin".to_string(),
-                    ResumeRefusal::UnfinishedInput {
-                        by: RefusedBy::Handler
-                    }
-                )],
+                &vec![("fin".to_string(), ResumeRefusal::UnfinishedInput)],
                 "the reattaching source is not named"
             );
         }
@@ -814,218 +766,9 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
     Ok(())
 }
 
-/// An infinite direct handler that counts its polls.
-#[derive(Clone, Debug)]
-struct PolledTicker {
-    ticks: InfiniteChannelSource,
-    polls: Arc<AtomicUsize>,
-}
-
-impl TypedInfiniteSourceHandler for PolledTicker {
-    type Output = ChannelTick;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        self.polls.fetch_add(1, Ordering::SeqCst);
-        self.ticks.next()
-    }
-}
-
-fn build_ticker_flow(
-    journal_base: PathBuf,
-    polls: Arc<AtomicUsize>,
-    delivered: Arc<AtomicU64>,
-) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let ticker_handler = PolledTicker {
-            ticks: InfiniteChannelSource::new("t", 1, 2),
-            polls,
-        };
-        let merge_handler = MergeTransform::new();
-        let collect_handler = CountingSink::<Merged>::new(delivered);
-
-        Ok(flow! {
-            name: "resume_direct_ticker",
-            journals: disk_journals(journal_base),
-
-            stages: {
-                ticker = infinite_source!(ChannelTick => ticker_handler);
-                merge = transform!(ChannelTick -> Merged => merge_handler);
-                collect = sink!(Merged => collect_handler);
-            },
-
-            topology: {
-                ticker |> merge;
-                merge |> collect;
-            }
-        })
-    })
-}
-
-/// The ticker flow with its stage rebuilt as a connector, the remedy the
-/// direct-handler refusal names. It continues at 3.
-fn build_reattaching_ticker_flow(
-    journal_base: PathBuf,
-    polls: Arc<AtomicUsize>,
-    delivered: Arc<AtomicU64>,
-) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let ticker_handler = ReattachingSource(PolledTicker {
-            ticks: InfiniteChannelSource::new("t", 3, 1),
-            polls,
-        });
-        let merge_handler = MergeTransform::new();
-        let collect_handler = CountingSink::<Merged>::new(delivered);
-
-        Ok(flow! {
-            name: "resume_direct_ticker",
-            journals: disk_journals(journal_base),
-
-            stages: {
-                ticker = infinite_source!(ChannelTick => ticker_handler);
-                merge = transform!(ChannelTick -> Merged => merge_handler);
-                collect = sink!(Merged => collect_handler);
-            },
-
-            topology: {
-                ticker |> merge;
-                merge |> collect;
-            }
-        })
-    })
-}
-
-/// FLOWIP-122i: an infinite direct handler declares no continuation. Stopped,
-/// it refuses the resume at admission, named as a handler, before any run
-/// directory exists or any source polls; only connectors and hosted ingress
-/// reattach. The refusal's remedy holds: the same stage rebuilt as a
-/// connector resumes the refused archive.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let journal_base = temp.path().join("journals");
-
-    let delivered = Arc::new(AtomicU64::new(0));
-    let handle = build_ticker_flow(
-        journal_base.clone(),
-        Arc::new(AtomicUsize::new(0)),
-        delivered.clone(),
-    )
-    .build(replay_testkit::unsynced_context())
-    .await
-    .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
-    wait_for_running(&handle).await?;
-    wait_for_count(&delivered, 2).await?;
-    handle.stop_graceful(Duration::from_secs(5)).await?;
-    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
-        .await
-        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
-    drop(handle);
-    let recorded_run = replay_testkit::latest_run_dir(&journal_base);
-
-    let runs_before = std::fs::read_dir(journal_base.join("flows"))?.count();
-    let resumed_polls = Arc::new(AtomicUsize::new(0));
-    let failure = {
-        let _bootstrap = install_bootstrap_config(
-            replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
-        );
-        build_ticker_flow(
-            journal_base.clone(),
-            resumed_polls.clone(),
-            Arc::new(AtomicU64::new(0)),
-        )
-        .build(replay_testkit::unsynced_context())
-        .await
-        .err()
-        .ok_or_else(|| anyhow!("an interrupted infinite direct handler must refuse"))?
-    };
-    match &failure.error {
-        obzenflow_dsl::dsl::FlowBuildError::ArchiveVerbRefused(
-            obzenflow_core::journal::archive_actions::ArchiveRefusal::Sources { refusals, .. },
-        ) => {
-            assert_eq!(
-                refusals,
-                &vec![(
-                    "ticker".to_string(),
-                    ResumeRefusal::UnfinishedInput {
-                        by: RefusedBy::Handler
-                    }
-                )]
-            );
-        }
-        other => panic!("expected the unfinished-source refusal, got: {other}"),
-    }
-    assert!(
-        failure.error.to_string().contains(
-            "source 'ticker' stopped with its input unfinished, and its handler cannot \
-             continue interrupted input."
-        ),
-        "{}",
-        failure.error
-    );
-    assert_eq!(
-        std::fs::read_dir(journal_base.join("flows"))?.count(),
-        runs_before,
-        "the refusal leaves no run directory"
-    );
-    assert_eq!(resumed_polls.load(Ordering::SeqCst), 0);
-    assert!(!recorded_run.join("run_continuation.json").exists());
-
-    let delivered = Arc::new(AtomicU64::new(0));
-    {
-        let _bootstrap = install_bootstrap_config(
-            replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
-        );
-        let handle = build_reattaching_ticker_flow(
-            journal_base.clone(),
-            Arc::new(AtomicUsize::new(0)),
-            delivered.clone(),
-        )
-        .build(replay_testkit::unsynced_context())
-        .await
-        .map_err(|e| anyhow!("the rebuilt flow must resume the refused archive: {e:?}"))?;
-        let facts = handle.archive_flow_evidence();
-        assert!(facts.cycle_members.is_empty());
-        assert_eq!(
-            facts.sources,
-            [(
-                "ticker".to_string(),
-                obzenflow_core::source::SourceContinuation::Reattach {
-                    guarantee: ReattachGuarantee::AtMostOnce
-                }
-            )]
-        );
-        wait_for_running(&handle).await?;
-        wait_for_count(&delivered, 1).await?;
-        handle.stop_graceful(Duration::from_secs(5)).await?;
-        tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
-            .await
-            .map_err(|_| anyhow!("timeout waiting for the resumed run to stop"))??;
-    }
-    let resumed_run = replay_testkit::latest_run_dir(&journal_base);
-    assert_ne!(recorded_run, resumed_run);
-
-    let mut expected = tick_rows("t", 1..=2);
-    expected.push(MixedRow::CatchUp {
-        stage_key: "ticker".to_string(),
-        generation: 1,
-    });
-    expected.push(MixedRow::Reattached(SourceReattachedFact {
-        generation: 1,
-        guarantee: ReattachGuarantee::AtMostOnce,
-    }));
-    expected.extend(tick_rows("t", 3..=3));
-    expected.push(MixedRow::Eof);
-    assert_eq!(
-        mixed_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "ticker").await),
-        expected
-    );
-
-    Ok(())
-}
-
 fn build_channel_flow(
     journal_base: PathBuf,
-    ticks: tokio::sync::mpsc::Receiver<ChannelTick>,
+    ticks: obzenflow_runtime::stages::common::handlers::source::SourceReceiver<ChannelTick>,
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
@@ -1038,7 +781,7 @@ fn build_channel_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                chan = async_infinite_source!(ChannelTick => channel_source);
+                chan = source!(ChannelTick => channel_source);
                 merge = transform!(ChannelTick -> Merged => merge_handler);
                 collect = sink!(Merged => collect_handler);
             },
@@ -1065,7 +808,7 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
 
-    let (sender, ticks) = tokio::sync::mpsc::channel(8);
+    let (sender, ticks) = obzenflow_runtime::stages::common::handlers::source::source_channel(8);
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_channel_flow(journal_base.clone(), ticks, delivered.clone())
         .build(replay_testkit::unsynced_context())
@@ -1084,7 +827,7 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
     drop(sender);
     let recorded_run = replay_testkit::latest_run_dir(&journal_base);
 
-    let (sender, ticks) = tokio::sync::mpsc::channel(8);
+    let (sender, ticks) = obzenflow_runtime::stages::common::handlers::source::source_channel(8);
     let delivered = Arc::new(AtomicU64::new(0));
     {
         let _bootstrap = install_bootstrap_config(
@@ -1274,18 +1017,13 @@ async fn resume_csv_run(
     Ok((outcome, resumed))
 }
 
-/// A positioned source's journal reduced to its source evidence and records,
-/// in append order.
 #[derive(Clone, Debug, PartialEq)]
 enum SourceRow {
-    Acquired(SourceOpenIntent),
-    Pinned,
-    Positioned(u64),
-    StartedOnResume(u64),
+    Declared,
+    Read(u64),
     CatchUp,
     Order(u64),
     Eof(EofKind),
-    Released(SourceCleanupTrigger, SourceCleanupPhase),
 }
 
 async fn source_rows(run: &Path) -> Vec<SourceRow> {
@@ -1294,26 +1032,13 @@ async fn source_rows(run: &Path) -> Vec<SourceRow> {
         .iter()
         .filter_map(|envelope| match &envelope.payload {
             ChainPayload::Fact(order) => {
-                assert!(
-                    envelope.envelope.provenance.event.source_progress.is_some(),
-                    "every positioned record commits its position"
-                );
                 Some(SourceRow::Order(order["id"].as_u64().expect("order id")))
             }
-            ChainPayload::Execution(ExecutionPayload::SourceReaderAcquired(acquired)) => {
-                Some(SourceRow::Acquired(acquired.intent))
+            ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(_)) => {
+                Some(SourceRow::Declared)
             }
-            ChainPayload::Execution(ExecutionPayload::SourceInputPinned(_)) => {
-                Some(SourceRow::Pinned)
-            }
-            ChainPayload::Execution(ExecutionPayload::SourcePositioned(fact)) => {
-                Some(SourceRow::Positioned(fact.generation))
-            }
-            ChainPayload::Execution(ExecutionPayload::SourceStartedOnResume(fact)) => {
-                Some(SourceRow::StartedOnResume(fact.generation))
-            }
-            ChainPayload::Execution(ExecutionPayload::SourceCleanupSucceeded(fact)) => {
-                Some(SourceRow::Released(fact.trigger, fact.phase))
+            ChainPayload::Execution(ExecutionPayload::SourceInput(record)) => {
+                Some(SourceRow::Read(record.number))
             }
             ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. }) => {
                 Some(SourceRow::CatchUp)
@@ -1333,7 +1058,7 @@ async fn source_errors(run: &Path) -> Vec<JournalRecord<ChainPayload>> {
 }
 
 fn orders(ids: std::ops::RangeInclusive<u64>) -> impl Iterator<Item = SourceRow> {
-    ids.map(SourceRow::Order)
+    ids.flat_map(|id| [SourceRow::Read(id), SourceRow::Order(id)])
 }
 
 /// The generations whose reconstruction a run recorded as complete (B6).
@@ -1365,22 +1090,13 @@ async fn recorded_prefix(run: &Path) -> u64 {
         (1..ORDERS).contains(&committed),
         "the stop must land inside the input: {rows:?}"
     );
-    let mut expected = vec![
-        SourceRow::Acquired(SourceOpenIntent::Start),
-        SourceRow::Pinned,
-    ];
+    let mut expected = vec![SourceRow::Declared];
     expected.extend(orders(1..=committed));
-    expected.extend([
-        SourceRow::Eof(EofKind::Truncated),
-        SourceRow::Released(SourceCleanupTrigger::Stopped, SourceCleanupPhase::Live),
-    ]);
-    assert_eq!(rows, expected, "the pin precedes every positioned record");
+    expected.push(SourceRow::Eof(EofKind::Truncated));
+    assert_eq!(rows, expected, "the binding precedes every read");
     committed
 }
 
-/// FLOWIP-134i B1, B3: the resumed run re-admits the committed prefix, then
-/// positions the reader strictly after it and commits the catch-up marker
-/// before the first live row, so every row is admitted exactly once.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interrupted_csv_source_continues_after_its_last_committed_row() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -1394,17 +1110,13 @@ async fn an_interrupted_csv_source_continues_after_its_last_committed_row() -> R
     let (outcome, resumed_run) =
         resume_csv_run(&journal_base, &input, &recorded_run, OrderCsv).await?;
     outcome?;
-    let mut expected = vec![SourceRow::Pinned];
+    let mut expected = vec![SourceRow::Declared];
     expected.extend(orders(1..=committed));
-    expected.extend([
-        SourceRow::Acquired(SourceOpenIntent::Resume),
-        SourceRow::Positioned(1),
-        SourceRow::CatchUp,
-    ]);
+    expected.push(SourceRow::CatchUp);
     expected.extend(orders(committed + 1..=ORDERS));
     expected.extend([
+        SourceRow::Read(ORDERS + 1),
         SourceRow::Eof(EofKind::Natural),
-        SourceRow::Released(SourceCleanupTrigger::Exhausted, SourceCleanupPhase::Live),
     ]);
     assert_eq!(source_rows(&resumed_run).await, expected);
     assert!(source_errors(&resumed_run).await.is_empty());
@@ -1422,110 +1134,6 @@ async fn an_interrupted_csv_source_continues_after_its_last_committed_row() -> R
     Ok(())
 }
 
-const BILLION: u64 = 1_000_000_000;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Offset(u64);
-
-impl SourcePosition for Offset {}
-
-/// A billion orders that exist only as they are read: each is generated from
-/// its offset when polled, and the reader holds nothing but that offset.
-struct LazyOrderReader {
-    next: u64,
-    identity: SourceInputIdentity,
-    shape: LazyOrders,
-}
-
-impl SeekableSource for LazyOrderReader {
-    type Position = Offset;
-
-    fn input_identity(&self) -> &SourceInputIdentity {
-        &self.identity
-    }
-
-    fn beginning(&self) -> Offset {
-        Offset(0)
-    }
-
-    fn seek(&mut self, position: Offset) -> Result<(), SourceError> {
-        if self.shape.seek_fails {
-            return Err(SourceError::Transport(
-                SourceDiagnosticReason::InputUnavailable.into(),
-            ));
-        }
-        self.next = position.0;
-        Ok(())
-    }
-}
-
-impl PositionedFiniteReader for LazyOrderReader {
-    type Output = Order;
-
-    fn next(&mut self) -> Result<Option<Vec<SourceRecord<Order, Offset>>>, SourceError> {
-        if self.next == BILLION {
-            return Ok(None);
-        }
-        let mut records = Vec::new();
-        while records.len() < self.shape.batch && self.next < BILLION {
-            self.shape
-                .lowest_read
-                .fetch_min(self.next, Ordering::SeqCst);
-            self.shape.fetched.fetch_add(1, Ordering::SeqCst);
-            self.next += 1;
-            let id = if self.shape.duplicate_payloads {
-                0
-            } else {
-                self.next
-            };
-            records.push(SourceRecord {
-                value: Order { id },
-                after: Offset(self.next),
-            });
-        }
-        Ok(Some(records))
-    }
-}
-
-#[derive(Clone)]
-struct LazyOrders {
-    /// Records per poll.
-    batch: usize,
-    /// Every order carries the same payload; only positions tell them apart.
-    duplicate_payloads: bool,
-    seek_fails: bool,
-    /// The lowest offset this connector's readers generated.
-    lowest_read: Arc<AtomicU64>,
-    fetched: Arc<AtomicU64>,
-}
-
-impl LazyOrders {
-    fn new() -> Self {
-        Self {
-            batch: 1,
-            duplicate_payloads: false,
-            seek_fails: false,
-            lowest_read: Arc::new(AtomicU64::new(u64::MAX)),
-            fetched: Arc::new(AtomicU64::new(0)),
-        }
-    }
-}
-
-impl FiniteSourceConnector for LazyOrders {
-    type Output = Order;
-    type Reader = LazyOrderReader;
-    type Continuation = Seek<Offset>;
-
-    fn open(&self, _: SourceReaderInitContext) -> Result<LazyOrderReader, SourceError> {
-        Ok(LazyOrderReader {
-            next: 0,
-            identity: SourceInputIdentity::new("lazy_orders", &json!({ "records": BILLION }))
-                .expect("the identity encodes"),
-            shape: self.clone(),
-        })
-    }
-}
-
 fn resume_bootstrap(archive: &Path) -> ReplayBootstrap {
     ReplayBootstrap {
         archive_path: archive.to_path_buf(),
@@ -1534,618 +1142,8 @@ fn resume_bootstrap(archive: &Path) -> ReplayBootstrap {
     }
 }
 
-/// The positions a source journal committed, decoded in append order.
-async fn committed_offsets(run: &Path) -> Vec<u64> {
-    replay_testkit::read_stage_envelopes_appended(run, "orders")
-        .await
-        .iter()
-        .filter_map(|envelope| envelope.envelope.provenance.event.source_progress.as_ref())
-        .map(|progress| {
-            progress
-                .after
-                .decode::<Offset>()
-                .expect("a committed lazy position")
-                .0
-        })
-        .collect()
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct CountOrder;
-
-#[obzenflow_runtime::effects::port]
-#[async_trait]
-trait DelayedCountPort {
-    #[effect(type = "test.resume_mixed.count_order", at_least_once, records = reply)]
-    async fn count(&self, request: &CountOrder) -> Result<(), EffectError>;
-}
-
-/// Counts orders, taking `delay` over each.
-#[derive(Clone, Debug)]
-struct DelayedCount {
-    delivered: Arc<AtomicUsize>,
-    delay: Duration,
-}
-
-#[obzenflow_runtime::effects::system("delayed-count")]
-#[async_trait]
-impl DelayedCountPort for DelayedCount {
-    async fn count(&self, _: &CountOrder) -> Result<(), EffectError> {
-        tokio::time::sleep(self.delay).await;
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-async fn wait_for_settled_calls(run: &Path, target: usize) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let settled = replay_testkit::read_stage_envelopes_appended(run, "collect")
-                .await
-                .iter()
-                .filter(|envelope| {
-                    matches!(
-                        envelope.payload,
-                        ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
-                    )
-                })
-                .count();
-            if settled >= target {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .map_err(|_| anyhow!("timeout waiting for the sink's journal to settle {target} calls"))
-}
-
-fn enforced_backpressure(window: u64) -> obzenflow_runtime::run_context::FlowBuildContext {
-    use obzenflow_core::config::{ConfigScope, ConfigSource};
-    use obzenflow_runtime::runtime_config::{
-        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
-    };
-    let mut candidates = CandidateSet::default();
-    for (key, value) in [
-        (
-            "runtime.backpressure.mode",
-            ConfigValue::Text("enforce".to_owned()),
-        ),
-        ("runtime.backpressure.window", ConfigValue::U64(window)),
-        (
-            "runtime.backpressure.stall_timeout_ms",
-            ConfigValue::U64(60_000),
-        ),
-    ] {
-        candidates
-            .admit(ScopedCandidate::unqualified(
-                key,
-                ConfigScope::Flow,
-                ConfigSource::File,
-                value,
-            ))
-            .expect("the backpressure setting admits");
-    }
-    obzenflow_runtime::run_context::FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(
-        candidates,
-    )))
-}
-
-/// Lazy orders paced at the source.
-fn lazy_flow(
-    journal_base: &Path,
-    orders_source: LazyOrders,
-    (rate, burst): (f64, f64),
-    collect_handler: DelayedCount,
-) -> FlowDefinition {
-    let journals = journal_base.to_path_buf();
-    let collect_handler = perform(|_: &Order| CountOrder).through(Port::to(collect_handler));
-    FlowDefinition::materialize(move |_runtime_config| {
-        Ok(flow! {
-            name: "resume_lazy",
-            journals: disk_journals(journals),
-
-            stages: {
-                orders = source!(Order with {
-                    rate_limit(rate).burst_capacity(burst)
-                } => orders_source);
-                collect = sink!(Order => collect_handler);
-            },
-
-            topology: {
-                orders |> collect;
-            }
-        })
-    })
-}
-
-async fn run_lazy_orders(
-    journal_base: &Path,
-    resume: Option<&Path>,
-    pacing: (f64, f64),
-    deliveries: usize,
-) -> Result<(PathBuf, u64)> {
-    let _bootstrap = match resume {
-        Some(archive) => Some(install_bootstrap_config(
-            replay_testkit::bootstrap_with_archive(resume_bootstrap(archive)).await,
-        )),
-        None => None,
-    };
-    let orders_source = LazyOrders::new();
-    let lowest_read = orders_source.lowest_read.clone();
-    let delivered = Arc::new(AtomicUsize::new(0));
-    let handle = lazy_flow(
-        journal_base,
-        orders_source,
-        pacing,
-        DelayedCount {
-            delivered: delivered.clone(),
-            delay: Duration::ZERO,
-        },
-    )
-    .build(replay_testkit::unsynced_context())
-    .await
-    .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
-    wait_for_running(&handle).await?;
-    wait_for_deliveries(&delivered, deliveries).await?;
-    handle.stop_graceful(Duration::from_secs(10)).await?;
-    tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
-        .await
-        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
-    drop(handle);
-    Ok((
-        replay_testkit::latest_run_dir(journal_base),
-        lowest_read.load(Ordering::SeqCst),
-    ))
-}
-
-/// `lazy_flow`'s flow for any value that reads the orders, so a resume can
-/// rewire the source and admission still sees the recorded flow.
-macro_rules! orders_flow {
-    ($journal_base:expr, $orders_source:ident, $delivered:expr) => {{
-        let journals = $journal_base.to_path_buf();
-        let collect_handler = perform(|_: &Order| CountOrder).through(Port::to(DelayedCount {
-            delivered: $delivered,
-            delay: Duration::ZERO,
-        }));
-        FlowDefinition::materialize(move |_runtime_config| {
-            Ok(flow! {
-                name: "resume_lazy",
-                journals: disk_journals(journals),
-
-                stages: {
-                    orders = source!(Order with {
-                        rate_limit(50.0).burst_capacity(5.0)
-                    } => $orders_source);
-                    collect = sink!(Order => collect_handler);
-                },
-
-                topology: {
-                    orders |> collect;
-                }
-            })
-        })
-    }};
-}
-
-/// Orders read by a direct handler, which positions nothing and lowers to
-/// `Refuse` (B8).
-#[derive(Clone, Debug, Default)]
-struct UnpositionedOrders {
-    next: u64,
-}
-
-impl TypedFiniteSourceHandler for UnpositionedOrders {
-    type Output = Order;
-
-    fn next(&mut self) -> Result<Option<Vec<Order>>, SourceError> {
-        self.next += 1;
-        Ok(Some(vec![Order { id: self.next }]))
-    }
-}
-
-/// `Offset`'s format, revised: the same shape under a new version.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct RevisedOffset(u64);
-
-impl SourcePosition for RevisedOffset {
-    const SCHEMA_VERSION: u32 = 2;
-}
-
-/// `LazyOrders`, positioned in the revised format.
-#[derive(Clone)]
-struct RevisedLazyOrders(LazyOrders);
-
-struct RevisedOrderReader(LazyOrderReader);
-
-impl SeekableSource for RevisedOrderReader {
-    type Position = RevisedOffset;
-
-    fn input_identity(&self) -> &SourceInputIdentity {
-        self.0.input_identity()
-    }
-
-    fn beginning(&self) -> RevisedOffset {
-        RevisedOffset(0)
-    }
-
-    fn seek(&mut self, position: RevisedOffset) -> Result<(), SourceError> {
-        self.0.seek(Offset(position.0))
-    }
-}
-
-impl PositionedFiniteReader for RevisedOrderReader {
-    type Output = Order;
-
-    fn next(&mut self) -> Result<Option<Vec<SourceRecord<Order, RevisedOffset>>>, SourceError> {
-        Ok(self.0.next()?.map(|records| {
-            records
-                .into_iter()
-                .map(|record| SourceRecord {
-                    value: record.value,
-                    after: RevisedOffset(record.after.0),
-                })
-                .collect()
-        }))
-    }
-}
-
-impl FiniteSourceConnector for RevisedLazyOrders {
-    type Output = Order;
-    type Reader = RevisedOrderReader;
-    type Continuation = Seek<RevisedOffset>;
-
-    fn open(&self, context: SourceReaderInitContext) -> Result<RevisedOrderReader, SourceError> {
-        self.0.open(context).map(RevisedOrderReader)
-    }
-}
-
-/// Run `flow` until its sink has `deliveries`, then stop it.
-async fn record_interrupted(
-    journal_base: &Path,
-    flow: FlowDefinition,
-    delivered: Arc<AtomicUsize>,
-    deliveries: usize,
-) -> Result<PathBuf> {
-    let handle = flow
-        .build(replay_testkit::unsynced_context())
-        .await
-        .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
-    wait_for_running(&handle).await?;
-    wait_for_deliveries(&delivered, deliveries).await?;
-    handle.stop_graceful(Duration::from_secs(10)).await?;
-    tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
-        .await
-        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
-    drop(handle);
-    Ok(replay_testkit::latest_run_dir(journal_base))
-}
-
-/// Build `flow` as a resume of `archive`, which must refuse at admission:
-/// no run directory and no claim on the archive (B8, B12, B22).
-async fn refused_at_admission(
-    journal_base: &Path,
-    archive: &Path,
-    flow: FlowDefinition,
-) -> Result<String> {
-    let runs_before = std::fs::read_dir(journal_base.join("flows"))?.count();
-    let bootstrap = install_bootstrap_config(
-        replay_testkit::bootstrap_with_archive(resume_bootstrap(archive)).await,
-    );
-    let failure = flow.build(replay_testkit::unsynced_context()).await.err();
-    drop(bootstrap);
-    let failure = failure.ok_or_else(|| anyhow!("the resume must refuse at admission"))?;
-    assert_eq!(
-        std::fs::read_dir(journal_base.join("flows"))?.count(),
-        runs_before,
-        "the refusal leaves no run directory"
-    );
-    assert!(
-        !archive.join("run_continuation.json").exists(),
-        "the refused resume claims nothing (B12)"
-    );
-    Ok(failure.error.to_string())
-}
-
-/// FLOWIP-134i B22: a direct handler records its input without positions.
-/// Rewiring the source to a positioned connector cannot continue that input,
-/// so the resume refuses at admission, before it claims the archive or polls.
 #[tokio::test(flavor = "multi_thread")]
-async fn input_recorded_without_positions_refuses_the_resume_at_admission() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let journal_base = temp.path().join("journals");
-    let delivered = Arc::new(AtomicUsize::new(0));
-    let unpositioned = UnpositionedOrders::default();
-    let recorded = record_interrupted(
-        &journal_base,
-        orders_flow!(&journal_base, unpositioned, delivered.clone()),
-        delivered,
-        3,
-    )
-    .await?;
-
-    let positioned = LazyOrders::new();
-    let fetched = positioned.fetched.clone();
-    let refusal = refused_at_admission(
-        &journal_base,
-        &recorded,
-        orders_flow!(&journal_base, positioned, Arc::new(AtomicUsize::new(0))),
-    )
-    .await?;
-    assert_eq!(
-        refusal,
-        format!(
-            "cannot resume {}: source 'orders' recorded its input without positions, so its \
-             connector cannot continue it from where it stopped.\nStart a new run.",
-            recorded.display()
-        )
-    );
-    assert_eq!(
-        fetched.load(Ordering::SeqCst),
-        0,
-        "the refused resume never polls the connector"
-    );
-    Ok(())
-}
-
-/// FLOWIP-134i B22: positions recorded in one version of a connector's format
-/// refuse a resume whose connector reads another, at admission. The archive
-/// stays unclaimed, so resuming with the recording version continues it.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_changed_position_version_refuses_the_resume_at_admission() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let journal_base = temp.path().join("journals");
-    let (recorded, _) = run_lazy_orders(&journal_base, None, (50.0, 5.0), 3).await?;
-
-    let revised = RevisedLazyOrders(LazyOrders::new());
-    let fetched = revised.0.fetched.clone();
-    let refusal = refused_at_admission(
-        &journal_base,
-        &recorded,
-        orders_flow!(&journal_base, revised, Arc::new(AtomicUsize::new(0))),
-    )
-    .await?;
-    assert_eq!(
-        refusal,
-        format!(
-            "cannot resume {}: source 'orders' recorded positions in version 1 of its \
-             connector's format, and the connector now reads version 2.\nResume with the \
-             version that recorded them, or start a new run.",
-            recorded.display()
-        )
-    );
-    assert_eq!(
-        fetched.load(Ordering::SeqCst),
-        0,
-        "the refused resume never polls the connector"
-    );
-
-    let (resumed, _) = run_lazy_orders(&journal_base, Some(&recorded), (50.0, 5.0), 1).await?;
-    assert_ne!(resumed, recorded);
-    assert!(
-        recorded.join("run_continuation.json").exists(),
-        "the recording version's resume claims the untouched archive"
-    );
-    Ok(())
-}
-
-/// FLOWIP-134i B1 (AC3): a lazy billion-record source resumes after a small
-/// committed prefix by seeking past it, without generating or holding any of
-/// the input it already admitted.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_lazy_billion_record_source_resumes_without_reading_its_prefix() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let journal_base = temp.path().join("journals");
-    let (recorded, _) = run_lazy_orders(&journal_base, None, (0.5, 3.0), 3).await?;
-    let recorded_rows = source_rows(&recorded).await;
-    let committed = recorded_rows
-        .iter()
-        .filter(|row| matches!(row, SourceRow::Order(_)))
-        .count() as u64;
-    let mut expected = vec![
-        SourceRow::Acquired(SourceOpenIntent::Start),
-        SourceRow::Pinned,
-    ];
-    expected.extend(orders(1..=committed));
-    expected.extend([
-        SourceRow::Eof(EofKind::Truncated),
-        SourceRow::Released(SourceCleanupTrigger::Stopped, SourceCleanupPhase::Live),
-    ]);
-    assert_eq!(recorded_rows, expected);
-
-    let (resumed, lowest_read) =
-        run_lazy_orders(&journal_base, Some(&recorded), (50.0, 5.0), 5).await?;
-    assert_eq!(
-        lowest_read, committed,
-        "the resumed reader generated nothing before its committed position"
-    );
-    let rows = source_rows(&resumed).await;
-    let admitted = rows
-        .iter()
-        .filter(|row| matches!(row, SourceRow::Order(_)))
-        .count() as u64;
-    assert!(
-        admitted > committed,
-        "the resume read live orders: {rows:?}"
-    );
-    let mut expected = vec![SourceRow::Pinned];
-    expected.extend(orders(1..=committed));
-    expected.extend([
-        SourceRow::Acquired(SourceOpenIntent::Resume),
-        SourceRow::Positioned(1),
-        SourceRow::CatchUp,
-    ]);
-    expected.extend(orders(committed + 1..=admitted));
-    expected.extend([
-        SourceRow::Eof(EofKind::Truncated),
-        SourceRow::Released(SourceCleanupTrigger::Stopped, SourceCleanupPhase::Live),
-    ]);
-    assert_eq!(rows, expected, "every order once, in order, without a gap");
-    Ok(())
-}
-
-/// FLOWIP-134i B1 (AC4): a source that fetched a thousand orders but had
-/// committed only those its backpressure window admitted when stopped
-/// resumes after its commits, never its reads. Every order carries the same
-/// payload, so only positions tell them apart.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_source_resumes_after_its_commits_not_its_reads() -> Result<()> {
-    const FETCHED: u64 = 1_000;
-    const WINDOW: u64 = 300;
-    let temp = tempfile::tempdir()?;
-    let journal_base = temp.path().join("journals");
-    let duplicates = || LazyOrders {
-        batch: FETCHED as usize,
-        duplicate_payloads: true,
-        ..LazyOrders::new()
-    };
-
-    let orders_source = duplicates();
-    let fetched = orders_source.fetched.clone();
-    let delivered = Arc::new(AtomicUsize::new(0));
-    let handle = lazy_flow(
-        &journal_base,
-        orders_source,
-        (1000.0, 1000.0),
-        DelayedCount {
-            delivered: delivered.clone(),
-            delay: Duration::from_millis(5),
-        },
-    )
-    .build(enforced_backpressure(WINDOW))
-    .await
-    .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
-    wait_for_running(&handle).await?;
-    // One poll fetched a thousand; publication stalls at the window while the
-    // sink drains slowly, and a cancel cuts it there. A graceful stop would
-    // first publish every fetched order.
-    wait_for_deliveries(&delivered, 10).await?;
-    assert_eq!(fetched.load(Ordering::SeqCst), FETCHED);
-    handle.stop().await?;
-    tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
-        .await
-        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
-    drop(handle);
-    let recorded = replay_testkit::latest_run_dir(&journal_base);
-    let committed = committed_offsets(&recorded).await;
-    let prefix = committed.len() as u64;
-    assert_eq!(committed, (1..=prefix).collect::<Vec<_>>());
-    assert!(
-        (WINDOW..FETCHED).contains(&prefix),
-        "fetched {FETCHED}, committed {prefix}"
-    );
-
-    let _bootstrap = install_bootstrap_config(
-        replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded)).await,
-    );
-    let orders_source = duplicates();
-    let lowest_read = orders_source.lowest_read.clone();
-    let handle = lazy_flow(
-        &journal_base,
-        orders_source,
-        (1000.0, 1000.0),
-        DelayedCount {
-            delivered: Arc::new(AtomicUsize::new(0)),
-            delay: Duration::ZERO,
-        },
-    )
-    .build(enforced_backpressure(WINDOW))
-    .await
-    .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
-    wait_for_running(&handle).await?;
-    wait_for_settled_calls(
-        &replay_testkit::latest_run_dir(&journal_base),
-        prefix as usize + 100,
-    )
-    .await?;
-    handle.stop_graceful(Duration::from_secs(20)).await?;
-    tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
-        .await
-        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
-    drop(handle);
-    assert_eq!(
-        lowest_read.load(Ordering::SeqCst),
-        prefix,
-        "the resume seeks after the last commit, not the last read"
-    );
-    let resumed = replay_testkit::latest_run_dir(&journal_base);
-    let offsets = committed_offsets(&resumed).await;
-    assert!(offsets.len() as u64 > prefix, "the resume read live orders");
-    assert_eq!(
-        offsets,
-        (1..=offsets.len() as u64).collect::<Vec<_>>(),
-        "every order once, by position"
-    );
-    Ok(())
-}
-
-/// FLOWIP-134i B1 (AC6): a seek that fails refuses before any live input. The
-/// source records why, releases its reader and fails the resumed run.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_failed_seek_refuses_before_live_input() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let journal_base = temp.path().join("journals");
-    let (recorded, _) = run_lazy_orders(&journal_base, None, (0.5, 3.0), 3).await?;
-    let committed = source_rows(&recorded)
-        .await
-        .iter()
-        .filter(|row| matches!(row, SourceRow::Order(_)))
-        .count() as u64;
-
-    let _bootstrap = install_bootstrap_config(
-        replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded)).await,
-    );
-    let orders_source = LazyOrders {
-        seek_fails: true,
-        ..LazyOrders::new()
-    };
-    let fetched = orders_source.fetched.clone();
-    let handle = lazy_flow(
-        &journal_base,
-        orders_source,
-        (1000.0, 100.0),
-        DelayedCount {
-            delivered: Arc::new(AtomicUsize::new(0)),
-            delay: Duration::ZERO,
-        },
-    )
-    .build(replay_testkit::unsynced_context())
-    .await
-    .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
-    tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
-        .await
-        .map_err(|_| anyhow!("timeout waiting for the resumed run to fail"))?
-        .expect_err("a failed seek fails the resumed run");
-    drop(handle);
-    assert_eq!(
-        fetched.load(Ordering::SeqCst),
-        0,
-        "nothing is read after it"
-    );
-
-    let resumed = replay_testkit::latest_run_dir(&journal_base);
-    let mut expected = vec![SourceRow::Pinned];
-    expected.extend(orders(1..=committed));
-    expected.extend([
-        SourceRow::Acquired(SourceOpenIntent::Resume),
-        SourceRow::Released(SourceCleanupTrigger::Failed, SourceCleanupPhase::Recovery),
-    ]);
-    assert_eq!(source_rows(&resumed).await, expected);
-    assert!(
-        source_errors(&resumed).await.iter().any(|row| matches!(
-            row.payload,
-            ChainPayload::Execution(ExecutionPayload::SourceSeekFailed(_))
-        )),
-        "the source records its failed seek"
-    );
-    Ok(())
-}
-
-/// FLOWIP-134i B9 (AC6): a changed decoder value resumes. The committed
-/// prefix keeps its recorded values; the new value decodes only the rest, each
-/// remaining row once at its committed position.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_changed_decoder_value_applies_only_to_the_resumed_suffix() -> Result<()> {
+async fn changed_decoder_value_decodes_resumed_suffix() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
     let input = temp.path().join("orders.csv");
@@ -2161,17 +1159,15 @@ async fn a_changed_decoder_value_applies_only_to_the_resumed_suffix() -> Result<
     )
     .await?;
     outcome?;
-    let mut expected = vec![SourceRow::Pinned];
+    let mut expected = vec![SourceRow::Declared];
     expected.extend(orders(1..=committed));
+    expected.push(SourceRow::CatchUp);
+    expected.extend(
+        (committed + 1..=ORDERS).flat_map(|id| [SourceRow::Read(id), SourceRow::Order(id * 100)]),
+    );
     expected.extend([
-        SourceRow::Acquired(SourceOpenIntent::Resume),
-        SourceRow::Positioned(1),
-        SourceRow::CatchUp,
-    ]);
-    expected.extend((committed + 1..=ORDERS).map(|id| SourceRow::Order(id * 100)));
-    expected.extend([
+        SourceRow::Read(ORDERS + 1),
         SourceRow::Eof(EofKind::Natural),
-        SourceRow::Released(SourceCleanupTrigger::Exhausted, SourceCleanupPhase::Live),
     ]);
     assert_eq!(source_rows(&resumed_run).await, expected);
     Ok(())
@@ -2253,7 +1249,7 @@ async fn a_changed_decoder_output_type_fails_at_re_admission() -> Result<()> {
         .map(|recorded| &recorded.outcome)
     {
         Some(obzenflow_core::journal::read::RunOutcome::Failed { reason }) => assert!(
-            reason.contains("does not match its output contract"),
+            reason.contains("emitted OrderV2 at input 1, but its recording's next action is"),
             "{reason}"
         ),
         other => panic!("the resumed run must record its failure: {other:?}"),
@@ -2268,10 +1264,8 @@ async fn a_changed_decoder_output_type_fails_at_re_admission() -> Result<()> {
     Ok(())
 }
 
-/// FLOWIP-134i B10: an input appended after its pin refuses the resume,
-/// naming the changed part, before any live row.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_csv_input_changed_since_its_pin_refuses_the_resume() -> Result<()> {
+async fn changed_csv_input_resume_refused() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
     let input = temp.path().join("orders.csv");
@@ -2285,37 +1279,26 @@ async fn a_csv_input_changed_since_its_pin_refuses_the_resume() -> Result<()> {
     let (outcome, resumed_run) =
         resume_csv_run(&journal_base, &input, &recorded_run, OrderCsv).await?;
     assert!(outcome.is_err(), "a refused source fails the resumed run");
-    let mut expected = vec![SourceRow::Pinned];
+    let mut expected = vec![SourceRow::Declared];
     expected.extend(orders(1..=committed));
-    expected.extend([
-        SourceRow::Acquired(SourceOpenIntent::Resume),
-        SourceRow::Released(SourceCleanupTrigger::Failed, SourceCleanupPhase::Recovery),
-    ]);
+    expected.extend([SourceRow::CatchUp, SourceRow::Read(committed + 1)]);
     assert_eq!(source_rows(&resumed_run).await, expected);
     let refusals: Vec<_> = source_errors(&resumed_run)
         .await
         .into_iter()
         .filter_map(|envelope| match envelope.into_parts().1 {
-            ChainPayload::Execution(ExecutionPayload::SourceContinuationRefused(fact)) => {
-                Some(fact.refusal)
+            ChainPayload::Execution(ExecutionPayload::SourcePollFailed(fact)) => {
+                Some(fact.diagnostic.reason())
             }
             _ => None,
         })
         .collect();
-    assert_eq!(
-        refusals,
-        [SourceContinuationRefusal::InputChanged {
-            part: "file".into()
-        }]
-    );
-    assert!(reconstruction_completions(&resumed_run).await.is_empty());
+    assert_eq!(refusals, [SourceDiagnosticReason::InputChanged]);
     Ok(())
 }
 
-/// FLOWIP-134i B15: a source whose open failed never pinned, so its resume
-/// pins the current input and reads it all, once.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_csv_source_that_never_pinned_starts_on_resume() -> Result<()> {
+async fn unread_csv_source_resume_reads_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
     let input = temp.path().join("orders.csv");
@@ -2334,26 +1317,27 @@ async fn a_csv_source_that_never_pinned_starts_on_resume() -> Result<()> {
     let failed = tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow!("timeout waiting for the failed open"))?;
-    assert!(failed.is_err(), "a missing input fails the source's open");
+    assert!(
+        failed.is_err(),
+        "a missing input fails the source's first read"
+    );
     // The failed process ends, releasing its journal writers (B7).
     drop(handle);
     let failed_run = replay_testkit::latest_run_dir(&journal_base);
-    assert_eq!(source_rows(&failed_run).await, Vec::new());
+    assert_eq!(
+        source_rows(&failed_run).await,
+        [SourceRow::Declared, SourceRow::Read(1)]
+    );
 
     write_orders(&input)?;
     let (outcome, resumed_run) =
         resume_csv_run(&journal_base, &input, &failed_run, OrderCsv).await?;
     outcome?;
-    let mut expected = vec![
-        SourceRow::Acquired(SourceOpenIntent::Resume),
-        SourceRow::Pinned,
-        SourceRow::StartedOnResume(1),
-        SourceRow::CatchUp,
-    ];
+    let mut expected = vec![SourceRow::Declared, SourceRow::Read(1), SourceRow::CatchUp];
     expected.extend(orders(1..=ORDERS));
     expected.extend([
+        SourceRow::Read(ORDERS + 1),
         SourceRow::Eof(EofKind::Natural),
-        SourceRow::Released(SourceCleanupTrigger::Exhausted, SourceCleanupPhase::Live),
     ]);
     assert_eq!(source_rows(&resumed_run).await, expected);
     assert_eq!(reconstruction_completions(&resumed_run).await, [1]);

@@ -8,6 +8,7 @@
 use crate::replay_testkit;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
@@ -16,11 +17,32 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+fn reference_rows() -> impl TypedFiniteSourceHandler<Output = RefItem> {
+    ValuesSource::new(
+        (1..=4)
+            .map(|index| RefItem {
+                key: format!("r{index}"),
+                label: format!("label-{index}"),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn stream_rows() -> impl TypedFiniteSourceHandler<Output = StreamItem> {
+    ValuesSource::new(
+        (1..=5_u64)
+            .map(|index| StreamItem {
+                key: format!("r{}", ((index - 1) % 3) + 1),
+                value: index,
+            })
+            .collect::<Vec<_>>(),
+    )
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RefItem {
@@ -51,62 +73,6 @@ struct JoinedItem {
 
 impl TypedPayload for JoinedItem {
     const EVENT_TYPE: &'static str = "join_err.joined";
-}
-
-/// Reference source: four catalog rows. The reference validator below rejects
-/// the final row.
-#[derive(Clone, Debug)]
-struct RefSource {
-    next_index: usize,
-}
-
-impl RefSource {
-    fn new() -> Self {
-        Self { next_index: 0 }
-    }
-}
-
-impl TypedFiniteSourceHandler for RefSource {
-    type Output = RefItem;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next_index >= 4 {
-            return Ok(None);
-        }
-        self.next_index += 1;
-        Ok(Some(vec![RefItem {
-            key: format!("r{}", self.next_index),
-            label: format!("label-{}", self.next_index),
-        }]))
-    }
-}
-
-/// Stream source: five rows, keys cycling r1..r3, values 1..=5.
-#[derive(Clone, Debug)]
-struct StreamSource {
-    next_index: usize,
-}
-
-impl StreamSource {
-    fn new() -> Self {
-        Self { next_index: 0 }
-    }
-}
-
-impl TypedFiniteSourceHandler for StreamSource {
-    type Output = StreamItem;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next_index >= 5 {
-            return Ok(None);
-        }
-        self.next_index += 1;
-        let key = format!("r{}", ((self.next_index - 1) % 3) + 1);
-        Ok(Some(vec![StreamItem {
-            key,
-            value: self.next_index as u64,
-        }]))
-    }
 }
 
 /// Validation stage: rejects value 3 with a Domain error, re-emits everything
@@ -199,9 +165,9 @@ impl TypedJoinHandler for GuardedInnerJoin {
 
 fn build_flow(journal_base: PathBuf, typed_handler_calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reference_source = RefSource::new();
+        let reference_source = reference_rows();
         let reference_validator = RefValidator::new();
-        let stream_source = StreamSource::new();
+        let stream_source = stream_rows();
         let stream_validator = Validator::new();
         let joined = GuardedInnerJoin {
             typed_handler_calls,
@@ -356,8 +322,8 @@ async fn a_join_records_the_stream_row_its_handler_rejects() {
     replay_testkit::unsynced_application()
         .with_cli_args(["obzenflow"])
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
-            let reference_source = RefSource::new();
-            let stream_source = StreamSource::new();
+            let reference_source = reference_rows();
+            let stream_source = stream_rows();
             let collector = DropSink::new();
             Ok(flow! {
                 name: "join_rejects_a_stream_row",

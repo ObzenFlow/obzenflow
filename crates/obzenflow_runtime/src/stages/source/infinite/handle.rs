@@ -4,13 +4,13 @@
 
 //! Handle for infinite source stages
 
-use crate::stages::common::handlers::source::traits::InfiniteSourceHandler;
+use crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 
 use super::fsm::{InfiniteSourceEvent, InfiniteSourceState};
 
 /// Type alias for the infinite source handle
-pub type InfiniteSourceHandle<H = Box<dyn InfiniteSourceHandler>> =
+pub type InfiniteSourceHandle<H = Box<dyn UnifiedAsyncInfiniteSourceHandler>> =
     StandardHandle<InfiniteSourceEvent<H>, InfiniteSourceState<H>>;
 
 /// Extension trait for infinite source-specific convenience methods

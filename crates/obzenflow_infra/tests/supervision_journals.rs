@@ -90,10 +90,8 @@ async fn physical_group_limits_reject_before_commit_and_members_stream_in_order(
 
 #[tokio::test]
 async fn large_in_process_documents_roundtrip_through_memory_and_reopened_disk() {
-    use obzenflow_adapters::sources::ValuesSource;
     use obzenflow_core::event::ChainPayload;
     use obzenflow_core::TypedPayload;
-    use obzenflow_runtime::stages::source::TypedFiniteSourceHandler;
 
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
     struct Document {
@@ -115,12 +113,9 @@ async fn large_in_process_documents_roundtrip_through_memory_and_reopened_disk()
         } else {
             Arc::new(MemoryJournal::with_owner(JournalOwner::stage(stage)))
         };
-        // The public source and event-authoring APIs admit documents above the
-        // retired 8 MiB logical cap. Both live and reopened readers must agree.
-        let mut source = ValuesSource::new([Document {
+        let document = Document {
             body: "document content ".repeat(600_000),
-        }]);
-        let document = source.next().unwrap().unwrap().pop().unwrap();
+        };
         assert!(document.body.len() > 8 * 1024 * 1024);
         let event = ChainEventFactory::data_event_from(
             stage.into(),

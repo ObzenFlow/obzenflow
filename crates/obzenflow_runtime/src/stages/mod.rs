@@ -19,11 +19,10 @@ pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
     prove_journal_form, EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig,
-    HostedIngressSource, HostedSubmission, IngressDecodeError, IngressDecoder,
-    IngressReceiptSender, IngressRecord, ObserverHandler, ProcessingContext, ResourceManaged,
-    SignalDecision, SignalGate, SourceObservationSink, StatefulEmission,
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedInfiniteSourceHandler, TypedStatefulHandler,
+    HostedSource, HostedSubmission, IngressDecodeError, IngressDecoder, IngressReceiptSender,
+    IngressRecord, ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision, SignalGate,
+    StatefulEmission, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedStatefulHandler,
 };
 
 pub use common::{CreditWaker, WakeOn};

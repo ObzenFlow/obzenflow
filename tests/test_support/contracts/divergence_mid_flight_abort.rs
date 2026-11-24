@@ -42,7 +42,6 @@ use obzenflow_dsl::{effectful_transform, sink, source, test_flow, transform};
 use obzenflow_infra::journal::{memory_journals, MemoryJournalFactory};
 use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
@@ -66,31 +65,8 @@ impl TypedPayload for SeedEvent {
 use std::time::Duration;
 use tokio::time::sleep;
 
-#[derive(Clone, Debug)]
-struct SeedSource {
-    remaining: usize,
-}
-
-impl SeedSource {
-    fn new(count: usize) -> Self {
-        Self { remaining: count }
-    }
-}
-
-impl TypedFiniteSourceHandler for SeedSource {
-    type Output = SeedEvent;
-
-    fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(None);
-        }
-
-        self.remaining -= 1;
-        Ok(Some(vec![SeedEvent {
-            n: self.remaining as u64,
-            looped: false,
-        }]))
-    }
+fn seeds(count: u64) -> impl TypedFiniteSourceHandler<Output = SeedEvent> {
+    crate::replay_testkit::single_values((0..count).rev().map(|n| SeedEvent { n, looped: false }))
 }
 
 /// Test-only source-boundary policy that contributes a deliberately unhealthy
@@ -433,7 +409,7 @@ async fn committed_facts(
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
-    let source = SeedSource::new(30);
+    let source = seeds(30);
     let inject_signals = DivergenceSignalInjection::new(50);
     let delay = DelayedSeedTransform::new(Duration::from_millis(10));
     let armed = delay.armed.clone();
@@ -521,7 +497,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> {
-    let source = SeedSource::new(50);
+    let source = seeds(50);
     let delay = DelayedSeedTransform::new(Duration::from_millis(1));
     let armed = delay.armed.clone();
     let sink = CountingSink::new();
@@ -586,7 +562,7 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<()> {
-    let source = SeedSource::new(50);
+    let source = seeds(50);
     let entry = FanInEntryTransform;
     let branch_a = PassThroughTransform;
     let branch_b = PassThroughTransform;
@@ -672,7 +648,7 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
-    let source = SeedSource::new(10);
+    let source = seeds(10);
     let delay = DelayedSeedTransform::new(Duration::from_millis(5));
     let armed = delay.armed.clone();
     let entry = PassThroughTransform;

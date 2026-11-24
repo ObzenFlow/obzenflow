@@ -18,9 +18,9 @@ use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
 };
-use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::transform::strategies::MapTyped;
 
+use obzenflow::stages::sources::ValuesSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -33,26 +33,6 @@ struct Item {
 
 impl TypedPayload for Item {
     const EVENT_TYPE: &'static str = "lineage_policy_flow.item";
-}
-
-#[derive(Clone, Debug)]
-struct OneShotSource {
-    emitted: bool,
-}
-
-impl TypedFiniteSourceHandler for OneShotSource {
-    type Output = Item;
-
-    fn next(
-        &mut self,
-    ) -> Result<Option<Vec<Self::Output>>, obzenflow_runtime::stages::SourceError> {
-        if self.emitted {
-            Ok(None)
-        } else {
-            self.emitted = true;
-            Ok(Some(vec![Item { index: 0 }]))
-        }
-    }
 }
 
 type NullSink = obzenflow::stages::sinks::DiscardSink<Item>;
@@ -78,7 +58,7 @@ async fn file_configured_lineage_depth_caps_journalled_parent_ids() {
 
     let journal_base = base.clone();
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = OneShotSource { emitted: false };
+        let source = ValuesSource::new([Item { index: 0 }]);
         let t1 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
         let t2 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
         let t3 = MapTyped::new(|i: Item| Item { index: i.index + 1 });

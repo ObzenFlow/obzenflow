@@ -177,6 +177,15 @@ const RECORDED_FLOW_NAMESPACE: &str = "<recorded-flow-namespace>";
 
 fn comparable_data_payload(event: &ChainEvent, payload: &Value) -> Value {
     let mut payload = payload.clone();
+    if matches!(
+        event.payload,
+        ChainPayload::Execution(ExecutionPayload::SourceInput(_))
+    ) {
+        if let Some(flow_id) = payload.get_mut("recorded_flow_id") {
+            *flow_id = Value::String(RECORDED_FLOW_NAMESPACE.to_string());
+        }
+        return payload;
+    }
     if event.effect_provenance.is_none() {
         return payload;
     }

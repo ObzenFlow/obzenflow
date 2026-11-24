@@ -268,19 +268,12 @@ async fn empty_observer_label_fails_preflight() {
     }
 }
 
-#[derive(Clone)]
-struct HostedInputDecoder;
-
-impl obzenflow_runtime::stages::common::handlers::IngressDecoder for HostedInputDecoder {
-    type Output = Input;
-}
-
 #[tokio::test]
 async fn claimed_hosted_slot_fails_preflight() {
     use obzenflow_adapters::middleware::rate_limit;
     use obzenflow_core::ingress::{FilledHostedIngress, HostedIngressBindingSlot};
-    use obzenflow_dsl::async_infinite_source;
-    use obzenflow_runtime::stages::common::handlers::HostedIngressSource;
+    use obzenflow_dsl::source;
+    use obzenflow_runtime::stages::common::handlers::HostedSource;
 
     for prefilled in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -302,17 +295,16 @@ async fn claimed_hosted_slot_fails_preflight() {
         }
         let shared_slot = slot.clone();
         let definition = FlowDefinition::materialize(move |_| {
-            let (_, first_rx) = tokio::sync::mpsc::channel(1);
-            let (_, second_rx) = tokio::sync::mpsc::channel(1);
-            let first =
-                HostedIngressSource::<HostedInputDecoder>::new(first_rx, shared_slot.clone());
-            let second = HostedIngressSource::<HostedInputDecoder>::new(second_rx, shared_slot);
+            let (_, first_rx) = obzenflow::stages::sources::source_channel(1);
+            let (_, second_rx) = obzenflow::stages::sources::source_channel(1);
+            let first = HostedSource::<Input>::ingress(first_rx, shared_slot.clone());
+            let second = HostedSource::<Input>::ingress(second_rx, shared_slot);
             Ok(flow! {
                 name: "hosted_slot_ownership_preflight",
                 journals: disk_journals(journal_root),
                 stages: {
-                    left = async_infinite_source!(Input with { rate_limit(10.0), observer } => first);
-                    right = async_infinite_source!(Input with rate_limit(10.0) => second);
+                    left = source!(Input with { rate_limit(10.0), observer } => first);
+                    right = source!(Input with rate_limit(10.0) => second);
                     output = sink!(Input => output);
                 },
                 topology: {

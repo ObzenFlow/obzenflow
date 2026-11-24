@@ -7,13 +7,8 @@ use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::pipeline::PipelineState;
-use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
-/// File-local payload for the memory-journals smoke test. Matches the
-/// `{ "n": u64 }` shape emitted by `TestSource`; the type satisfies
-/// FLOWIP-114c's typed-stage requirement.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SmokeEvent {
     n: u64,
@@ -22,37 +17,10 @@ struct SmokeEvent {
 impl TypedPayload for SmokeEvent {
     const EVENT_TYPE: &'static str = "bench.smoke_event";
 }
+use obzenflow_adapters::sources::ValuesSource;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-
-#[derive(Clone, Debug)]
-struct TestSource {
-    total_events: u64,
-    emitted: Arc<AtomicU64>,
-}
-
-impl TestSource {
-    fn new(total_events: u64) -> Self {
-        Self {
-            total_events,
-            emitted: Arc::new(AtomicU64::new(0)),
-        }
-    }
-}
-
-impl TypedFiniteSourceHandler for TestSource {
-    type Output = SmokeEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let current = self.emitted.fetch_add(1, Ordering::Relaxed);
-        if current < self.total_events {
-            Ok(Some(vec![SmokeEvent { n: current }]))
-        } else {
-            Ok(None)
-        }
-    }
-}
 
 #[derive(Clone, Debug, Serialize)]
 struct Received;
@@ -78,7 +46,11 @@ async fn memory_journals_flow_runs_to_completion() {
 
     let handle = tokio::time::timeout(Duration::from_secs(10), async {
         FlowDefinition::materialize(move |_runtime_config| {
-            let source = TestSource::new(total_events);
+            let source = ValuesSource::new(
+                (0..total_events)
+                    .map(|n| SmokeEvent { n })
+                    .collect::<Vec<_>>(),
+            );
             let sink = perform(|_: &SmokeEvent| Received).through(Port::to(CountingSink {
                 received: received_for_flow,
             }));

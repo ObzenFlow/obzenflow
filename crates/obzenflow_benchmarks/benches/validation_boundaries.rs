@@ -157,17 +157,18 @@ fn bench(c: &mut Criterion) {
             let VerifyOutcome::Completed { report, .. } = result else {
                 panic!("incomplete comparison");
             };
+            let source_rows = archive.inputs + archive.reads;
             assert_eq!(
                 report.stages["ticks"].positional_rows_baseline,
-                archive.inputs
+                source_rows
             );
             assert_eq!(
                 report.stages["ticks"].positional_rows_candidate,
-                archive.inputs
+                source_rows
             );
             (
                 elapsed,
-                json!({"baseline_source_rows":archive.inputs,"candidate_source_rows":archive.inputs,"stages":report.stages.len()}),
+                json!({"baseline_source_rows":source_rows,"candidate_source_rows":source_rows,"stages":report.stages.len()}),
             )
         },
     );

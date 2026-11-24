@@ -8,8 +8,7 @@ use super::*;
 use console_api::instrument::{instrument_client::InstrumentClient, InstrumentRequest, Update};
 use console_api::tasks::{Stats, Task};
 use console_api::{field, Metadata};
-use obzenflow_dsl::{async_source, stateful, transform};
-use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
+use obzenflow_dsl::{stateful, transform};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
@@ -233,10 +232,7 @@ fn blocking_console_disk_flow_preserves_filtering_and_completed_journal() {
     let journal_root = dir.path().join("journals");
     let (source_input, input) = mpsc::channel(1);
     let (entered, source_entered) = mpsc::unbounded_channel();
-    let source = ControlledSource {
-        input: Arc::new(tokio::sync::Mutex::new(input)),
-        entered,
-    };
+    let source = ControlledSource::new(input, entered);
     let (console_tx, console_rx) = oneshot::channel();
     let driver = Mutex::new(Some((console_rx, source_input, source_entered)));
     let (proved_tx, proved_rx) = std::sync::mpsc::sync_channel(1);
@@ -329,7 +325,7 @@ fn blocking_console_disk_flow_preserves_filtering_and_completed_journal() {
             name: "blocking_console_disk",
             journals: disk_journals(journal_root),
             stages: {
-                console_source = async_source!(IdlePayload => source);
+                console_source = source!(IdlePayload => source);
                 console_transform = transform!(IdlePayload -> IdlePayload => mapper);
                 console_counter = stateful!(IdlePayload -> IdlePayload => counter);
                 console_sink = sink!(IdlePayload => sink);
@@ -426,25 +422,61 @@ async fn assert_completed_disk_cohort(run_path: &std::path::Path, inputs: usize)
         .all(|journal| settled.end_positions.contains_key(&journal.id)));
 }
 
-#[derive(Clone, Debug)]
-struct ControlledSource {
-    input: Arc<tokio::sync::Mutex<mpsc::Receiver<IdlePayload>>>,
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct NextControlled;
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait ControlledInput {
+    #[query(type = "flow_application.controlled.take")]
+    async fn take(
+        &self,
+        from: &NextControlled,
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<IdlePayload, NextControlled>, obzenflow_runtime::queries::QueryError>;
+}
+
+struct Controlled {
+    input: tokio::sync::Mutex<mpsc::Receiver<IdlePayload>>,
     entered: mpsc::UnboundedSender<()>,
 }
 
+#[obzenflow_runtime::effects::system("controlled")]
 #[async_trait]
-impl TypedAsyncFiniteSourceHandler for ControlledSource {
+impl ControlledInput for Controlled {
+    async fn take(
+        &self,
+        _from: &NextControlled,
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<IdlePayload, NextControlled>, obzenflow_runtime::queries::QueryError>
+    {
+        self.entered.send(()).expect("source observation is alive");
+        Ok(match self.input.lock().await.recv().await {
+            Some(event) => FiniteRead::Batch {
+                records: vec![event],
+                next: NextControlled,
+            },
+            None => FiniteRead::EndOfInput,
+        })
+    }
+}
+
+struct ControlledSource(obzenflow_runtime::queries::QueryPort<dyn ControlledInput>);
+
+impl ControlledSource {
+    fn new(input: mpsc::Receiver<IdlePayload>, entered: mpsc::UnboundedSender<()>) -> Self {
+        Self(obzenflow_runtime::queries::QueryPort::to(Controlled {
+            input: tokio::sync::Mutex::new(input),
+            entered,
+        }))
+    }
+}
+
+impl TypedFiniteSourceHandler for ControlledSource {
     type Output = IdlePayload;
 
-    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.entered.send(()).expect("source observation is alive");
-        Ok(self
-            .input
-            .lock()
-            .await
-            .recv()
-            .await
-            .map(|event| vec![event]))
+    fn read(&self) -> SourceRead<IdlePayload> {
+        SourceRead::finite(self.0.clone(), NextControlled, Ok)
     }
 }
 
@@ -565,10 +597,7 @@ fn telemetry_proof(cancel: bool) {
             .unwrap();
             let (source_input, input) = mpsc::channel(1);
             let (entered, mut source_entered) = mpsc::unbounded_channel();
-            let source = ControlledSource {
-                input: Arc::new(tokio::sync::Mutex::new(input)),
-                entered,
-            };
+            let source = ControlledSource::new(input, entered);
             let (flow_tx, flow_rx) = oneshot::channel();
             let flow_tx = Mutex::new(Some(flow_tx));
             let (console_tx, console_rx) = oneshot::channel();
@@ -602,7 +631,7 @@ fn telemetry_proof(cancel: bool) {
                     name: "console_telemetry",
                     journals: crate::journal::memory_journals(),
                     stages: {
-                        console_source = async_source!(IdlePayload => source);
+                        console_source = source!(IdlePayload => source);
                         console_transform = transform!(IdlePayload -> IdlePayload => mapper);
                         console_counter = stateful!(IdlePayload -> IdlePayload => counter);
                         console_sink = sink!(IdlePayload => sink);

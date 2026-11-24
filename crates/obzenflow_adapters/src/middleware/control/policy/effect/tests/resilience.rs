@@ -1380,7 +1380,7 @@ async fn stale_retry_reservation_preserves_last_physical_error_after_recovery_cy
     assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 5);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn open_half_open_recovery_and_chronic_failure_share_one_authority() {
     let factory = EffectPlanFactory::with_breaker(
         crate::middleware::control::circuit_breaker()
@@ -1425,7 +1425,7 @@ async fn open_half_open_recovery_and_chronic_failure_share_one_authority() {
     assert_eq!(rejected_completion[0].1, 0);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::advance(Duration::from_millis(2)).await;
     let probe = boundary
         .around_repeatable_effect(
             &identity_for("effect.retry"),

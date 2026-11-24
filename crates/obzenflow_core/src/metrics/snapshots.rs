@@ -9,7 +9,7 @@
 
 use crate::event::context::StageType;
 use crate::event::observability::{
-    EdgeLivenessState, HttpPullMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot, MeasurementWindow,
+    EdgeLivenessState, HttpPullMeasurements, HttpSurfaceRouteMetricsSnapshot, MeasurementWindow,
     StageActivity,
 };
 use crate::event::payloads::system_payload::{
@@ -197,7 +197,7 @@ pub struct AppMetricsSnapshot {
     /// HTTP pull telemetry metrics derived from wide events (FLOWIP-084e).
     ///
     /// Keyed by stage ID (labels attach via `stage_metadata`).
-    pub http_pull_metrics: HashMap<StageId, HttpPullMetricsSnapshot>,
+    pub http_pull_metrics: HashMap<StageId, HttpPullMeasurements>,
 
     /// AI chunking metrics derived from `ai_chunking.snapshot` wide events (FLOWIP-086z).
     ///

@@ -22,6 +22,8 @@ pub use obzenflow_runtime::effects::{
     EffectPortResolutionError, EffectSet, Effects, IdempotencyKey, RetryDisposition,
     StageCompletion,
 };
+#[doc(hidden)]
+pub use obzenflow_runtime::queries as __queries;
 
 #[doc(hidden)]
 pub use obzenflow_runtime::effects::{

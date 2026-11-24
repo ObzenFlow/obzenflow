@@ -19,6 +19,7 @@ pub mod execution;
 pub mod feed_plan;
 pub mod id_conversions;
 pub mod message_bus;
+pub mod queries;
 pub mod replay;
 pub mod run_context;
 pub mod runtime_config;
@@ -39,7 +40,7 @@ pub mod stages;
 pub mod __private {
     pub mod lifecycle;
 
-    pub use crate::stages::common::handlers::source::prepared::AdmitSource;
+    pub use crate::stages::common::handlers::source::prepared::{AdmitSource, AdmittedSource};
 
     // Public macros resolve through this narrow hygiene surface without
     // re-exporting Core itself as an alternate authoring gateway.
@@ -48,12 +49,10 @@ pub mod __private {
     };
     pub use crate::stages::common::handlers::source::typed::{
         TypedAsyncFiniteSourceHandlerAdapter, TypedAsyncInfiniteSourceHandlerAdapter,
-        TypedFiniteSourceHandlerAdapter, TypedInfiniteSourceHandlerAdapter,
     };
     pub use crate::stages::common::handlers::source::{
         ErasedSourceCompletion, ErasedSourceInvocation, ErasedSourceOutcome,
         UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
-        UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
     };
 }
 
@@ -119,11 +118,10 @@ pub mod prelude {
 
     // Handlers
     pub use crate::stages::{
-        EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource,
-        IngressDecodeError, IngressDecoder, IngressRecord, ObserverHandler, ResourceManaged,
-        SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,
-        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, HostedSource, IngressDecodeError,
+        IngressDecoder, IngressRecord, ObserverHandler, ResourceManaged, SourceError,
+        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     pub use crate::typing::{SourceTyping, TransformTyping};
 

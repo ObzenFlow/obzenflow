@@ -10,18 +10,19 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use obzenflow_benchmarks::case::{declare, Category};
+use obzenflow_benchmarks::numbers::{NextNumber, NumberFeed, Numbers};
 use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Perform, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
@@ -42,43 +43,6 @@ impl TypedPayload for BenchEvent {
     const EVENT_TYPE: &'static str = "bench.pipeline_execution_event";
 }
 const STAGE_COUNTS: &[usize] = &[1, 3, 5, 10]; // Simplified for maintainability
-
-/// Test source that emits events with timestamps
-#[derive(Clone, Debug)]
-struct TimestampedSource {
-    total_events: u64,
-    emitted: Arc<AtomicU64>,
-}
-
-impl TimestampedSource {
-    fn new(total_events: u64) -> Self {
-        Self {
-            total_events,
-            emitted: Arc::new(AtomicU64::new(0)),
-        }
-    }
-}
-
-impl TypedFiniteSourceHandler for TimestampedSource {
-    type Output = BenchEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let current = self.emitted.fetch_add(1, Ordering::Relaxed);
-        if current < self.total_events {
-            let emit_time_nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-
-            Ok(Some(vec![BenchEvent {
-                event_id: current,
-                emit_time_nanos,
-            }]))
-        } else {
-            Ok(None)
-        }
-    }
-}
 
 /// Passthrough stage that just forwards events
 #[derive(Clone, Copy, Debug)]
@@ -140,6 +104,30 @@ fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::Path
     ));
     std::fs::create_dir_all(&journal_path)?;
     Ok((journal_path, temp_dir))
+}
+
+struct TimestampedSource(obzenflow_runtime::queries::QueryPort<dyn NumberFeed>);
+
+impl TimestampedSource {
+    fn new(total_events: u64) -> Self {
+        Self(Numbers::counting(total_events, 1).port())
+    }
+}
+
+impl TypedFiniteSourceHandler for TimestampedSource {
+    type Output = BenchEvent;
+
+    fn read(&self) -> SourceRead<BenchEvent> {
+        SourceRead::finite(self.0.clone(), NextNumber(0), |event_id| {
+            Ok(BenchEvent {
+                event_id,
+                emit_time_nanos: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            })
+        })
+    }
 }
 
 /// Build pipeline with specified stage count

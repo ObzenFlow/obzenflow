@@ -11,9 +11,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{perform, EffectError, Port};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    TypedFiniteSourceHandler, TypedTransformHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the cycle-guard fan-out test. The JSON shape
@@ -34,6 +32,7 @@ struct SeedEvent {
 impl TypedPayload for SeedEvent {
     const EVENT_TYPE: &'static str = "test.cycle";
 }
+use obzenflow::stages::sources::ValuesSource;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,47 +99,6 @@ async fn any_error_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
         }
     }
     Ok(false)
-}
-
-#[derive(Clone, Debug)]
-struct SingleSeedFanOutSource {
-    emitted: bool,
-    fan_out: u64,
-    target: u64,
-}
-
-impl SingleSeedFanOutSource {
-    fn new(fan_out: u64, target: u64) -> Self {
-        Self {
-            emitted: false,
-            fan_out,
-            target,
-        }
-    }
-}
-
-impl TypedFiniteSourceHandler for SingleSeedFanOutSource {
-    type Output = SeedEvent;
-
-    fn next(
-        &mut self,
-    ) -> std::result::Result<
-        Option<Vec<Self::Output>>,
-        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-
-        Ok(Some(vec![SeedEvent {
-            kind: "seed".to_string(),
-            fan_out: self.fan_out,
-            item: 0,
-            iter: 0,
-            target: self.target,
-        }]))
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -283,7 +241,13 @@ async fn cycle_guard_fan_out_siblings_converge_without_spurious_abort() -> Resul
     let iter_processed_for_flow = iter_processed.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = SingleSeedFanOutSource::new(fan_out, target_round_trips);
+        let source_handler = ValuesSource::new([SeedEvent {
+            kind: "seed".to_string(),
+            fan_out,
+            item: 0,
+            iter: 0,
+            target: target_round_trips,
+        }]);
         let entry_handler = FanOutEntryTransform::new(entry_processed_for_flow);
         let pass_handler = PassThroughTransform;
         let iter_handler = IterationTransform::new(iter_processed_for_flow);

@@ -18,8 +18,8 @@ use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::runtime_config::JournalSync;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 const ARCHIVE_DEADLINE: Duration = Duration::from_secs(300);
+const TICKS_PER_READ: u64 = 500;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Tick {
@@ -37,31 +38,24 @@ struct Tick {
 impl TypedPayload for Tick {
     const EVENT_TYPE: &'static str = "validation_benchmark.tick";
 }
-#[derive(Clone)]
-struct Ticks {
-    next: u64,
-    count: u64,
-}
+struct Ticks(obzenflow_runtime::queries::QueryPort<dyn crate::numbers::NumberFeed>);
+
 impl TypedFiniteSourceHandler for Ticks {
     type Output = Tick;
-    fn next(&mut self) -> Result<Option<Vec<Tick>>, SourceError> {
-        if self.next == self.count {
-            return Ok(None);
-        }
-        let end = (self.next + 500).min(self.count);
-        let rows = (self.next..end)
-            .map(|n| Tick {
+
+    fn read(&self) -> SourceRead<Tick> {
+        SourceRead::finite(self.0.clone(), crate::numbers::NextNumber(0), |n| {
+            Ok(Tick {
                 n,
                 body: "x".repeat(256),
             })
-            .collect();
-        self.next = end;
-        Ok(Some(rows))
+        })
     }
 }
+
 fn definition(base: PathBuf, count: u64) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let input = Ticks { next: 0, count };
+        let input = Ticks(crate::numbers::Numbers::counting(count, TICKS_PER_READ).port());
         let output = DiscardTicks::new();
         Ok(flow! {
             name: "validation_benchmark",
@@ -90,6 +84,7 @@ pub struct Archive {
     pub replay: Option<PathBuf>,
     pub records: Vec<serde_json::Value>,
     pub inputs: u64,
+    pub reads: u64,
     pub directory: tempfile::TempDir,
 }
 impl Archive {
@@ -166,6 +161,27 @@ impl Archive {
             assert_eq!(payload["n"], index as u64, "source identity/order");
             assert_eq!(payload["body"].as_str().unwrap().len(), 256);
         }
+        let reads = read
+            .iter()
+            .filter(|row| {
+                matches!(
+                    &row.record,
+                    RunRecordData::Chain(record) if matches!(
+                        record.payload,
+                        ChainPayload::Execution(ExecutionPayload::SourceInput(_))
+                    )
+                ) && row
+                    .journal
+                    .stage
+                    .as_ref()
+                    .is_some_and(|stage| stage.key == "ticks")
+            })
+            .count() as u64;
+        assert_eq!(
+            reads,
+            inputs.div_ceil(TICKS_PER_READ) + 1,
+            "fixture records every read, the read that ends the input included"
+        );
         assert_eq!(
             read.iter()
                 .filter(|row| matches!(
@@ -192,6 +208,7 @@ impl Archive {
             replay,
             records,
             inputs,
+            reads,
             directory,
         }
     }

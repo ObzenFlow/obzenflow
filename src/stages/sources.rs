@@ -2,40 +2,52 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Source constructors and custom typed source handlers.
+//! The `sources` module re-exports the built-in source handlers and the
+//! contracts for application source handlers.
 //!
-//! Sources are the entry points of every pipeline. This module re-exports the
-//! built-in sources and the contracts for implementing application sources.
+//! Sources are the entry points of every pipeline.
+//!
+//! ## Source handlers
+//!
+//! A `source!` row takes a source handler. A handler that pulls its input
+//! declares one query through a bound port. The source stage asks each query,
+//! and the system behind the port does the physical I/O. A handler that receives
+//! pushed input records each admitted event. The journal records the binding of
+//! the system and each answer or event. A replay uses only those records.
+//!
+//! | Input | Handler | System |
+//! |---|---|---|
+//! | Values in this process | [`ValuesSource::new`] | `in-memory` |
+//! | Source channel | [`ChannelSource::new`] | `channel` |
+//! | CSV or TSV file | [`CsvSource::builder`] | `file-system` |
+//! | YAML document | [`YamlSource::builder`] | `file-system` |
+//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` | `http-ingress` |
+//! | HTTP API | An application handler with a port that [`HttpApi`] implements | `http-api` |
+//!
+//! An application source handler implements [`TypedFiniteSourceHandler`],
+//! [`TypedAsyncFiniteSourceHandler`], [`TypedInfiniteSourceHandler`] or
+//! [`TypedAsyncInfiniteSourceHandler`]. Its `read` returns a [`SourceRead`].
+//! A finite handler builds it with [`SourceRead::finite`] for input that ends,
+//! and an infinite handler builds it with [`SourceRead::continuous`] for input
+//! that stays open. The `#[query]` method of the port answers with a
+//! [`FiniteRead`] or a [`ContinuousRead`]. Each answer gives the records and the
+//! argument of the next read, or ends a finite input. The handler maps each
+//! recorded record to its output. A continuous port has [`InputReadiness`] as a
+//! supertrait, so each system behind it tells the framework when it holds input.
+//! A resumed run continues a continuous read and can read the latest state of
+//! the system again.
 //!
 //! ## In-process sources
 //!
-//! [`ValuesSource::new`] transfers values into one finite execution. It creates
-//! the iterator only on the first live poll and emits one item per poll, without
-//! cloning or collecting. A single value uses `ValuesSource::new([value])`.
-//! [`ChannelSource::new`] transfers a Tokio receiver into one asynchronous
-//! infinite execution. Channel closure is a source error; orderly drain closes
-//! the receiver. Use topology fan-out for multiple consumers. Values still
-//! buffered in the channel when a run stops are lost, so a resumed run
-//! reattaches with [`AtMostOnce`].
-//!
-//! ## Construction catalog
-//!
-//! | Integration | Entry point |
-//! |---|---|
-//! | Owned values | [`ValuesSource::new`] |
-//! | Tokio receiver | [`ChannelSource::new`] |
-//! | CSV or TSV | [`CsvSource::builder`] |
-//! | YAML document | [`YamlSource::builder`] |
-//! | HTTP pull | [`HttpPullSource::new`] |
-//! | HTTP polling | [`HttpPollSource::new`] |
-//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` |
-//!
-//! New polling behaviour implements the appropriate typed handler:
-//! [`TypedFiniteSourceHandler`], [`TypedAsyncFiniteSourceHandler`],
-//! [`TypedInfiniteSourceHandler`] or [`TypedAsyncInfiniteSourceHandler`].
-//! Resource-owning integrations use the corresponding connector and reader. A
-//! direct handler declares no continuation, so a resume refuses its interrupted
-//! input; a source that must continue after an interruption is a connector.
+//! A [`ValuesSource`] reads its values through the `in-memory` system, up to 1,000
+//! values in each read. [`ValuesSource::chunk_size`] sets a smaller number. Only
+//! this process holds the values, so ObzenFlow refuses to resume a run that did
+//! not read all of them. A [`ChannelSource`] receives the values that a sender
+//! puts on a channel from [`source_channel`]. Its system is `channel`, and the
+//! stage records each value before it publishes it. A closed channel is a source
+//! error. Use topology fan-out for more than one consumer.
+//! Values that are still in the channel when a run stops are lost, so a resumed
+//! run continues its live reads with [`ReattachGuarantee::AtMostOnce`].
 //!
 //! ## Source errors
 //!
@@ -43,7 +55,7 @@
 //! a closed [`SourceDiagnosticReason`], safe coordinates and an optional
 //! namespaced [`SourceErrorCode`]. A record-local rejection is
 //! [`SourceError::Validation`] and reading continues. [`SourceError::Terminal`]
-//! reports that the reader cannot safely continue; the supervisor fails the
+//! reports that the source cannot safely continue. The supervisor then fails the
 //! stage without EOF.
 //!
 //! ```rust
@@ -89,11 +101,10 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
-//! [`CsvSource`] (via [`CsvSourceBuilder`]) is cold, reusable configuration.
-//! The supervisor opens an independent [`CsvReader`] only when live input is
-//! required. Building and cloning it do no file I/O, so strict replay works even
-//! when the original CSV is unavailable. Input/header errors occur at startup.
-//! [`CsvRowDecoder`] provides string-preserving [`CsvRow`] output.
+//! [`CsvSourceBuilder`] does no file I/O when it builds a [`CsvSource`]. The
+//! `file-system` system reads the file only for a live read, so a strict replay
+//! works when the original CSV is not available. [`CsvRowDecoder`] gives
+//! [`CsvRow`] output that keeps each field as a string.
 //!
 //! ## YAML sources
 //!
@@ -145,7 +156,7 @@
 //! A [`YamlDecodeError`] rejects only that record, and reading continues.
 //! `decode` has no default, because a YAML output may be a sum of several fact
 //! types. Building does no file I/O. Aliases, anchors, tags, merge keys and
-//! duplicate keys fail opening.
+//! duplicate keys cause a terminal source error.
 //!
 //! ## Hosted ingress sources
 //!
@@ -192,66 +203,49 @@
 //! ```
 //!
 //! Register the decoder through `FlowApplication::builder().http_ingress(decoder,
-//! config)` (or `.ingress` for another transport), which returns the
-//! [`HostedIngressSource`]. Custom hosting can explicitly compose bundles with
+//! config)`, or through `.ingress` for another transport. Each call returns the
+//! [`HostedSource`] handler for a `source!` stage. The journal records each
+//! admitted submission before its row commits. For custom hosting, compose the
+//! bundles with
 //! [`crate::application::ingress::ingress_source`] or
 //! [`crate::application::ingress::http_ingress`]. Hosted ingress acknowledges a
 //! submission only after its row commits, so a resumed run reattaches it live
 //! and records that the sender redelivers what was never acknowledged.
 //!
-//! ## HTTP pull sources
+//! ## HTTP sources
 //!
-//! [`HttpPullSource`] configures a finite paginated HTTP source and
-//! [`HttpPollSource`] configures repeated polling with [`HttpPollConfig`]. Each
-//! opens an independent reader under supervision. [`PullDecoder::Output`]
-//! declares the domain type; the runtime owns subsequent poll requests.
-//!
-//! Integration authors implement one of [`FiniteSourceConnector`],
-//! [`AsyncFiniteSourceConnector`], [`InfiniteSourceConnector`] or
-//! [`AsyncInfiniteSourceConnector`]. Each returns its corresponding typed handler
-//! and receives only [`SourceReaderInitContext`], never runtime controls.
-//!
-//! Each connector also declares how a resumed run continues its interrupted
-//! input. [`Refuse`] refuses the resume; [`Seek`] continues a
-//! [`PositionedFiniteReader`] strictly after its last committed record, as
-//! [`CsvSource`] and [`YamlSource`] do; [`Reattach`] reattaches an infinite
-//! input live and names what the interruption could cost: [`LatestState`] when
-//! each observation supersedes the last, as for [`HttpPollSource`], or
-//! [`AtMostOnce`] when no input is admitted twice but uncommitted input, or
-//! input that arrived while no reader was attached, may be lost, as for
-//! [`ChannelSource`]. The resumed run records the guarantee, and
-//! `obzenflow show` reports it.
-//!
-//! The default HTTP client requires the `http` feature.
-//! Applications supplying their own [`HttpClient`] do not require that feature.
+//! An HTTP source declares an application port and implements that port for
+//! [`HttpApi`]. The system of [`HttpApi`] is `http-api`. `HttpApi::json` binds a
+//! base URL. The port resolves the system only for a live read. Each port method
+//! calls `HttpApi::get_json` and replies with the records and the argument of
+//! the next read. The default HTTP client is available only with the `http`
+//! feature.
 
 /// CSV file source, decoder contract, and string-preserving row support.
 pub use obzenflow_adapters::sources::{
-    CsvDecodeError, CsvDecoder, CsvPosition, CsvReader, CsvRecord, CsvRow, CsvRowDecoder,
-    CsvSource, CsvSourceBuilder,
+    CsvDecodeError, CsvDecoder, CsvPosition, CsvRecord, CsvRow, CsvRowDecoder, CsvSource,
+    CsvSourceBuilder,
 };
 
-/// In-process sources owning values or a channel receiver.
-pub use obzenflow_adapters::sources::{ChannelReader, ChannelSource, ValuesSource};
+/// These items are the framework file system, its CSV configuration and read types, and
+/// its YAML port.
+pub use obzenflow_adapters::sources::{
+    CsvFile, CsvFileSystem, CsvLine, CsvPage, CsvRead, FileSystem, YamlFile, YamlFileSystem,
+};
+
+/// These items are the in-process sources, which own values or a source channel.
+pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 
 /// Finite YAML source and its application decoder contract.
 pub use obzenflow_adapters::sources::{
-    YamlDecodeError, YamlDecoder, YamlPosition, YamlReader, YamlRecord, YamlSelection, YamlSource,
-    YamlSourceBuilder,
+    YamlDecodeError, YamlDecoder, YamlLine, YamlNode, YamlPage, YamlRead, YamlRecord,
+    YamlSelection, YamlSource, YamlSourceBuilder,
 };
 
-pub use obzenflow_adapters::sources::http_pull::{HttpRetryConfig, ListDetailState};
-/// Hosted-ingress source and its application-owned decoder contract.
+/// These items are the hosted source handler and the application-owned decoder contract
+/// for hosted ingress.
 pub use obzenflow_adapters::sources::{
-    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord,
-};
-
-/// HTTP pull and poll sources, decoders, and configuration types.
-pub use obzenflow_adapters::sources::{
-    simple_poll, CursorlessPullDecoder, DecodeError, DecodeResult, FnPullDecoder, HttpPollConfig,
-    HttpPollConfigBuilder, HttpPollReader, HttpPollSource, HttpPullConfig, HttpPullConfigBuilder,
-    HttpPullReader, HttpPullSource, HttpResponse, ListDetailDecoder, ListDetailDecoderBuilder,
-    PullDecoder,
+    HostedSource, IngressDecodeError, IngressDecoder, IngressRecord,
 };
 
 /// HTTP primitives re-exported from `obzenflow_core` for building requests.
@@ -259,11 +253,14 @@ pub use obzenflow_core::http_client::{
     Bytes, HeaderMap, HttpClient, HttpClientError, HttpMethod, HttpRequest, Url,
 };
 
-/// Default HTTP pull and poll configuration composed by the infra layer.
-pub use obzenflow_infra::clients::http::{
-    http_poll_config, http_pull_config, HttpClientFactoryError,
-};
+/// These items are the HTTP API system and the error of its client factory.
+pub use obzenflow_infra::clients::http::{HttpApi, HttpClientFactoryError};
 
+pub use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
+pub use obzenflow_runtime::stages::common::handlers::source::{
+    source_channel, Continuous, ContinuousRead, Finite, FiniteRead, InputReadiness, ReadLifetime,
+    SourceClosed, SourcePermit, SourceRead, SourceReceiver, SourceSender,
+};
 pub use obzenflow_runtime::stages::common::handlers::{
     SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
@@ -275,15 +272,4 @@ pub use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 pub use obzenflow_core::event::{
     FieldName, FieldSegment, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode,
     SourceErrorCodeError, SourceLocation, TextPosition, MAX_FIELD_PATH_DEPTH,
-};
-pub use obzenflow_runtime::stages::source::{
-    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
-    InfiniteSourceConnector, SourceReaderInitContext,
-};
-
-/// Connector continuation declarations, their reattachment guarantees and the
-/// positioned reader contract (FLOWIP-134i, FLOWIP-122i).
-pub use obzenflow_runtime::stages::source::{
-    AtMostOnce, LatestState, PositionedFiniteReader, Reattach, Refuse, Seek, SeekableSource,
-    SourceIdentityError, SourceInputIdentity, SourcePosition, SourceRecord,
 };

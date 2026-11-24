@@ -13,10 +13,7 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TypedFiniteSourceHandler,
-};
-use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use serde::{Deserialize, Serialize};
 
 /// File-local payloads for the stalled-transition test. The JSON shape is
@@ -41,29 +38,6 @@ impl TypedPayload for ProbeOutputEvent {
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
-
-#[derive(Clone, Debug)]
-struct OneEventSource {
-    emitted: bool,
-}
-
-impl OneEventSource {
-    fn new() -> Self {
-        Self { emitted: false }
-    }
-}
-
-impl TypedFiniteSourceHandler for OneEventSource {
-    type Output = ProbeEvent;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![ProbeEvent { value: 1 }]))
-    }
-}
 
 #[obzenflow_runtime::effects::command]
 #[derive(Clone, Debug)]
@@ -119,7 +93,7 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let numbers_handler = OneEventSource::new();
+        let numbers_handler = ValuesSource::new([ProbeEvent { value: 1 }]);
         let slow_handler = StallingTransform::new();
         let sink_handler = NoopSink::new();
 
@@ -222,3 +196,4 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
 }
 
 use crate::liveness_observations;
+use obzenflow_adapters::sources::ValuesSource;

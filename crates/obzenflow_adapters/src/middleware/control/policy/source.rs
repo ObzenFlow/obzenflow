@@ -409,7 +409,7 @@ mod tests {
                         error_event,
                     ])),
                     poll_duration,
-                    operational_events: Vec::new(),
+                    retry_after: None,
                 }
             }))
             .await;
@@ -451,7 +451,7 @@ mod tests {
                         test_event(),
                     ])),
                     poll_duration: Duration::from_millis(1),
-                    operational_events: Vec::new(),
+                    retry_after: None,
                 }
             }))
             .await;
@@ -545,7 +545,7 @@ mod tests {
                         test_event(),
                     ])),
                     poll_duration: Duration::from_millis(1),
-                    operational_events: Vec::new(),
+                    retry_after: None,
                 }
             }))
             .await;

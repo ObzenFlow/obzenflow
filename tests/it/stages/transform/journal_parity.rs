@@ -6,6 +6,7 @@
 
 use crate::{csv_demo::domain as support_domain, replay_testkit};
 
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::ai::{ChunkEnvelope, TokenCount};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -15,9 +16,7 @@ use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    TypedFiniteSourceHandler, TypedTransformHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
 use obzenflow_runtime::stages::transform::{ChunkByBudgetBuilder, FilterTyped, TryMapTyped};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -51,38 +50,6 @@ struct FilterRecord {
 
 impl TypedPayload for FilterRecord {
     const EVENT_TYPE: &'static str = "flowip_134b.filter_record";
-}
-
-#[derive(Clone, Debug)]
-struct TypedValuesSource<T> {
-    values: Vec<T>,
-    next: usize,
-}
-
-impl<T> TypedValuesSource<T> {
-    fn new(values: Vec<T>) -> Self {
-        Self { values, next: 0 }
-    }
-}
-
-impl<T> TypedFiniteSourceHandler for TypedValuesSource<T>
-where
-    T: TypedPayload + Clone + Debug + Send + Sync + 'static,
-{
-    type Output = T;
-
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<Self::Output>>,
-        obzenflow_runtime::stages::common::handlers::source::SourceError,
-    > {
-        let Some(value) = self.values.get(self.next).cloned() else {
-            return Ok(None);
-        };
-        self.next += 1;
-        Ok(Some(vec![value]))
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -160,11 +127,11 @@ fn right_filter_fixtures() -> Vec<FilterRecord> {
 
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticket_source = TypedValuesSource::new(ticket_fixtures());
-        let seed_source = TypedValuesSource::new(chunk_fixtures());
-        let try_map_source = TypedValuesSource::new(try_map_fixtures());
-        let left_filter_source = TypedValuesSource::new(left_filter_fixtures());
-        let right_filter_source = TypedValuesSource::new(right_filter_fixtures());
+        let ticket_source = ValuesSource::new(ticket_fixtures());
+        let seed_source = ValuesSource::new(chunk_fixtures());
+        let try_map_source = ValuesSource::new(try_map_fixtures());
+        let left_filter_source = ValuesSource::new(left_filter_fixtures());
+        let right_filter_source = ValuesSource::new(right_filter_fixtures());
         let triage = TicketTriageWitness;
         let chunker = ChunkByBudgetBuilder::new()
             .items(|seed: &ChunkSeed| seed.items.clone())

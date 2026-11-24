@@ -10,10 +10,13 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{JournalRecord, TypedPayload};
-use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinition};
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
+use obzenflow_runtime::effects::{perform, EffectError, Port, SystemName};
+use obzenflow_runtime::stages::common::handlers::source::{
+    Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
+};
 use obzenflow_runtime::stages::common::handlers::{
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    TypedAsyncFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +33,6 @@ struct PendingSource {
     started: Arc<Notify>,
     released: Arc<Notify>,
     cancelled: Arc<Notify>,
-    emitted: bool,
 }
 
 struct PollLifetime(Arc<Notify>);
@@ -48,28 +50,104 @@ impl PendingSource {
     }
 }
 
-#[async_trait::async_trait]
-impl TypedAsyncFiniteSourceHandler for PendingSource {
-    type Output = Payload;
-    fn poll_timeout(&self) -> Option<Duration> {
-        None
-    }
-    async fn next(&mut self) -> Result<Option<Vec<Payload>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.poll().await;
-        self.emitted = true;
-        Ok(Some(vec![Payload]))
-    }
+impl SystemName for PendingSource {
+    const NAME: &'static str = "pending";
 }
 
 #[async_trait::async_trait]
-impl TypedAsyncInfiniteSourceHandler for PendingSource {
-    type Output = Payload;
-    async fn next(&mut self) -> Result<Vec<Payload>, SourceError> {
+impl InputReadiness for PendingSource {
+    async fn ready(&self) -> Result<(), SourceError> {
         self.poll().await;
-        Ok(Vec::new())
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct PendingRead {
+    emitted: bool,
+}
+
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait PendingInput {
+    #[query(type = "test.observation_pending.read")]
+    async fn read(
+        &self,
+        from: &PendingRead,
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<Payload, PendingRead>, obzenflow_runtime::queries::QueryError>;
+}
+
+#[async_trait::async_trait]
+impl PendingInput for PendingSource {
+    async fn read(
+        &self,
+        from: &PendingRead,
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<Payload, PendingRead>, obzenflow_runtime::queries::QueryError> {
+        if from.emitted {
+            return Ok(FiniteRead::EndOfInput);
+        }
+        self.poll().await;
+        Ok(FiniteRead::Batch {
+            records: vec![Payload],
+            next: PendingRead { emitted: true },
+        })
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct PendingTake;
+
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait PendingLiveInput: InputReadiness {
+    #[query(type = "test.observation_pending.take")]
+    async fn take(
+        &self,
+        from: &PendingTake,
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<ContinuousRead<Payload, PendingTake>, obzenflow_runtime::queries::QueryError>;
+}
+
+#[async_trait::async_trait]
+impl PendingLiveInput for PendingSource {
+    async fn take(
+        &self,
+        _from: &PendingTake,
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<ContinuousRead<Payload, PendingTake>, obzenflow_runtime::queries::QueryError> {
+        Ok(ContinuousRead {
+            records: Vec::new(),
+            next: PendingTake,
+        })
+    }
+}
+
+struct PendingFinite(obzenflow_runtime::queries::QueryPort<dyn PendingInput>);
+
+#[async_trait::async_trait]
+impl TypedAsyncFiniteSourceHandler for PendingFinite {
+    type Output = Payload;
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    fn read(&self) -> SourceRead<Payload> {
+        SourceRead::finite(self.0.clone(), PendingRead { emitted: false }, Ok)
+    }
+}
+
+struct PendingLive {
+    port: obzenflow_runtime::queries::QueryPort<dyn PendingLiveInput>,
+}
+
+impl TypedInfiniteSourceHandler for PendingLive {
+    type Output = Payload;
+
+    fn read(&self) -> SourceRead<Payload, Continuous> {
+        SourceRead::continuous(self.port.clone(), PendingTake, Ok)
     }
 }
 
@@ -106,7 +184,6 @@ async fn pending_flow(infinite: bool) -> (Arc<FlowHandle>, PendingSource, Counti
         started: Arc::new(Notify::new()),
         released: Arc::new(Notify::new()),
         cancelled: Arc::new(Notify::new()),
-        emitted: false,
     };
     let source_handler = source.clone();
     let sink = CountingSink {
@@ -117,15 +194,19 @@ async fn pending_flow(infinite: bool) -> (Arc<FlowHandle>, PendingSource, Counti
     let sink_handler = perform(|_: &Payload| Hold).through(Port::to(sink.clone()));
     let flow = FlowDefinition::materialize(move |_| {
         Ok(if infinite {
+            let source_handler = PendingLive {
+                port: obzenflow_runtime::queries::QueryPort::to(source_handler),
+            };
             flow! {
                 name: "observation_infinite", journals: crate::journal::memory_journals(),
-                stages: { src = async_infinite_source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },
+                stages: { src = source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },
                 topology: { src |> snk; }
             }
         } else {
+            let source_handler = PendingFinite(obzenflow_runtime::queries::QueryPort::to(source_handler));
             flow! {
                 name: "observation_finite", journals: crate::journal::memory_journals(),
-                stages: { src = async_source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },
+                stages: { src = source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },
                 topology: { src |> snk; }
             }
         })

@@ -4,21 +4,12 @@
 
 //! Sealed source execution surface (FLOWIP-134g).
 
-use super::traits::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, SourceError,
-};
+use super::traits::SourceError;
 use crate::stages::common::handler_error::StageFatal;
-use crate::stages::source::SourceReaderInitContext;
 use async_trait::async_trait;
-use obzenflow_core::event::observability::ObservationRecorder;
-use obzenflow_core::event::payloads::execution_payload::{
-    SourceContinuationRefusal, SourceInputPinnedFact,
-};
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
-use obzenflow_core::source::{EncodedSourcePosition, SourcePositionError};
-use obzenflow_core::{ChainEvent, EventId, WriterId};
-use std::sync::Arc;
+use obzenflow_core::{ChainEvent, EventId};
 use std::time::Duration;
 
 /// Successful completion of one erased source poll.
@@ -38,225 +29,109 @@ pub enum ErasedSourceOutcome {
     Fatal(StageFatal),
 }
 
-/// One source poll plus its closed, runtime-authored operational outbox.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct ErasedSourceInvocation {
     outcome: ErasedSourceOutcome,
-    observations: Vec<ChainEvent>,
+    retry_after: Option<Duration>,
 }
 
 impl ErasedSourceInvocation {
-    pub(crate) fn completed(
-        completion: ErasedSourceCompletion,
-        observations: Vec<ChainEvent>,
-    ) -> Self {
+    pub(crate) fn completed(completion: ErasedSourceCompletion) -> Self {
         Self {
             outcome: ErasedSourceOutcome::Completed(completion),
-            observations,
+            retry_after: None,
         }
     }
 
-    pub(crate) fn handler_error(error: SourceError, observations: Vec<ChainEvent>) -> Self {
+    pub(crate) fn handler_error(error: SourceError) -> Self {
         Self {
             outcome: ErasedSourceOutcome::HandlerError(error),
-            observations,
+            retry_after: None,
+        }
+    }
+
+    pub(crate) fn rate_limited(error: SourceError, retry_after: Option<Duration>) -> Self {
+        Self {
+            outcome: ErasedSourceOutcome::HandlerError(error),
+            retry_after,
         }
     }
 
     pub(crate) fn fatal(fatal: StageFatal) -> Self {
         Self {
             outcome: ErasedSourceOutcome::Fatal(fatal),
-            observations: Vec::new(),
+            retry_after: None,
         }
     }
 
-    pub fn into_parts(self) -> (ErasedSourceOutcome, Vec<ChainEvent>) {
-        (self.outcome, self.observations)
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
+    pub fn into_outcome(self) -> ErasedSourceOutcome {
+        self.outcome
     }
 }
 
 mod sealed {
-    pub trait Finite {}
     pub trait AsyncFinite {}
-    pub trait Infinite {}
     pub trait AsyncInfinite {}
-}
-
-/// Runtime-erased finite source interface.
-#[doc(hidden)]
-pub trait UnifiedFiniteSourceHandler: sealed::Finite + Send + Sync {
-    fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
-        Ok(())
-    }
-    fn install_writer_id(&mut self, writer_id: WriterId);
-    fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
-    /// The acquired reader's input pin, committed before its first record;
-    /// `None` for a reader without positions (FLOWIP-134i B11).
-    fn input_pin(&self) -> Option<Result<SourceInputPinnedFact, SourcePositionError>> {
-        None
-    }
-    /// Validate the recorded pin, then continue strictly after `after`, or at
-    /// the pinned beginning (FLOWIP-134i B1). A reader without positions
-    /// refuses.
-    fn resume_at(
-        &mut self,
-        _pin: &SourceInputPinnedFact,
-        _after: Option<&EncodedSourcePosition>,
-    ) -> Result<(), SourceResumeError> {
-        Err(SourceResumeError::Refused(
-            SourceContinuationRefusal::Unpositioned,
-        ))
-    }
-    fn next_invocation(&mut self) -> ErasedSourceInvocation;
-}
-
-/// Why a positioned reader could not continue its committed prefix.
-#[doc(hidden)]
-#[derive(Debug)]
-pub enum SourceResumeError {
-    Refused(SourceContinuationRefusal),
-    SeekFailed(SourceError),
 }
 
 /// Runtime-erased asynchronous finite source interface.
 #[doc(hidden)]
 #[async_trait]
 pub trait UnifiedAsyncFiniteSourceHandler: sealed::AsyncFinite + Send + Sync {
-    async fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
-        Ok(())
+    fn has_pending_records(&self) -> bool {
+        false
     }
-    fn install_writer_id(&mut self, writer_id: WriterId);
-    fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
+    fn replayed_facts(&self) -> u64 {
+        0
+    }
+    fn idle_backoff_cap(&self) -> Duration {
+        Duration::from_millis(50)
+    }
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::AsyncFiniteSource
+    }
+    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext);
+    fn poll_cancelled(&mut self) {}
     fn poll_timeout(&self) -> Option<Duration>;
     async fn next_invocation(&mut self) -> ErasedSourceInvocation;
-    async fn drain(&mut self) -> Result<(), SourceError>;
-}
-
-/// Runtime-erased infinite source interface.
-#[doc(hidden)]
-pub trait UnifiedInfiniteSourceHandler: sealed::Infinite + Send + Sync {
-    fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
-        Ok(())
-    }
-    fn install_writer_id(&mut self, writer_id: WriterId);
-    fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
-    fn next_invocation(&mut self) -> ErasedSourceInvocation;
 }
 
 /// Runtime-erased asynchronous infinite source interface.
 #[doc(hidden)]
 #[async_trait]
 pub trait UnifiedAsyncInfiniteSourceHandler: sealed::AsyncInfinite + Send + Sync {
-    async fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
-        Ok(())
+    fn has_pending_records(&self) -> bool {
+        false
     }
-    fn install_writer_id(&mut self, writer_id: WriterId);
-    fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
+    fn idle_backoff_cap(&self) -> Duration {
+        Duration::from_millis(50)
+    }
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::AsyncInfiniteSource
+    }
+    fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext);
+    fn poll_cancelled(&mut self) {}
+    async fn cross_to_live(
+        &mut self,
+    ) -> Result<bool, crate::stages::common::handler_error::StageFatal> {
+        Ok(false)
+    }
+    fn replayed_facts(&self) -> u64 {
+        0
+    }
     fn poll_timeout(&self) -> Option<Duration>;
     /// The binding slot of Runtime-owned hosted ingress (FLOWIP-122i B3).
     fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
         None
     }
     async fn next_invocation(&mut self) -> ErasedSourceInvocation;
-    async fn drain(&mut self) -> Result<(), SourceError>;
     /// Rows the journal committed, so hosted receipts can resolve (FLOWIP-084l).
     fn settle_committed(&mut self, _committed: &[EventId]) {}
-    /// One re-admitted row of this source, folded before the slot goes live.
-    fn fold_recorded_admission(&mut self, _event: &ChainEvent) {}
 }
 
-impl<T: FiniteSourceHandler + Send + Sync> sealed::Finite for T {}
-
-impl<T: FiniteSourceHandler + Send + Sync> UnifiedFiniteSourceHandler for T {
-    fn install_writer_id(&mut self, writer_id: WriterId) {
-        FiniteSourceHandler::bind_writer_id(self, writer_id);
-    }
-
-    fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        match FiniteSourceHandler::next(self) {
-            Ok(Some(events)) => {
-                ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(events), Vec::new())
-            }
-            Ok(None) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof, Vec::new()),
-            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
-        }
-    }
-}
-
-impl<T: AsyncFiniteSourceHandler + Send + Sync> sealed::AsyncFinite for T {}
-
-#[async_trait]
-impl<T: AsyncFiniteSourceHandler + Send + Sync> UnifiedAsyncFiniteSourceHandler for T {
-    fn install_writer_id(&mut self, writer_id: WriterId) {
-        AsyncFiniteSourceHandler::bind_writer_id(self, writer_id);
-    }
-
-    fn poll_timeout(&self) -> Option<Duration> {
-        AsyncFiniteSourceHandler::poll_timeout(self)
-    }
-
-    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        match AsyncFiniteSourceHandler::next(self).await {
-            Ok(Some(events)) => {
-                ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(events), Vec::new())
-            }
-            Ok(None) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof, Vec::new()),
-            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
-        }
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        AsyncFiniteSourceHandler::drain(self).await
-    }
-}
-
-impl<T: InfiniteSourceHandler + Send + Sync> sealed::Infinite for T {}
-
-impl<T: InfiniteSourceHandler + Send + Sync> UnifiedInfiniteSourceHandler for T {
-    fn install_writer_id(&mut self, writer_id: WriterId) {
-        InfiniteSourceHandler::bind_writer_id(self, writer_id);
-    }
-
-    fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        match InfiniteSourceHandler::next(self) {
-            Ok(events) => {
-                ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(events), Vec::new())
-            }
-            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
-        }
-    }
-}
-
-impl<T: AsyncInfiniteSourceHandler + Send + Sync> sealed::AsyncInfinite for T {}
-
-#[async_trait]
-impl<T: AsyncInfiniteSourceHandler + Send + Sync> UnifiedAsyncInfiniteSourceHandler for T {
-    fn install_writer_id(&mut self, writer_id: WriterId) {
-        AsyncInfiniteSourceHandler::bind_writer_id(self, writer_id);
-    }
-
-    fn poll_timeout(&self) -> Option<Duration> {
-        AsyncInfiniteSourceHandler::poll_timeout(self)
-    }
-
-    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
-        AsyncInfiniteSourceHandler::hosted_ingress_slot(self)
-    }
-
-    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        match AsyncInfiniteSourceHandler::next(self).await {
-            Ok(events) => {
-                ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(events), Vec::new())
-            }
-            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
-        }
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        AsyncInfiniteSourceHandler::drain(self).await
-    }
-}
-
-pub(super) use sealed::{AsyncFinite as SealAsyncFinite, AsyncInfinite as SealAsyncInfinite};
-pub(super) use sealed::{Finite as SealFinite, Infinite as SealInfinite};
+pub(crate) use sealed::{AsyncFinite as SealAsyncFinite, AsyncInfinite as SealAsyncInfinite};

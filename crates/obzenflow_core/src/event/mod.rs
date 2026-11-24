@@ -46,7 +46,7 @@ pub use payloads::effect_payload::{
     EffectFailureDetail, EffectFailureKind, EffectFailureSource, EffectInputPosition, EffectLabel,
     EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload, EffectProvenance, EffectRecord,
     EffectRecoveryAbandoned, EffectSchemaVersion, EffectStageKey, EffectType, IdempotencyKey,
-    OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion,
+    OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, SourceReadFailure, StageLogicVersion,
 };
 pub use payloads::source_diagnostic::{
     FieldName, FieldSegment, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode,

@@ -8,6 +8,7 @@ use crate::dsl::stage_descriptor::{StageDescriptor, BINDING_DERIVED_NAME_SENTINE
 use crate::dsl::then_live::{plan, Refusal, ThenLivePlan};
 use crate::dsl::topology::AuthoredConnection;
 use crate::dsl::FlowBuildError;
+use obzenflow_adapters::sources::ChannelSource;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{StageId, TypedPayload};
@@ -193,14 +194,20 @@ fn join(catalog: &str, stream: &str, join: &str) -> AuthoredConnection {
 fn batch_accounts() -> Box<dyn StageDescriptor> {
     crate::source!(Account => placeholder!())
 }
+fn live_input<T: TypedPayload + Send + Sync + 'static>() -> ChannelSource<T> {
+    ChannelSource::new(obzenflow_runtime::stages::common::handlers::source::source_channel(1).1)
+}
+
 fn live_accounts() -> Box<dyn StageDescriptor> {
-    crate::infinite_source!(Account => placeholder!())
+    let input = live_input::<Account>();
+    crate::source!(Account => input)
 }
 fn batch_tx() -> Box<dyn StageDescriptor> {
     crate::source!(Entry => placeholder!())
 }
 fn live_tx() -> Box<dyn StageDescriptor> {
-    crate::infinite_source!(Entry => placeholder!())
+    let input = live_input::<Entry>();
+    crate::source!(Entry => input)
 }
 
 fn piggy_bank() -> Flow {
@@ -1051,10 +1058,7 @@ fn a_concat_producer_with_a_live_source_is_refused() {
     let flow = flow(
         vec![
             ("transactions", batch_tx()),
-            (
-                "alert_ingress",
-                crate::infinite_source!(Entry => placeholder!()),
-            ),
+            ("alert_ingress", live_tx()),
             ("score", crate::transform!(Entry -> Alert => placeholder!())),
             (
                 "live_alerts",

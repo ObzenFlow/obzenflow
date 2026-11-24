@@ -6,7 +6,7 @@
 //!
 //! Tutorials: `https://obzenflow.dev/tutorials/`
 //!
-//! Run (default: local mock HN server + Ollama; requires Ollama running):
+//! Start Ollama first. Then use this command to run the example with scripted stories:
 //! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
 //!
 //! Ollama quickstart (macOS):
@@ -51,8 +51,8 @@ mod config;
 mod decoder;
 mod domain;
 mod flow;
-mod mock_server;
 mod runner;
+mod scripted;
 mod util;
 
 fn main() -> anyhow::Result<()> {

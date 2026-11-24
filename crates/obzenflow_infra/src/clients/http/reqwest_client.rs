@@ -691,7 +691,3 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 }
-
-#[cfg(test)]
-#[path = "reqwest_client_replay_tests.rs"]
-mod replay_tests;

@@ -26,8 +26,6 @@ impl<T> IngestionHealthEndpoint<T> {
 struct IngestionHealthResponse {
     status: &'static str,
     pipeline_ready: bool,
-    /// The two readiness conjuncts (FLOWIP-120n F12): the pipeline-running
-    /// watcher and the hosted source's resume-live flag.
     pipeline_running: bool,
     resume_live: bool,
     channel_depth: usize,

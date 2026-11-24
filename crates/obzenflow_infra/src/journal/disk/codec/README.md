@@ -1,8 +1,8 @@
 # Journal format
 
-The current schema is **22.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
+The current schema is **25.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
 version for records, frame encoding, archive interpretation, and the run
-manifest. `run_manifest.json` records `journal_schema_version: "22.0"`.
+manifest. `run_manifest.json` records `journal_schema_version: "25.0"`.
 Frame markers and disposable observation
 checkpoint stamps derive from that same authority. A breaking change to any of
 these contracts bumps the one version. Package versions remain provenance.
@@ -44,13 +44,13 @@ All fixed-width integers are little endian. A frame consists of:
 
 | Position | Bytes | Meaning |
 |---|---:|---|
-| 0 | 7 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF22.0`) |
+| 0 | 7 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF25.0`) |
 | 7 | 8 | Body length |
 | 15 | 4 | CRC32 of magic and body length |
 | 19 | body length | Compact body |
 | after body | 4 | CRC32 of header and body |
 | after checksum | 8 | Complete frame length, including header and trailer |
-| final | 7 | Reversed header magic (`0.22FJO`) |
+| final | 7 | Reversed header magic (`0.52FJO`) |
 
 The 19-byte trailer commits the entire ordinary record or atomic group. A reader
 validates both lengths, magic values and checksums before exposing members.
@@ -208,7 +208,7 @@ ignored by default; CI runs it explicitly to require byte-for-byte encoding and
 exact logical decoding within the current schema. To run it locally:
 
 ```sh
-cargo test -p obzenflow_infra --lib current_schema_fixtures_preserve_bytes_and_logical_records -- --ignored
+cargo test -p obzenflow_infra --lib codec_current_schema_reproduces_fixtures -- --ignored
 ```
 
 The verification test always compares the committed frames and never updates

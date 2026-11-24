@@ -5,7 +5,7 @@
 //! Ready-made sinks. Each is a command a `sink!` row takes, sending one
 //! request per input through a port the framework declares.
 
-mod blocking;
+pub(crate) mod blocking;
 pub mod console;
 pub mod csv;
 pub mod discard;

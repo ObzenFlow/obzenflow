@@ -24,7 +24,7 @@ mod exported_jsonl {
 pub mod fake_ai;
 #[path = "../examples/hn_ai_digest_demo/flow.rs"]
 mod hn_demo_flow;
-#[path = "../examples/hn_ai_digest_demo/mock_server.rs"]
+#[path = "support/hn_mock_server.rs"]
 mod mock_server;
 #[cfg(feature = "e2e")]
 #[path = "support/postgres"]
@@ -32,6 +32,8 @@ mod postgres_support {
     mod pool;
     pub use self::pool::*;
 }
+#[path = "../examples/hn_ai_digest_demo/scripted.rs"]
+mod scripted;
 #[path = "../examples/hn_ai_digest_demo/util.rs"]
 mod util;
 
@@ -41,6 +43,7 @@ use fake_ai::{
 use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk, Partials,
 };
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_adapters::middleware::{circuit_breaker, CircuitBreaker};
 use obzenflow_core::ai::{
     AiMapReduceChunkFailed, AiMapReduceGroupingEnded, AiMapReduceMapInput, AiMapReduceReduceFailed,
@@ -67,12 +70,8 @@ use obzenflow_runtime::effects::{
     perform, EffectError, Port, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::SourceError;
+use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::source::{
-    FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceInputIdentity,
-    SourcePosition, SourceReaderInitContext, SourceRecord,
-};
 use obzenflow_runtime::testing::BackpressureAckGate;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -198,6 +197,10 @@ fn recording() -> FakeChatModels {
     FakeChatModels::replying(|_| FIXTURE_REPLY.to_string())
 }
 
+fn live_base_url() -> obzenflow::stages::sources::Url {
+    config::HN_API_URL.parse().expect("the HN API URL is valid")
+}
+
 fn is_reduce_request(request: &obzenflow_core::ai::ChatRequest) -> bool {
     last_user_message(request).ends_with("partials")
 }
@@ -206,29 +209,12 @@ fn breaker() -> CircuitBreaker {
     circuit_breaker().consecutive_failures(5)
 }
 
-#[derive(Clone, Debug)]
-struct ItemSource {
-    next: u64,
-    last: u64,
-}
-
-impl ItemSource {
-    fn one_to(last: u64) -> Self {
-        Self { next: 1, last }
-    }
-}
-
-impl TypedFiniteSourceHandler for ItemSource {
-    type Output = DigestItem;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.next > self.last {
-            return Ok(None);
-        }
-        let value = self.next;
-        self.next += 1;
-        Ok(Some(vec![DigestItem { value }]))
-    }
+fn items_one_to(last: u64) -> impl TypedFiniteSourceHandler<Output = DigestItem> {
+    ValuesSource::new(
+        (1..=last)
+            .map(|value| DigestItem { value })
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[obzenflow_runtime::effects::port]
@@ -295,7 +281,7 @@ fn build_flow_with(
     ai_breaker: CircuitBreaker,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let items = ItemSource::one_to(items);
+        let items = items_one_to(items);
         let digest = ai::map(map_role).chunks(1).reduce(ReduceRole).on_eof();
         let collected = perform(|output: &DigestOut| output.clone()).through(collect_into(outputs));
 
@@ -322,7 +308,7 @@ fn build_recovery_flow(
     ai_breaker: CircuitBreaker,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let recovery_items = ItemSource::one_to(1);
+        let recovery_items = items_one_to(1);
         let digest = ai::map(MapRole::default())
             .chunks(1)
             .reduce(ReduceRole)
@@ -353,7 +339,7 @@ fn build_credit_flow(
     prepare_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let credit_items = ItemSource::one_to(2);
+        let credit_items = items_one_to(2);
         let digest = ai::map(MapRole {
             prepare_calls: Some(prepare_calls),
             ..MapRole::default()
@@ -387,7 +373,7 @@ fn build_interruption_flow(
     outputs: Arc<Mutex<Vec<DigestOut>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let interrupt_items = ItemSource::one_to(5);
+        let interrupt_items = items_one_to(5);
         let digest = ai::map(MapRole::default())
             .chunks(1)
             .reduce(ReduceRole)
@@ -447,6 +433,60 @@ async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<C
         .as_str()
         .expect("stage data journal path");
     replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(relative)).await
+}
+
+fn declared_systems(rows: &[JournalRecord<ChainPayload>]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|row| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(binding)) => {
+                Some(binding.name().to_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn stories_then_eof(rows: &[JournalRecord<ChainPayload>]) -> Vec<u64> {
+    let eof = rows
+        .iter()
+        .position(JournalRecord::is_eof)
+        .expect("hn_stories writes EOF");
+    assert!(
+        rows[eof..]
+            .iter()
+            .all(|row| domain::HnStory::from_event(&row.authored()).is_none()),
+        "no story follows EOF"
+    );
+    rows[..eof]
+        .iter()
+        .filter_map(|row| domain::HnStory::from_event(&row.authored()))
+        .map(|story| story.id.0)
+        .collect()
+}
+
+#[tokio::test]
+async fn scripted_polls_return_single_stories() {
+    use decoder::{StoriesPort, StoryPosition};
+    use obzenflow::stages::sources::FiniteRead;
+    let ctx = obzenflow::queries::QueryContext::for_test("stories", 1);
+    let system = scripted::ScriptedStories;
+    let mut position = StoryPosition::Start { limit: 60 };
+    let mut ids = Vec::new();
+    while let FiniteRead::Batch { records, next } = system.read(&position, &ctx).await.unwrap() {
+        assert!(records.len() <= 1);
+        ids.extend(
+            records
+                .into_iter()
+                .map(|record| decoder::decode_item(record).unwrap().id.0),
+        );
+        position = next;
+    }
+    assert_eq!(
+        ids,
+        (100..160)
+            .filter(|id| (id - 99) % 11 != 0)
+            .collect::<Vec<_>>()
+    );
 }
 
 fn map_inputs(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<AiMapReduceMapInput<DigestItem>> {
@@ -537,6 +577,7 @@ fn assert_grouping_authorship(
 
 #[derive(Debug, PartialEq)]
 struct StableSinkCall {
+    schema_version: u32,
     effect_type: String,
     request_hash: String,
     outcome: serde_json::Value,
@@ -551,6 +592,7 @@ fn stable_sink_calls(sink_events: &[JournalRecord<ChainPayload>]) -> Vec<StableS
                 return None;
             };
             Some(StableSinkCall {
+                schema_version: record.descriptor.schema_version.get(),
                 effect_type: record.descriptor.effect_type.to_string(),
                 request_hash: record.descriptor.canonical_input_hash.to_string(),
                 outcome: serde_json::to_value(&record.outcome)
@@ -847,8 +889,6 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
         "digest = ai!(FormattedStory -> HnDigestSummary with { ai_breaker, ai_retry } => digest);",
         "impl AiRole<Chunk<FormattedStory>> for HnDigest {",
         "impl AiRole<Partials<FormattedStory, HnDigestGroupSummary>> for HnDigest {",
-        "let hn_source = HttpPullSource::new(decoder, http_source_config);",
-        "#[effect(type = \"hn.digest.publish\", at_least_once, records = reply)]",
         "PostgresStatement::insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)",
         "DigestOutput::Console => Port::to(ConsoleDigest),",
         "DigestOutput::Postgres => Port::deferred(PostgresDigest::from_env),",
@@ -910,7 +950,7 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
     assert!(!checked_config.contains("[sinks]"));
     assert!(checked_config.contains("output = \"console\""));
     assert!(checked_config.contains("[app]"));
-    assert!(checked_config.contains("source = \"mock\""));
+    assert!(checked_config.contains("stories = \"scripted\""));
     for retired in [
         "\"HN_LIVE\"",
         "\"HN_MAX_STORIES\"",
@@ -1840,15 +1880,14 @@ async fn postgres_output_inserts_one_hn_digest() {
 
     let temp = tempfile::tempdir().expect("temporary PostgreSQL HN-flow journal root");
     let journal_base = temp.path().join("target/hn-ai-digest-logs");
-    let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let inputs = config::HnRunInputs {
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: config::DEFAULT_HN_SOURCE_RATE_LIMIT,
         max_stories_per_group: 5,
         interests: Some("runtime protocols".to_string()),
-        mode_label: "mock".to_string(),
-        base_url: server.base_url(),
+        stories: config::Stories::Scripted,
+        base_url: live_base_url(),
         output: config::DigestOutput::Postgres,
     };
     let config_path = witness_config(temp.path(), |_| {});
@@ -1869,7 +1908,6 @@ async fn postgres_output_inserts_one_hn_digest() {
         .await
         .expect("the shared HN flow delivers its digest to PostgreSQL");
 
-    assert!(server.request_count() > 0);
     assert_eq!(models.call_count(), 2);
 
     let count_rows = format!("SELECT COUNT(*) FROM \"{schema}\".hn_digest_summaries");
@@ -1888,13 +1926,12 @@ async fn postgres_output_inserts_one_hn_digest() {
             String,
             String,
             String,
-            String,
             Option<String>,
             Vec<String>,
             String,
         ),
     >(&format!(
-        "SELECT digest_id, created_at IS NOT NULL, source_mode, source_identity, \
+        "SELECT digest_id, created_at IS NOT NULL, source_system, \
          ai_provider, ai_model, token_estimator, interests, story_ids, output_markdown \
          FROM \"{schema}\".hn_digest_summaries"
     ))
@@ -1903,21 +1940,24 @@ async fn postgres_output_inserts_one_hn_digest() {
     .expect("inspect the HN digest destination");
     assert_eq!(row.0, 1);
     assert!(row.1);
-    assert_eq!(row.2, "mock");
-    assert_eq!(row.3, "mock://hacker-news/");
-    assert_eq!(row.4, "ollama");
-    assert_eq!(row.5, "llama3.1:8b");
-    assert_eq!(row.6, "heuristic");
-    assert_eq!(row.7.as_deref(), Some("runtime protocols"));
-    assert_eq!(row.8, ["100", "101", "102", "103", "104"]);
+    assert_eq!(row.2, "scripted-stories");
+    assert_eq!(row.3, "ollama");
+    assert_eq!(row.4, "llama3.1:8b");
+    assert_eq!(row.5, "heuristic");
+    assert_eq!(row.6.as_deref(), Some("runtime protocols"));
+    assert_eq!(row.7, ["100", "101", "102", "103", "104"]);
     assert_eq!(
-        row.9,
+        row.8,
         "recorded [^1]\n\n### Links\n\n\
          [^1]: [Rust: tooling update](<https://example.com/hn/100>) · \
          [HN discussion](<https://news.ycombinator.com/item?id=100>)"
     );
 
     let archive = latest_run_dir(&journal_base);
+    let stories = stage_envelopes(&archive, "hn_stories").await;
+    assert_eq!(declared_systems(&stories), ["scripted-stories"]);
+    let story_ids = stories_then_eof(&stories);
+    assert_eq!(story_ids, [100, 101, 102, 103, 104]);
     let sink = stage_envelopes(&archive, "digest_summary").await;
     let calls = stable_sink_calls(&sink);
     let [call] = calls.as_slice() else {
@@ -1927,6 +1967,7 @@ async fn postgres_output_inserts_one_hn_digest() {
         );
     };
     assert_eq!(call.effect_type, "hn.digest.publish");
+    assert_eq!(call.schema_version, 3);
     assert_eq!(call.outcome["outcome"], "succeeded");
 
     let mut offline_config = shipped_config("obzenflow.postgres.toml");
@@ -1964,6 +2005,12 @@ async fn postgres_output_inserts_one_hn_digest() {
     );
     let replay_archive = latest_run_dir(&journal_base);
     assert_ne!(replay_archive, archive);
+    let replay_stories = stage_envelopes(&replay_archive, "hn_stories").await;
+    assert_eq!(
+        declared_systems(&replay_stories),
+        declared_systems(&stories)
+    );
+    assert_eq!(stories_then_eof(&replay_stories), story_ids);
     let replayed = stage_envelopes(&replay_archive, "digest_summary").await;
     assert_eq!(stable_sink_calls(&replayed), calls);
     let rows_after_replay = sqlx::query_scalar::<_, i64>(&count_rows)
@@ -2009,10 +2056,10 @@ fn the_live_and_replay_configurations_differ_from_the_default_as_documented() {
         .and_then(toml::Value::as_table_mut)
         .expect("[app] table");
     assert_eq!(
-        app.insert("source".to_owned(), default["app"]["source"].clone()),
-        Some(toml::Value::String("live".to_owned()))
+        app.insert("stories".to_owned(), default["app"]["stories"].clone()),
+        Some(toml::Value::String("hacker_news".to_owned()))
     );
-    assert_eq!(live, default, "the live file differs only in app.source");
+    assert_eq!(live, default, "the live file differs only in app.stories");
 
     let mut live = shipped_config("obzenflow.live.toml");
     assert!(live.remove("ai").is_some(), "the live file configures AI");
@@ -2030,21 +2077,20 @@ async fn hn_settings_convert_to_the_run_inputs_the_flow_reads() {
          [digest]\ngroup_max_stories = 4\n",
     )
     .unwrap();
-    let inputs = settings.into_inputs().expect("a mock source starts");
+    let inputs = settings.into_inputs();
     assert_eq!(inputs.max_stories, 5);
     assert_eq!(inputs.poll_timeout_secs, 10);
     assert_eq!(inputs.interests.as_deref(), Some("runtime protocols"));
     assert_eq!(inputs.max_stories_per_group, 4);
-    assert_eq!(inputs.mode_label, "mock");
-    assert_eq!(inputs.base_url.host_str(), Some("127.0.0.1"));
+    assert!(matches!(inputs.stories, config::Stories::Scripted));
     assert_eq!(
         inputs.source_rate_limit,
         config::DEFAULT_HN_SOURCE_RATE_LIMIT
     );
 
-    let live: config::HnSettings = toml::from_str("source = \"live\"").unwrap();
-    let live = live.into_inputs().unwrap();
-    assert_eq!(live.mode_label, "live");
+    let live: config::HnSettings = toml::from_str("stories = \"hacker_news\"").unwrap();
+    let live = live.into_inputs();
+    assert!(matches!(live.stories, config::Stories::HackerNews));
     assert_eq!(
         live.base_url.as_str(),
         "https://hacker-news.firebaseio.com/"
@@ -2061,15 +2107,14 @@ async fn hn_settings_convert_to_the_run_inputs_the_flow_reads() {
 async fn digest_rate_limit_delivers_summary() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
-    let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let inputs = config::HnRunInputs {
         max_stories: 60,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
         max_stories_per_group: 10,
         interests: None,
-        mode_label: "mock".to_string(),
-        base_url: server.base_url(),
+        stories: config::Stories::Scripted,
+        base_url: live_base_url(),
         output: config::DigestOutput::Console,
     };
     let config_path = witness_config(temp.path(), |_| {});
@@ -2102,6 +2147,15 @@ async fn digest_rate_limit_delivers_summary() {
         .expect("a rate-limited chunk is retried and the digest delivered");
 
     let archive = latest_run_dir(&journal_base);
+    let stories = stage_envelopes(&archive, "hn_stories").await;
+    assert_eq!(declared_systems(&stories), ["scripted-stories"]);
+    assert_eq!(
+        stories_then_eof(&stories),
+        scripted::scripted_stories(60)
+            .iter()
+            .map(|story| story.id.0)
+            .collect::<Vec<_>>()
+    );
     let map = stage_envelopes(&archive, "digest__map").await;
     let collect = stage_envelopes(&archive, "digest__collect").await;
     let reduce = stage_envelopes(&archive, "digest__reduce").await;
@@ -2132,15 +2186,14 @@ async fn digest_rate_limit_delivers_summary() {
 async fn hn_group_size_zero_fails_the_build_naming_the_stage() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
-    let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let inputs = config::HnRunInputs {
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
         max_stories_per_group: 0,
         interests: None,
-        mode_label: "mock".to_string(),
-        base_url: server.base_url(),
+        stories: config::Stories::Scripted,
+        base_url: live_base_url(),
         output: config::DigestOutput::Console,
     };
     let config_path = witness_config(temp.path(), |_| {});
@@ -2168,7 +2221,7 @@ async fn hn_group_size_zero_fails_the_build_naming_the_stage() {
 }
 
 #[tokio::test]
-async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
+async fn hn_replay_reconstructs_digest() {
     let temp = tempfile::tempdir().expect("temporary real HN-flow journal root");
     let journal_base = temp.path().join("journals");
     let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
@@ -2178,7 +2231,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         source_rate_limit: 1_000.0,
         max_stories_per_group: 5,
         interests: Some("runtime protocols".to_string()),
-        mode_label: "mock".to_string(),
+        stories: config::Stories::HackerNews,
         base_url: server.base_url(),
         output: config::DigestOutput::Console,
     };
@@ -2227,6 +2280,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let live_reduce = stage_envelopes(&live_archive, "digest__reduce").await;
     let live_digest_summary = stage_envelopes(&live_archive, "digest_summary").await;
     let live_sink_calls = stable_sink_calls(&live_digest_summary);
+    assert!(live_sink_calls.iter().all(|call| call.schema_version == 3));
     assert!(
         !live_sink_calls.is_empty(),
         "the production digest summary must settle at least one sink call"
@@ -2261,15 +2315,6 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     assert!(storage.effect_record_envelope.count > 0);
     assert!(storage.composite_record_envelope.count > 0);
 
-    // Replay prepares a fresh host fixture with a different physical endpoint.
-    // The live guard can be retired; neither endpoint is durable flow identity.
-    drop(server);
-    let replay_server =
-        mock_server::spawn_mock_hn_server().expect("strict replay HN server starts");
-    let replay_inputs = config::HnRunInputs {
-        base_url: replay_server.base_url(),
-        ..demo_inputs
-    };
     let replay = FakeChatModels::forbidden();
     FlowApplication::builder()
         .with_cli_args(vec![
@@ -2281,7 +2326,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         ])
         .with_ai_models(replay.resolvers())
         .run_async(hn_demo_flow::build_flow_definition(
-            replay_inputs,
+            demo_inputs,
             hn_demo_flow::HnFlowOptions {
                 journal_base: journal_base.clone(),
             },
@@ -2292,9 +2337,9 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     assert_eq!(replay.connect_count(), 0);
     assert_eq!(replay.call_count(), 0);
     assert_eq!(
-        replay_server.request_count(),
-        0,
-        "strict replay may start a fresh host fixture but must not poll it"
+        server.request_count(),
+        live_source_requests,
+        "strict replay must not poll the endpoint the live run read"
     );
     let replay_archive = latest_run_dir(&journal_base);
     // Archived source attachments keep their original selection and stamps;
@@ -2305,8 +2350,41 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
             .map(|row| serde_json::to_value(&row.envelope.observability).unwrap())
             .collect::<Vec<_>>()
     };
-    let live_packets = source_packets(stage_envelopes(&live_archive, "hn_stories").await);
-    let replay_packets = source_packets(stage_envelopes(&replay_archive, "hn_stories").await);
+    let live_stories = stage_envelopes(&live_archive, "hn_stories").await;
+    let replay_stories = stage_envelopes(&replay_archive, "hn_stories").await;
+    assert_eq!(declared_systems(&live_stories), ["http-api"]);
+    assert_eq!(
+        declared_systems(&replay_stories),
+        declared_systems(&live_stories)
+    );
+    let answers = |rows: &[JournalRecord<ChainPayload>]| {
+        rows.iter()
+            .filter_map(|row| {
+                let ChainPayload::Execution(ExecutionPayload::SourceInput(record)) = &row.payload
+                else {
+                    return None;
+                };
+                let obzenflow_core::query::SourceInput::QueryAnswered {
+                    query_type,
+                    request,
+                    answer,
+                } = &record.input
+                else {
+                    panic!("expected a query answer")
+                };
+                assert_eq!(query_type, "hn.stories.read");
+                Some((record.number, *row.id(), request.clone(), answer.clone()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let reads = answers(&live_stories);
+    assert_eq!(reads.len(), live_source_requests + 1);
+    assert_eq!(answers(&replay_stories), reads);
+    let live_story_ids = stories_then_eof(&live_stories);
+    assert!(!live_story_ids.is_empty());
+    assert_eq!(stories_then_eof(&replay_stories), live_story_ids);
+    let live_packets = source_packets(live_stories);
+    let replay_packets = source_packets(replay_stories);
     assert!(live_packets.iter().any(|packet| !packet.is_null()));
     assert!(live_packets.iter().any(serde_json::Value::is_null));
     assert_eq!(replay_packets, live_packets);
@@ -2624,7 +2702,16 @@ fn parity(item: &DigestItem) -> u64 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Offset(u64);
 
-impl SourcePosition for Offset {}
+#[obzenflow_runtime::effects::port]
+#[async_trait::async_trait]
+trait ItemFeed {
+    #[query(type = "hn_digest_fixture.items.read")]
+    async fn read(
+        &self,
+        from: &Offset,
+        ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<DigestItem, Offset>, obzenflow::queries::QueryError>;
+}
 
 #[derive(Clone, Copy, Debug)]
 struct ContinuableItems {
@@ -2641,60 +2728,37 @@ impl ContinuableItems {
     }
 }
 
-struct ContinuableItemsReader {
-    next: u64,
-    items: ContinuableItems,
-    identity: SourceInputIdentity,
-}
-
-impl SeekableSource for ContinuableItemsReader {
-    type Position = Offset;
-
-    fn input_identity(&self) -> &SourceInputIdentity {
-        &self.identity
-    }
-
-    fn beginning(&self) -> Offset {
-        Offset(0)
-    }
-
-    fn seek(&mut self, position: Offset) -> Result<(), SourceError> {
-        self.next = position.0;
-        Ok(())
-    }
-}
-
-impl PositionedFiniteReader for ContinuableItemsReader {
-    type Output = DigestItem;
-
-    fn next(&mut self) -> Result<Option<Vec<SourceRecord<DigestItem, Offset>>>, SourceError> {
-        let end = self.items.holds_after.unwrap_or(self.items.last);
-        if self.next >= end {
-            return Ok(self.items.holds_after.map(|_| Vec::new()));
+#[obzenflow::system("continuable-items")]
+#[async_trait::async_trait]
+impl ItemFeed for ContinuableItems {
+    async fn read(
+        &self,
+        from: &Offset,
+        _ctx: &obzenflow::queries::QueryContext,
+    ) -> Result<FiniteRead<DigestItem, Offset>, obzenflow::queries::QueryError> {
+        let end = self.holds_after.unwrap_or(self.last);
+        if from.0 >= end {
+            if self.holds_after.is_some() {
+                std::future::pending::<()>().await;
+            }
+            return Ok(FiniteRead::EndOfInput);
         }
-        let batch = (self.next + 1..=end)
-            .map(|value| SourceRecord {
-                value: DigestItem { value },
-                after: Offset(value),
-            })
-            .collect();
-        self.next = end;
-        Ok(Some(batch))
+        Ok(FiniteRead::Batch {
+            records: (from.0 + 1..=end)
+                .map(|value| DigestItem { value })
+                .collect(),
+            next: Offset(end),
+        })
     }
 }
 
-impl FiniteSourceConnector for ContinuableItems {
-    type Output = DigestItem;
-    type Reader = ContinuableItemsReader;
-    type Continuation = Seek<Offset>;
+struct KeyedItems(obzenflow::queries::QueryPort<dyn ItemFeed>);
 
-    fn open(&self, _: SourceReaderInitContext) -> Result<ContinuableItemsReader, SourceError> {
-        Ok(ContinuableItemsReader {
-            next: 0,
-            items: *self,
-            identity: SourceInputIdentity::new("continuable_items", &json!({ "last": self.last }))
-                .expect("the identity encodes"),
-        })
+impl TypedFiniteSourceHandler for KeyedItems {
+    type Output = DigestItem;
+
+    fn read(&self) -> SourceRead<DigestItem> {
+        SourceRead::finite(self.0.clone(), Offset(0), Ok)
     }
 }
 
@@ -2703,6 +2767,7 @@ fn build_keyed_flow(
     outputs: Arc<Mutex<Vec<DigestOut>>>,
     keyed_items: ContinuableItems,
 ) -> FlowDefinition {
+    let keyed_items = KeyedItems(obzenflow::queries::QueryPort::to(keyed_items));
     FlowDefinition::materialize(move |_| {
         let by_parity = ai::map(MapRole::default())
             .key_by(parity)
@@ -2966,7 +3031,7 @@ async fn a_map_only_provider_failure_reaches_the_error_journal() {
         .run_async(FlowDefinition::materialize({
             let journal_base = journal_base.clone();
             move |_| {
-                let items = ItemSource::one_to(2);
+                let items = items_one_to(2);
                 let tag = ai::map(MapRole::default()).chunks(1);
                 let tagged = obzenflow::stages::sinks::DiscardSink::<DigestPartial>::new();
 
@@ -3057,7 +3122,7 @@ impl AiRole<Partials<DigestItem, DigestPartial>> for OneRole {
 
 fn build_one_role_flow(journal_base: PathBuf, reduce_version: &'static str) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let items = ItemSource::one_to(3);
+        let items = items_one_to(3);
         let role = OneRole { reduce_version };
         let digest = ai::map(role).chunks(1).reduce(role).on_eof();
         let collected = perform(|output: &DigestOut| output.clone())

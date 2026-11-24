@@ -29,6 +29,7 @@
 // that benchmarks might share
 
 pub mod case;
+pub mod numbers;
 #[cfg(feature = "components")]
 pub mod support;
 

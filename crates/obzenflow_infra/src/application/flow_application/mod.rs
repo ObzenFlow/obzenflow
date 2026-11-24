@@ -22,8 +22,7 @@ use super::{
 use crate::application::config::CorsModeArg;
 use crate::application::config::{ConsoleDefaults, ResolvedStartupConfig};
 use crate::web::endpoints::event_ingestion::{
-    http_ingress, HostedIngressSource, HttpIngressAttachment, IngestionConfig, Ingress,
-    IngressDecoder, IngressHandle,
+    http_ingress, HttpIngressAttachment, IngestionConfig, Ingress, IngressDecoder, IngressHandle,
 };
 #[cfg(feature = "warp-server")]
 use crate::web::host_config::{HostConfig, HostCorsConfig, HostCorsMode};
@@ -40,6 +39,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
 use obzenflow_runtime::prelude::FlowHandle;
+use obzenflow_runtime::stages::HostedSource;
 use obzenflow_runtime::stages::LivenessSnapshots;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -310,11 +310,14 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Create and host HTTP ingress, returning its source for the flow topology.
-    ///
-    /// The builder retains the HTTP surface and wires readiness, refusal recording
-    /// and shutdown. The application only places the returned source in `flow!`.
-    pub fn http_ingress<D>(&mut self, decoder: D, config: IngestionConfig) -> HostedIngressSource<D>
+    /// `http_ingress` creates HTTP ingress and hosts it. It returns the hosted source handler
+    /// for a `source!` stage. The builder connects the ingress to the
+    /// lifecycle of the application. The source's system is `http-ingress`.
+    pub fn http_ingress<D>(
+        &mut self,
+        decoder: D,
+        config: IngestionConfig,
+    ) -> HostedSource<D::Output>
     where
         D: IngressDecoder,
     {
@@ -323,11 +326,10 @@ impl FlowApplicationBuilder {
         source
     }
 
-    /// Register ingress for an application-owned protocol and return its source.
-    ///
-    /// Clone the bundle's submission handle before passing it here. The builder
-    /// wires its lifecycle; place the returned source in `flow!`.
-    pub fn ingress<D>(&mut self, ingress: Ingress<D>) -> HostedIngressSource<D>
+    /// `ingress` registers ingress for an application-owned protocol. It returns the hosted
+    /// source handler for a `source!` stage. Before you give the bundle to
+    /// `ingress`, clone its submission handle with `Ingress::handle`.
+    pub fn ingress<D>(&mut self, ingress: Ingress<D>) -> HostedSource<D::Output>
     where
         D: IngressDecoder,
     {
@@ -954,6 +956,7 @@ impl FlowApplication {
                         // journal so they can append attempt evidence. A surface with
                         // evidence recording enabled fails startup here if it is None.
                         ingress_evidence: flow_handle.ingress_evidence(),
+                        source_phases: flow_handle.source_phases(),
                     }) {
                         Ok(wired) => application
                             .tasks

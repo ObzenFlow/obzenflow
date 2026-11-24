@@ -4,11 +4,10 @@
 
 use super::*;
 use obzenflow::ai::{AiProviderError, EmbeddingResponse};
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
-use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::SourceError;
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
 
@@ -62,31 +61,6 @@ fn ticket(id: u64, description: &str) -> Vec<TicketRaised> {
     }]
 }
 
-#[derive(Clone, Debug, Default)]
-struct TwoTicketSource {
-    step: u8,
-}
-
-impl TypedFiniteSourceHandler for TwoTicketSource {
-    type Output = TicketRaised;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let ticket = match self.step {
-            0 => TicketRaised {
-                id: 1,
-                description: "first".to_string(),
-            },
-            1 => TicketRaised {
-                id: 2,
-                description: "second".to_string(),
-            },
-            _ => return Ok(None),
-        };
-        self.step += 1;
-        Ok(Some(vec![ticket]))
-    }
-}
-
 fn control_interleaving_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
@@ -97,7 +71,16 @@ fn control_interleaving_flow(
         let embed = ai::infer(EmbedSummary::of_width(3));
         let chat_breaker = circuit_breaker().consecutive_failures(5);
         let embedding_breaker = circuit_breaker().consecutive_failures(5);
-        let input = TwoTicketSource::default();
+        let input = ValuesSource::new([
+            TicketRaised {
+                id: 1,
+                description: "first".to_string(),
+            },
+            TicketRaised {
+                id: 2,
+                description: "second".to_string(),
+            },
+        ]);
         let collected =
             perform(|output: &TicketEmbedded| output.clone()).through(collect_into(outputs));
 

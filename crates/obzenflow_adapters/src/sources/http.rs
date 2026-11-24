@@ -9,7 +9,7 @@
 //! in `obzenflow_infra`.
 
 pub use obzenflow_runtime::stages::{
-    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord,
+    HostedSource, IngressDecodeError, IngressDecoder, IngressRecord,
 };
 
 #[derive(Debug, Clone)]

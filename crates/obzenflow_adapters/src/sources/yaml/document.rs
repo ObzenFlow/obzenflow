@@ -12,17 +12,18 @@ use super::YamlSelection;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, TextPosition};
 use obzenflow_runtime::stages::source::SourceError;
 use saphyr_parser::{Event, Marker, Parser, ScalarStyle};
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct Node {
     pub(super) kind: NodeKind,
     pub(super) start: TextPosition,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(super) enum NodeKind {
     Null,
     Bool(bool),
