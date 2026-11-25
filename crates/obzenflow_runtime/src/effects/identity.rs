@@ -4,6 +4,7 @@
 
 use super::*;
 use obzenflow_core::config::LineagePolicy;
+use obzenflow_core::event::provenance::ChainEventProvenance;
 
 pub(super) fn descriptor_for_effect<E>(
     effect: &E,
@@ -195,7 +196,7 @@ where
 
 pub(crate) fn stamp_output_event(
     mut event: ChainEvent,
-    parent: &ChainEvent,
+    parent: &ChainEventProvenance,
     recorded_flow_id: impl AsRef<str>,
     stage_key: impl AsRef<str>,
     input_seq: StageInputPosition,
@@ -210,10 +211,10 @@ pub(crate) fn stamp_output_event(
         &event.descriptor(),
     );
     let deterministic = deterministic_event_time(input_seq, output_ordinal);
-    event.processing.event_time = if parent.composite_activations().is_empty() {
+    event.processing.event_time = if parent.composite_activations.is_empty() {
         deterministic
     } else {
-        parent.composite_activations().iter().fold(
+        parent.composite_activations.iter().fold(
             parent.processing.event_time.max(deterministic),
             |time, activation| time.max(activation.entered_at_ms),
         )

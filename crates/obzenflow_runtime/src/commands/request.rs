@@ -6,9 +6,7 @@ use crate::effects::{CallSafety, EffectContext, EffectError, EffectOutcomeSemant
 use async_trait::async_trait;
 use serde::Serialize;
 
-/// A request a system answers, performed by a handler with `fx.call(request)`.
-/// `#[effect]` on the port method that takes the request implements it, and
-/// refuses a method it cannot answer through. A method states its guarantee:
+/// An `#[effect]` method without a guarantee does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -24,7 +22,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// and its effect type:
+/// An `#[effect]` method without an effect type does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -40,7 +38,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// It takes its request by reference after `&self`:
+/// An `#[effect]` method that takes its request by value does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -56,8 +54,8 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// and after it, nothing, `&EffectContext`, a key optionally followed by
-/// `&EffectContext`, or a commit handle:
+/// After the request, an `#[effect]` method takes nothing, `&EffectContext`, a key, a key and
+/// `&EffectContext`, or a commit handle. Other parameters do not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -73,7 +71,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// A keyed method is exactly once:
+/// A keyed `#[effect]` method that is not `exactly_once` does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::{EffectError, IdempotencyKey, Keyed};
@@ -90,7 +88,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// and so is a committing one:
+/// An `#[effect]` method that takes a commit handle and is not `exactly_once` does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::{EffectCommitHandle, EffectError};
@@ -106,7 +104,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// A method takes a key or a commit handle, not both:
+/// An `#[effect]` method that takes a key and a commit handle does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::{EffectCommitHandle, EffectError, IdempotencyKey};
@@ -127,7 +125,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// Each request type answers one effect method:
+/// Two `#[effect]` methods that take the same request type do not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -145,7 +143,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// and each effect method records under its own effect type:
+/// Two `#[effect]` methods with the same effect type do not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -165,7 +163,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// Outside a port, no macro reads `#[effect]`:
+/// An `#[effect]` method outside a port does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -180,14 +178,14 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// A struct port is marked on its inherent `impl` block, not on the struct:
+/// `#[obzenflow::port]` on a struct does not compile:
 ///
 /// ```compile_fail
 /// #[obzenflow_runtime::effects::port]
 /// struct CallCounter;
 /// ```
 ///
-/// nor on a system's `impl` of its port:
+/// `#[obzenflow::port]` on the `impl` of a port trait for a system does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -205,7 +203,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// nor on a generic block:
+/// `#[obzenflow::port]` on a generic `impl` block does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -225,7 +223,7 @@ use serde::Serialize;
 /// }
 /// ```
 ///
-/// and on one block per struct:
+/// `#[obzenflow::port]` on two `impl` blocks of one struct does not compile:
 ///
 /// ```compile_fail,E0119
 /// # use obzenflow_runtime::effects::EffectError;
@@ -265,18 +263,12 @@ pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'stat
     const EFFECT_TYPE: &'static str;
     const SCHEMA_VERSION: u32 = 1;
 
-    /// How a repeated call behaves: `Idempotent`, `RequiresKey`, `AtLeastOnce`,
-    /// `AtMostOnce` or `Transactional`.
     type Safety: CallSafety + KeyRule<Self>;
 
-    /// The port a system implements to answer this request.
     type Port: ?Sized + Send + Sync + 'static;
 
-    /// What a successful call answers: facts, or a reply under `records = reply`.
     type Outcome: Clone + Send + Sync + 'static;
 
-    /// `DomainFacts` when the answer is facts the stage writes, `RecordedReply`
-    /// when it is a reply the runtime records and returns.
     type Records: EffectOutcomeSemantics<Self::Outcome>;
 
     async fn call(

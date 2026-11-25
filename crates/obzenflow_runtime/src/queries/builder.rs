@@ -17,7 +17,7 @@ const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 type KeptRecord<Record> = fn(Record) -> Result<Record, SourceError>;
 
 /// `query` starts the line that builds a pull source from the request of its first
-/// read. `.through(port)` ends it with the source handler.
+/// read. `.through(port)` ends the line and returns the source handler.
 ///
 /// ```
 /// # use obzenflow_runtime::queries::{query, FiniteRead, QueryContext, QueryError};
@@ -73,8 +73,9 @@ where
     }
 }
 
-/// The query line before `.through(port)`. It holds the request of the first read,
-/// the function that decodes each record and the deadline of each supplier call.
+/// `PendingQuery` is the query line before `.through(port)`. It holds the request of
+/// the first read, the function that decodes each record and the deadline of each
+/// supplier call.
 pub struct PendingQuery<R, D> {
     first: R,
     decode: D,
@@ -82,9 +83,9 @@ pub struct PendingQuery<R, D> {
 }
 
 impl<R: QueryRequest, D> PendingQuery<R, D> {
-    /// `decode` sets the function from one recorded record to the stage's output. A
-    /// line whose records already are the output leaves it out. A function that does
-    /// not take the query's record does not compile:
+    /// `decode` sets the function from one recorded record to the output of the stage.
+    /// A line whose records are the output does not call `decode`. A function that does
+    /// not take the record of the query does not compile:
     ///
     /// ```compile_fail,E0631
     /// # use obzenflow_runtime::queries::{query, FiniteRead, QueryContext, QueryError};
@@ -117,8 +118,8 @@ impl<R: QueryRequest, D> PendingQuery<R, D> {
     }
 
     /// `poll_timeout` sets the deadline of each supplier call. A line without it keeps
-    /// a deadline of 30 seconds. After the supplier answers, the answer is recorded
-    /// even if the deadline passes.
+    /// a deadline of 30 seconds. After the supplier answers, the stage records the
+    /// answer even if the deadline passes.
     pub fn poll_timeout(mut self, deadline: Duration) -> Self {
         self.poll_timeout = deadline;
         self
@@ -181,7 +182,7 @@ impl<R: QueryRequest, D> PendingQuery<R, D> {
     }
 }
 
-/// The source handler that a query line builds. `source!` takes it.
+/// `Query` is the source handler that a query line builds. `source!` takes it.
 pub struct Query<Output> {
     read: Box<dyn Fn() -> SourceRead<Output, Finite> + Send + Sync>,
     poll_timeout: Duration,

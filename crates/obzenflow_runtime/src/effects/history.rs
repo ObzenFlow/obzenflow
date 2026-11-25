@@ -281,9 +281,6 @@ pub(super) fn member_cursor(member: &obzenflow_core::source::MemberRecorded) -> 
     )
 }
 
-/// `is_query_attempt` tells whether a row of `group_id` holds the record of a failed
-/// query attempt that its read repeated. The read's recovery progress group holds it,
-/// before the read's one terminal record.
 pub(crate) fn is_query_attempt(group_id: Option<&str>, payload: &ChainPayload) -> bool {
     group_id.is_some_and(|group| group.starts_with(EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX))
         && matches!(
@@ -383,7 +380,7 @@ impl EffectHistory {
                 .is_some_and(|prior| prior.payload != row.payload || prior.id != row.id)
             {
                 return Err(EffectError::ReplayArchive(format!(
-                    "member {cursor:?} differs between archives"
+                    "the member at {cursor:?} differs between archives"
                 )));
             }
             history.members.insert(cursor.clone(), row.clone());
@@ -408,9 +405,6 @@ impl EffectHistory {
             && self.abandonments.is_empty())
     }
 
-    /// `holds_read` tells whether the archive holds a source's read at `cursor`: a
-    /// query's terminal record, a failed attempt that the read repeated, or an
-    /// admitted member.
     pub(crate) fn holds_read(&self, cursor: &EffectCursor) -> bool {
         self.index.contains_key(cursor)
             || self.members.contains_key(cursor)
@@ -419,8 +413,6 @@ impl EffectHistory {
                 .contains_key(effect_recovery_progress_group_id(cursor, 1).as_str())
     }
 
-    /// `holds_query_attempt` tells whether a read at `cursor` committed a failed attempt
-    /// that its source repeats, which a resume reproduces before it reads again.
     fn holds_query_attempt(&self, cursor: &EffectCursor) -> bool {
         let group = effect_recovery_progress_group_id(cursor, 1);
         self.grouped_events.get(group.as_str()).is_some_and(|rows| {
@@ -561,7 +553,7 @@ impl EffectHistory {
                         .is_some()
                 {
                     return Err(EffectError::ReplayArchive(format!(
-                        "invalid or duplicate member at stage {stage_key}"
+                        "the archive holds an invalid or duplicate member at stage {stage_key}"
                     )));
                 }
             }
@@ -1254,9 +1246,6 @@ pub(crate) async fn current_cursor_history(
     Ok(history)
 }
 
-/// `retried_read_failure` tells whether a later run repeated the failed read that ends
-/// `older`. The later run keeps that failure as an attempt in the read's progress
-/// group, so the failure is no longer the read's terminal record.
 fn retried_read_failure(older: &EffectCursorHistory, newer: &EffectCursorHistory) -> bool {
     let [record] = older.records.as_slice() else {
         return false;

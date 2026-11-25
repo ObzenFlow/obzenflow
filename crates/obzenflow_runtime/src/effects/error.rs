@@ -195,8 +195,8 @@ pub enum DriftBinding {
     Model,
     /// A named binding the stage's handler holds.
     Named,
-    /// No recorded binding, as a call through a system's port has, so a replay
-    /// compares none.
+    /// `Portless` means that the effect records no binding, for example a call
+    /// through the port of a system. A replay compares no binding for it.
     Portless,
 }
 

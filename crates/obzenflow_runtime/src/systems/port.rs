@@ -7,13 +7,11 @@ use crate::effects::{EffectPortResolutionError, LogicalEffectBindingName};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// A port `P` with the system that answers it chosen. A source asks its queries
-/// through one, and a command holds one per port type, in a `#[port]` field or
-/// through `through`, and performs requests through `fx` without ever seeing the
-/// system.
+/// `Port<P>` binds the port `P` to the system that answers it. A source or a command works
+/// through the port and does not see the system.
 ///
-/// A port trait is `Send` and `Sync`, so a system that isn't thread-safe is
-/// refused where it implements the port:
+/// A port trait is `Send` and `Sync`. An `impl` of a port trait for a system that
+/// is not thread-safe does not compile:
 ///
 /// ```compile_fail,E0277
 /// #[obzenflow_runtime::effects::port]
@@ -27,9 +25,8 @@ pub struct Port<P: ?Sized + Send + Sync + 'static> {
 }
 
 impl<P: ?Sized + Send + Sync + 'static> Port<P> {
-    /// A port answered by a system that is already built, by value or in an
-    /// `Arc`. The port's trait comes from the `#[obzenflow::port]` trait the
-    /// system implements, so the port needs no annotation.
+    /// `Port::to` binds a port to a system that is already built, by value or in an `Arc`.
+    /// The port type is the `#[obzenflow::port]` trait that the system implements.
     ///
     /// ```
     /// # use obzenflow_runtime::systems::Port;
@@ -43,7 +40,7 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// # let ports: [Port<dyn RiskEnginePort>; 2] = [outage, shared];
     /// ```
     ///
-    /// A port trait left unmarked does not compile:
+    /// A port trait without `#[obzenflow::port]` does not compile:
     ///
     /// ```compile_fail,E0277
     /// # use obzenflow_runtime::systems::Port;
@@ -56,8 +53,7 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// # }
     /// ```
     ///
-    /// A struct whose inherent `impl` block carries `#[obzenflow::port]` serves
-    /// as its own port:
+    /// A struct whose inherent `impl` block has `#[obzenflow::port]` is its own port:
     ///
     /// ```
     /// # use obzenflow_runtime::effects::EffectError;
@@ -91,9 +87,8 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         ))
     }
 
-    /// A port whose system is built only when a live call needs it, at most
-    /// once per run. The port's trait comes from the `#[obzenflow::port]` trait
-    /// the system implements.
+    /// `Port::deferred` binds a port to a system that `resolver` builds at the first live call
+    /// of a run. The port type is the `#[obzenflow::port]` trait that the system implements.
     ///
     /// ```
     /// # use obzenflow_runtime::effects::EffectPortResolutionError;
@@ -139,26 +134,19 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         }
     }
 
-    /// `binding_name` returns the name that the run's registry keys this port's
-    /// registrations by. It comes from the port's build-local coordinate, so two
-    /// ports never share it and no journal records it.
     pub(crate) fn binding_name(&self) -> LogicalEffectBindingName {
         LogicalEffectBindingName::new(format!("port.{}", self.port.ordinal()))
             .expect("a port coordinate forms a binding name")
     }
 }
 
-/// The type a system is looked up under. The port attribute implements
-/// [`ServesPort`] for it.
 #[doc(hidden)]
 pub struct PortImpl<T>(PhantomData<fn() -> Arc<T>>);
 
-/// Turns a system `T` into the trait object `P` of the port it serves,
-/// generated for each trait marked `#[obzenflow::port]`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "this system implements no trait marked `#[obzenflow::port]`",
-    label = "the system this port is built from",
+    label = "the system that this port uses",
     note = "mark the port trait it implements, or the `impl` block of a struct that serves as its own port, with `#[obzenflow::port]`"
 )]
 pub trait ServesPort<P: ?Sized, T> {

@@ -4,10 +4,9 @@
 
 //! Compiler-host macros for ObzenFlow contracts.
 //!
-//! Provides the sorting behind `outcome![...]`, which `obzenflow_core`
-//! re-exports for its `outcome!` macro, and `#[command]` and `#[port]`, which
-//! the runtime's effects module re-exports next to its command and port
-//! contracts.
+//! This crate provides the sorting behind `outcome![...]`, which `obzenflow_core`
+//! re-exports for its `outcome!` macro. It also provides `#[command]` and
+//! `#[port]`, which the runtime's effects module re-exports.
 
 mod command;
 mod effects_path;
@@ -88,17 +87,17 @@ pub fn runtime_command(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// After its request, an effect method takes nothing, `&EffectContext`,
 /// `key: &IdempotencyKey` optionally followed by `&EffectContext`, or a
-/// commit handle. In a struct's `impl` block, methods without `#[effect]` or
-/// `#[query]` are ordinary methods; on a port trait, every method is a port
+/// commit handle. In a struct's `impl` block, a method without `#[effect]` or
+/// `#[query]` is an ordinary method. On a port trait, every method is a port
 /// method.
 ///
 /// Each method marked `#[query(type = "...")]` declares one query, which a source
 /// asks with `query(first).through(port)`. It takes its request by reference after
 /// `&self`, then `&QueryContext`, and returns `Result<Answer, QueryError>`. A port
-/// declares effects or queries, not both.
+/// cannot declare both effects and queries.
 ///
 /// A struct that serves as its own port is also its own system. A system in an
-/// `Arc` serves its ports too, so one system can serve several ports.
+/// `Arc` also serves its ports, so one system can serve more than one port.
 ///
 /// The facade export resolves contracts through the facade's effects module.
 /// A renamed dependency can supply its module with `effects = <path>`.

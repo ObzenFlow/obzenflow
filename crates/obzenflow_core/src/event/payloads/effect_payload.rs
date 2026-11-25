@@ -800,8 +800,8 @@ pub struct EffectRecord {
     pub request: Option<Value>,
 }
 
-/// `CallKind` is the kind of call that an effect record answers: a command that a
-/// stage performs, or a query that a source asks.
+/// `CallKind` shows if an effect record answers a command that a stage performs or a
+/// query that a source asks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallKind {
@@ -820,10 +820,10 @@ fn present_request<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<
     Value::deserialize(deserializer).map(Some)
 }
 
-/// The row name of a query that its system answered.
+/// `QUERY_ANSWERED_EVENT_TYPE` is the event type of a query that its system answered.
 pub const QUERY_ANSWERED_EVENT_TYPE: &str = "query.answered";
 
-/// The row name of a query that failed.
+/// `QUERY_FAILED_EVENT_TYPE` is the event type of a query that failed.
 pub const QUERY_FAILED_EVENT_TYPE: &str = "query.failed";
 
 /// Replay identity for an effect-produced fact.
@@ -954,8 +954,8 @@ pub fn effect_recovery_progress_group_id(cursor: &EffectCursor, wait: u32) -> Ef
 pub const EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX: &str = "effect-recovery-progress:v1:";
 
 impl EffectRecord {
-    /// `event_type` returns the row name. A record that holds the request of a query
-    /// is `query.answered` or `query.failed`.
+    /// `event_type` returns the event type of the record. The event type of a query
+    /// record is `query.answered` or `query.failed`.
     pub fn event_type(&self) -> &'static str {
         match (self.call, &self.outcome) {
             (CallKind::Command, _) => self.observation.event_type(),
@@ -964,7 +964,7 @@ impl EffectRecord {
         }
     }
 
-    /// `is_query` returns whether this record answers a query.
+    /// `is_query` returns true if this record answers a query.
     pub fn is_query(&self) -> bool {
         self.call == CallKind::Query
     }

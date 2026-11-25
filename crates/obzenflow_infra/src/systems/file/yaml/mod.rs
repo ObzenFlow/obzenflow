@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! This module holds the finite YAML source.
+//! The `yaml` module holds the finite YAML source.
 //!
 //! A [`YamlSource`] handler reads through a file system port. Each read
 //! takes at most `max_bytes` from the file, parses the document, resolves the
@@ -34,38 +34,40 @@ use std::path::{Path, PathBuf};
 const DEFAULT_BATCH_SIZE: usize = 64;
 const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
 
-/// Which part of the document holds the records.
+/// `YamlSelection` names the part of the document that holds the records.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum YamlSelection {
-    /// Pass the complete root value to the decoder once.
+    /// `Document` selects the root value as the only record.
     Document,
-    /// Require a root sequence and decode each element.
+    /// `Sequence` selects each element of the root value, which must be a sequence.
     Sequence,
-    /// Resolve an RFC 6901 JSON Pointer, require a sequence there and decode
-    /// each element.
+    /// `SequenceAt` selects each element of the value at an RFC 6901 JSON Pointer.
+    /// That value must be a sequence.
     SequenceAt(String),
 }
 
-/// Application-owned mapping from one selected YAML record to one fact.
+/// `YamlDecoder` maps one selected YAML record to one fact.
+/// An application passes its decoder to [`YamlSource::builder`].
 pub trait YamlDecoder: Clone + Send + Sync + 'static {
     type Output: OneFactOutcome + Send + Sync + 'static;
 
     fn decode(&self, record: YamlRecord<'_>) -> Result<Self::Output, YamlDecodeError>;
 }
 
-/// One selected record. Exposes neither parser internals nor file access.
+/// `YamlRecord` is one selected record. It gives no access to the parser or to the file.
 pub struct YamlRecord<'a> {
     node: &'a Node,
     index: u64,
 }
 
 impl YamlRecord<'_> {
-    /// Zero-based index of this record within the selection.
+    /// `index` returns the zero-based index of this record in the selection.
     pub fn index(&self) -> u64 {
         self.index
     }
 
-    /// Deserialize this record with serde. Errors name schema fields only.
+    /// `deserialize` decodes this record with serde. An error names only the fields
+    /// of the schema.
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, YamlDecodeError> {
         T::deserialize(de::NodeDeserializer::new(self.node))
             .map_err(|error| YamlDecodeError(error.into_diagnostic()))
@@ -99,7 +101,7 @@ impl YamlDecodeError {
         Self(SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord))
     }
 
-    /// Nests the path under a schema-declared parent field.
+    /// `within_field` puts the schema field `name` at the start of the field path of this error.
     pub fn within_field(self, name: &'static str) -> Self {
         Self(self.0.within_field(name))
     }
@@ -166,13 +168,17 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
         self
     }
 
-    /// Validates local configuration only; the file is not touched.
+    /// `build` checks only the configuration of the source. It does not open the file.
     pub fn build(self) -> anyhow::Result<YamlSource<D>> {
         let port = match (self.path, self.port) {
             (Some(path), None) => YamlFileSystem::at(path).port(),
             (None, Some(port)) => port,
-            (None, None) => anyhow::bail!("yaml source: path required"),
-            (Some(_), Some(_)) => anyhow::bail!("a YAML source takes a path or a port"),
+            (None, None) => anyhow::bail!("yaml source: the source must have a path or a port"),
+            (Some(_), Some(_)) => {
+                anyhow::bail!(
+                    "yaml source: the source takes a path or a port, and this builder has both"
+                )
+            }
         };
         anyhow::ensure!(
             self.batch_size > 0,
@@ -198,8 +204,8 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
     }
 }
 
-/// `YamlSource` reads the records of a YAML file through a cold file system port.
-/// Its decoder maps each recorded record to the output.
+/// `YamlSource` reads the records of a YAML file through a cold port of the file
+/// system. Its decoder maps each recorded record to the output.
 #[derive(Clone)]
 pub struct YamlSource<D> {
     port: Port<dyn YamlFile>,
@@ -243,7 +249,8 @@ impl<D: YamlDecoder> TypedFiniteSourceHandler for YamlSource<D> {
         SourceRead::pages(
             self.port.clone(),
             YamlRead {
-                limit: std::num::NonZeroUsize::new(self.batch_size).expect("validated batch size"),
+                limit: std::num::NonZeroUsize::new(self.batch_size)
+                    .expect("build checks that the batch size is positive"),
                 selection: self.selection.clone(),
                 max_bytes: self.max_bytes,
                 after: None,
@@ -255,8 +262,10 @@ impl<D: YamlDecoder> TypedFiniteSourceHandler for YamlSource<D> {
                         (),
                         records,
                         YamlRead {
+                            limit: from.limit,
+                            selection: from.selection.clone(),
+                            max_bytes: from.max_bytes,
                             after: Some(next),
-                            ..from.clone()
                         },
                     )),
                 })
@@ -280,7 +289,7 @@ fn decode_line<D: YamlDecoder>(decoder: &D, line: YamlLine) -> Result<D::Output,
 }
 
 /// `YamlRead` is the request of one YAML read. A replay and a resume compare it
-/// without `limit`, so a build may read pages of another size.
+/// without `limit`, so a build can read pages of another size.
 #[derive(Clone, Debug, Serialize)]
 pub struct YamlRead {
     #[serde(skip_serializing)]
@@ -335,8 +344,6 @@ pub(crate) fn read_yaml_page(path: &Path, from: YamlRead) -> Result<YamlPage, Qu
     }
 }
 
-/// `FileYamlRead` is the argument of one YAML read. It holds the read settings and,
-/// after the first read, the next record index and the file version.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FileYamlRead {
     batch: usize,
@@ -431,9 +438,6 @@ fn read_yaml(path: &Path, from: FileYamlRead) -> FiniteRead<YamlLine, FileYamlRe
     }
 }
 
-/// Reads at most `max_bytes + 1`, so oversize input never reaches the parser.
-/// The file version is taken before the read and verified after it
-/// (FLOWIP-134i B10).
 fn read_bounded(path: &Path, max_bytes: usize) -> Result<(Vec<u8>, FileVersion), SourceError> {
     let unavailable = || SourceError::Transport(SourceDiagnosticReason::InputUnavailable.into());
     let limit = u64::try_from(max_bytes)

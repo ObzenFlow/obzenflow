@@ -432,10 +432,6 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
         "the infinite source authors its watermark and guarantee between prefix and live tail"
     );
 
-    // The fan-in authors its own single watermark, counting the EOF-exhausted
-    // finite input as vacuously crossed (F17), and goes live. Its journal
-    // also carries the forwarded finite EOF, so the boundary is found and
-    // measured over data rows, not raw indices.
     let merge_rows =
         mixed_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "merge").await);
     let boundary = merge_rows

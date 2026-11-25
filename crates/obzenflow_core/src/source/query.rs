@@ -8,7 +8,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
-/// A supplier's serializable position within its input.
+/// `QueryBookmark` is a serializable position in the input of a supplier.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct QueryBookmark(Value);
@@ -33,7 +33,7 @@ impl QueryBookmark {
     }
 }
 
-/// The diagnostic and retry delay recorded for a failed query.
+/// `QueryError` holds the recorded diagnostic and retry delay of a failed query.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, thiserror::Error)]
 #[error("query failed: {}", failure.diagnostic)]
 pub struct QueryError {

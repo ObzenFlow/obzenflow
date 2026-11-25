@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The portable data of sources: the queries a source asks, the members a sender
-//! pushes, and how the interrupted input of a source continues on resume.
+//! This module holds the portable data of sources, such as the queries that a source
+//! asks and the members that a sender pushes.
 
 mod input;
 mod query;
@@ -44,7 +44,6 @@ impl SourceContinuation {
     }
 }
 
-/// Sorted-key JSON, arrays in order: the canonical form hashed by digests.
 pub(crate) fn canonicalize(value: Value) -> Value {
     match value {
         Value::Object(map) => {

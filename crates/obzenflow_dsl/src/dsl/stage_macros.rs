@@ -3520,9 +3520,9 @@ macro_rules! sink {
 /// ```
 ///
 /// The handler slot of a source stage takes a source handler or
-/// `placeholder!()`. A pull source is the line `query(first).through(port)`,
-/// and the framework reads through that port. Hosted ingress registration
-/// returns a hosted source handler.
+/// `placeholder!()`. A pull source is the line `query(first).through(port)`.
+/// The framework reads through that port. Hosted ingress registration returns
+/// a hosted source handler.
 ///
 /// ```
 /// # use obzenflow_runtime::events::{source_channel, HostedSubmission};

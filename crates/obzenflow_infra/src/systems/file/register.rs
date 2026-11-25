@@ -2,14 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! CSV file sink.
+//! The `register` module holds the CSV file sink.
 //!
-//! A [`CsvProjection`] maps each input to one serializable row, and the sink
-//! appends it to a CSV file that one run history writes. A new history starts
-//! the file empty. Each append records the file's length and SHA-256 after the
-//! row, so a resumed run checks the file against its history before its first
-//! write, and moves a tail that no record holds into an inert file beside it,
-//! named `<file>.<length>.damage`.
+//! A [`CsvProjection`] maps each input to one serializable row. The sink appends
+//! each row to a CSV file that one run history writes. A new run history empties
+//! the file first. Each append records the length and the SHA-256 of the file after
+//! the row. Before its first write, a resumed run compares the file with its history.
+//! The run moves the bytes that no record holds into the file `<file>.<length>.damage`.
 
 use async_trait::async_trait;
 use csv::{ReaderBuilder, WriterBuilder};
@@ -32,37 +31,37 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// User-owned mapping from one domain input to one serializable CSV row.
-///
-/// The projection value owns its input contract through an associated type,
-/// so applications pass it to [`CsvSink::builder`] without repeating the event
-/// type.
+/// `CsvProjection` maps one domain input to one serializable CSV row.
+/// An application passes its projection to [`CsvSink::builder`].
 pub trait CsvProjection: Clone + Send + Sync + 'static {
-    /// Domain input accepted by this projection.
+    /// `Input` is the domain type that this projection takes.
     type Input: TypedPayload + Send + Sync + 'static;
-    /// Serializable object used for column selection and row encoding.
+    /// `Row` must serialize as a struct or a map. The sink fills the cell of each column
+    /// from the field of `Row` with the same name.
     type Row: Serialize;
 
-    /// Consume one domain input to build its CSV row.
+    /// `project` maps one domain input to its CSV row.
     fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError>;
 }
 
-/// One row a CSV sink appends: the projected row's fields, by name.
+/// `CsvRow` is one row that a CSV sink appends. It holds the fields of the
+/// projected row by name.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CsvRow {
     fields: Arc<Map<String, Value>>,
 }
 
-/// What one append records: the file's length and SHA-256 after the row.
+/// `Appended` is the reply of one append. It holds the length and the SHA-256 of
+/// the file after the row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Appended {
     pub length: u64,
     pub sha256: String,
 }
 
-/// The port a CSV sink appends through. A resume truncates what no record
-/// holds before its first write, so each row lands once and the method is
-/// `exactly_once`.
+/// `CsvRegisterPort` is the port that a CSV sink appends through. Its `append` is
+/// `exactly_once`. Before the first write of a resumed run, the file register removes
+/// the bytes that no record holds.
 #[port]
 #[async_trait]
 pub trait CsvRegisterPort {
@@ -147,7 +146,7 @@ impl SinkGroupSystem<CsvRow> for CsvRegister {
                         message: reason.clone(),
                     });
                 }
-                RegisterState::Closed => unreachable!("a closed register is opened above"),
+                RegisterState::Closed => unreachable!("the code above opens a closed register"),
             };
             match register.append_group(&layout, &rows) {
                 Ok(appended) => Ok(appended),
@@ -304,7 +303,7 @@ fn set_aside_tail(file: &mut File, path: &Path, length: u64) -> Result<(), Effec
         .and_then(|()| file.sync_all())
         .map_err(|error| io_failure(path, error))?;
     tracing::warn!(
-        "moved the bytes after offset {length} of {}, which this run's history never recorded, into {}",
+        "the CSV register moved the bytes after offset {length} of {} into {}. The history of this run has no record of these bytes.",
         path.display(),
         damage.display()
     );
@@ -359,7 +358,7 @@ fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
 
 fn poisoned_lock() -> EffectError {
     EffectError::DestinationChanged {
-        message: "CSV register lock poisoned".to_string(),
+        message: "the lock of the CSV register is poisoned".to_string(),
     }
 }
 
@@ -371,15 +370,15 @@ fn no_longer_matches(path: &Path, recorded: &Appended) -> EffectError {
     let short = recorded.sha256.get(..4).unwrap_or(&recorded.sha256);
     EffectError::DestinationChanged {
         message: format!(
-            "{} no longer holds what this run's history recorded (length {}, SHA-256 {short}…); \
-         restore it as the history recorded it, then resume again",
+            "{} no longer holds the bytes that the history of this run recorded (length {}, \
+             SHA-256 {short}…). Restore the file to these bytes, then resume the run again.",
             path.display(),
             recorded.length
         ),
     }
 }
 
-/// Builder for a CSV projection whose input contract is owned by `P`.
+/// `CsvSinkBuilder` builds a [`CsvSink`] for the projection `P`.
 #[derive(Clone)]
 pub struct CsvSinkBuilder<P> {
     projection: P,
@@ -414,7 +413,8 @@ impl<P> CsvSinkBuilder<P> {
         }
     }
 
-    /// Set how many rows the register writes and syncs together by default.
+    /// `batch_size` sets the default number of rows that the register writes and syncs
+    /// together. It returns an error for zero.
     pub fn batch_size(mut self, size: usize) -> Result<Self, anyhow::Error> {
         self.batch.size = Some(
             std::num::NonZeroUsize::new(size)
@@ -423,7 +423,8 @@ impl<P> CsvSinkBuilder<P> {
         Ok(self)
     }
 
-    /// Set how long an open group may wait for more rows. Zero takes only queued rows.
+    /// `batch_max_wait` sets the longest time that an open group waits for more rows.
+    /// If the wait is zero, a group takes only the rows in the queue.
     pub fn batch_max_wait(mut self, wait: std::time::Duration) -> Self {
         self.batch.max_wait = Some(wait);
         self
@@ -466,18 +467,20 @@ impl<P> CsvSinkBuilder<P> {
     where
         P: CsvProjection,
     {
-        let path = self.path.ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let path = self
+            .path
+            .ok_or_else(|| anyhow::anyhow!("a CSV sink must have a path"))?;
         if let Some(columns) = self.columns.as_ref() {
             if columns.is_empty() {
-                anyhow::bail!("columns must be non-empty when provided");
+                anyhow::bail!("columns must not be empty");
             }
         }
         if let Some(headers) = self.headers.as_ref() {
             let Some(columns) = self.columns.as_ref() else {
-                anyhow::bail!("headers requires columns (header names must map to columns)");
+                anyhow::bail!("headers must have columns, with one header for each column");
             };
             if headers.len() != columns.len() {
-                anyhow::bail!("headers length must match columns length");
+                anyhow::bail!("the number of headers must be equal to the number of columns");
             }
         }
         let layout = CsvLayout {
@@ -494,9 +497,9 @@ impl<P> CsvSinkBuilder<P> {
     }
 }
 
-/// A sink that appends each input, projected by `P`, as one CSV row.
-/// The built-in file register writes and syncs up to 64 queued rows together
-/// by default, with zero maximum wait.
+/// `CsvSink` appends each input as one CSV row, which the projection `P` makes. By
+/// default, the file register writes and syncs up to 64 queued rows together and does
+/// not wait for more rows.
 #[derive(Clone)]
 pub struct CsvSink<P> {
     projection: P,
@@ -535,8 +538,8 @@ where
 }
 
 impl<P> CsvSink<P> {
-    /// Append through another system that answers `CsvRegisterPort`. A replacement
-    /// uses the framework's one-request default unless the builder sets a size.
+    /// `through` appends through another system that answers [`CsvRegisterPort`].
+    /// If the builder sets no batch size, that system receives one row in each request.
     pub fn through(mut self, port: Port<dyn CsvRegisterPort>) -> Self {
         self.destination = CsvDestination::Port(port);
         self
@@ -573,11 +576,12 @@ impl<P: CsvProjection> SinkRole<P::Input> for CsvSink<P> {
             Ok(Value::Object(fields)) => Ok(CsvRow {
                 fields: Arc::new(fields),
             }),
-            Ok(other) => Err(HandlerError::Validation(format!(
-                "CsvSink requires object rows, got {other}"
-            ))),
+            Ok(_) => Err(HandlerError::Validation(
+                "CsvSink must have a projected row that serializes as a struct or a map"
+                    .to_string(),
+            )),
             Err(error) => Err(HandlerError::Validation(format!(
-                "CsvSink failed to serialize projected row: {error}"
+                "CsvSink cannot serialize the projected row: {error}"
             ))),
         }
     }

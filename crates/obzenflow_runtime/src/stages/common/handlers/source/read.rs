@@ -275,11 +275,11 @@ where
         effects: &mut EffectsCore,
         deadline: Option<Duration>,
     ) -> Result<ReadEnd, EffectError> {
-        let Some(request) = self.next.clone() else {
+        let Some(request) = self.next.as_ref() else {
             return Ok(ReadEnd::EndOfInput);
         };
         let answer = effects.query(request.clone(), deadline).await?;
-        match (self.page)(&request, answer)? {
+        match (self.page)(request, answer)? {
             Some((metadata, records, next)) => {
                 self.next = Some(next);
                 self.metadata = Some(metadata);

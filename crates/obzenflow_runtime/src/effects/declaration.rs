@@ -307,8 +307,6 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
         None
     }
 
-    /// `recorded_request` returns the request that the record of a query holds. The
-    /// record of any other effect holds none.
     #[doc(hidden)]
     fn recorded_request(&self) -> Option<Value> {
         None

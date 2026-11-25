@@ -12,8 +12,7 @@ use crate::systems::Port;
 use obzenflow_core::event::schema::{EffectOutcome, EmptySet, WithMember};
 use std::marker::PhantomData;
 
-/// The answer a port method gives, its request's outcome or an `EffectError`.
-/// `#[obzenflow::port]` requires it of every method on a port trait.
+/// A port method returns `Result<Outcome, EffectError>`:
 ///
 /// ```
 /// # use obzenflow_core::TypedPayload;
@@ -27,7 +26,7 @@ use std::marker::PhantomData;
 /// }
 /// ```
 ///
-/// A method that returns a system's own answer does not compile:
+/// A port method that returns a system's own answer does not compile:
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_runtime::effects::EffectError;
@@ -39,7 +38,7 @@ use std::marker::PhantomData;
 /// }
 /// ```
 ///
-/// Nor does one that fails with its own error:
+/// A port method that fails with its own error type does not compile:
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_core::TypedPayload;
@@ -54,7 +53,7 @@ use std::marker::PhantomData;
 /// }
 /// ```
 ///
-/// Nor one that answers with a bare fact:
+/// A port method that returns a fact without `Result` does not compile:
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_core::TypedPayload;
@@ -70,7 +69,7 @@ use std::marker::PhantomData;
 #[diagnostic::on_unimplemented(
     message = "a port method answers with its request's outcome and fails with `EffectError`",
     label = "`{Self}` is not `Result<Outcome, EffectError>`",
-    note = "keep a system's own answer behind the port and turn it into the outcome there"
+    note = "change the answer of the system to the outcome in the `impl` of the port"
 )]
 pub trait PortAnswer {
     type Outcome;
@@ -80,12 +79,11 @@ impl<O: EffectOutcome> PortAnswer for Result<O, EffectError> {
     type Outcome = O;
 }
 
-/// The answer of a port method marked `records = reply`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "a port method marked `records = reply` answers with a reply and fails with `EffectError`",
     label = "`{Self}` is not `Result<Reply, EffectError>`",
-    note = "a reply is a plain serializable value the runtime records and returns, such as `()`"
+    note = "a reply is a serializable value that the runtime records and returns, for example `()`"
 )]
 pub trait PortReply {
     type Reply;
@@ -105,13 +103,13 @@ mod sealed {
     pub trait StagePort {}
 }
 
-/// A value a `#[port]` field holds: a [`Port`], or a typed binding of a
-/// hand-written named effect.
+/// `StagePort` is a value that a `#[port]` field holds. It is a [`Port`] or the
+/// [`EffectBinding`] of a named effect.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a port",
-    label = "a `#[port]` field holds a port the command works through",
-    note = "hold a `Port` value, or the typed binding of a hand-written named effect; \
-            AI effects are performed by `ai!`, whose model comes from [ai.*] configuration"
+    label = "a `#[port]` field holds a port that the command works through",
+    note = "hold a `Port` value or the typed binding of a hand-written named effect. \
+            `ai!` performs AI effects with the model from the [ai.*] configuration"
 )]
 pub trait StagePort: sealed::StagePort {}
 
@@ -120,12 +118,11 @@ impl<P: ?Sized + Send + Sync + 'static> StagePort for Port<P> {}
 impl<E: NamedEffect> sealed::StagePort for EffectBinding<E> {}
 impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 
-/// A command: an effectful handler that declares the ports it works through.
-/// `#[obzenflow::command(through = P)]` on a unit struct implements it, as does
-/// `#[obzenflow::command]` on a struct that marks each field holding a port
-/// `#[port]`; a command that works through no port has no such field. The
-/// command may perform every effect a port declares, and a field written
-/// `#[port(RequestA, RequestB)]` allows only the requests it lists.
+/// A `Command` is an effectful handler that can perform each effect that its ports declare. A
+/// `#[port(RequestA, RequestB)]` field allows only the requests that it lists.
+///
+/// `#[obzenflow::command(through = P)]` implements it on a unit struct.
+/// `#[obzenflow::command]` implements it on a struct with a `#[port]` field for each port:
 ///
 /// ```
 /// # #[obzenflow_runtime::effects::port]
@@ -171,7 +168,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// }
 /// ```
 ///
-/// An effectful handler without it does not compile at its impl:
+/// An effectful handler that is not a command does not compile at its `impl`:
 ///
 /// ```compile_fail,E0277
 /// # use async_trait::async_trait;
@@ -209,7 +206,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// struct Scorer;
 /// ```
 ///
-/// Nor does a `through` struct with a field of its own:
+/// A `through` struct with a field of its own does not compile:
 ///
 /// ```compile_fail
 /// # #[obzenflow_runtime::effects::port]
@@ -221,7 +218,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// }
 /// ```
 ///
-/// Nor two ports of one type:
+/// A command with two ports of one type does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::systems::Port;
@@ -237,7 +234,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// }
 /// ```
 ///
-/// Nor a `#[port]` field that holds no port:
+/// A `#[port]` field that holds no port does not compile:
 ///
 /// ```compile_fail,E0277
 /// #[obzenflow_runtime::effects::command]
@@ -248,7 +245,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// }
 /// ```
 ///
-/// A field lists only requests its own port declares:
+/// A `#[port(...)]` field that lists a request of another port does not compile:
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_runtime::effects::EffectError;
@@ -278,7 +275,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// }
 /// ```
 ///
-/// lists each request once:
+/// A `#[port(...)]` field that lists a request two times does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -301,7 +298,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// }
 /// ```
 ///
-/// and lists at least one, since a bare `#[port]` allows the whole port:
+/// A `#[port()]` field with no request does not compile:
 ///
 /// ```compile_fail
 /// # use obzenflow_runtime::effects::EffectError;
@@ -324,14 +321,14 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// }
 /// ```
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is not a command; add `#[obzenflow::command(through = …)]` above it, or `#[obzenflow::command]` with a `#[port]` field for each port it works through; a `perform` becomes one with `.through(port)`",
+    message = "`{Self}` is not a command. Add `#[obzenflow::command(through = …)]` above it, or `#[obzenflow::command]` with a `#[port]` field for each port that it works through. A `perform` becomes a command with `.through(port)`",
     label = "an effectful stage's handler is a command"
 )]
 pub trait Command {
     #[doc(hidden)]
     type Ports: PortList;
 
-    /// The effects this command may perform, which its ports allow.
+    /// `AllowedEffects` is the set of effects that the ports of this command allow.
     type AllowedEffects: EffectSet;
 
     #[doc(hidden)]
@@ -341,26 +338,21 @@ pub trait Command {
 #[doc(hidden)]
 pub fn assert_command<H: Command>(_: &H) {}
 
-/// The effects a port declares, in method order. `#[obzenflow::port]`
-/// implements it.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` is not a port; mark the trait, or the `impl` block of a struct that serves as its own port, with `#[obzenflow::port]`",
+    message = "`{Self}` is not a port. Put `#[obzenflow::port]` on the trait, or on the `impl` block of a struct that is its own port",
     label = "a command works through ports, which declare its effects"
 )]
 pub trait PortEffects {
     type Members;
 }
 
-/// A port held whole, which allows every effect it declares.
 #[doc(hidden)]
 pub struct WholePort<S>(PhantomData<fn() -> S>);
 
-/// A `#[port(...)]` field, which allows only the requests it lists.
 #[doc(hidden)]
 pub struct NarrowedPort<S, Requests>(PhantomData<fn() -> (S, Requests)>);
 
-/// The effects one held port allows.
 #[doc(hidden)]
 pub trait FieldEffects {
     type Members;
@@ -378,7 +370,6 @@ impl<S, Requests: RequestList> FieldEffects for NarrowedPort<S, Requests> {
     type Members = Requests::Members;
 }
 
-/// The effects a command's ports allow, in the order it holds them.
 #[doc(hidden)]
 pub trait FieldsEffects {
     type Members;
@@ -410,7 +401,6 @@ impl<Head, Tail: JoinMembers<Rest>, Rest> JoinMembers<Rest> for WithMember<Head,
     type Joined = WithMember<Head, Tail::Joined>;
 }
 
-/// Proof that a `#[port(...)]` field's port declares a request it lists.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{R}` is not an effect of this `#[port]` field's port",
@@ -431,7 +421,7 @@ where
 #[diagnostic::on_unimplemented(
     message = "an effectful handler cannot perform an AI effect",
     label = "this handler's allowed effects include an AI effect",
-    note = "AI effects are performed by `ai!`; the model comes from [ai.*] configuration"
+    note = "`ai!` performs AI effects with the model from the [ai.*] configuration"
 )]
 pub trait HandlerPerformableEffects {}
 
@@ -461,7 +451,6 @@ where
 {
 }
 
-/// A failure to register the system behind a command's port.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageEffectsError(EffectBindingBuildError);
@@ -481,7 +470,6 @@ impl From<EffectBindingBuildError> for StageEffectsError {
     }
 }
 
-/// A port whose system answers the named effect `E`.
 #[doc(hidden)]
 pub trait AnswersEffect<E: Effect> {
     #[doc(hidden)]
@@ -516,16 +504,12 @@ impl<E: NamedEffect> AnswersEffect<E> for EffectBinding<E> {
     }
 }
 
-/// Index witness: the port that answers is the head of the list.
 #[doc(hidden)]
 pub struct PortFound;
 
-/// Index witness: the port that answers follows the head.
 #[doc(hidden)]
 pub struct PortAfter<Index>(PhantomData<fn() -> Index>);
 
-/// Proof that exactly one of the command's ports answers the effect named
-/// `N`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "this command performs `{N}`, which needs a port",
@@ -552,11 +536,9 @@ impl<N: EffectName, S, Rest: FindPort<N, Index>, Index> FindPort<N, PortAfter<In
     }
 }
 
-/// A port that answers at least one of the command's effects.
 #[doc(hidden)]
 pub struct Used<S>(PhantomData<fn() -> S>);
 
-/// A port that has not yet answered any of the command's effects.
 #[doc(hidden)]
 pub struct Unused<S>(PhantomData<fn() -> S>);
 

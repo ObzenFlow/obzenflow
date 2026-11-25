@@ -374,7 +374,7 @@ async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_
 }
 
 #[test]
-fn distinct_systems_same_effect_collect() {
+fn distinct_systems_same_effect_accepted() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counting: Port<dyn LedgerPort> = Port::to(counting_ledger(&calls));
     let refusing: Port<dyn LedgerPort> = Port::to(RefusingLedger);
@@ -393,7 +393,10 @@ fn port_type_inferred_from_system() {
     });
     let shared = Port::to(counting_ledger(&calls));
     let deferred = Port::deferred(|| Ok(RefusingLedger));
-    let _ports: [&Port<dyn LedgerPort>; 3] = [&by_value, &shared, &deferred];
+    let ports: [&Port<dyn LedgerPort>; 3] = [&by_value, &shared, &deferred];
+    let declarations = ports.map(declaration_for::<Call<LedgerWrite>, _>);
+    EffectPortRegistry::collect_from_declarations(declarations.iter())
+        .expect("each inferred port declares the ledger write");
 }
 
 struct KeyedLedger {

@@ -2,11 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Serde over one snapshot record, with typed and safe errors (FLOWIP-084n B6).
-//!
-//! The shared [`RecordDeError`] classifies by serde hook and redacts
-//! input-controlled map keys; this module adds YAML node positions.
-
 use super::document::{Node, NodeKind};
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_runtime::stages::source::RecordDeError;
@@ -14,7 +9,6 @@ use serde::de::value::StrDeserializer;
 use serde::de::{self, DeserializeSeed, VariantAccess, Visitor};
 
 trait AtNode {
-    /// The innermost node that failed supplies the position.
     fn at(self, node: &Node) -> Self;
 }
 
@@ -176,7 +170,6 @@ impl<'de, 'a> de::MapAccess<'de> for NodeMapAccess<'a> {
             return Ok(None);
         };
         self.pending = Some((key, value));
-        // A key error, such as an unknown field, already names its subject.
         seed.deserialize(StrDeserializer::<RecordDeError>::new(key))
             .map(Some)
             .map_err(|error| error.at(value))
@@ -391,8 +384,6 @@ mod tests {
             _inner: Inner,
         }
 
-        // Flattening buffers entries outside this deserializer, so no path
-        // survives; the reason and record position still do.
         let error = decode::<Outer>("count: 300\n").unwrap_err();
         assert_eq!(error.reason(), SourceDiagnosticReason::InvalidValue);
         assert!(error.location().field_path().is_empty());

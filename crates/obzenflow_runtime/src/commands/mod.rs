@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Commands: the requests that an effectful stage or a sink performs through a
-//! port. A stage writes `perform(request).through(port)`, or holds its ports in a
-//! command, and the effect journal records each call.
+//! Commands are the requests that an effectful stage or a sink performs through a
+//! port. A stage writes `perform(request).through(port)` or holds its ports in a
+//! `Command`. The effect journal records each call.
 
 mod command;
 mod perform;

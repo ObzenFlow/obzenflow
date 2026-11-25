@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Events: the input that a sender starts, such as an HTTP POST or a value on a
-//! source channel. An [`IngressDecoder`] turns each submitted body into the
-//! source's output, and [`source_channel`] gives in-process code a sender. The
+//! Events are the input that a sender pushes to a source, for example an HTTP POST or a
+//! value on a source channel. An [`IngressDecoder`] turns each submitted body into the
+//! source's output. [`source_channel`] gives in-process code a sender. The
 //! source records each admitted member before the fact that it produces.
 //!
 //! ```rust

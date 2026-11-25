@@ -10,8 +10,8 @@ use serde::de::DeserializeOwned;
 use std::fmt;
 use tokio::sync::oneshot;
 
-/// Error returned by an [`IngressDecoder`]. It carries a typed diagnostic only,
-/// so a refusal journals a reason and field, never submitted values.
+/// `IngressDecodeError` is the error that an [`IngressDecoder`] returns. It holds a typed
+/// diagnostic and never a submitted value.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct IngressDecodeError(SourceDiagnostic);
@@ -29,7 +29,7 @@ impl IngressDecodeError {
         Self(SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord))
     }
 
-    /// Nests the path under a schema-declared parent field.
+    /// `within_field` puts the parent field `name` at the start of the field path.
     pub fn within_field(self, name: &'static str) -> Self {
         Self(self.0.within_field(name))
     }
@@ -43,18 +43,18 @@ impl IngressDecodeError {
     }
 }
 
-/// One submitted ingress body. Exposes neither raw text nor request metadata.
+/// `IngressRecord` is one submitted ingress body, without its raw text or request metadata.
 pub struct IngressRecord<'a> {
     data: &'a serde_json::Value,
 }
 
 impl<'a> IngressRecord<'a> {
-    /// Wraps a body, for example to test a decoder directly.
+    /// `IngressRecord::new` makes a record from one ingress body.
     pub fn new(data: &'a serde_json::Value) -> Self {
         Self { data }
     }
 
-    /// Deserialize this body with serde. Errors name schema fields only.
+    /// `deserialize` decodes the body with serde. Its errors name only schema fields.
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, IngressDecodeError> {
         deserialize_json(self.data).map_err(IngressDecodeError)
     }
@@ -66,14 +66,8 @@ impl fmt::Debug for IngressRecord<'_> {
     }
 }
 
-/// User-owned mapping from one submitted ingress body to one domain output.
-///
-/// The decoder value owns the source's `Output` contract. The default method
-/// deserializes the record with serde; applications override it for an
-/// external representation or a record-local rule, rejecting with a typed
-/// [`IngressDecodeError`]. Hosted admission runs it exactly once per
-/// submission, before anything is queued. Typed `IngressHandle` submissions
-/// already have the `Output` shape and bypass it.
+/// `IngressDecoder` maps one submitted ingress body to one `Output` value, by default with serde.
+/// Hosted admission runs the decoder one time for each body, before it queues the value.
 pub trait IngressDecoder: Clone + Send + Sync + 'static {
     type Output: TypedPayload + Send + Sync + 'static;
 
@@ -82,9 +76,8 @@ pub trait IngressDecoder: Clone + Send + Sync + 'static {
     }
 }
 
-/// Prove that `value`'s journal form decodes as its own type, returning the
-/// decoded copy so the queued value is exactly what replay reconstructs. A
-/// failure is `UnrepresentableValue` at the failing field.
+/// `prove_journal_form` returns the copy of `value` that replay reconstructs from its journal
+/// form. An error has the reason `UnrepresentableValue` and names the field that failed.
 pub fn prove_journal_form<T: TypedPayload>(value: T) -> Result<T, IngressDecodeError> {
     let unrepresentable = || {
         IngressDecodeError(SourceDiagnostic::new(
@@ -104,7 +97,7 @@ pub fn prove_journal_form<T: TypedPayload>(value: T) -> Result<T, IngressDecodeE
         })
 }
 
-/// Resolves one submitted member's commit evidence.
+/// `IngressReceiptSender` sends the commit receipt of one submitted member.
 pub type IngressReceiptSender = oneshot::Sender<IngressReceipt>;
 
 /// `HostedSubmission` is one admitted member that waits for the stage to read it.

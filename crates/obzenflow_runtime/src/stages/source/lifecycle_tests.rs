@@ -499,7 +499,6 @@ where
     journals
 }
 
-/// A query's record, with the attempt that its row names.
 struct QueryRow {
     record: EffectRecord,
     attempt: Option<EffectAttemptOrdinal>,
@@ -1268,7 +1267,6 @@ where
     handle
 }
 
-/// A run whose `query.answered` append holds for five seconds past a one-second deadline.
 async fn held_answer_run(answered: &Answered) -> (Arc<TestJournal<ChainEvent>>, StageId) {
     let (source, ports, declarations) =
         admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(answered_line(answered));
@@ -1319,7 +1317,6 @@ async fn held_append_past_deadline_commits_once() {
     assert_eq!(facts(&rows), 1, "the held answer advances to its record");
 }
 
-/// The archive of one recorded source journal.
 struct RecordedArchive {
     journal: Arc<TestJournal<ChainEvent>>,
     flow_id: String,

@@ -27,8 +27,6 @@ impl<H> AdmittedSource<H> {
         self.continuation
     }
 
-    /// `effect_declarations` returns the declaration of the source's query, which
-    /// registers its port with the flow. A source of events declares none.
     pub fn effect_declarations(&self) -> Result<Vec<EffectDeclaration>, StageEffectsError> {
         self.declaration
             .clone()
@@ -45,7 +43,7 @@ impl<H: super::UnifiedAsyncInfiniteSourceHandler> AdmittedSource<H> {
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a source handler",
-    note = "`source!` takes a source handler: a framework builder's handler, a `query(…).through(port)` line, or the `HostedSource<_>` from ingress registration"
+    note = "`source!` takes the handler of a framework builder, a `query(…).through(port)` line, or the `HostedSource<_>` from ingress registration"
 )]
 pub trait AdmitSource<Family: ?Sized>: sealed::Admitted<Family> + Send + Sync + 'static {
     type Output: OneFactOutcome + Send + Sync + 'static;

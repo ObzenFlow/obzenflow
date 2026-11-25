@@ -1000,9 +1000,6 @@ where
         )
         .map_err(|e| FlowBuildError::ResourcePreflightFailed(format!("{e}")))?;
 
-        // Resume requires a durable current run. An ephemeral continuation is
-        // unreachable, and its live effects would run again on the next resume
-        // of the original archive.
         if matches!(
             __substrate,
             obzenflow_core::journal::factory::RunSubstrateState::Ephemeral

@@ -5,6 +5,7 @@
 use super::ChainEventFactory;
 use crate::config::LineagePolicy;
 use crate::event::provenance::causality_context::{CausalInput, CausalityContext};
+use crate::event::provenance::ChainEventProvenance;
 use crate::event::types::WriterId;
 use crate::event::{ChainEvent, ChainPayload};
 use serde_json::Value;
@@ -48,7 +49,7 @@ impl ChainEventFactory {
     /// the caller; the data path performs no global config read.
     pub(crate) fn derived_event(
         writer_id: WriterId,
-        parent: &ChainEvent,
+        parent: &ChainEventProvenance,
         content: ChainPayload,
         event_type: impl Into<String>,
         payload_schema_version: NonZeroU32,
@@ -57,7 +58,7 @@ impl ChainEventFactory {
         let mut event = Self::create_event(writer_id, content, event_type, payload_schema_version);
 
         event.correlation = parent.correlation.clone();
-        event.composite_activations = parent.composite_activations().to_vec();
+        event.composite_activations = parent.composite_activations.clone();
         event.replay_context = parent.replay_context.clone();
         event.ingress_context = parent.ingress_context.clone();
         event.cycle_depth = parent.cycle_depth;

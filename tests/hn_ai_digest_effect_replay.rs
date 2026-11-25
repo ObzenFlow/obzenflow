@@ -2258,7 +2258,7 @@ async fn hn_replay_reconstructs_digest() {
     let live_reduce = stage_envelopes(&live_archive, "digest__reduce").await;
     let live_digest_summary = stage_envelopes(&live_archive, "digest_summary").await;
     let live_sink_calls = stable_sink_calls(&live_digest_summary);
-    assert!(live_sink_calls.iter().all(|call| call.schema_version == 3));
+    assert!(live_sink_calls.iter().all(|call| call.schema_version == 4));
     assert!(
         !live_sink_calls.is_empty(),
         "the production digest summary must settle at least one sink call"

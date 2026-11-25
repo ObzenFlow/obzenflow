@@ -24,29 +24,32 @@
 //! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` |
 //! | HTTP API | `query(ListDetailRead::first(n)).through(port)` |
 //!
-//! An application writes a pull source as one line, `query(first).through(port)`,
-//! from the request of its first read and the port of the system that answers it.
-//! The `#[query]` method of the port answers with a
-//! [`FiniteRead`](crate::queries::FiniteRead). Each answer
-//! gives the records and the request of the next read, or ends the input.
-//! `.decode(f)` maps each recorded record to the output, and `.poll_timeout(d)`
-//! sets the deadline of each call to the system, 30 seconds when the line sets
-//! none. An answer that arrives is recorded, also when the deadline passes.
+//! An application writes a pull source as one line, `query(first).through(port)`.
+//! `first` is the request of the first read, and `port` is the port of the system
+//! that answers it. The `#[query]` method of the port answers with a
+//! [`FiniteRead`](crate::queries::FiniteRead). Each answer gives the records and the
+//! request of the next read, or ends the input.
+//!
+//! `.decode(f)` maps each recorded record to the output. `.poll_timeout(d)` sets the
+//! deadline of each call to the system. The default deadline is 30 seconds. The
+//! journal records each answer that arrives, also when the deadline passes.
 //!
 //! A source handler with state of its own implements [`TypedFiniteSourceHandler`]
-//! or [`TypedAsyncFiniteSourceHandler`], and its `read` returns a [`SourceRead`]
-//! that [`SourceRead::finite`] builds. A source of pushed events is a
-//! [`ChannelSource`] or the hosted HTTP ingress.
+//! or [`TypedAsyncFiniteSourceHandler`]. Its `read` returns a [`SourceRead`] that
+//! [`SourceRead::finite`] builds. A source of pushed events is a [`ChannelSource`]
+//! or the hosted HTTP ingress.
 //!
 //! ## In-process sources
 //!
 //! A [`ValuesSource`] reads values that this process holds, up to 1,000 values in
 //! each read. [`ValuesSource::chunk_size`] sets a smaller number. Only this
 //! process holds the values, so ObzenFlow refuses to resume a run that did not
-//! read all of them. A [`ChannelSource`] receives the values that a sender puts on
-//! a channel from [`source_channel`](crate::events::source_channel), and the
-//! stage records each value before it publishes it. A closed channel is a source
-//! error. Use topology fan-out for more than one consumer.
+//! read all of them.
+//!
+//! A [`ChannelSource`] receives the values that a sender puts on a channel from
+//! [`source_channel`](crate::events::source_channel). The stage records each value
+//! before it publishes it. A closed channel is a source error. Use topology fan-out
+//! for more than one consumer.
 //! Values that are still in the channel when a run stops are lost, so a resumed
 //! run continues its live reads with [`ReattachGuarantee::AtMostOnce`].
 //!
@@ -102,10 +105,10 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
-//! [`CsvSourceBuilder`] does no file I/O when it builds a [`CsvSource`]. The file
-//! system reads the file only for a live read, so a strict replay
-//! works when the original CSV is not available. [`CsvRowDecoder`] gives
-//! [`CsvRow`] output that keeps each field as a string.
+//! [`CsvSourceBuilder`] does no file I/O when it builds a [`CsvSource`].
+//! [`FileSystem`](crate::systems::file::FileSystem) reads the file only for a live
+//! read, so a strict replay works when the original CSV is not available.
+//! [`CsvRowDecoder`] gives [`CsvRow`] output that keeps each field as a string.
 //!
 //! ## YAML sources
 //!
@@ -165,7 +168,7 @@
 //! application for an [`IngressDecoder`](crate::events::IngressDecoder) that
 //! names the event each body becomes. The default `decode` deserializes the
 //! record with serde. Override it for a record-local rule. A decode error
-//! refuses that submission, and the journalled refusal names the field.
+//! refuses that submission. The journalled refusal names the field.
 //!
 //! Register the decoder through `FlowApplication::builder().http_ingress(decoder,
 //! config)`, or through `.ingress` for another transport. Each call returns the
@@ -179,13 +182,13 @@
 //!
 //! ## HTTP sources
 //!
-//! An HTTP API that lists IDs and then reads each item answers the framework's
+//! An HTTP API that lists IDs and gives each item by its ID answers the framework's
 //! [`ListDetail`] port. `HttpApi::json(base)` configures the
-//! [`HttpApi`](crate::systems::http::HttpApi) system with a base URL, and
-//! `.list_detail(list, detail)` names the list path and the path of each item.
-//! The line `query(ListDetailRead::first(n)).decode(f).through(port)` reads at
-//! most `n` items. The port resolves the system only for a live read. The
-//! default HTTP client is available only with the `http` feature.
+//! [`HttpApi`](crate::systems::http::HttpApi) system with a base URL.
+//! `.list_detail(list, detail)` names the list path and the path of each item. The
+//! line `query(ListDetailRead::first(n)).decode(f).through(port)` reads at most `n`
+//! items. The port resolves the system only for a live read. The default HTTP client
+//! is available only with the `http` feature.
 //!
 //! Another system answers [`ListDetail`] with its one `read` method. The method
 //! asks the request for its [`step`](ListDetailRead::step) and answers with
@@ -214,7 +217,7 @@ pub use obzenflow_infra::systems::file::yaml::{
     YamlSelection, YamlSource, YamlSourceBuilder,
 };
 
-/// The hosted source handler for hosted ingress.
+/// `HostedSource` is the source handler for hosted ingress.
 pub use obzenflow_adapters::sources::HostedSource;
 
 /// HTTP primitives re-exported from `obzenflow_core` for building requests.

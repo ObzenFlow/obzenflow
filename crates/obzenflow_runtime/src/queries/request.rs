@@ -23,13 +23,12 @@ pub enum FiniteRead<Record, Next> {
     EndOfInput,
 }
 
-/// A request that a port's `#[query]` method takes. The port attribute implements
-/// it for the request type of each `#[query]` method.
 #[doc(hidden)]
 #[async_trait]
 #[diagnostic::on_unimplemented(
-    message = "`query` takes the first request of a port's `#[query]` method; `{Self}` is the request of no `#[query]` method",
-    label = "this value is not a query request"
+    message = "`{Self}` is not the request of a `#[query]` method",
+    label = "this value is not a query request",
+    note = "`query` takes the first request for a `#[query]` method of the port"
 )]
 pub trait QueryRequest: Serialize + Clone + Send + Sync + 'static {
     const QUERY_TYPE: &'static str;
@@ -68,9 +67,6 @@ impl From<QueryError> for EffectError {
     }
 }
 
-/// The effect that asks one query through the port of its source. The effect
-/// call path records it as an idempotent call with a recorded reply, named
-/// `query.answered` or `query.failed`.
 pub(crate) struct QueryCall<R: QueryRequest> {
     request: R,
     deadline: Option<Duration>,

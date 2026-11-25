@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Replay-safe external operations: the requests systems answer, the ports a
-//! command works through, and the systems the flow builder chooses for them.
+//! This module holds the types of replay-safe external operations, the effect context, its
+//! errors and the `#[command]` and `#[port]` attributes. Ports and systems are in
+//! [`systems`](crate::systems), and `perform` is in [`commands`](crate::commands).
 
 pub use obzenflow_runtime::effects::__facade::{command, port};
 #[doc(hidden)]

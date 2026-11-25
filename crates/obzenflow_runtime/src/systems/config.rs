@@ -5,9 +5,9 @@
 use super::port::{Port, PortImpl, ServesPort};
 use crate::effects::EffectPortResolutionError;
 
-/// The configuration of a system, such as a file and its format or an
-/// application's fixture. It builds its system from the same value at the first
-/// live call, so a replay builds no system.
+/// `SystemConfig` is the configuration of a system, for example a file and its
+/// format, or an application's fixture. Its port builds the system at the first
+/// live call. A replay builds no system.
 ///
 /// ```
 /// # use obzenflow_runtime::effects::EffectPortResolutionError;

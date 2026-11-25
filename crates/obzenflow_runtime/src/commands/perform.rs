@@ -13,9 +13,8 @@ use obzenflow_core::event::schema::{EffectOutcome, EmptySet, FactsOf, WithMember
 use obzenflow_core::TypedPayload;
 use std::marker::PhantomData;
 
-/// The command for a stage that performs one request per input. `f` builds the
-/// request from the stage's input, [`PerformRequest::through`] supplies the port
-/// the request names, and the request's outcome facts are the stage's output.
+/// `perform` starts a command that performs one request for each input and emits the outcome
+/// facts of that request. [`PerformRequest::through`] gives the command its port.
 ///
 /// ```
 /// # use obzenflow_core::event::schema::TypedPayload;
@@ -58,9 +57,6 @@ use std::marker::PhantomData;
 ///
 /// let charge = perform(same_invoice);
 /// ```
-///
-/// A command that does more than this, emits a fact of its own or holds state is
-/// a struct under `#[obzenflow::command]`.
 pub fn perform<F, In, R>(request: F) -> PerformRequest<F, In, R>
 where
     F: for<'input> Fn(&'input In) -> R,
@@ -72,16 +68,16 @@ where
     }
 }
 
-/// What `perform` builds and what `through` turns into a command. It is not a
-/// command until it has its port.
+/// `PerformRequest` is the value that `perform` returns. It is not a [`Command`] until
+/// [`PerformRequest::through`] gives it a port.
 pub struct PerformRequest<F, In, R> {
     request: F,
     performed: PhantomData<fn(In) -> R>,
 }
 
 impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
-    /// `through` gives the request its port and returns the command. Only the port of a
-    /// `#[obzenflow::port]` trait answers a request:
+    /// `through` gives the request its port and returns the command. Only a port that
+    /// `#[obzenflow::port]` marks answers a request:
     ///
     /// ```
     /// # use obzenflow_runtime::commands::{perform, CallRequest};
@@ -113,8 +109,7 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     /// let read = perform(|_: &Ticket| Read).through(Port::to(Desk));
     /// ```
     ///
-    /// The request of a `#[query]` method is not a command's request, so a `perform`
-    /// line that builds one does not compile:
+    /// A `perform` line that builds the request of a `#[query]` method does not compile:
     ///
     /// ```compile_fail,E0277
     /// # use obzenflow_runtime::commands::perform;
@@ -160,10 +155,9 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     }
 }
 
-/// A request a function given to `perform` builds.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`perform` takes a function from the stage's input to a request, one a port's `#[effect]` method takes; this function returns `{Self}`, which no port method takes",
+    message = "`perform` takes a function that builds the request of an `#[effect]` method from the input of the stage. This function returns `{Self}`, and no port method takes `{Self}`",
     label = "this function does not build a request"
 )]
 pub trait PerformedRequest: CallRequest {}
@@ -171,8 +165,8 @@ pub trait PerformedRequest: CallRequest {}
 #[diagnostic::do_not_recommend]
 impl<R: CallRequest> PerformedRequest for R {}
 
-/// The command `perform(f).through(port)` builds: one input, one request, and
-/// the request's outcome facts as the stage's output.
+/// `Perform` is the command that `perform(f).through(port)` returns. It performs one
+/// request for each input and emits the outcome facts of that request.
 pub struct Perform<F, In, R: CallRequest> {
     request: F,
     port: Port<R::Port>,

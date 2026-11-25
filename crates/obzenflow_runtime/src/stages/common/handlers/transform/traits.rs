@@ -183,8 +183,8 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 ///
 /// A single output fact may be named directly. For a multi-fact arrow, list
 /// the facts with [`obzenflow_core::outcome!`]. The handler is a
-/// [`Command`](crate::commands::Command), which allows every effect the ports it
-/// works through declare.
+/// [`Command`](crate::commands::Command) and allows every effect that its ports
+/// declare.
 ///
 /// ```ignore
 /// # use async_trait::async_trait;

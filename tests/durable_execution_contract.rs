@@ -1119,6 +1119,25 @@ async fn until(run: &Path, name: &str, holds: impl Fn(&Archive) -> bool) {
     }
 }
 
+async fn kill_at_cut(
+    name: &str,
+    fresh: impl Fn() -> Scenario,
+    holds: impl Fn(&Archive) -> bool,
+) -> (Scenario, PathBuf) {
+    for _ in 0..3 {
+        let scenario = fresh();
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, &holds).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        if holds(&Archive::read(&killed).await) {
+            return (scenario, killed);
+        }
+    }
+    panic!("{name}: three runs passed the cut before the kill landed");
+}
+
 // ---------------------------------------------------------------------------
 // Sender: the test parent's HTTP client. Its ledger survives the server.
 
@@ -3230,14 +3249,8 @@ mod then_live {
     }
 
     async fn row(name: &str, graph: Graph, cut: Cut, generations: (u64, u64)) {
-        let scenario = fresh(name, graph);
-        let child = Child::spawn(&scenario, Vec::new(), None);
-        let killed = child.run().await;
-        until(&killed, name, |archive| cut.holds(archive)).await;
-        child.signal(Signal::Kill);
-        assert!(!child.exit().await.success(), "{name}: the kill lands");
-        let at_kill = Archive::read(&killed).await;
-        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+        let (scenario, killed) =
+            kill_at_cut(name, || fresh(name, graph), |archive| cut.holds(archive)).await;
 
         let child = Child::spawn(&scenario, resume(&killed), None);
         let resumed = child.run().await;
@@ -3383,17 +3396,12 @@ mod then_live {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_join_whose_stream_is_all_batch_resumes_to_a_drained_join() {
         let name = "then_live_batch_stream";
-        let scenario = fresh(name, Graph::ThenLiveBatchStream);
-        let child = Child::spawn(&scenario, Vec::new(), None);
-        let killed = child.run().await;
-        until(&killed, name, |archive| Cut::Enriching.holds(archive)).await;
-        child.signal(Signal::Kill);
-        assert!(!child.exit().await.success(), "{name}: the kill lands");
-        let at_kill = Archive::read(&killed).await;
-        assert!(
-            Cut::Enriching.holds(&at_kill),
-            "{name}: the kill landed while enriching"
-        );
+        let (scenario, killed) = kill_at_cut(
+            name,
+            || fresh(name, Graph::ThenLiveBatchStream),
+            |archive| Cut::Enriching.holds(archive),
+        )
+        .await;
 
         let child = Child::spawn(&scenario, resume(&killed), None);
         let resumed = child.run().await;
@@ -3700,14 +3708,8 @@ mod concat {
     }
 
     async fn row(name: &str, cut: Cut) {
-        let scenario = fresh(name);
-        let child = Child::spawn(&scenario, Vec::new(), None);
-        let killed = child.run().await;
-        until(&killed, name, |archive| cut.holds(archive)).await;
-        child.signal(Signal::Kill);
-        assert!(!child.exit().await.success(), "{name}: the kill lands");
-        let at_kill = Archive::read(&killed).await;
-        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+        let (scenario, killed) =
+            kill_at_cut(name, || fresh(name), |archive| cut.holds(archive)).await;
 
         let resumed = Child::spawn(&scenario, resume(&killed), None)
             .completed()
@@ -3975,14 +3977,12 @@ mod as_of {
     }
 
     async fn row(name: &str, cut: Cut, between: Between) {
-        let scenario = fresh(name, cut.graph());
-        let child = Child::spawn(&scenario, Vec::new(), None);
-        let killed = child.run().await;
-        until(&killed, name, |archive| cut.holds(archive)).await;
-        child.signal(Signal::Kill);
-        assert!(!child.exit().await.success(), "{name}: the kill lands");
-        let at_kill = Archive::read(&killed).await;
-        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+        let (scenario, killed) = kill_at_cut(
+            name,
+            || fresh(name, cut.graph()),
+            |archive| cut.holds(archive),
+        )
+        .await;
         if let Between::CorrectOneRate = between {
             std::fs::write(rates_input(&scenario), CORRECTED).expect("correct one rate");
         }

@@ -2,12 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! One immutable YAML snapshot built from parser events (FLOWIP-084n B6).
-//!
-//! Aliases, anchors, tags, merge keys, non-string keys, duplicate keys and
-//! additional documents are rejected from the event stream, before any alias
-//! could expand. Plain scalars resolve by the YAML 1.2.2 core schema.
-
 use super::YamlSelection;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, TextPosition};
 use obzenflow_runtime::stages::source::SourceError;
@@ -34,7 +28,6 @@ pub(super) enum NodeKind {
     Map(Vec<(String, Node)>),
 }
 
-/// saphyr reports one-based lines and zero-based character columns.
 fn position(marker: &Marker) -> TextPosition {
     TextPosition {
         line: NonZeroU32::new(u32::try_from(marker.line()).unwrap_or(u32::MAX))
@@ -50,12 +43,10 @@ fn positioned(reason: SourceDiagnosticReason, at: TextPosition) -> SourceDiagnos
     SourceDiagnostic::new(reason).position(at.line, at.column)
 }
 
-/// The whole input could not be decoded as one supported document.
 fn undecodable(reason: SourceDiagnosticReason, at: TextPosition) -> SourceError {
     SourceError::Deserialization(positioned(reason, at))
 }
 
-/// Parses one bounded UTF-8 document into an owned snapshot.
 pub(super) fn parse(bytes: &[u8]) -> Result<Node, SourceError> {
     let text = std::str::from_utf8(bytes).map_err(|error| {
         let prefix = String::from_utf8_lossy(&bytes[..error.valid_up_to()]);
@@ -66,7 +57,6 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Node, SourceError> {
     let mut tree = TreeBuilder::default();
     let mut documents = 0usize;
     for item in Parser::new_from_str(text) {
-        // The scan error's text is parser detail; only its position survives.
         let (event, span) = item.map_err(|error| {
             undecodable(
                 SourceDiagnosticReason::MalformedInput,
@@ -119,7 +109,6 @@ fn end_of(prefix: &str) -> TextPosition {
     }
 }
 
-/// Anchors (nonzero anchor id), explicit tags and aliases are outside the subset.
 fn is_decorated(event: &Event<'_>) -> bool {
     match event {
         Event::Alias(_) => true,
@@ -217,7 +206,6 @@ impl TreeBuilder {
         })
     }
 
-    /// A collection in key position is a complex key, outside the subset.
     fn open(&mut self, frame: Frame, at: TextPosition) -> Result<(), SourceError> {
         if self.at_key_position() {
             return Err(undecodable(
@@ -265,7 +253,6 @@ impl TreeBuilder {
         }
     }
 
-    /// An empty stream holds no document, which differs from an empty sequence.
     fn finish(self) -> Result<Node, SourceError> {
         self.root.ok_or_else(|| {
             SourceError::Deserialization(SourceDiagnosticReason::UnexpectedShape.into())
@@ -273,7 +260,6 @@ impl TreeBuilder {
     }
 }
 
-/// Mapping keys must be strings; a plain `<<` would be a merge key.
 fn resolve_key(value: &str, style: ScalarStyle) -> Option<String> {
     if !matches!(style, ScalarStyle::Plain) {
         return Some(value.to_owned());
@@ -284,8 +270,6 @@ fn resolve_key(value: &str, style: ScalarStyle) -> Option<String> {
     }
 }
 
-/// YAML 1.2.2 core schema (§10.3.2). Quoted and block scalars stay strings;
-/// timestamps are not part of the core schema, so dates stay strings too.
 fn resolve_scalar(value: &str, style: ScalarStyle) -> NodeKind {
     if !matches!(style, ScalarStyle::Plain) {
         return NodeKind::Str(value.to_owned());
@@ -315,7 +299,6 @@ fn resolve_number(value: &str) -> Option<NodeKind> {
         return radix(digits, 16);
     }
     if is_core_int(value) {
-        // Out-of-range integers stay text, so a numeric field rejects the record.
         return Some(
             value
                 .parse::<i128>()
@@ -339,12 +322,10 @@ fn digits(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// `[-+]? [0-9]+`
 fn is_core_int(value: &str) -> bool {
     digits(unsigned(value))
 }
 
-/// `[-+]? ( \. [0-9]+ | [0-9]+ ( \. [0-9]* )? ) ( [eE] [-+]? [0-9]+ )?`
 fn is_core_float(value: &str) -> bool {
     let body = unsigned(value);
     let (mantissa, exponent) = match body.find(['e', 'E']) {
@@ -359,7 +340,6 @@ fn is_core_float(value: &str) -> bool {
     mantissa_ok && exponent.is_none_or(|exponent| digits(unsigned(exponent)))
 }
 
-/// Parses an RFC 6901 pointer into unescaped reference tokens.
 pub(super) fn pointer_tokens(pointer: &str) -> Option<Vec<String>> {
     if pointer.is_empty() {
         return Some(Vec::new());
@@ -390,7 +370,6 @@ fn array_index(token: &str) -> Option<usize> {
     canonical.then(|| token.parse().ok()).flatten()
 }
 
-/// Resolves the configured selection into the records it names.
 pub(super) fn select(root: Node, selection: &YamlSelection) -> Result<Vec<Node>, SourceError> {
     let not_found = |at: TextPosition| {
         SourceError::Validation(positioned(SourceDiagnosticReason::SelectionNotFound, at))
@@ -464,7 +443,6 @@ mod tests {
             ("1.5e3", NodeKind::Float(1500.0)),
             (".5", NodeKind::Float(0.5)),
             ("-.inf", NodeKind::Float(f64::NEG_INFINITY)),
-            // YAML 1.1 booleans, dates and partial numbers stay strings.
             ("yes", NodeKind::Str("yes".into())),
             ("NO", NodeKind::Str("NO".into())),
             ("2026-10-09", NodeKind::Str("2026-10-09".into())),
@@ -501,7 +479,6 @@ mod tests {
                 "{text}"
             );
         }
-        // A quoted `<<` and a quoted numeric key are ordinary strings.
         assert!(parse(b"\"<<\": 1\n'1': 2\n").is_ok());
     }
 
@@ -548,7 +525,6 @@ mod tests {
         let NodeKind::Seq(items) = &inner[0].1.kind else {
             panic!("sequence");
         };
-        // `é` is one column although it is two bytes.
         assert_eq!(
             (
                 items[1].start.line.get(),

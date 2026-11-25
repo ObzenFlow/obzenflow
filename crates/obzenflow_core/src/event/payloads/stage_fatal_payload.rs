@@ -91,7 +91,7 @@ pub struct Departure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DepartureAction {
-    /// A member that a source admitted, at its read number.
+    /// `MemberRecorded` is a member that a source admitted, at its read number.
     MemberRecorded { number: u64 },
     /// An effect call, at its input and ordinal.
     Effect {

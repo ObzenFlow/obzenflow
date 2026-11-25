@@ -40,8 +40,6 @@ fn is_query_failure(error: &EffectError) -> bool {
     )
 }
 
-/// `last_query_attempt` returns the failed attempt in the last recovery progress group
-/// of a read that has no terminal record.
 fn last_query_attempt(history: &EffectCursorHistory) -> Result<Option<EffectRecord>, EffectError> {
     let Some(rows) = history.progress_batches.values().next_back() else {
         return Ok(None);
@@ -468,8 +466,6 @@ impl EffectsCore {
         }
     }
 
-    /// `adopt_answer_as_parent` makes the record that answered this invocation's read,
-    /// a query's answer or an admitted member, the parent of the facts it supplies.
     pub(crate) fn adopt_answer_as_parent(&mut self) {
         if let Some(answer) = self.answer.take() {
             self.ctx.parent = answer;
@@ -1267,7 +1263,7 @@ impl EffectsCore {
 
         let recorded_flow_id = self.namespace();
         let output_ordinal = self.reserve_output_ordinal()?;
-        let parent = self.ctx.parent.view().as_ref();
+        let parent = self.ctx.parent.event_provenance();
         let mut event = stamp_output_event(
             fact.into_derived_event(self.ctx.stage.writer_id, parent, self.ctx.stage.lineage),
             parent,
@@ -2604,9 +2600,6 @@ impl EffectsCore {
         .await
     }
 
-    /// `commit_query_attempt` records a query attempt that failed and that its source
-    /// repeats. The read's recovery progress group holds the attempt and the retry that
-    /// follows it, so the read's cursor keeps one terminal record.
     async fn commit_query_attempt(
         &mut self,
         cursor: EffectCursor,
@@ -2640,8 +2633,6 @@ impl EffectsCore {
             .await
     }
 
-    /// `commit_query_attempt_group` commits a failed query attempt and the retry that
-    /// follows it as the read's recovery progress group.
     async fn commit_query_attempt_group(
         &mut self,
         record: EffectRecord,

@@ -383,8 +383,8 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// ```
 ///
 /// Middleware stays in the stage's `with` clause. The handler is a
-/// [`Command`](crate::commands::Command), which allows every effect the ports it
-/// works through declare.
+/// [`Command`](crate::commands::Command) and allows every effect that its ports
+/// declare.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not satisfy `EffectfulStatefulHandler` for this stage",
     label = "this handler does not match the effectful stateful contract",

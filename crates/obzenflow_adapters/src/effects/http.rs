@@ -15,9 +15,8 @@ pub(crate) const CONNECT_FAILED: &str = "connect_failed";
 
 const BODY_PREFIX_BYTES: usize = 512;
 
-/// The effect error for a send that got no response. A refused connection
-/// names its transport, `http`, as its failure source, since the other end
-/// certainly did not act.
+/// `unsent` returns the effect error for a send that got no response. The error of a
+/// refused connection names `http` as its failure source.
 pub fn unsent(error: HttpClientError) -> EffectError {
     unsent_from("http", error)
 }

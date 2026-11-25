@@ -212,8 +212,8 @@
 //! - [`stages`] groups sources, transforms, stateful handlers, joins, and sinks.
 //! - [`commands`] performs requests through ports, from effectful stages and sinks.
 //! - [`queries`] asks a source's reads through ports.
-//! - [`events`] decodes the input that a sender starts, and holds the source channel.
-//! - [`systems`] names systems and binds them to ports.
+//! - [`events`] decodes the input that a sender pushes, and holds the source channel.
+//! - [`systems`] binds systems to ports.
 //! - [`effects`] describes replay-safe external operations.
 //! - [`middleware`] provides live-I/O policies and passive observers.
 //! - [`application`] configures and runs the application, including ingress.

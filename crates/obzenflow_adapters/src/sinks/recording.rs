@@ -107,7 +107,7 @@ pub struct RecordingSink<T> {
 }
 
 impl<T: TypedPayload + Send + Sync + 'static> RecordingSink<T> {
-    /// A sink and the [`Recorded`] that the test reads its inputs from.
+    /// `new` returns a sink and the [`Recorded`] that gives a test the inputs of the sink.
     pub fn new() -> (Self, Recorded<T>) {
         let rows = Arc::new(Mutex::new(Vec::new()));
         let arrived = Arc::new(Notify::new());
@@ -211,7 +211,7 @@ pub struct CountingSink<T> {
 }
 
 impl<T> CountingSink<T> {
-    /// A sink that adds one to `counter` for each call it makes.
+    /// `new` returns a sink that adds one to `counter` for each call that it makes.
     pub fn new(counter: Arc<impl CallCounter>) -> Self {
         Self {
             port: Port::to(Counter(counter)),

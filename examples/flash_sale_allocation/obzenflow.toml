@@ -6,9 +6,8 @@ mode = "enforce"
 window = 64
 stall_timeout_ms = 30000
 
-# The number of units of each SKU the allocator reserves. A resume that raises
-# it would reserve stock for an order that the run settled as sold out, so the
-# resume refuses.
+# The allocator holds at most `capacity_per_sku` units of each SKU at one time.
+# A resume refuses a larger value if a recorded order settled as sold out.
 [app.allocation]
 capacity_per_sku = 1
 

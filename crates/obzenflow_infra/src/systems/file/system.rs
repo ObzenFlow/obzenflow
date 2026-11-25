@@ -39,8 +39,7 @@ pub(crate) struct CsvFormat {
     pub(crate) headers: Option<Vec<String>>,
 }
 
-/// `CsvFileSystem` configures a [`FileSystem`] to read a CSV or TSV file at a path,
-/// with a delimiter and the place its column names come from.
+/// `CsvFileSystem` configures a [`FileSystem`] to read a CSV or TSV file at a path.
 #[derive(Clone)]
 pub struct CsvFileSystem {
     path: PathBuf,
@@ -48,8 +47,8 @@ pub struct CsvFileSystem {
 }
 
 impl CsvFileSystem {
-    /// `CsvFileSystem::at` reads the CSV file at `path`. The first row of the file
-    /// names the columns.
+    /// `CsvFileSystem::at` configures the system for the CSV file at `path`. By default,
+    /// the first row of the file names the columns.
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -76,7 +75,8 @@ impl CsvFileSystem {
         self
     }
 
-    /// `port` returns a port whose system reads this file when a live read needs it.
+    /// `port` returns a cold port for this file. Its system reads the file only
+    /// during a live read.
     pub fn port(self) -> Port<dyn CsvFile> {
         SystemConfig::port(self)
     }
@@ -108,7 +108,8 @@ impl YamlFileSystem {
         Self { path: path.into() }
     }
 
-    /// `port` returns a port whose system reads this file when a live read needs it.
+    /// `port` returns a cold port for this file. Its system reads the file only
+    /// during a live read.
     pub fn port(self) -> Port<dyn YamlFile> {
         SystemConfig::port(self)
     }
@@ -153,7 +154,7 @@ pub trait CsvFile: Send + Sync {
 }
 
 /// `CsvRead` is the request of one CSV read. A replay and a resume compare it
-/// without `limit`, so a build may read pages of another size.
+/// without `limit`, so a build can read pages of another size.
 #[derive(Clone, Debug, Serialize)]
 pub struct CsvRead {
     #[serde(skip_serializing)]
@@ -173,9 +174,6 @@ pub enum CsvPage {
     EndOfInput,
 }
 
-/// `FileCsvRead` is the argument of one CSV read. It holds the read settings and, after
-/// the first read, the position, columns and file version that the previous reply
-/// recorded.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FileCsvRead {
     chunk: usize,
@@ -302,7 +300,7 @@ fn read_failure(
 ) -> EffectError {
     EffectError::SourceRead {
         error: Box::new(EffectError::Transport(format!(
-            "the file at '{}' cannot be read",
+            "the source cannot read the file at '{}'",
             path.display()
         ))),
         failure: Box::new(SourceReadFailure {

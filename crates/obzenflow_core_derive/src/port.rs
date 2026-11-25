@@ -51,7 +51,7 @@ const RETURN_SHAPE: &str = "a port method returns a concrete `Result<Outcome, Ef
 const PORT_ARGUMENTS: &str = "`#[obzenflow::port]` takes only `effects = <path>`";
 
 const ONE_REQUEST_KIND: &str =
-    "a port declares `#[effect]` methods or `#[query]` methods, not both";
+    "a port declares only `#[effect]` methods or only `#[query]` methods";
 
 struct PortArgs {
     effects: EffectsPath,
@@ -200,8 +200,6 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
     }
 }
 
-/// `shared_forwarding` implements the port for `Arc<T>` when `T` implements it, so that
-/// one system in an `Arc` can serve several ports.
 fn shared_forwarding(effects: &TokenStream, item: &ItemTrait) -> TokenStream {
     let port = &item.ident;
     let methods = item.items.iter().filter_map(|member| match member {

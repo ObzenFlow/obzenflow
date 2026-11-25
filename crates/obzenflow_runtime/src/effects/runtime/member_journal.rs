@@ -7,9 +7,6 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::source::MemberRecorded;
 
 impl EffectsCore {
-    /// `record_member` records one member that a sender pushed, at the read number of
-    /// this invocation, and returns it. A replay returns the recorded member and
-    /// takes nothing from the sender.
     pub(crate) async fn record_member<F, Fut>(
         &mut self,
         acquire: F,
@@ -30,11 +27,13 @@ impl EffectsCore {
         if let Some(mut event) = recorded {
             let ChainPayload::Execution(ExecutionPayload::MemberRecorded(record)) = &event.payload
             else {
-                return Err(EffectError::ReplayArchive("invalid member record".into()));
+                return Err(EffectError::ReplayArchive(
+                    "the member record is not valid".into(),
+                ));
             };
             if matches!(plan, ActionPlan::Live) {
                 return Err(EffectError::ReplayArchive(format!(
-                    "member differs at {cursor:?}"
+                    "the member at {cursor:?} does not match the recording"
                 )));
             }
             let member = record.member.clone();
@@ -49,7 +48,7 @@ impl EffectsCore {
                 && self.ctx.stage.runtime_execution.resume_control().is_none()
         {
             return Err(EffectError::ReplayArchive(format!(
-                "missing member at {cursor:?}"
+                "the archive has no member at {cursor:?}"
             )));
         }
         self.cross_before_live_action().await?;

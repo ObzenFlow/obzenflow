@@ -1,6 +1,6 @@
 [package]
 name = "obzenflow_core_derive"
-description = "Procedural macros for ObzenFlow outcome lists, commands, systems and ports"
+description = "Procedural macros for ObzenFlow outcome lists, commands and ports"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

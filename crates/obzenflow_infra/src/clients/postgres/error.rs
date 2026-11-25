@@ -29,9 +29,9 @@ pub enum PostgresClientError {
     Unencodable(String),
 }
 
-/// The effect error for a statement that failed. A connection that never
-/// opened is a retryable refusal, a definite no, whose failure source is the
-/// transport, `postgres`.
+/// `unsent` returns the effect error for a statement that failed. The error of a
+/// connection that never opened is a retryable refusal with `postgres` as its failure
+/// source.
 pub fn unsent(error: PostgresClientError) -> EffectError {
     match error {
         PostgresClientError::Connection(message) => {

@@ -2,11 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! CSV file source
+//! The `csv` module holds the finite CSV source.
 //!
-//! A CSV source handler reads records through a file system port. The port
+//! A [`CsvSource`] handler reads records through a file system port. The port
 //! records each reply. The handler decodes each recorded record. The handler
-//! reports each row that the decoder rejects. The read then continues.
+//! reports each record that the decoder rejects. The read then continues.
 
 use super::system::{CsvFile, CsvFileSystem, CsvFormat, CsvLine, CsvPage, CsvRead};
 use super::version::input_changed;
@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
-/// Untyped CSV row payload (`csv.row.v1`) with string-only values.
+/// `CsvRow` is the untyped `csv.row.v1` payload of one CSV record. Each value is a string.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct CsvRow(pub BTreeMap<String, String>);
@@ -46,7 +46,7 @@ impl<'a> CsvRecord<'a> {
         Self { headers, fields }
     }
 
-    /// Deserialize this record using its effective headers.
+    /// `deserialize` decodes this record with serde and matches each field to its column name.
     pub fn deserialize<T>(&self) -> Result<T, CsvDecodeError>
     where
         T: DeserializeOwned,
@@ -56,7 +56,7 @@ impl<'a> CsvRecord<'a> {
             .map_err(CsvDecodeError::from)
     }
 
-    /// Read a field by its effective column name.
+    /// `get` returns the field in the column that has the name `column`.
     pub fn get(&self, column: &str) -> Option<&'a str> {
         self.headers
             .iter()
@@ -64,7 +64,7 @@ impl<'a> CsvRecord<'a> {
             .and_then(|index| self.fields.get(index))
     }
 
-    /// Read a field by its zero-based position.
+    /// `field` returns the field at the zero-based position `index`.
     pub fn field(&self, index: usize) -> Option<&'a str> {
         self.fields.get(index)
     }
@@ -88,7 +88,7 @@ impl std::fmt::Debug for CsvRecord<'_> {
 }
 
 /// `CsvDecodeError` is the error that a [`CsvDecoder`] returns. It holds only a
-/// typed diagnostic. The source handler adds the record index and the line.
+/// typed diagnostic. The source handler adds the record index and the line number.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct CsvDecodeError(SourceDiagnostic);
@@ -106,7 +106,7 @@ impl CsvDecodeError {
         Self(SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord))
     }
 
-    /// Nests the path under a schema-declared parent field.
+    /// `within_field` puts the schema field `name` at the start of the field path of this error.
     pub fn within_field(self, name: &'static str) -> Self {
         Self(self.0.within_field(name))
     }
@@ -118,8 +118,6 @@ impl CsvDecodeError {
 
 impl From<csv::Error> for CsvDecodeError {
     fn from(error: csv::Error) -> Self {
-        // Serde text can echo rejected values, so only the kind and column survive.
-        // Missing and unknown fields both arrive as message text: `InvalidRecord`.
         let csv::ErrorKind::Deserialize { err, .. } = error.kind() else {
             return Self::invalid_record();
         };
@@ -177,24 +175,19 @@ impl CsvPosition {
     }
 }
 
-/// User-owned mapping from one external CSV record to one domain output.
-///
-/// Like typed source handlers, the decoder value owns its output contract
-/// through an associated type. Applications pass that value to
-/// [`CsvSource::builder`] instead of repeating the event type on the source.
+/// `CsvDecoder` maps one CSV record to one value of the domain type `Output`.
+/// An application passes its decoder to [`CsvSource::builder`].
 pub trait CsvDecoder: Clone + Send + Sync + 'static {
     type Output: TypedPayload + Send + Sync + 'static;
 
-    /// Decode one record into the declared domain output.
-    ///
-    /// The default uses serde with the record's effective headers. Override it
-    /// when the external CSV shape differs from the domain type.
+    /// `decode` maps one record to the domain output. The default implementation calls
+    /// [`CsvRecord::deserialize`].
     fn decode(&self, record: CsvRecord<'_>) -> Result<Self::Output, CsvDecodeError> {
         record.deserialize()
     }
 }
 
-/// Built-in decoder for string-preserving [`CsvRow`] output.
+/// `CsvRowDecoder` decodes each record into a [`CsvRow`] and keeps each value as a string.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CsvRowDecoder;
 
@@ -251,9 +244,9 @@ impl<D> CsvSourceBuilder<D> {
         self
     }
 
-    /// `through` reads through `port` instead of a file at a path. The system
-    /// behind the port supplies the location and the CSV format, so a source with
-    /// a port takes no path, delimiter or headers.
+    /// `through` sets the port that the source reads through, instead of a path. The
+    /// system of the port supplies the CSV format. `build` fails when the builder also
+    /// has a path, a delimiter or header settings.
     pub fn through(mut self, port: Port<dyn CsvFile>) -> Self {
         self.port = Some(port);
         self
@@ -264,7 +257,8 @@ impl<D> CsvSourceBuilder<D> {
         self
     }
 
-    /// Provide headers explicitly (required when `has_headers=false`).
+    /// `headers` names the columns of a file without a header row. They are
+    /// necessary when `has_headers` is `false`.
     pub fn headers<I, S>(mut self, headers: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -310,7 +304,7 @@ where
 {
     pub fn build(self) -> Result<CsvSource<D>> {
         if self.chunk_size == 0 {
-            bail!("chunk_size must be > 0");
+            bail!("chunk_size must be positive");
         }
         let format_set =
             self.has_headers.is_some() || self.headers.is_some() || self.delimiter.is_some();
@@ -318,7 +312,7 @@ where
             (Some(_), Some(_)) => {
                 bail!("a CSV source takes a path or a port, and this builder has both")
             }
-            (None, None) => bail!("path required"),
+            (None, None) => bail!("a CSV source must have a path or a port"),
             (None, Some(_)) if format_set => {
                 bail!("a CSV source that reads through a port takes its format from the port")
             }
@@ -326,7 +320,7 @@ where
             (Some(path), None) => {
                 let has_headers = self.has_headers.unwrap_or(true);
                 if !has_headers && self.headers.as_ref().is_none_or(|h| h.is_empty()) {
-                    bail!("headers must be provided when has_headers=false");
+                    bail!("a CSV source must have headers when has_headers is false");
                 }
                 let format = CsvFormat {
                     delimiter: self.delimiter.unwrap_or(b','),
@@ -345,8 +339,8 @@ where
     }
 }
 
-/// `CsvSource` reads the records of a CSV file through a cold file system port.
-/// Its decoder maps each recorded record to the output.
+/// `CsvSource` reads the records of a CSV file through a cold port of the file
+/// system. Its decoder maps each recorded record to the output.
 #[derive(Clone)]
 pub struct CsvSource<D> {
     port: Port<dyn CsvFile>,
@@ -364,7 +358,8 @@ impl<D: CsvDecoder> TypedFiniteSourceHandler for CsvSource<D> {
         SourceRead::pages(
             self.port.clone(),
             CsvRead {
-                limit: std::num::NonZeroUsize::new(self.chunk_size).expect("validated chunk size"),
+                limit: std::num::NonZeroUsize::new(self.chunk_size)
+                    .expect("build checks that the chunk size is positive"),
                 skip_rows: self.skip_rows,
                 columns: self.select_columns.clone(),
                 after: None,
@@ -380,8 +375,10 @@ impl<D: CsvDecoder> TypedFiniteSourceHandler for CsvSource<D> {
                         StringRecord::from(headers),
                         records,
                         CsvRead {
+                            limit: from.limit,
+                            skip_rows: from.skip_rows,
+                            columns: from.columns.clone(),
                             after: Some(next),
-                            ..from.clone()
                         },
                     )),
                 })

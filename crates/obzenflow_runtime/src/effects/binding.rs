@@ -25,19 +25,13 @@ pub trait EffectBindingEvidence: Clone + Eq + Send + Sync + 'static {
     fn canonical_bytes(&self) -> BoundedBindingEvidence;
 }
 
-/// What an effect descriptor records of a binding's evidence.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorEvidence {
-    /// A digest of the evidence, which a replay compares.
     Digest,
-    /// Nothing, so a replay compares no binding.
     Omitted,
 }
 
-/// `SystemPortEvidence` is the evidence of a call through a system's port. It holds
-/// nothing, so a call's descriptor records no binding and a replay or resume can bind
-/// any system.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SystemPortEvidence;

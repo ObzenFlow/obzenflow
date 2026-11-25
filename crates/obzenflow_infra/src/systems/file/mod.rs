@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The framework's file system and CSV register system, and the CSV and YAML
-//! sources and the CSV sink that read and write files through them.
+//! The `file` module holds the framework's file system and CSV register system. The
+//! CSV and YAML sources and the CSV sink read and write files through these systems.
 
 pub mod csv;
 pub mod register;

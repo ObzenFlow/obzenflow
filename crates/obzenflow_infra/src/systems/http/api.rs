@@ -25,9 +25,9 @@ pub struct HttpApi {
 }
 
 impl HttpApi {
-    /// `json` configures a JSON endpoint below `base`. The port checks `base` when it
-    /// builds its HTTP client at the first live read: an `http` or `https` URL with a
-    /// host and no query or fragment.
+    /// `json` configures a JSON endpoint below `base`. At the first live read, the port
+    /// checks that `base` is an `http` or `https` URL with a host and no query or
+    /// fragment.
     pub fn json(base: Url) -> JsonEndpoint {
         JsonEndpoint { base }
     }
@@ -40,8 +40,7 @@ impl HttpApi {
         }
     }
 
-    /// `get_json` reads the JSON document at `path` below the base URL. A failure
-    /// carries the diagnostic that the reading source reports. A refused or
+    /// `get_json` reads the JSON document at `path` below the base URL. A refused or
     /// unreadable reply ends the read. After a timeout, a rate limit or a server
     /// failure, the source can read again.
     pub async fn get_json<T: DeserializeOwned>(
@@ -73,7 +72,7 @@ impl HttpApi {
         let mut stages = self
             .measurements
             .lock()
-            .expect("HTTP measurement lock poisoned");
+            .expect("the lock of the HTTP measurements is poisoned");
         if !stages.contains_key(ctx.stage_key()) {
             stages.insert(ctx.stage_key().to_owned(), HttpPullMeasurements::default());
         }
@@ -171,8 +170,8 @@ impl SystemConfig for JsonEndpoint {
 
 impl JsonEndpoint {
     /// `list_detail` configures the endpoint to answer [`ListDetail`]. `list` is the
-    /// path of the JSON array of item IDs below the base URL, and `detail` returns the
-    /// path of one item from its ID. The system skips an item whose document is `null`.
+    /// path of the JSON array of item IDs below the base URL. `detail` returns the path
+    /// of one item from its ID. The system skips an item whose document is `null`.
     pub fn list_detail(
         self,
         list: impl Into<String>,
@@ -250,7 +249,7 @@ mod list_detail {
                 ListDetailStep::Detail { id } => {
                     let item: Option<Value> = self.api.get_json(&(self.detail)(id), ctx).await?;
                     if item.is_none() {
-                        tracing::info!(id = %id, "the API has no item at this ID; the source skips it");
+                        tracing::info!(id = %id, "the API has no item at this ID. The source skips the item.");
                     }
                     from.detail_reply(item)
                 }

@@ -2,9 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The list-and-detail port of a pull source. The first read takes the list of
-//! item IDs, and each later read takes one item, in list order.
-
 use async_trait::async_trait;
 use obzenflow_runtime::queries::{
     FiniteRead, QueryContext, QueryError, SourceDiagnosticReason, SourcePollErrorKind,
@@ -13,10 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// `ListDetail` is the port of a supplier that lists the IDs of its items and
-/// gives each item by its ID. The framework asks for the list once, then for each
-/// item in list order, and records each answer. A system that answers the port asks
-/// the request for its [`step`](ListDetailRead::step) and answers it with the
-/// request's reply constructors.
+/// gives each item by its ID. The framework asks for the list once, and then it
+/// asks for each item in list order.
 ///
 /// ```
 /// # use obzenflow_adapters::sources::{ListDetail, ListDetailRead, ListDetailStep};
@@ -54,8 +49,8 @@ pub trait ListDetail: Send + Sync {
     ) -> Result<FiniteRead<Value, ListDetailRead>, QueryError>;
 }
 
-/// `ListDetailRead` is the request of one list-and-detail read. The request of the
-/// first read takes the list, and each answer holds the request of the next read.
+/// `ListDetailRead` is the request of one list-and-detail read. Each answer holds the
+/// request of the next read.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListDetailRead {
     limit: usize,
@@ -66,17 +61,14 @@ pub struct ListDetailRead {
 /// `ListDetailStep` is the step of the read that one request asks a system to answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListDetailStep<'a> {
-    /// The list of item IDs, of which the source keeps the first `limit`.
     List { limit: usize },
-    /// The item with `id`.
     Detail { id: &'a str },
-    /// The source read every listed item.
     EndOfInput,
 }
 
 impl ListDetailRead {
-    /// `first` returns the request of the first read. It takes the list and keeps
-    /// its first `limit` IDs.
+    /// `first` returns the request of the first read. That read keeps the first
+    /// `limit` IDs of the list.
     pub fn first(limit: usize) -> Self {
         Self {
             limit,
@@ -96,8 +88,8 @@ impl ListDetailRead {
         }
     }
 
-    /// `list_reply` answers the list step with the item IDs. It keeps the first `limit`
-    /// IDs. At another step it fails the read, so an answer cannot restart the list.
+    /// `list_reply` answers the list step with the first `limit` item IDs. At another
+    /// step, `list_reply` fails the read.
     pub fn list_reply(&self, mut ids: Vec<String>) -> Result<FiniteRead<Value, Self>, QueryError> {
         if self.ids.is_some() {
             return Err(wrong_step());
@@ -113,9 +105,9 @@ impl ListDetailRead {
         })
     }
 
-    /// `detail_reply` answers a detail step with the item, or `None` when the supplier no
-    /// longer has it, and moves to the next ID. At another step it fails the read, so
-    /// an answer cannot pass the end of the list.
+    /// `detail_reply` answers a detail step with the item, or with `None` when the
+    /// supplier has no item with that ID. The next request asks for the next ID. At
+    /// another step, `detail_reply` fails the read.
     pub fn detail_reply(&self, item: Option<Value>) -> Result<FiniteRead<Value, Self>, QueryError> {
         let Some(ids) = self.ids.as_ref().filter(|ids| self.next < ids.len()) else {
             return Err(wrong_step());
