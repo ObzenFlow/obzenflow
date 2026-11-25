@@ -276,7 +276,7 @@ pub(super) fn member_cursor(member: &obzenflow_core::source::MemberRecorded) -> 
     EffectCursor::new(
         member.recorded_flow_id.clone(),
         member.stage_key.clone(),
-        member.number,
+        member.number.get(),
         EffectOrdinal::new(0),
     )
 }

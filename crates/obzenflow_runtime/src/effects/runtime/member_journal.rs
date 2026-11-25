@@ -56,7 +56,9 @@ impl EffectsCore {
         let record = MemberRecorded {
             recorded_flow_id: cursor.recorded_flow_id.to_string(),
             stage_key: self.ctx.stage.stage_key.clone(),
-            number: self.ctx.input_seq.0,
+            number: std::num::NonZeroU64::new(self.ctx.input_seq.0).ok_or_else(|| {
+                EffectError::Execution("the input position of the member is zero".into())
+            })?,
             member: member.clone(),
         };
         let mut event = ChainEventFactory::execution_event(

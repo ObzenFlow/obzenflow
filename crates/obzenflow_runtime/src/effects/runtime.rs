@@ -578,6 +578,16 @@ impl EffectsCore {
             })
     }
 
+    fn starts_journeys(&self) -> bool {
+        self.ctx.stage.flow_context.as_ref().is_some_and(|flow| {
+            matches!(
+                flow.stage_type,
+                obzenflow_core::event::context::StageType::FiniteSource
+                    | obzenflow_core::event::context::StageType::InfiniteSource
+            )
+        })
+    }
+
     fn rejects_in_replay(&self) -> bool {
         self.ctx
             .stage
@@ -1272,6 +1282,9 @@ impl EffectsCore {
             self.ctx.input_seq,
             output_ordinal,
         );
+        if self.starts_journeys() {
+            event.correlation = None;
+        }
         let plan = self.take_action(super::RecordedAction::Fact {
             id: event.id,
             event_type: obzenflow_core::EventType::from(event_type),

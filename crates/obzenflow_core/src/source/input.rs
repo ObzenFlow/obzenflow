@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::num::NonZeroU64;
 
 /// `MEMBER_RECORDED_EVENT_TYPE` is the event type of an admitted member.
 pub const MEMBER_RECORDED_EVENT_TYPE: &str = "runtime.ingress.member_recorded";
@@ -14,6 +15,6 @@ pub const MEMBER_RECORDED_EVENT_TYPE: &str = "runtime.ingress.member_recorded";
 pub struct MemberRecorded {
     pub recorded_flow_id: String,
     pub stage_key: String,
-    pub number: u64,
+    pub number: NonZeroU64,
     pub member: Value,
 }
