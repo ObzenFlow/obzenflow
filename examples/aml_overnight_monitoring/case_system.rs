@@ -88,7 +88,6 @@ enum CaseReply {
     Unreadable,
 }
 
-#[obzenflow::system("simulated-case-system")]
 pub struct SimulatedCaseSystem {
     calls: CallLog<CaseAnswer>,
 }
@@ -123,7 +122,6 @@ impl SimulatedCaseSystem {
     }
 }
 
-#[obzenflow::system("case-system-unreadable-replies")]
 pub struct UnreadableCaseSystem {
     cases: SimulatedCaseSystem,
 }

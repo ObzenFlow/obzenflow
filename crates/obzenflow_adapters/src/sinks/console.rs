@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
-    port, system, Command, DeclaredEffectSet, EffectContext, EffectError, Port, SinkBatchDefaults,
+    port, Command, DeclaredEffectSet, EffectContext, EffectError, Port, SinkBatchDefaults,
     SinkGroupSystem, SinkRole,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -523,7 +523,6 @@ pub trait ConsolePort {
     async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError>;
 }
 
-#[system("console")]
 struct Stdout;
 
 #[async_trait]
@@ -533,7 +532,6 @@ impl ConsolePort for Stdout {
     }
 }
 
-#[system("console-stderr")]
 struct Stderr;
 
 #[async_trait]
@@ -680,7 +678,6 @@ pub trait ConsoleTablePort {
     async fn write_row(&self, row: &TableRow, ctx: &EffectContext) -> Result<(), EffectError>;
 }
 
-#[system("console-table")]
 #[derive(Clone)]
 struct ConsoleTable {
     columns: Vec<String>,
@@ -706,10 +703,7 @@ impl ConsoleTable {
             .unwrap_or_else(|e| e.into_inner());
         Ok(ports
             .entry(instance.clone())
-            .or_insert_with(|| {
-                Port::deferred_grouped::<TableRow, _, _>(move || Ok(self.clone()))
-                    .instance(&instance)
-            })
+            .or_insert_with(|| Port::deferred_grouped::<TableRow, _, _>(move || Ok(self.clone())))
             .clone())
     }
 }
@@ -856,7 +850,6 @@ mod tests {
         }
     }
 
-    #[system("captured-console")]
     struct Captured(Arc<Mutex<Vec<ConsoleOutput>>>);
 
     #[async_trait]
@@ -935,11 +928,6 @@ mod tests {
             table("customer", 30, true, 8),
             table("customer", 30, false, 16),
         ];
-        let names: std::collections::HashSet<_> = tables
-            .iter()
-            .map(|table| table.port.system_name())
-            .collect();
-        assert_eq!(names.len(), 4);
         let declarations: Vec<_> = tables
             .into_iter()
             .flat_map(|table| {
@@ -955,7 +943,6 @@ mod tests {
         let captured = Captured(seen.clone());
         let sink = ConsoleSink::<TestEvent, _>::new(|e: &TestEvent| format!("got {}", e.value))
             .through(Port::to(Captured(seen.clone())));
-        assert_eq!(sink.ports().0.system_name(), "captured-console");
         let request = sink
             .prepare(TestEvent {
                 value: "one".into(),

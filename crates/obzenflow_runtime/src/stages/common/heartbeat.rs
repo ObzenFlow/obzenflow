@@ -788,13 +788,6 @@ mod tests {
             unimplemented!("not used in heartbeat tests")
         }
 
-        fn recorded_source_binding(
-            &self,
-            _stage_key: &str,
-        ) -> Option<obzenflow_core::effect_binding::SystemBinding> {
-            unimplemented!("not used in heartbeat tests")
-        }
-
         fn archive_path(&self) -> &Path {
             Path::new("stub-archive")
         }

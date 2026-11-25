@@ -74,7 +74,6 @@ impl TypedTransformHandler for Passthrough {
 
 type Delivered = Arc<Mutex<Vec<(u64, Duration)>>>;
 
-#[obzenflow_runtime::effects::system("latency-recorder")]
 pub struct LatencyRecorder {
     origin: Instant,
     delivered: Delivered,

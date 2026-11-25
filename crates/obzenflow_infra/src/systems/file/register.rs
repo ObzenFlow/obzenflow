@@ -19,8 +19,7 @@ use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::commands::Command;
 use obzenflow_runtime::effects::{
-    port, system, DeclaredEffectSet, EffectContext, EffectError, EffectPortResolutionError,
-    SinkRole,
+    port, DeclaredEffectSet, EffectContext, EffectError, EffectPortResolutionError, SinkRole,
 };
 use obzenflow_runtime::effects::{SinkBatchDefaults, SinkGroupSystem};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -99,7 +98,6 @@ enum Written {
     Header,
 }
 
-#[system("csv-register")]
 struct CsvRegister {
     layout: Arc<CsvLayout>,
     state: Arc<Mutex<RegisterState>>,
@@ -350,21 +348,6 @@ fn cell(value: Option<&Value>) -> std::borrow::Cow<'_, [u8]> {
 }
 
 fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
-    let path = layout.path.canonicalize().unwrap_or_else(|_| {
-        let parent = layout
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        parent
-            .canonicalize()
-            .or_else(|_| std::path::absolute(parent))
-            .unwrap_or_else(|_| parent.to_path_buf())
-            .join(layout.path.file_name().unwrap_or_default())
-    });
-    let digest = ring::digest::digest(&SHA256, path.as_os_str().as_encoded_bytes());
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let instance = format!("{}.{name}", hex(&digest.as_ref()[..16]));
     let layout = Arc::new(layout);
     Port::deferred_grouped::<CsvRow, _, _>(move || {
         Ok::<_, EffectPortResolutionError>(CsvRegister {
@@ -372,7 +355,6 @@ fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
             state: Arc::new(Mutex::new(RegisterState::Closed)),
         })
     })
-    .instance(&instance)
 }
 
 fn poisoned_lock() -> EffectError {
@@ -533,10 +515,10 @@ impl<P> std::fmt::Debug for CsvSink<P> {
         f.debug_struct("CsvSink")
             .field("projection", &std::any::type_name::<P>())
             .field(
-                "port",
+                "destination",
                 &match &self.destination {
-                    CsvDestination::File(_) => "csv-register",
-                    CsvDestination::Port(port) => port.system_name(),
+                    CsvDestination::File(_) => "file",
+                    CsvDestination::Port(_) => "port",
                 },
             )
             .finish()
@@ -628,13 +610,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn register_directories_distinguish_bindings() {
-        let east = register_port(layout(Path::new("east/register.csv")));
-        let west = register_port(layout(Path::new("west/register.csv")));
-        assert_ne!(east.system_name(), west.system_name());
-    }
-
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct Entry {
         id: u64,
@@ -698,63 +673,6 @@ mod tests {
                 hex(ring::digest::digest(&SHA256, &expected[..length]).as_ref())
             );
         }
-    }
-
-    #[test]
-    fn csv_sinks_sharing_path_refused() {
-        assert_registers_conflict(
-            Path::new("shared/register.csv"),
-            Path::new("shared/register.csv"),
-        );
-    }
-
-    #[test]
-    fn csv_sinks_sharing_resolved_path_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let subdir = dir.path().join("reports");
-        std::fs::create_dir(&subdir).unwrap();
-        let file = dir.path().join("register.csv");
-        assert_registers_conflict(&file, &subdir.join("../register.csv"));
-        assert!(!file.exists());
-    }
-
-    fn assert_registers_conflict(first: &Path, second: &Path) {
-        use obzenflow_runtime::commands::effectful_transform_effects;
-        use obzenflow_runtime::effects::{
-            EffectPortRegistry, EffectRegistrationCollectionError, SinkHandler,
-        };
-        let declarations = |path: &Path| {
-            let sink = CsvSink::builder(EntryRow).path(path).build().unwrap();
-            effectful_transform_effects(&SinkHandler::<_, Entry>::new(sink)).unwrap()
-        };
-        let (first, second) = (declarations(first), declarations(second));
-        let refused = EffectPortRegistry::collect_from_declarations(first.iter().chain(&second));
-        assert!(matches!(
-            refused,
-            Err(EffectRegistrationCollectionError::DistinctBindings { .. })
-        ));
-    }
-
-    #[test]
-    fn cloned_register_stages_refused() {
-        use obzenflow_runtime::commands::effectful_transform_effects;
-        use obzenflow_runtime::effects::{
-            EffectPortRegistry, EffectRegistrationCollectionError, SinkHandler,
-        };
-        let sink = CsvSink::builder(EntryRow)
-            .path("register.csv")
-            .build()
-            .unwrap();
-        let declarations: Vec<_> = [sink.clone(), sink]
-            .into_iter()
-            .flat_map(|sink| {
-                effectful_transform_effects(&SinkHandler::<_, Entry>::new(sink)).unwrap()
-            })
-            .collect();
-        assert!(matches!(
-            EffectPortRegistry::collect_from_declarations(&declarations),
-            Err(EffectRegistrationCollectionError::DistinctBindings { .. })
-        ));
     }
 
     #[test]

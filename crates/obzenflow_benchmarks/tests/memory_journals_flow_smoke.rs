@@ -27,7 +27,6 @@ use std::time::Duration;
 #[derive(Clone, Debug, Serialize)]
 struct Received;
 
-#[obzenflow_runtime::effects::system("smoke-counter")]
 struct CountingSink {
     received: Arc<AtomicU64>,
 }

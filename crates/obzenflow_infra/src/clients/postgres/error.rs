@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use obzenflow_runtime::effects::EffectError;
-use obzenflow_runtime::systems::System;
 
 /// Why a statement didn't complete.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -31,11 +30,12 @@ pub enum PostgresClientError {
 }
 
 /// The effect error for a statement that failed. A connection that never
-/// opened is the system's retryable refusal, a definite no.
-pub fn unsent<S: System>(error: PostgresClientError) -> EffectError {
+/// opened is a retryable refusal, a definite no, whose failure source is the
+/// transport, `postgres`.
+pub fn unsent(error: PostgresClientError) -> EffectError {
     match error {
         PostgresClientError::Connection(message) => {
-            EffectError::unavailable(S::NAME, "connect_failed", message)
+            EffectError::unavailable("postgres", "connect_failed", message)
         }
         PostgresClientError::Timeout(message) => EffectError::Timeout(message),
         PostgresClientError::Transport(message) => EffectError::Transport(message),
@@ -48,22 +48,19 @@ pub fn unsent<S: System>(error: PostgresClientError) -> EffectError {
 mod tests {
     use super::*;
 
-    #[obzenflow_runtime::effects::system("ledger")]
-    struct Ledger;
-
     #[test]
-    fn refused_connection_names_system() {
+    fn refused_connection_names_transport() {
         assert!(matches!(
-            unsent::<Ledger>(PostgresClientError::Connection("refused".into())),
+            unsent(PostgresClientError::Connection("refused".into())),
             EffectError::DependencyFailed { failure_source, code, .. }
-                if failure_source.as_str() == "ledger" && code.as_str() == "connect_failed"
+                if failure_source.as_str() == "postgres" && code.as_str() == "connect_failed"
         ));
     }
 
     #[test]
     fn unencodable_value_returns_permanent_error() {
         assert!(matches!(
-            unsent::<Ledger>(PostgresClientError::Unencodable("bad".into())),
+            unsent(PostgresClientError::Unencodable("bad".into())),
             EffectError::Permanent(_)
         ));
     }

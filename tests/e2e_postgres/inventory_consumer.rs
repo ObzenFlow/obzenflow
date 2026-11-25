@@ -43,7 +43,6 @@ trait InventoryStorePort {
     async fn store(&self, level: &InventoryLevelChanged) -> Result<(), EffectError>;
 }
 
-#[obzenflow::system("inventory-postgres")]
 struct PostgresInventory {
     postgres: Arc<dyn PostgresClient>,
     insert: PostgresStatement,
@@ -61,7 +60,7 @@ impl InventoryStorePort for PostgresInventory {
                     .bind(level.replenishment_due);
             })
             .await
-            .map_err(postgres::unsent::<Self>)?;
+            .map_err(postgres::unsent)?;
         Ok(())
     }
 }

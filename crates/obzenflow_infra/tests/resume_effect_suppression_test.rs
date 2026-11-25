@@ -75,7 +75,6 @@ impl TypedPayload for Enriched {
 
 /// Counts real executions via the shared counter; a suppressed catch-up
 /// replay never reaches the counter.
-#[obzenflow_runtime::effects::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
@@ -680,13 +679,6 @@ impl ReplayArchive for HistoryReads {
 
     fn recorded_source_eof(&self, stage_key: &str) -> Option<EofKind> {
         self.inner.recorded_source_eof(stage_key)
-    }
-
-    fn recorded_source_binding(
-        &self,
-        stage_key: &str,
-    ) -> Option<obzenflow_core::effect_binding::SystemBinding> {
-        self.inner.recorded_source_binding(stage_key)
     }
 
     fn archive_path(&self) -> &Path {

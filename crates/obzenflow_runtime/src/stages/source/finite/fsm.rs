@@ -1102,7 +1102,7 @@ pub(crate) mod tests {
                         replay_completion: Default::default(),
                         source_boundary: None,
                         pending_failure: None,
-                        system: obzenflow_core::SystemBindingEvidence::named("projection").unwrap().binding().clone(),
+                        registered: Default::default(),
                         $($extra: $value,)*
                     };
                     let build_fsm = |initial_state| {

@@ -2109,7 +2109,6 @@ macro_rules! effectful_stateful {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::system("card")]
 /// # struct Card;
 /// # impl CardPort for Card { fn charge(&self, _: &ChargeCardRequest) -> Result<Charged, EffectError> { Ok(Charged) } }
 /// # #[derive(Clone, Debug, Serialize)]
@@ -2162,7 +2161,6 @@ macro_rules! effectful_stateful {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::system("card")]
 /// # struct Card;
 /// # impl CardPort for Card { fn charge(&self, _: &ChargeCardRequest) -> Result<Charged, EffectError> { Ok(Charged) } }
 /// let charge = perform(ChargeCardRequest::for_order).through(Port::to(Card));
@@ -3265,7 +3263,6 @@ macro_rules! join {
 ///     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// }
 ///
-/// #[obzenflow_runtime::effects::system("ledger")]
 /// struct Ledger;
 ///
 /// impl LedgerPort for Ledger {
@@ -3299,7 +3296,6 @@ macro_rules! join {
 ///     fn record(&self, entry: &Entry) -> Result<Recorded, EffectError>;
 /// }
 ///
-/// #[obzenflow_runtime::effects::system("ledger")]
 /// struct Ledger;
 ///
 /// impl LedgerPort for Ledger {
@@ -3339,7 +3335,6 @@ macro_rules! join {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::system("ledger")]
 /// # struct Ledger;
 /// # impl LedgerPort for Ledger {
 /// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
@@ -3362,7 +3357,6 @@ macro_rules! join {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::system("ledger")]
 /// # struct Ledger;
 /// # impl LedgerPort for Ledger {
 /// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
@@ -3387,7 +3381,6 @@ macro_rules! join {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::system("ledger")]
 /// # struct Ledger;
 /// # impl LedgerPort for Ledger {
 /// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
@@ -3553,7 +3546,6 @@ macro_rules! sink {
 ///     ) -> Result<FiniteRead<Fact, NextFact>, QueryError>;
 /// }
 ///
-/// #[obzenflow_runtime::effects::system("fact-file")]
 /// struct FactFile;
 ///
 /// #[async_trait::async_trait]
@@ -3597,7 +3589,6 @@ macro_rules! sink {
 /// #         ctx: &QueryContext,
 /// #     ) -> Result<FiniteRead<Fact, NextFact>, QueryError>;
 /// # }
-/// # #[obzenflow_runtime::effects::system("fact-file")]
 /// # struct FactFile;
 /// # #[async_trait::async_trait]
 /// # impl FactInput for FactFile {

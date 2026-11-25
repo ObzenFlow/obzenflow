@@ -124,7 +124,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
             data_journal: self.resources.data_journal.clone(),
             flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
-            system: self.source.binding.clone(),
+            registered: Default::default(),
             idle_backoff: IdleBackoff::exponential_with_cap(Duration::from_millis(1), idle_cap),
             pending_idle_delay: None,
             external_events: event_receiver.into(),

@@ -103,7 +103,6 @@ impl TypedTransformHandler for MergeTransform {
     }
 }
 
-#[obzenflow_runtime::effects::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }

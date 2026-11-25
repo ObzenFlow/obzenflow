@@ -62,7 +62,9 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
     /// Stage ID
     pub(crate) stage_id: StageId,
 
-    pub(crate) system: obzenflow_core::effect_binding::SystemBinding,
+    pub(crate) registered: Arc<
+        std::sync::OnceLock<crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>>,
+    >,
 
     /// Adaptive backoff for async polls that deliver no data.
     pub(crate) idle_backoff: IdleBackoff,
@@ -338,10 +340,11 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> Supervisor
         _context: &Self::Context,
         descriptor: SupervisorDescriptor,
     ) -> Registration {
-        base::register_stage(
+        base::register_source_stage(
             self.data_journal.clone(),
             self.flow_context.clone(),
             descriptor,
+            self.registered.clone(),
         )
     }
 
@@ -460,7 +463,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
             data_journal: self.data_journal.clone(),
             flow_context: self.flow_context.clone(),
             stage_id: self.stage_id,
-            system: self.system.clone(),
+            registered: self.registered.clone(),
             external_events: self.external_events.begin_turn(),
             state_watcher: self.state_watcher.clone(),
             last_state: Some(state.clone()),
@@ -535,33 +538,11 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
 
             FiniteSourceState::AcquiringInput => {
                 let stage = &self.reads;
-                let archived = stage
-                    .effect_history
-                    .as_ref()
-                    .and_then(|history| history.declared_binding.clone());
-                let parent = if let Some(record) = archived.as_ref() {
-                    let origin = obzenflow_core::event::CausalFrontier::from_record(record)?;
-                    let event = record
-                        .authored()
-                        .with_flow_context(self.flow_context.clone());
-                    crate::supervised_base::publication::with_snapshot(
-                        origin,
-                        crate::supervised_base::publication::append(
-                            &self.data_journal,
-                            event,
-                            Default::default(),
-                        ),
-                    )
-                    .await?
-                    .into()
-                } else {
-                    crate::stages::source::supervision::commit_source_binding(
-                        &self.data_journal,
-                        &self.flow_context,
-                        &self.system,
-                    )
-                    .await?
-                };
+                let parent = self
+                    .registered
+                    .get()
+                    .cloned()
+                    .ok_or("the source reads before its registration row commits")?;
                 if let Some(archive) = ctx.runtime_execution.archive_for_io() {
                     crate::stages::source::supervision::announce_replay_started(
                         archive,

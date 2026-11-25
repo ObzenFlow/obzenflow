@@ -46,7 +46,6 @@ trait RowInput {
     ) -> Result<FiniteRead<serde_json::Value, RowRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("rows")]
 struct Rows {
     rows: Vec<serde_json::Value>,
     reads: Arc<AtomicUsize>,

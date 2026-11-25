@@ -174,7 +174,6 @@ trait CollectBriefPort: Send + Sync {
     fn collect(&self, brief: &DecisionBrief) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("brief-collector")]
 struct CollectBrief {
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
 }

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The framework's `http-api` system, which reads JSON from an HTTP API.
+//! The framework's HTTP API system, which reads JSON from an HTTP API.
 
 mod api;
 

@@ -64,7 +64,6 @@ struct Delivered {
     event_id: u64,
 }
 
-#[obzenflow_runtime::effects::system("delivery-log")]
 struct DeliveryLog {
     delivered: Arc<Mutex<Vec<u64>>>,
 }

@@ -115,7 +115,6 @@ trait CollectOutPort: Send + Sync {
     fn collect(&self, out: &BuildOnlyOut) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("amr-collector")]
 struct Collect {
     rows: Arc<Mutex<Vec<BuildOnlyOut>>>,
 }

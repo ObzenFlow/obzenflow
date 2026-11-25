@@ -12,7 +12,7 @@ use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead
 use obzenflow_runtime::stages::source::{
     SourceError, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
 };
-use obzenflow_runtime::systems::{Port, System};
+use obzenflow_runtime::systems::Port;
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -104,15 +104,6 @@ enum ValuesState<I: IntoIterator> {
     Ready(I),
     Reading(Fuse<I::IntoIter>),
     Exhausted,
-}
-
-impl<I> System for InMemory<I>
-where
-    I: IntoIterator + Send + Sync + 'static,
-    I::IntoIter: Send + Sync,
-    I::Item: TypedPayload + Send + Sync + 'static,
-{
-    const NAME: &'static str = "in-memory";
 }
 
 impl<I> InMemory<I>

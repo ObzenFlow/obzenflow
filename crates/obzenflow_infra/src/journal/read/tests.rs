@@ -4,9 +4,6 @@
 
 use super::*;
 use crate::journal::DiskJournal;
-use obzenflow_core::effect_binding::{
-    ConfigurationEvidence, DelimitedHeaders, SystemBindingEvidence,
-};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::SourceRecordRejectedFact;
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -153,30 +150,6 @@ impl Run {
     async fn reject(&self, row: Option<u64>) {
         self.error
             .append(self.rejection(row), Default::default())
-            .await
-            .unwrap();
-    }
-
-    async fn bind(&self, file: &str) {
-        let binding = SystemBindingEvidence::configured(
-            "file-system",
-            ConfigurationEvidence::Delimited {
-                path: file.into(),
-                delimiter: ',',
-                headers: DelimitedHeaders::FirstRow,
-            },
-        )
-        .unwrap()
-        .binding()
-        .clone();
-        self.data
-            .append(
-                ChainEventFactory::execution_event(
-                    self.stage.into(),
-                    ExecutionPayload::SourceBindingDeclared(binding),
-                ),
-                Default::default(),
-            )
             .await
             .unwrap();
     }
@@ -805,11 +778,9 @@ async fn earlier_rejections_keep_their_places_while_each_journal_holds_one() {
 #[tokio::test]
 async fn a_row_rejected_again_names_the_oldest_run_that_rejected_it() {
     let first = Run::new();
-    first.bind("night.csv").await;
     first.reject(Some(3)).await;
     first.reject(Some(5)).await;
     let second = Run::new();
-    second.bind("night.csv").await;
     second.reject(Some(5)).await;
     second.reject(Some(7)).await;
     let shown = Run::new();
@@ -865,7 +836,6 @@ async fn a_row_rejected_again_names_the_oldest_run_that_rejected_it() {
 #[tokio::test]
 async fn a_run_that_rejected_rows_out_of_order_still_names_the_first() {
     let killed = Run::new();
-    killed.bind("night.csv").await;
     killed.reject(Some(5)).await;
     killed.reject(Some(3)).await;
     let shown = Run::new();
@@ -874,39 +844,8 @@ async fn a_run_that_rejected_rows_out_of_order_still_names_the_first() {
 }
 
 #[tokio::test]
-async fn rejected_row_same_binding_repeats() {
-    let killed = Run::new();
-    killed.bind("night.csv").await;
-    killed.reject(Some(5)).await;
-    let shown = Run::new();
-    shown.bind("night.csv").await;
-    shown.reject(Some(5)).await;
-    assert_eq!(shown_repeats(&shown, &[&killed]).await, [Some(0)]);
-}
-
-#[tokio::test]
-async fn rows_without_one_binding_never_repeat() {
-    let unbound = Run::new();
-    unbound.reject(Some(164)).await;
-    let shown = Run::new();
-    shown.reject(Some(164)).await;
-    assert_eq!(shown_repeats(&shown, &[&unbound]).await, [None]);
-
-    let monday = Run::new();
-    monday.bind("monday.csv").await;
-    monday.reject(Some(164)).await;
-    let tuesday = Run::new();
-    tuesday.bind("tuesday.csv").await;
-    tuesday.reject(Some(164)).await;
-    let shown = Run::new();
-    shown.reject(Some(164)).await;
-    assert_eq!(shown_repeats(&shown, &[&monday, &tuesday]).await, [None]);
-}
-
-#[tokio::test]
 async fn a_rejection_that_names_no_record_never_repeats() {
     let killed = Run::new();
-    killed.bind("night.csv").await;
     killed.reject(None).await;
     let shown = Run::new();
     shown.reject(None).await;

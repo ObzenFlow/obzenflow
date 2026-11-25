@@ -112,7 +112,6 @@ impl TypedTransformHandler for MergeTransform {
     }
 }
 
-#[obzenflow_runtime::effects::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
@@ -599,7 +598,6 @@ trait TickInput {
     ) -> Result<FiniteRead<ChannelTick, TickRead>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("stalling-finite")]
 struct StallingTicks {
     polls: Arc<AtomicUsize>,
 }
@@ -1018,7 +1016,6 @@ async fn resume_csv_run(
 
 #[derive(Clone, Debug, PartialEq)]
 enum SourceRow {
-    Declared,
     Read(u64),
     CatchUp,
     Order(u64),
@@ -1032,9 +1029,6 @@ async fn source_rows(run: &Path) -> Vec<SourceRow> {
         .filter_map(|envelope| match &envelope.payload {
             ChainPayload::Fact(order) => {
                 Some(SourceRow::Order(order["id"].as_u64().expect("order id")))
-            }
-            ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(_)) => {
-                Some(SourceRow::Declared)
             }
             ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
                 if record.is_query() =>
@@ -1091,10 +1085,12 @@ async fn recorded_prefix(run: &Path) -> u64 {
         (1..ORDERS).contains(&committed),
         "the stop must land inside the input: {rows:?}"
     );
-    let mut expected = vec![SourceRow::Declared];
-    expected.extend(orders(1..=committed));
+    let mut expected = orders(1..=committed).collect::<Vec<_>>();
     expected.push(SourceRow::Eof(EofKind::Truncated));
-    assert_eq!(rows, expected, "the binding precedes every read");
+    assert_eq!(
+        rows, expected,
+        "a truncated EOF follows the committed orders"
+    );
     committed
 }
 
@@ -1111,8 +1107,7 @@ async fn an_interrupted_csv_source_continues_after_its_last_committed_row() -> R
     let (outcome, resumed_run) =
         resume_csv_run(&journal_base, &input, &recorded_run, OrderCsv).await?;
     outcome?;
-    let mut expected = vec![SourceRow::Declared];
-    expected.extend(orders(1..=committed));
+    let mut expected = orders(1..=committed).collect::<Vec<_>>();
     expected.push(SourceRow::CatchUp);
     expected.extend(orders(committed + 1..=ORDERS));
     expected.extend([
@@ -1160,8 +1155,7 @@ async fn changed_decoder_value_decodes_resumed_suffix() -> Result<()> {
     )
     .await?;
     outcome?;
-    let mut expected = vec![SourceRow::Declared];
-    expected.extend(orders(1..=committed));
+    let mut expected = orders(1..=committed).collect::<Vec<_>>();
     expected.push(SourceRow::CatchUp);
     expected.extend(
         (committed + 1..=ORDERS).flat_map(|id| [SourceRow::Read(id), SourceRow::Order(id * 100)]),
@@ -1280,8 +1274,7 @@ async fn changed_csv_input_resume_refused() -> Result<()> {
     let (outcome, resumed_run) =
         resume_csv_run(&journal_base, &input, &recorded_run, OrderCsv).await?;
     assert!(outcome.is_err(), "a refused source fails the resumed run");
-    let mut expected = vec![SourceRow::Declared];
-    expected.extend(orders(1..=committed));
+    let mut expected = orders(1..=committed).collect::<Vec<_>>();
     expected.extend([SourceRow::CatchUp, SourceRow::Read(committed + 1)]);
     assert_eq!(source_rows(&resumed_run).await, expected);
     let refusals: Vec<_> = source_errors(&resumed_run)
@@ -1325,16 +1318,13 @@ async fn unread_csv_source_resume_reads_input() -> Result<()> {
     // The failed process ends, releasing its journal writers (B7).
     drop(handle);
     let failed_run = replay_testkit::latest_run_dir(&journal_base);
-    assert_eq!(
-        source_rows(&failed_run).await,
-        [SourceRow::Declared, SourceRow::Read(1)]
-    );
+    assert_eq!(source_rows(&failed_run).await, [SourceRow::Read(1)]);
 
     write_orders(&input)?;
     let (outcome, resumed_run) =
         resume_csv_run(&journal_base, &input, &failed_run, OrderCsv).await?;
     outcome?;
-    let mut expected = vec![SourceRow::Declared, SourceRow::Read(1), SourceRow::CatchUp];
+    let mut expected = vec![SourceRow::Read(1), SourceRow::CatchUp];
     expected.extend(orders(1..=ORDERS));
     expected.extend([
         SourceRow::Read(ORDERS + 1),

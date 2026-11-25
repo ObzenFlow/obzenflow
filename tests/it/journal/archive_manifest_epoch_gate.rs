@@ -35,7 +35,6 @@ trait ArchiveGatePort: Send + Sync {
     fn record(&self, request: &Record) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("archive-gate")]
 struct ArchiveGateDestination;
 
 impl ArchiveGatePort for ArchiveGateDestination {

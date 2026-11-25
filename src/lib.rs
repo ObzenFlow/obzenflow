@@ -240,4 +240,4 @@ pub mod systems;
 #[cfg(feature = "test-support")]
 pub mod testing;
 
-pub use effects::{command, port, system};
+pub use effects::{command, port};

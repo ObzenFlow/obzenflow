@@ -14,6 +14,8 @@ use std::time::Duration;
 
 const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
+type KeptRecord<Record> = fn(Record) -> Result<Record, SourceError>;
+
 /// `query` starts the line that builds a pull source from the request of its first
 /// read. `.through(port)` ends it with the source handler.
 ///
@@ -31,7 +33,6 @@ const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 /// }
 /// # impl obzenflow_core::TypedPayload for Tick { const EVENT_TYPE: &'static str = "docs.tick"; }
 ///
-/// #[obzenflow_runtime::effects::system("ticks")]
 /// struct Ticks;
 ///
 /// #[obzenflow_runtime::effects::port]
@@ -61,10 +62,13 @@ const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 /// # use obzenflow_runtime::queries::query;
 /// let source = query(7_u64);
 /// ```
-pub fn query<R: QueryRequest>(first: R) -> PendingQuery<R, Undecoded> {
+pub fn query<R, Record>(first: R) -> PendingQuery<R, KeptRecord<Record>>
+where
+    R: QueryRequest<Answer = FiniteRead<Record, R>>,
+{
     PendingQuery {
         first,
-        decode: Undecoded,
+        decode: Ok,
         poll_timeout: DEFAULT_POLL_TIMEOUT,
     }
 }
@@ -79,8 +83,32 @@ pub struct PendingQuery<R, D> {
 
 impl<R: QueryRequest, D> PendingQuery<R, D> {
     /// `decode` sets the function from one recorded record to the stage's output. A
-    /// line whose records already are the output leaves it out.
-    pub fn decode<F>(self, decode: F) -> PendingQuery<R, F> {
+    /// line whose records already are the output leaves it out. A function that does
+    /// not take the query's record does not compile:
+    ///
+    /// ```compile_fail,E0631
+    /// # use obzenflow_runtime::queries::{query, FiniteRead, QueryContext, QueryError};
+    /// # use obzenflow_runtime::stages::common::handlers::SourceError;
+    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    /// # struct Position;
+    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    /// # struct Tick;
+    /// # struct Ticks;
+    /// # #[obzenflow_runtime::effects::port]
+    /// # impl Ticks {
+    /// #     #[query(type = "docs.ticks.read")]
+    /// #     async fn read(&self, _: &Position, _: &QueryContext)
+    /// #         -> Result<FiniteRead<Tick, Position>, QueryError> {
+    /// #         Ok(FiniteRead::EndOfInput)
+    /// #     }
+    /// # }
+    /// let line = query(Position).decode(|text: String| Ok::<_, SourceError>(text));
+    /// ```
+    pub fn decode<Record, Output, F>(self, decode: F) -> PendingQuery<R, F>
+    where
+        R: QueryRequest<Answer = FiniteRead<Record, R>>,
+        F: Fn(Record) -> Result<Output, SourceError> + Send + Sync + 'static,
+    {
         PendingQuery {
             first: self.first,
             decode,
@@ -123,7 +151,6 @@ impl<R: QueryRequest, D> PendingQuery<R, D> {
     ///     fn append(&self, request: &Append) -> Result<Tick, EffectError>;
     /// }
     ///
-    /// #[obzenflow_runtime::effects::system("tick-ledger")]
     /// struct Ledger;
     ///
     /// impl TickLedger for Ledger {
@@ -135,21 +162,19 @@ impl<R: QueryRequest, D> PendingQuery<R, D> {
     /// let ledger: Port<dyn TickLedger> = Port::to(Ledger);
     /// let source = query(Position).through(ledger);
     /// ```
-    pub fn through<Record>(self, port: Port<R::Port>) -> Query<D::Output>
+    pub fn through<Record, Output>(self, port: Port<R::Port>) -> Query<Output>
     where
         R: QueryRequest<Answer = FiniteRead<Record, R>>,
         Record: Send + Sync + 'static,
-        D: Decode<Record>,
-        D::Output: Send + Sync + 'static,
+        D: Fn(Record) -> Result<Output, SourceError> + Send + Sync + 'static,
+        Output: Send + Sync + 'static,
     {
         let decode = Arc::new(self.decode);
         let first = self.first;
         Query {
             read: Box::new(move || {
                 let decode = Arc::clone(&decode);
-                SourceRead::finite(port.clone(), first.clone(), move |record| {
-                    decode.decode(record)
-                })
+                SourceRead::finite(port.clone(), first.clone(), move |record| decode(record))
             }),
             poll_timeout: self.poll_timeout,
         }
@@ -183,37 +208,5 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> TypedAsyncFiniteSourceHandl
 
     fn read(&self) -> SourceRead<Output, Finite> {
         (self.read)()
-    }
-}
-
-/// The decode step of a query line: a function from one record to the output, or
-/// [`Undecoded`] when the records already are the output.
-#[doc(hidden)]
-pub trait Decode<Record>: Send + Sync + 'static {
-    type Output;
-
-    fn decode(&self, record: Record) -> Result<Self::Output, SourceError>;
-}
-
-/// The decode step of a query line that sets none.
-#[doc(hidden)]
-pub struct Undecoded;
-
-impl<Record> Decode<Record> for Undecoded {
-    type Output = Record;
-
-    fn decode(&self, record: Record) -> Result<Record, SourceError> {
-        Ok(record)
-    }
-}
-
-impl<Record, Output, F> Decode<Record> for F
-where
-    F: Fn(Record) -> Result<Output, SourceError> + Send + Sync + 'static,
-{
-    type Output = Output;
-
-    fn decode(&self, record: Record) -> Result<Output, SourceError> {
-        self(record)
     }
 }

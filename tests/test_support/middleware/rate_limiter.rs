@@ -253,7 +253,6 @@ trait BatchInput {
     ) -> Result<FiniteRead<RateLimiterTestEvent, BatchRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("batches")]
 struct Batches {
     sizes: Vec<u64>,
 }
@@ -327,7 +326,6 @@ trait ScriptedInput {
     ) -> Result<FiniteRead<RateLimiterTestEvent, ScriptRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("scripted")]
 struct Script {
     steps: Vec<SourceStep>,
     played: AtomicUsize,

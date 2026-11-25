@@ -130,7 +130,6 @@ trait TickNumbers {
     ) -> Result<FiniteRead<u64, TickRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow::system("tick-numbers")]
 struct Numbers {
     last: Option<u64>,
     pace: Duration,
@@ -2519,7 +2518,6 @@ mod hosted {
 #[derive(Clone, Debug, serde::Serialize)]
 struct Discard;
 
-#[obzenflow::system("slow-discard")]
 struct SlowDiscard {
     delay: Duration,
 }

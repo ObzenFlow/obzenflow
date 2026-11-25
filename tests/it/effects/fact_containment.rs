@@ -50,7 +50,6 @@ impl TypedPayload for ContainmentEffectValue {
     const EVENT_TYPE: &'static str = "containment.effect_value";
 }
 
-#[obzenflow::system("values")]
 struct ValueService;
 
 #[derive(Clone, Debug, Serialize)]
@@ -263,7 +262,6 @@ impl obzenflow_core::Outcome for CollidingOutcome {
 
 impl obzenflow_core::EffectOutcome for CollidingOutcome {}
 
-#[obzenflow::system("colliding")]
 struct CollidingService;
 
 #[derive(Clone, Debug, Serialize)]

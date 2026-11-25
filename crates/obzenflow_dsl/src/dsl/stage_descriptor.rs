@@ -18,7 +18,6 @@ use obzenflow_adapters::middleware::{
     MiddlewareSurfaceKind, PerEffectPolicyBoundary, PerSourcePolicyBoundary,
     TopologyMiddlewareConfigSlot,
 };
-use obzenflow_core::effect_binding::SystemBinding;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::__private::{AdmittedSource, UnifiedJoinHandler};
@@ -606,12 +605,6 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     /// for the same reason: resume admission must see every source (FLOWIP-134i B8).
     fn source_continuation(&self) -> Option<SourceContinuation>;
 
-    /// For a source stage, `source_binding` returns the binding of its system. For every
-    /// other stage, it returns `None`.
-    fn source_binding(&self) -> Option<SystemBinding> {
-        None
-    }
-
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
         Vec::new()
     }
@@ -723,10 +716,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
         Some(self.source.continuation())
-    }
-
-    fn source_binding(&self) -> Option<SystemBinding> {
-        Some(self.source.binding().clone())
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -895,10 +884,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
         Some(self.source.continuation())
-    }
-
-    fn source_binding(&self) -> Option<SystemBinding> {
-        Some(self.source.binding().clone())
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {

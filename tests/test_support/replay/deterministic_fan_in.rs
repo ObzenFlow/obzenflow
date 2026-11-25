@@ -46,7 +46,6 @@ trait ChannelInput {
     ) -> Result<FiniteRead<FanInInput, ChannelRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("channel-fixture")]
 struct ChannelFixture {
     channel: &'static str,
     count: usize,
@@ -206,7 +205,6 @@ impl TypedTransformHandler for TapTransform {
     }
 }
 
-#[obzenflow::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }

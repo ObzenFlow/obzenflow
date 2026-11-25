@@ -76,7 +76,6 @@ impl TypedPayload for EnvelopeOutput {
     const EVENT_TYPE: &'static str = "envelope.output";
 }
 
-#[obzenflow::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }

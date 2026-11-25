@@ -8,7 +8,7 @@ use super::erased::{
 };
 use super::prepared::{sealed as admission_sealed, AdmitSource, AdmittedSource};
 use super::read::recording_ends;
-use super::typed::{configuration_fatal, preserve_recorded, protocol_fatal};
+use super::typed::{configuration_fatal, effect_fatal, preserve_recorded, protocol_fatal};
 use super::SourceContinuation;
 use super::SourceError;
 use crate::effects::{EffectError, EffectInvocationContext, EffectsCore};
@@ -16,7 +16,6 @@ use crate::events::{HostedSubmission, IngressReceiptSender, SourceReceiver};
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::StageFatal;
 use async_trait::async_trait;
-use obzenflow_core::effect_binding::SystemBinding;
 use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::schema::TypedFact;
 use obzenflow_core::event::{ChainPayload, EventKind, SourceDiagnosticReason};
@@ -122,7 +121,6 @@ impl<T: OneFactOutcome> QueueState<T> {
 /// `HostedSource` is the handler of a hosted source stage. It holds the read
 /// port of its endpoint's queue. The host keeps the queue's submission handle.
 pub struct HostedSource<T> {
-    binding: SystemBinding,
     queue: Arc<QueueState<T>>,
     slot: HostedIngressBindingSlot,
     batch: usize,
@@ -132,7 +130,6 @@ impl<T> fmt::Debug for HostedSource<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostedSource")
             .field("output", &std::any::type_name::<T>())
-            .field("system", &self.binding.name())
             .field("ingress_key", self.slot.ingress_key())
             .field("max_batch_size", &self.batch)
             .finish_non_exhaustive()
@@ -141,46 +138,26 @@ impl<T> fmt::Debug for HostedSource<T> {
 
 impl<T: OneFactOutcome + Send + Sync + 'static> HostedSource<T> {
     /// `HostedSource::http` makes a source of the submissions that the framework-managed
-    /// HTTP ingress admits. Its system is `http-ingress`.
-    ///
-    /// # Panics
-    ///
-    /// `http` panics when the ingress key makes the binding evidence longer than
-    /// 4,096 bytes.
+    /// HTTP ingress admits.
     pub fn http(rx: SourceReceiver<HostedSubmission<T>>, slot: HostedIngressBindingSlot) -> Self {
-        Self::named("http-ingress", rx, slot)
+        Self::admitting(rx, slot)
     }
 
     /// `HostedSource::ingress` makes a source of the submissions that the protocol-neutral
-    /// ingress admits. Its system is `ingress`.
-    ///
-    /// # Panics
-    ///
-    /// `ingress` panics when the ingress key makes the binding evidence longer than
-    /// 4,096 bytes.
+    /// ingress admits.
     pub fn ingress(
         rx: SourceReceiver<HostedSubmission<T>>,
         slot: HostedIngressBindingSlot,
     ) -> Self {
-        Self::named("ingress", rx, slot)
+        Self::admitting(rx, slot)
     }
 
-    fn named(
-        name: &'static str,
-        rx: SourceReceiver<HostedSubmission<T>>,
-        slot: HostedIngressBindingSlot,
-    ) -> Self {
+    fn admitting(rx: SourceReceiver<HostedSubmission<T>>, slot: HostedIngressBindingSlot) -> Self {
         let queue = Arc::new(QueueState {
             rx,
             receipts: Mutex::new(HashMap::new()),
         });
-        let configuration = obzenflow_core::effect_binding::ConfigurationEvidence::Ingress {
-            key: slot.ingress_key().as_str().to_owned(),
-        };
-        let evidence = obzenflow_core::SystemBindingEvidence::configured(name, configuration)
-            .expect("an ingress key fits the binding evidence bound");
         Self {
-            binding: evidence.binding().clone(),
             queue,
             slot,
             batch: 1000,
@@ -190,11 +167,6 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedSource<T> {
     pub fn with_max_batch_size(mut self, max_batch_size: usize) -> Self {
         self.batch = max_batch_size.max(1);
         self
-    }
-
-    /// `system_name` returns the name of the system that admits this source's submissions.
-    pub fn system_name(&self) -> &str {
-        self.binding.name()
     }
 }
 
@@ -214,11 +186,9 @@ impl<Out: OneFactOutcome + Send + Sync + 'static> AdmitSource<dyn UnifiedAsyncIn
     type Handler = HostedReadAdapter<Out>;
 
     fn admit(self) -> AdmittedSource<Self::Handler> {
-        let binding = self.binding.clone();
         AdmittedSource {
             handler: HostedReadAdapter::new(self),
             continuation: SENDER_REDELIVERS,
-            binding,
             declaration: Ok(None),
         }
     }
@@ -302,11 +272,9 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
         if recording_ends(&context, number) {
             let mut effects = EffectsCore::new(context);
             if let Err(error) = effects.reproduce_trailing_crossing().await {
-                return Some(ErasedSourceInvocation::fatal(
-                    effects
-                        .authoring_halt_fatal()
-                        .unwrap_or_else(|| protocol_fatal(error.to_string())),
-                ));
+                return Some(ErasedSourceInvocation::fatal(effect_fatal(
+                    &effects, &error,
+                )));
             }
             return Some(ErasedSourceInvocation::completed(
                 ErasedSourceCompletion::Eof,
@@ -316,11 +284,9 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
         let reproduced = effects.is_replaying();
         if !reproduced {
             if let Err(error) = effects.cross_to_live().await {
-                return Some(ErasedSourceInvocation::fatal(
-                    effects
-                        .authoring_halt_fatal()
-                        .unwrap_or_else(|| protocol_fatal(error.to_string())),
-                ));
+                return Some(ErasedSourceInvocation::fatal(effect_fatal(
+                    &effects, &error,
+                )));
             }
             if self.admission.pending.is_empty() {
                 self.slot.set_restoring(false);
@@ -372,11 +338,9 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
                 self.effects = Some(effects);
                 None
             }
-            Err(error) => Some(ErasedSourceInvocation::fatal(
-                effects
-                    .authoring_halt_fatal()
-                    .unwrap_or_else(|| protocol_fatal(error.to_string())),
-            )),
+            Err(error) => Some(ErasedSourceInvocation::fatal(effect_fatal(
+                &effects, &error,
+            ))),
         }
     }
 
@@ -398,25 +362,16 @@ impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
         })?;
         let (mut event, _) = match effects.prepare_typed_fact(fact, false).await {
             Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(effects
-                    .authoring_halt_fatal()
-                    .unwrap_or_else(|| protocol_fatal(error.to_string())))
-            }
+            Err(error) => return Err(effect_fatal(effects, &error)),
         };
         if self.reproduced
             && self.context.as_ref().is_some_and(|stage| {
                 super::read::recording_ends_before(stage, self.number, &event.id)
             })
         {
-            effects
-                .reproduce_trailing_crossing()
-                .await
-                .map_err(|error| {
-                    effects
-                        .authoring_halt_fatal()
-                        .unwrap_or_else(|| protocol_fatal(error.to_string()))
-                })?;
+            if let Err(error) = effects.reproduce_trailing_crossing().await {
+                return Err(effect_fatal(effects, &error));
+            }
             return Ok(None);
         }
         let accepted_at_ns = context.accepted_at_ns;
@@ -486,9 +441,7 @@ impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandle
                 }
                 Ok(live)
             }
-            Err(error) => Err(effects
-                .authoring_halt_fatal()
-                .unwrap_or_else(|| protocol_fatal(error.to_string()))),
+            Err(error) => Err(effect_fatal(&effects, &error)),
         }
     }
 
@@ -888,7 +841,6 @@ mod tests {
                 guarantee: ReattachGuarantee::SenderRedelivers
             }
         );
-        assert_eq!(admitted.binding.name(), "ingress");
         assert_eq!(
             admitted
                 .handler
@@ -924,27 +876,6 @@ mod tests {
         let member = queue.member(submission).unwrap();
         assert_eq!(member.context.attempt_seq, IngressAttemptSeq(1));
         assert_eq!(tx.capacity(), 2, "the read frees the slot");
-    }
-
-    #[test]
-    fn hosted_binding_records_ingress_key() {
-        let bound = |key: &str| {
-            let (_tx, rx) = source_channel::<HostedSubmission<Row>>(1);
-            HostedSource::http(rx, HostedIngressBindingSlot::new(key))
-                .admit()
-                .binding
-        };
-        let tx = bound("/api/bank/tx");
-        assert_eq!(tx.name(), "http-ingress");
-        assert_eq!(
-            tx.configuration(),
-            Some(
-                &obzenflow_core::effect_binding::ConfigurationEvidence::Ingress {
-                    key: "/api/bank/tx".to_owned()
-                }
-            )
-        );
-        assert_ne!(tx, bound("/api/bank/ach"));
     }
 
     #[test]

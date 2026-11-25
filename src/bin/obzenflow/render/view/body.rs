@@ -117,6 +117,8 @@ pub(in crate::render) struct EffectOutcomeView<'a> {
     pub observation: &'a obzenflow_core::event::payloads::effect_payload::EffectObservation,
     #[serde(flatten)]
     pub outcome: &'a EffectOutcomePayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<&'a serde_json::Value>,
 }
 
 impl<'a> From<&'a EffectRecord> for EffectOutcomeView<'a> {
@@ -125,6 +127,7 @@ impl<'a> From<&'a EffectRecord> for EffectOutcomeView<'a> {
             effect_type: &record.descriptor.effect_type,
             observation: &record.observation,
             outcome: &record.outcome,
+            request: record.request.as_ref(),
         }
     }
 }

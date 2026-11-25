@@ -188,6 +188,7 @@ where
                         observation: EffectObservation::settled_success(),
                         outcome: EffectOutcomePayload::Succeeded { output },
                         origin: None,
+                        call: CallKind::Command,
                         request: None,
                     };
                     let event = build_effect_record_event(
@@ -308,6 +309,7 @@ where
             observation: EffectObservation::settled_failure(),
             outcome: outcome.clone(),
             origin: None,
+            call: CallKind::Command,
             request: None,
         };
 
@@ -562,6 +564,7 @@ pub(super) fn build_domain_effect_success_facts(
                 outcome_fact_count,
             },
             origin: origin.clone(),
+            call: CallKind::Command,
             request: None,
         };
 

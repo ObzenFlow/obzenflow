@@ -6,7 +6,7 @@ use super::*;
 use obzenflow_core::event::payloads::effect_payload::EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::provenance::JournalGroupMember;
-use obzenflow_core::event::{CausalFrontier, JournalRecord};
+use obzenflow_core::event::CausalFrontier;
 use obzenflow_core::journal::ArchiveStatus;
 use obzenflow_core::{EventDescriptor, StageKey};
 use std::collections::{BTreeMap, HashSet};
@@ -216,7 +216,6 @@ pub trait EffectHistoryStore: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct EffectHistory {
     pub(crate) members: HashMap<EffectCursor, ChainEvent>,
-    pub(crate) declared_binding: Option<JournalRecord<ChainPayload>>,
     pub(super) fact_observations:
         HashMap<EventId, obzenflow_core::event::observability::ObservabilityContext>,
     causal: Arc<HashMap<EffectCursor, CausalFrontier>>,
@@ -282,13 +281,13 @@ pub(super) fn member_cursor(member: &obzenflow_core::source::MemberRecorded) -> 
     )
 }
 
-/// `is_query_attempt` tells whether an event is the record of a failed query attempt
-/// that its read repeated. The read's recovery progress group holds it, before the
-/// read's one terminal record.
-pub(crate) fn is_query_attempt(group_id: Option<&str>, event: &ChainEvent) -> bool {
+/// `is_query_attempt` tells whether a row of `group_id` holds the record of a failed
+/// query attempt that its read repeated. The read's recovery progress group holds it,
+/// before the read's one terminal record.
+pub(crate) fn is_query_attempt(group_id: Option<&str>, payload: &ChainPayload) -> bool {
     group_id.is_some_and(|group| group.starts_with(EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX))
         && matches!(
-            &event.payload,
+            payload,
             ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) if record.is_query()
         )
 }
@@ -376,9 +375,6 @@ impl EffectHistory {
             self.recorded_flow_id.clone()
         };
         let mut history = Self::from_cursor_histories(recorded_flow_id, histories);
-        history.declared_binding = self
-            .declared_binding
-            .or_else(|| newer.declared_binding.clone());
         history.members = self.members;
         for (cursor, row) in &newer.members {
             if history
@@ -421,6 +417,16 @@ impl EffectHistory {
             || self
                 .grouped_events
                 .contains_key(effect_recovery_progress_group_id(cursor, 1).as_str())
+    }
+
+    /// `holds_query_attempt` tells whether a read at `cursor` committed a failed attempt
+    /// that its source repeats, which a resume reproduces before it reads again.
+    fn holds_query_attempt(&self, cursor: &EffectCursor) -> bool {
+        let group = effect_recovery_progress_group_id(cursor, 1);
+        self.grouped_events.get(group.as_str()).is_some_and(|rows| {
+            rows.iter()
+                .any(|(_, _, event)| is_query_attempt(Some(group.as_str()), &event.payload))
+        })
     }
 
     /// Index validated cursor histories, as one run's history would be.
@@ -491,7 +497,6 @@ impl EffectHistory {
         }
         Self {
             members: HashMap::new(),
-            declared_binding: None,
             fact_observations: HashMap::new(),
             causal: Arc::new(causal),
             recorded_flow_id,
@@ -514,7 +519,6 @@ impl EffectHistory {
         pass_through: Option<&EventDescriptor>,
     ) -> Result<Self, EffectError> {
         let mut reader = archive.open_effect_history(stage_key).await?;
-        let mut declared_binding = None;
         let mut members = HashMap::new();
         let mut fact_observations = HashMap::new();
         let mut causal = HashMap::<EffectCursor, CausalFrontier>::new();
@@ -543,14 +547,6 @@ impl EffectHistory {
                     fact_observations.insert(*envelope.id(), packet.clone());
                 }
             }
-            if declared_binding.is_none()
-                && matches!(
-                    envelope.payload,
-                    ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(_))
-                )
-            {
-                declared_binding = Some(envelope.clone());
-            }
             let event = envelope.authored();
             actions.observe(&event)?;
             if let ChainPayload::Execution(ExecutionPayload::MemberRecorded(member)) =
@@ -576,7 +572,7 @@ impl EffectHistory {
                     .journal
                     .journal_group_id
                     .as_deref(),
-                &event,
+                &event.payload,
             );
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
                 causal
@@ -742,7 +738,6 @@ impl EffectHistory {
                     .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
             }
         }
-        history.declared_binding = declared_binding;
         history.members = members;
         history.fact_observations = fact_observations;
         history.causal = Arc::new(causal);
@@ -760,6 +755,7 @@ impl EffectHistory {
                     || history.attempts.contains_key(cursor)
                     || history.abandonments.contains_key(cursor)
                     || history.members.contains_key(cursor)
+                    || history.holds_query_attempt(cursor)
             },
             |cursor| !history.index.contains_key(cursor),
         );
@@ -896,7 +892,6 @@ impl EffectHistory {
 
         Ok(Self {
             members: HashMap::new(),
-            declared_binding: None,
             fact_observations: HashMap::new(),
             causal: Arc::new(HashMap::new()),
             recorded_flow_id,
@@ -1164,7 +1159,7 @@ pub(crate) async fn current_cursor_history(
                 .journal
                 .journal_group_id
                 .as_deref(),
-            &envelope.authored(),
+            &envelope.payload,
         ) {
             continue;
         }
@@ -2036,7 +2031,7 @@ fn validate_progress_group(
     grouped_events: &GroupedJournalEvents,
 ) -> Result<(), EffectError> {
     if events.iter().any(|(_, _, event)| {
-        event.consumes_data_credit() && !is_query_attempt(Some(group_id), event)
+        event.consumes_data_credit() && !is_query_attempt(Some(group_id), &event.payload)
     }) {
         return Err(EffectError::EffectProvenanceMismatch(format!(
             "recovery progress '{group_id}' contains Data"
@@ -2159,6 +2154,7 @@ mod tests {
                 detail: None,
             },
             origin: None,
+            call: CallKind::Command,
             request: None,
         }
     }

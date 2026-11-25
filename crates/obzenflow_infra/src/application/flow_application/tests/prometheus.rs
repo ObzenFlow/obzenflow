@@ -29,7 +29,6 @@ trait HeldInput {
     ) -> Result<FiniteRead<IdlePayload, HeldRead>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("held")]
 struct Held {
     release: Arc<Semaphore>,
 }

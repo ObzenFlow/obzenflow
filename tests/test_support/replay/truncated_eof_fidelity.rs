@@ -46,7 +46,6 @@ trait TickInput {
     ) -> Result<FiniteRead<Tick, TickRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("ticks")]
 struct TickFeed {
     emit: u64,
     seal: bool,

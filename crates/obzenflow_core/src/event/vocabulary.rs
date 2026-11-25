@@ -42,7 +42,6 @@ event_names! {
     },
     source => "source" {
         PRODUCTION_FINALIZED => "production_finalized",
-        BINDING_DECLARED => "binding_declared",
         REATTACHED => "reattached",
         RECORD_REJECTED => "record_rejected",
         POLL_FAILED => "poll_failed",

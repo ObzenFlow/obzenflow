@@ -31,6 +31,22 @@ pub(super) fn protocol_fatal(detail: impl Into<String>) -> StageFatal {
     )
 }
 
+pub(super) fn effect_fatal(
+    effects: &crate::effects::EffectsCore,
+    error: &crate::effects::EffectError,
+) -> StageFatal {
+    effects
+        .authoring_halt_fatal()
+        .unwrap_or_else(|| match error {
+            crate::effects::EffectError::Journal(detail) => StageFatal::new(
+                StageFatalCode::Journal,
+                StageFatalReason::JournalFailure,
+                detail.clone(),
+            ),
+            error => protocol_fatal(error.to_string()),
+        })
+}
+
 /// Pure synchronous finite source contract.
 #[diagnostic::on_unimplemented(
     message = "this source handler does not witness its arrow contract",
@@ -165,9 +181,7 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
                 execution.source_phase_for(stage_id),
                 crate::execution::SourceExecutionPhase::Replaying
             )),
-            Err(error) => Err(effects
-                .authoring_halt_fatal()
-                .unwrap_or_else(|| protocol_fatal(error.to_string()))),
+            Err(error) => Err(effect_fatal(&effects, &error)),
         }
     }
 
@@ -228,11 +242,9 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
             if super::read::recording_ends(&context, number) {
                 let mut effects = crate::effects::EffectsCore::new(context);
                 if let Err(error) = effects.reproduce_trailing_crossing().await {
-                    return Some(ErasedSourceInvocation::fatal(
-                        effects
-                            .authoring_halt_fatal()
-                            .unwrap_or_else(|| protocol_fatal(error.to_string())),
-                    ));
+                    return Some(ErasedSourceInvocation::fatal(effect_fatal(
+                        &effects, &error,
+                    )));
                 }
                 return Some(ErasedSourceInvocation::completed(
                     ErasedSourceCompletion::Eof,
@@ -268,8 +280,8 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
                         return Some(ErasedSourceInvocation::fatal(fatal));
                     }
                     let Some(failure) = read_failure(&error) else {
-                        return Some(ErasedSourceInvocation::fatal(protocol_fatal(
-                            error.to_string(),
+                        return Some(ErasedSourceInvocation::fatal(effect_fatal(
+                            &effects, &error,
                         )));
                     };
                     let retry_after = (!reproduced).then(|| error.retry_after()).flatten();
@@ -293,11 +305,7 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
     ) -> Option<ErasedSourceInvocation> {
         if self.read.is_continuous() {
             if let Err(error) = effects.cross_to_live().await {
-                return Some(ErasedSourceInvocation::fatal(
-                    effects
-                        .authoring_halt_fatal()
-                        .unwrap_or_else(|| protocol_fatal(error.to_string())),
-                ));
+                return Some(ErasedSourceInvocation::fatal(effect_fatal(effects, &error)));
             }
             if let Err(error) = self.read.ready().await {
                 return Some(ErasedSourceInvocation::handler_error(error));
@@ -326,13 +334,7 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
         };
         let event = match effects.prepare_typed_fact(fact, false).await {
             Ok((event, _)) => event,
-            Err(error) => {
-                return ErasedSourceInvocation::fatal(
-                    effects
-                        .authoring_halt_fatal()
-                        .unwrap_or_else(|| protocol_fatal(error.to_string())),
-                )
-            }
+            Err(error) => return ErasedSourceInvocation::fatal(effect_fatal(effects, &error)),
         };
         if self.reproduced
             && self.context.as_ref().is_some_and(|context| {
@@ -341,11 +343,7 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
         {
             return match effects.reproduce_trailing_crossing().await {
                 Ok(()) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof),
-                Err(error) => ErasedSourceInvocation::fatal(
-                    effects
-                        .authoring_halt_fatal()
-                        .unwrap_or_else(|| protocol_fatal(error.to_string())),
-                ),
+                Err(error) => ErasedSourceInvocation::fatal(effect_fatal(effects, &error)),
             };
         }
         match self.preserved(event).await {
@@ -502,13 +500,11 @@ where
     Output: OneFactOutcome + Send + Sync + 'static,
     L: super::read::ReadLifetime,
 {
-    let binding = read.binding();
     let declaration = read.declaration();
     let continuation = read.continuation();
     super::prepared::AdmittedSource {
         handler: handler(DrivenReads::new(read.into_driven(), deadline)),
         continuation,
-        binding,
         declaration,
     }
 }

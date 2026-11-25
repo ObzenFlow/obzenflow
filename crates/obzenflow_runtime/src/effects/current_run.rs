@@ -272,7 +272,7 @@ impl Folded {
                 .journal
                 .journal_group_id
                 .as_deref(),
-            &record.authored(),
+            &record.payload,
         );
         if let Some(group_id) = &record.envelope.provenance.journal.journal_group_id {
             let frontier = CausalFrontier::from_record(&record).map_err(journal_failure)?;
@@ -487,7 +487,8 @@ impl Folded {
             return Ok(());
         }
         if group.events.iter().any(|event| {
-            event.consumes_data_credit() && !super::history::is_query_attempt(Some(group_id), event)
+            event.consumes_data_credit()
+                && !super::history::is_query_attempt(Some(group_id), &event.payload)
         }) {
             return Err(history_failure(format!(
                 "recovery progress '{group_id}' contains Data"

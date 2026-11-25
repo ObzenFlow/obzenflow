@@ -64,7 +64,6 @@ impl SmsNotice {
     }
 }
 
-#[obzenflow::system("depot-directory")]
 #[derive(Debug)]
 pub struct SimulatedDepots;
 
@@ -83,7 +82,6 @@ impl DepotDirectory for SimulatedDepots {
     }
 }
 
-#[obzenflow::system("messaging-provider")]
 #[derive(Debug)]
 pub struct SimulatedMessaging;
 

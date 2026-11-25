@@ -205,7 +205,6 @@ trait TransactionProbeLedger: Send + Sync {
 #[derive(Clone, Debug, serde::Serialize)]
 struct TransactionProbeRequest;
 
-#[obzenflow_runtime::effects::system("tx")]
 struct TransactionProbePort {
     calls: Arc<AtomicUsize>,
     trace: Arc<Mutex<Vec<String>>>,

@@ -33,7 +33,6 @@ trait ConsumerPaymentPort {
     async fn store(&self, payment: &ConsumerPayment) -> Result<(), EffectError>;
 }
 
-#[obzenflow::system("consumer-payments")]
 struct ConsumerPayments {
     postgres: Arc<dyn PostgresClient>,
     insert: PostgresStatement,
@@ -47,7 +46,7 @@ impl ConsumerPaymentPort for ConsumerPayments {
                 bindings.bind(payment.id).bind(payment.installment);
             })
             .await
-            .map_err(postgres::unsent::<Self>)?;
+            .map_err(postgres::unsent)?;
         Ok(())
     }
 }

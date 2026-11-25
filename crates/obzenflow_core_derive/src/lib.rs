@@ -5,15 +5,14 @@
 //! Compiler-host macros for ObzenFlow contracts.
 //!
 //! Provides the sorting behind `outcome![...]`, which `obzenflow_core`
-//! re-exports for its `outcome!` macro, and `#[command]`, `#[system]` and
-//! `#[port]`, which the runtime's effects module re-exports next to its
-//! command and port contracts.
+//! re-exports for its `outcome!` macro, and `#[command]` and `#[port]`, which
+//! the runtime's effects module re-exports next to its command and port
+//! contracts.
 
 mod command;
 mod effects_path;
 mod outcome_list;
 mod port;
-mod system;
 
 use effects_path::EffectsPath;
 use proc_macro::TokenStream;
@@ -57,29 +56,6 @@ pub fn runtime_command(attr: TokenStream, item: TokenStream) -> TokenStream {
     command::expand(attr.into(), item.into(), EffectsPath::Runtime).into()
 }
 
-/// Name a system on its type, as in
-/// `#[system("stripe")] pub struct StripeProcessor`.
-///
-/// The name is recorded in every call the system answers, so a replay against a
-/// different system is refused. It is 1 to 64 characters from `[A-Za-z0-9._-]`
-/// and starts with a letter or digit. The type names itself once, whatever ports
-/// it serves, and a struct that serves as its own port names itself the same way.
-///
-/// The facade export resolves contracts through the facade's effects module.
-/// A renamed dependency can supply its module with `effects = <path>`.
-#[proc_macro_attribute]
-pub fn system(attr: TokenStream, item: TokenStream) -> TokenStream {
-    system::expand(attr.into(), item.into(), EffectsPath::Facade).into()
-}
-
-/// Names the system implementing a port, using Runtime's effects module.
-/// See [`#[system]`](macro@system) for the supported forms.
-#[doc(hidden)]
-#[proc_macro_attribute]
-pub fn runtime_system(attr: TokenStream, item: TokenStream) -> TokenStream {
-    system::expand(attr.into(), item.into(), EffectsPath::Runtime).into()
-}
-
 /// Mark a port trait, or the inherent `impl` block of a struct that serves as
 /// its own port, so a `Port` takes its port type from the system it is built
 /// from. Port methods return `Result<Outcome, EffectError>`. By default the
@@ -121,8 +97,8 @@ pub fn runtime_system(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `&self`, then `&QueryContext`, and returns `Result<Answer, QueryError>`. A port
 /// declares effects or queries, not both.
 ///
-/// A struct that serves as its own port is also its own system, and names itself
-/// on its type with `#[obzenflow::system("name")]`.
+/// A struct that serves as its own port is also its own system. A system in an
+/// `Arc` serves its ports too, so one system can serve several ports.
 ///
 /// The facade export resolves contracts through the facade's effects module.
 /// A renamed dependency can supply its module with `effects = <path>`.

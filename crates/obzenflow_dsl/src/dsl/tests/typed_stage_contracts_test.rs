@@ -20,7 +20,6 @@ mod tests {
     };
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
-    use obzenflow_runtime::systems::System;
 
     use obzenflow_runtime::events::source_channel;
     use obzenflow_runtime::queries::FiniteRead;
@@ -134,10 +133,6 @@ mod tests {
     }
 
     struct NoInput;
-
-    impl System for NoInput {
-        const NAME: &'static str = "no-input";
-    }
 
     #[async_trait]
     impl ExactInput for NoInput {
@@ -571,17 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_source_binding_names_placeholder() {
-        let placeholder = crate::source!(name: "source", InputEvent => placeholder!());
-        assert_eq!(
-            placeholder
-                .source_binding()
-                .map(|binding| binding.name().to_owned()),
-            Some("placeholder".to_owned())
-        );
-    }
-
-    #[test]
     fn typed_macros_attach_metadata_for_exact_handlers() {
         let sync_exact = SyncExactSource;
         let async_exact = AsyncExactSource;
@@ -749,7 +733,6 @@ mod tests {
         ) -> Result<outcome![OutputEvent | AlternateEvent], obzenflow_runtime::effects::EffectError>;
     }
 
-    #[obzenflow_runtime::effects::system("verdicts")]
     struct Verdicts;
 
     impl VerdictPort for Verdicts {

@@ -224,7 +224,6 @@ trait CollectOutPort: Send + Sync {
     fn collect(&self, output: &DigestOut) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("digest-collector")]
 struct CollectOut {
     outputs: Arc<Mutex<Vec<DigestOut>>>,
 }
@@ -436,17 +435,6 @@ async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<C
     replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(relative)).await
 }
 
-fn declared_systems(rows: &[JournalRecord<ChainPayload>]) -> Vec<String> {
-    rows.iter()
-        .filter_map(|row| match &row.payload {
-            ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(binding)) => {
-                Some(binding.name().to_owned())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 fn stories_then_eof(rows: &[JournalRecord<ChainPayload>]) -> Vec<u64> {
     let eof = rows
         .iter()
@@ -467,14 +455,17 @@ fn stories_then_eof(rows: &[JournalRecord<ChainPayload>]) -> Vec<u64> {
 
 #[tokio::test]
 async fn scripted_polls_return_single_stories() {
-    use obzenflow::stages::sources::ListDetail;
+    use obzenflow::stages::sources::{ListDetail, ListDetailRead};
     let ctx = obzenflow::queries::QueryContext::for_test("stories", 1);
     let system = scripted::ScriptedStories;
+    let mut read = ListDetailRead::first(60);
     let mut ids = Vec::new();
-    for id in system.list(&ctx).await.unwrap().into_iter().take(60) {
-        if let Some(record) = system.detail(&id, &ctx).await.unwrap() {
+    while let FiniteRead::Batch { records, next } = system.read(&read, &ctx).await.unwrap() {
+        assert!(records.len() <= 1, "each read returns at most one story");
+        for record in records {
             ids.push(decoder::decode_item(record).unwrap().id.0);
         }
+        read = next;
     }
     assert_eq!(
         ids,
@@ -1920,13 +1911,12 @@ async fn postgres_output_inserts_one_hn_digest() {
             String,
             String,
             String,
-            String,
             Option<String>,
             Vec<String>,
             String,
         ),
     >(&format!(
-        "SELECT digest_id, created_at IS NOT NULL, source_system, \
+        "SELECT digest_id, created_at IS NOT NULL, \
          ai_provider, ai_model, token_estimator, interests, story_ids, output_markdown \
          FROM \"{schema}\".hn_digest_summaries"
     ))
@@ -1935,14 +1925,13 @@ async fn postgres_output_inserts_one_hn_digest() {
     .expect("inspect the HN digest destination");
     assert_eq!(row.0, 1);
     assert!(row.1);
-    assert_eq!(row.2, "scripted-stories");
-    assert_eq!(row.3, "ollama");
-    assert_eq!(row.4, "llama3.1:8b");
-    assert_eq!(row.5, "heuristic");
-    assert_eq!(row.6.as_deref(), Some("runtime protocols"));
-    assert_eq!(row.7, ["100", "101", "102", "103", "104"]);
+    assert_eq!(row.2, "ollama");
+    assert_eq!(row.3, "llama3.1:8b");
+    assert_eq!(row.4, "heuristic");
+    assert_eq!(row.5.as_deref(), Some("runtime protocols"));
+    assert_eq!(row.6, ["100", "101", "102", "103", "104"]);
     assert_eq!(
-        row.8,
+        row.7,
         "recorded [^1]\n\n### Links\n\n\
          [^1]: [Rust: tooling update](<https://example.com/hn/100>) · \
          [HN discussion](<https://news.ycombinator.com/item?id=100>)"
@@ -1950,7 +1939,6 @@ async fn postgres_output_inserts_one_hn_digest() {
 
     let archive = latest_run_dir(&journal_base);
     let stories = stage_envelopes(&archive, "hn_stories").await;
-    assert_eq!(declared_systems(&stories), ["scripted-stories"]);
     let story_ids = stories_then_eof(&stories);
     assert_eq!(story_ids, [100, 101, 102, 103, 104]);
     let sink = stage_envelopes(&archive, "digest_summary").await;
@@ -1962,7 +1950,7 @@ async fn postgres_output_inserts_one_hn_digest() {
         );
     };
     assert_eq!(call.effect_type, "hn.digest.publish");
-    assert_eq!(call.schema_version, 3);
+    assert_eq!(call.schema_version, 4);
     assert_eq!(call.outcome["outcome"], "succeeded");
 
     let mut offline_config = shipped_config("obzenflow.postgres.toml");
@@ -2001,10 +1989,6 @@ async fn postgres_output_inserts_one_hn_digest() {
     let replay_archive = latest_run_dir(&journal_base);
     assert_ne!(replay_archive, archive);
     let replay_stories = stage_envelopes(&replay_archive, "hn_stories").await;
-    assert_eq!(
-        declared_systems(&replay_stories),
-        declared_systems(&stories)
-    );
     assert_eq!(stories_then_eof(&replay_stories), story_ids);
     let replayed = stage_envelopes(&replay_archive, "digest_summary").await;
     assert_eq!(stable_sink_calls(&replayed), calls);
@@ -2143,7 +2127,6 @@ async fn digest_rate_limit_delivers_summary() {
 
     let archive = latest_run_dir(&journal_base);
     let stories = stage_envelopes(&archive, "hn_stories").await;
-    assert_eq!(declared_systems(&stories), ["scripted-stories"]);
     assert_eq!(
         stories_then_eof(&stories),
         scripted::scripted_stories(60)
@@ -2347,11 +2330,6 @@ async fn hn_replay_reconstructs_digest() {
     };
     let live_stories = stage_envelopes(&live_archive, "hn_stories").await;
     let replay_stories = stage_envelopes(&replay_archive, "hn_stories").await;
-    assert_eq!(declared_systems(&live_stories), ["http-api"]);
-    assert_eq!(
-        declared_systems(&replay_stories),
-        declared_systems(&live_stories)
-    );
     let answers = |rows: &[JournalRecord<ChainPayload>]| {
         rows.iter()
             .filter_map(|row| {
@@ -2711,7 +2689,6 @@ trait ItemFeed {
     ) -> Result<FiniteRead<DigestItem, Offset>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow::system("continuable-items")]
 #[derive(Clone, Copy, Debug)]
 struct ContinuableItems {
     last: u64,

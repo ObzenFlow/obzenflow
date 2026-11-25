@@ -201,7 +201,6 @@ trait DoneCounterPort: Send + Sync {
     fn count(&self, seed: &SeedKind) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("done-counter")]
 struct DoneCounter {
     done_count: Arc<AtomicU64>,
 }

@@ -48,7 +48,6 @@ trait CompFeed {
     ) -> Result<FiniteRead<CompInput, CompRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("comp-inputs")]
 struct CompInputs {
     calls: Arc<AtomicUsize>,
 }
@@ -145,7 +144,6 @@ impl TypedTransformHandler for FanOutTransform {
 /// Each derived logical effect fails once with a typed, retryable timeout and
 /// then succeeds. Calls are counted by canonical input so the proof verifies
 /// that every fan-out sibling owns an independent recovery session.
-#[obzenflow::system("flaky-service")]
 struct FlakyService {
     calls: Arc<Mutex<BTreeMap<u64, usize>>>,
 }
@@ -229,7 +227,6 @@ trait CollectOutputPort: Send + Sync {
     fn collect(&self, output: &CompOutput) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("composition-collector")]
 struct CollectSink {
     outputs: Arc<Mutex<Vec<CompOutput>>>,
 }

@@ -4,8 +4,10 @@
 
 use super::domain::{HnStory, HnStoryId};
 use async_trait::async_trait;
-use obzenflow::queries::{QueryContext, QueryError, SourceDiagnosticReason, SourcePollErrorKind};
-use obzenflow::stages::sources::ListDetail;
+use obzenflow::queries::{
+    FiniteRead, QueryContext, QueryError, SourceDiagnosticReason, SourcePollErrorKind,
+};
+use obzenflow::stages::sources::{ListDetail, ListDetailRead, ListDetailStep};
 use serde_json::Value;
 
 const LISTED_STORIES: usize = 64;
@@ -49,18 +51,26 @@ fn scripted_story(offset: usize) -> HnStory {
     }
 }
 
-#[obzenflow::system("scripted-stories")]
 pub struct ScriptedStories;
 
 #[async_trait]
 impl ListDetail for ScriptedStories {
-    async fn list(&self, _ctx: &QueryContext) -> Result<Vec<String>, QueryError> {
-        Ok((0..LISTED_STORIES)
-            .map(|offset| (100 + offset).to_string())
-            .collect())
-    }
-
-    async fn detail(&self, id: &str, _ctx: &QueryContext) -> Result<Option<Value>, QueryError> {
+    async fn read(
+        &self,
+        from: &ListDetailRead,
+        _ctx: &QueryContext,
+    ) -> Result<FiniteRead<Value, ListDetailRead>, QueryError> {
+        let id = match from.step() {
+            ListDetailStep::List { limit } => {
+                return from.list_reply(
+                    (0..LISTED_STORIES.min(limit))
+                        .map(|offset| (100 + offset).to_string())
+                        .collect(),
+                );
+            }
+            ListDetailStep::Detail { id } => id,
+            ListDetailStep::EndOfInput => return Ok(FiniteRead::EndOfInput),
+        };
         let offset = id
             .parse::<usize>()
             .ok()
@@ -73,16 +83,15 @@ impl ListDetail for ScriptedStories {
                 )
             })?;
         if (offset + 1) % DELETED_EVERY_NTH == 0 {
-            return Ok(None);
+            return from.detail_reply(None);
         }
-        serde_json::to_value(scripted_story(offset))
-            .map(Some)
-            .map_err(|_| {
-                QueryError::terminal(
-                    SourcePollErrorKind::Other,
-                    SourceDiagnosticReason::UnrepresentableValue,
-                )
-            })
+        let story = serde_json::to_value(scripted_story(offset)).map_err(|_| {
+            QueryError::terminal(
+                SourcePollErrorKind::Other,
+                SourceDiagnosticReason::UnrepresentableValue,
+            )
+        })?;
+        from.detail_reply(Some(story))
     }
 }
 

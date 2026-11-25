@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::SystemPortEvidence;
 use super::{
     BoundEffect, Effect, EffectBindingUse, EffectContext, EffectError, EffectPortSlot,
     EffectPortSlotSet, EffectSafety, IdempotencyKey, Named,
 };
 use crate::commands::CallRequest;
 use async_trait::async_trait;
-use obzenflow_core::SystemBindingEvidence;
 
 /// The idempotency key of a request whose port method takes one, derived from
 /// the request's business identity. The system deduplicates repeats by it.
@@ -227,7 +227,7 @@ impl<R: CallRequest> Effect for Call<R> {
     const EFFECT_TYPE: &'static str = R::EFFECT_TYPE;
     const SCHEMA_VERSION: u32 = R::SCHEMA_VERSION;
     const SAFETY: EffectSafety = <R::Safety as CallSafety>::SAFETY;
-    type BindingMode = Named<SystemBindingEvidence>;
+    type BindingMode = Named<SystemPortEvidence>;
     type Outcome = R::Outcome;
     type OutcomeSemantics = R::Records;
 
@@ -250,7 +250,7 @@ impl<R: CallRequest> Effect for Call<R> {
 }
 
 impl<R: CallRequest> BoundEffect for Call<R> {
-    type BindingEvidence = SystemBindingEvidence;
+    type BindingEvidence = SystemPortEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {
         &self.projection

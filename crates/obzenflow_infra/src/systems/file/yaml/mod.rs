@@ -4,7 +4,7 @@
 
 //! This module holds the finite YAML source.
 //!
-//! A [`YamlSource`] handler reads through a `file-system` port. Each read
+//! A [`YamlSource`] handler reads through a file system port. Each read
 //! takes at most `max_bytes` from the file, parses the document, resolves the
 //! [`YamlSelection`] and returns the next selected records. The port records
 //! each reply. The handler maps each recorded record with its [`YamlDecoder`].
@@ -169,7 +169,7 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
     /// Validates local configuration only; the file is not touched.
     pub fn build(self) -> anyhow::Result<YamlSource<D>> {
         let port = match (self.path, self.port) {
-            (Some(path), None) => YamlFileSystem::at(path).port()?,
+            (Some(path), None) => YamlFileSystem::at(path).port(),
             (None, Some(port)) => port,
             (None, None) => anyhow::bail!("yaml source: path required"),
             (Some(_), Some(_)) => anyhow::bail!("a YAML source takes a path or a port"),
@@ -198,8 +198,8 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
     }
 }
 
-/// `YamlSource` reads the records of a YAML file through a cold `file-system`
-/// port. Its decoder maps each recorded record to the output.
+/// `YamlSource` reads the records of a YAML file through a cold file system port.
+/// Its decoder maps each recorded record to the output.
 #[derive(Clone)]
 pub struct YamlSource<D> {
     port: Port<dyn YamlFile>,
@@ -526,7 +526,6 @@ mod tests {
             .expect("the input is refused")
     }
 
-    #[obzenflow_runtime::effects::system("scripted-orders")]
     struct ScriptedOrders(&'static [&'static str]);
 
     #[async_trait::async_trait]
@@ -556,24 +555,16 @@ mod tests {
 
     #[tokio::test]
     async fn through_port_yaml_decodes_supplier_records() {
-        use obzenflow_runtime::__private::AdmitSource;
-        use obzenflow_runtime::stages::common::handlers::source::SyncFiniteReads;
-
         let supplier = Arc::new(ScriptedOrders(&[
             "{order_id: s-1, amount_cents: 700}",
             "{order_id: s-2, amount_cents: 900}",
             "{order_id: s-3, amount_cents: 1100}",
         ]));
-        let port = Port::to(supplier.clone());
-        let binding = port.binding().clone();
-        let source = YamlSource::builder(OrderYaml)
-            .through(port)
+        YamlSource::builder(OrderYaml)
+            .through(Port::to(supplier.clone()))
             .batch_size(2)
             .build()
             .expect("a port supplies the records");
-        let admitted = AdmitSource::<SyncFiniteReads>::admit(source);
-        assert_eq!(admitted.binding(), &binding);
-        assert_eq!(binding.name(), "scripted-orders");
 
         let ctx = QueryContext::for_test("orders", 0);
         let mut from = YamlRead {

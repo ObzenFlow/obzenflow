@@ -10,7 +10,7 @@ use super::*;
 use crate::execution::{ExecutionPosition, UnrecordedEffect};
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use obzenflow_core::event::payloads::effect_payload::{
-    CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
+    CallKind, CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
 };
 use obzenflow_core::MiddlewareExecutionScope;
 pub(super) use sink_group::SinkGroup;
@@ -492,6 +492,13 @@ impl EffectsCore {
         self.query_request
             .as_ref()
             .map(|_| EffectAttemptOrdinal::new(self.committed_query_waits.saturating_add(1)))
+    }
+
+    fn call_kind(&self) -> CallKind {
+        match self.query_request {
+            Some(_) => CallKind::Query,
+            None => CallKind::Command,
+        }
     }
 
     fn stamp_idempotency_key(&self, event: &mut ChainEvent) {
@@ -2329,6 +2336,7 @@ impl EffectsCore {
                     descriptor,
                     outcome: EffectOutcomePayload::Succeeded { output },
                     origin: None,
+                    call: CallKind::Command,
                     request: None,
                 };
                 let mut event = build_effect_record_event(
@@ -2443,6 +2451,7 @@ impl EffectsCore {
                 detail: error.failure_detail(),
             },
             origin: None,
+            call: CallKind::Command,
             request: None,
         };
         let mut event = build_effect_record_event(
@@ -2516,6 +2525,7 @@ impl EffectsCore {
                 detail: None,
             },
             origin: None,
+            call: CallKind::Command,
             request: None,
         };
         let record_event = build_effect_record_event(
@@ -2586,6 +2596,7 @@ impl EffectsCore {
                     detail: err.failure_detail(),
                 },
                 origin: None,
+                call: self.call_kind(),
                 request: self.query_request.clone(),
             },
             RowLineage::Live,
@@ -2621,6 +2632,7 @@ impl EffectsCore {
                 detail: err.failure_detail(),
             },
             origin: None,
+            call: self.call_kind(),
             request: self.query_request.clone(),
         };
         let delay = err.retry_after().unwrap_or_default();
@@ -2723,6 +2735,7 @@ impl EffectsCore {
                 detail: err.failure_detail(),
             },
             origin: None,
+            call: self.call_kind(),
             request: self.query_request.clone(),
         };
         let mut event = build_effect_record_event(
@@ -2773,6 +2786,7 @@ impl EffectsCore {
                 detail: None,
             },
             origin: None,
+            call: CallKind::Command,
             request: None,
         };
         let mut event = build_effect_record_event(
@@ -2938,6 +2952,7 @@ impl EffectsCore {
                 descriptor,
                 outcome: EffectOutcomePayload::Succeeded { output },
                 origin: None,
+                call: CallKind::Command,
                 request: None,
             },
             RowLineage::Live,
@@ -3542,6 +3557,7 @@ impl EffectsCore {
                         descriptor,
                         outcome: EffectOutcomePayload::Succeeded { output },
                         origin: None,
+                        call: self.call_kind(),
                         request: self.query_request.clone(),
                     },
                     RowLineage::Live,
@@ -3580,6 +3596,7 @@ impl EffectsCore {
                     descriptor,
                     outcome: EffectOutcomePayload::Succeeded { output },
                     origin: None,
+                    call: self.call_kind(),
                     request: self.query_request.clone(),
                 };
                 let mut event = build_effect_record_event(
@@ -3846,7 +3863,7 @@ impl EffectsCore {
         let group_id = effect_recovery_progress_group_id(cursor, wait);
         if rows.iter().any(|event| {
             event.consumes_data_credit()
-                && !super::history::is_query_attempt(Some(group_id.as_str()), event)
+                && !super::history::is_query_attempt(Some(group_id.as_str()), &event.payload)
         }) {
             return Err(self.refuse(ReconstructionRefusal::HistoryShape(
                 EffectError::EffectProvenanceMismatch(format!(
@@ -3856,7 +3873,7 @@ impl EffectsCore {
         }
         let query_attempt = rows
             .iter()
-            .find(|event| super::history::is_query_attempt(Some(group_id.as_str()), event))
+            .find(|event| super::history::is_query_attempt(Some(group_id.as_str()), &event.payload))
             .and_then(|event| event.effect_provenance.as_ref())
             .and_then(|provenance| provenance.attempt);
         if let Some(attempt) = query_attempt {

@@ -68,7 +68,6 @@ trait ProbeInput {
     ) -> Result<FiniteRead<ProbeEvent, ProbeRead>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("delayed-two-events")]
 struct DelayedTwoEvents {
     finish_gate: Arc<tokio::sync::Notify>,
 }

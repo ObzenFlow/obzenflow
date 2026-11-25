@@ -77,7 +77,6 @@ trait SeedInput {
     ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("seed-then-eof")]
 struct SeedThenEof {
     target: u64,
     iteration_started: Arc<Notify>,
@@ -377,7 +376,6 @@ trait DoneCounterPort: Send + Sync {
     fn count(&self, seed: &SeedKind) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("done-counter")]
 struct DoneCounter {
     done_events: Arc<AtomicU64>,
 }

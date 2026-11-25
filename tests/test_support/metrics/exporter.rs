@@ -63,7 +63,6 @@ trait MetricInput {
     ) -> Result<FiniteRead<MetricEvent, MetricRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("error-after-first")]
 struct ErrorAfterFirst {
     failed: std::sync::atomic::AtomicBool,
 }
@@ -146,7 +145,6 @@ trait SleepingPort {
     async fn settle(&self, request: &Settle) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("sleeper")]
 struct Sleeper {
     sleep_per_event: Duration,
 }

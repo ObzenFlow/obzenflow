@@ -32,7 +32,6 @@ pub(crate) trait PaymentStorePort {
     async fn store(&self, payment: &PaymentAuthorized) -> Result<(), EffectError>;
 }
 
-#[obzenflow::system("payments-postgres")]
 struct PostgresPayments {
     postgres: Arc<dyn PostgresClient>,
     insert: PostgresStatement,
@@ -50,7 +49,7 @@ impl PaymentStorePort for PostgresPayments {
                     .bind(payment.amount_cents);
             })
             .await
-            .map_err(postgres::unsent::<Self>)?;
+            .map_err(postgres::unsent)?;
         Ok(())
     }
 }

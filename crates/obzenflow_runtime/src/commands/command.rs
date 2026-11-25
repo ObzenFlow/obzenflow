@@ -132,7 +132,6 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// # trait RiskEnginePort: Send + Sync {}
 /// # #[obzenflow_runtime::effects::port]
 /// # trait CaseSystemPort: Send + Sync {}
-/// # #[obzenflow_runtime::effects::system("vendor")]
 /// # struct Vendor;
 /// # impl RiskEnginePort for Vendor {}
 /// # impl CaseSystemPort for Vendor {}
@@ -497,10 +496,12 @@ where
     fn declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {
         crate::effects::binding::validate_effect_type(R::EFFECT_TYPE)
             .map_err(|_| EffectBindingBuildError::InvalidEffectType)?;
-        let binding =
-            EffectRegistrationBuilder::<Call<R>>::new(self.name.clone(), self.evidence.clone())
-                .bind_system(call_port_slot::<R>(), &self.port)?
-                .finish()?;
+        let binding = EffectRegistrationBuilder::<Call<R>>::new(
+            self.binding_name(),
+            crate::effects::SystemPortEvidence,
+        )
+        .bind_system(call_port_slot::<R>(), &self.port)?
+        .finish()?;
         Ok(EffectDeclaration::for_binding::<Call<R>>(
             binding.declaration_binding(),
         ))

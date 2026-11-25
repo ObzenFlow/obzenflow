@@ -89,7 +89,6 @@ impl TypedTransformHandler for Identity {
     }
 }
 type Delivered = Arc<Mutex<Vec<(u64, Duration)>>>;
-#[obzenflow_runtime::effects::system("throughput-recorder")]
 struct Recorder {
     origin: Instant,
     delivered: Delivered,
@@ -255,7 +254,6 @@ struct Settled {
 impl TypedPayload for Settled {
     const EVENT_TYPE: &'static str = "bench.effect_settled";
 }
-#[obzenflow_runtime::effects::system("ledger")]
 struct Ledger;
 #[derive(Clone, Debug, Serialize)]
 struct Settle {
@@ -291,7 +289,6 @@ impl EffectfulTransformHandler for SettleEach {
         Ok(fx.complete()?)
     }
 }
-#[obzenflow_runtime::effects::system("settled-log")]
 struct SettledLog {
     settled: Arc<Mutex<Vec<u64>>>,
 }

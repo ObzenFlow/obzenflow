@@ -61,7 +61,6 @@ impl TypedPayload for PaymentEffectFact {
 const AUTHORIZE: &str = "payments.authorize";
 const REFUND: &str = "payments.refund";
 
-#[obzenflow::system("payments")]
 struct PaymentService;
 
 #[derive(Clone, Debug, Serialize)]

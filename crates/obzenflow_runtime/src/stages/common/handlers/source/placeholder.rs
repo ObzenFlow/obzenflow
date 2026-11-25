@@ -7,7 +7,7 @@ use super::erased::{
     UnifiedAsyncFiniteSourceHandler,
 };
 use super::prepared::AdmittedSource;
-use super::typed::{configuration_fatal, protocol_fatal};
+use super::typed::{configuration_fatal, effect_fatal};
 use super::SourceContinuation;
 use crate::commands::AnswersEffect;
 use crate::effects::{EffectInvocationContext, EffectsCore};
@@ -31,7 +31,6 @@ pub trait PlaceholderInput: Send + Sync {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlaceholderRead;
 
-#[obzenflow_runtime::effects::system("placeholder")]
 struct Placeholder;
 
 #[async_trait]
@@ -55,7 +54,6 @@ impl AdmittedSource<PlaceholderRows> {
     pub fn finite_placeholder(message: Option<&'static str>) -> Self {
         let port: Port<dyn PlaceholderInput> = Port::to(Placeholder);
         Self {
-            binding: port.binding().clone(),
             declaration: <Port<dyn PlaceholderInput> as AnswersEffect<
                 QueryCall<PlaceholderRead>,
             >>::declaration(&port)
@@ -91,11 +89,7 @@ impl UnifiedAsyncFiniteSourceHandler for PlaceholderRows {
         let mut effects = EffectsCore::new(context);
         match effects.query(PlaceholderRead, None).await {
             Ok(_) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof),
-            Err(error) => ErasedSourceInvocation::fatal(
-                effects
-                    .authoring_halt_fatal()
-                    .unwrap_or_else(|| protocol_fatal(error.to_string())),
-            ),
+            Err(error) => ErasedSourceInvocation::fatal(effect_fatal(&effects, &error)),
         }
     }
 }

@@ -11,8 +11,6 @@ mod context;
 mod request;
 
 pub use builder::{query, PendingQuery, Query};
-#[doc(hidden)]
-pub use builder::{Decode, Undecoded};
 pub use context::QueryContext;
 pub use request::FiniteRead;
 pub(crate) use request::QueryCall;

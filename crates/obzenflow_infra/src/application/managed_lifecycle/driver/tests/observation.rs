@@ -16,7 +16,7 @@ use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
-use obzenflow_runtime::systems::{Port, System};
+use obzenflow_runtime::systems::Port;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
@@ -46,10 +46,6 @@ impl PendingSource {
         self.started.notify_one();
         self.released.notified().await;
     }
-}
-
-impl System for PendingSource {
-    const NAME: &'static str = "pending";
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -111,7 +107,6 @@ trait HoldPort {
     async fn hold(&self, request: &Hold) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("holding")]
 #[derive(Clone, Debug)]
 struct CountingSink {
     writes: Arc<AtomicUsize>,

@@ -71,7 +71,6 @@ trait StreamInput {
     ) -> Result<FiniteRead<LiveEvent, StreamRead>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("delayed-stream")]
 struct DelayedStream;
 
 #[async_trait]

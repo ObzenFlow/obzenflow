@@ -60,7 +60,6 @@ type KeyLog = Arc<Mutex<Vec<IdempotencyKey>>>;
 
 /// The in-process system the counting, failing, reserving and product
 /// requests call. The test keeps its own `Arc` to the count and reads it.
-#[obzenflow::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
     keys: KeyLog,
@@ -263,7 +262,6 @@ trait CollectOutputPort: Send + Sync {
     fn collect(&self, output: &ReplayOutput) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("replay-output-collector")]
 struct CollectSink {
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 }

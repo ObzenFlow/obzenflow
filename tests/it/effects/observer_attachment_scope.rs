@@ -57,7 +57,6 @@ impl TypedPayload for EffectReply {
 const EFFECT_A: &str = "effect_observer_scope.a";
 const EFFECT_B: &str = "effect_observer_scope.b";
 
-#[obzenflow::system("scope")]
 struct ScopeService;
 
 #[derive(Clone, Debug, Serialize)]
@@ -125,7 +124,6 @@ impl EffectfulTransformHandler for PerformsBothEffects {
 #[derive(Clone, Debug, Serialize)]
 struct Delivered;
 
-#[obzenflow_runtime::effects::system("scope-delivery-counter")]
 struct CountDeliveries {
     deliveries: Arc<AtomicUsize>,
 }

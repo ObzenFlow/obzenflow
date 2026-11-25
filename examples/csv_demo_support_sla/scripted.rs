@@ -16,18 +16,12 @@ pub struct TicketFixture {
     pub count: u32,
 }
 
-#[obzenflow::system("scripted-tickets")]
 pub struct ScriptedTickets {
     count: u32,
 }
 
 impl SystemConfig for TicketFixture {
     type System = ScriptedTickets;
-    type Evidence = TicketFixture;
-
-    fn evidence(&self) -> TicketFixture {
-        self.clone()
-    }
 
     fn resolve(&self) -> Result<ScriptedTickets, EffectPortResolutionError> {
         Ok(ScriptedTickets { count: self.count })

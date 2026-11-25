@@ -4,9 +4,9 @@
 
 use super::*;
 use crate::commands::{perform, AnswersEffect};
+use crate::effects::SystemPortEvidence;
 use crate::effects::{AtLeastOnce, EffectName, Idempotent, Keyed, RequiresKey};
 use crate::systems::Port;
-use obzenflow_core::SystemBindingEvidence;
 
 #[derive(Debug, thiserror::Error)]
 #[error("the ledger refused the write")]
@@ -18,7 +18,6 @@ trait LedgerPort: Send + Sync {
     async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError>;
 }
 
-#[crate::effects::system("simulated-ledger")]
 struct CountingLedger {
     calls: Arc<AtomicUsize>,
 }
@@ -31,7 +30,6 @@ impl LedgerPort for CountingLedger {
     }
 }
 
-#[crate::effects::system("ledger-outage")]
 struct RefusingLedger;
 
 #[async_trait]
@@ -141,7 +139,7 @@ impl Effect for HandWrittenLedgerWrite {
     const EFFECT_TYPE: &'static str = "test.ledger_write";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = Named<SystemBindingEvidence>;
+    type BindingMode = Named<SystemPortEvidence>;
     type Outcome = LedgerWritten;
     type OutcomeSemantics = DomainFacts;
 
@@ -168,7 +166,7 @@ impl EffectName for HandWrittenLedgerWrite {
 }
 
 impl BoundEffect for HandWrittenLedgerWrite {
-    type BindingEvidence = SystemBindingEvidence;
+    type BindingEvidence = SystemPortEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {
         &self.binding
@@ -254,7 +252,7 @@ async fn a_request_records_what_an_equivalent_hand_written_effect_records() {
     let hand_ledger: Arc<dyn LedgerPort> = counting_ledger(&calls);
     let binding = EffectRegistrationBuilder::<HandWrittenLedgerWrite>::new(
         LogicalEffectBindingName::new("simulated-ledger").unwrap(),
-        SystemBindingEvidence::named("simulated-ledger").unwrap(),
+        SystemPortEvidence,
     )
     .bind_eager(LEDGER_PORT, hand_ledger)
     .unwrap()
@@ -376,42 +374,28 @@ async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_
 }
 
 #[test]
-fn independently_built_systems_with_one_name_fail_collection() {
+fn distinct_systems_same_effect_collect() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let first: Port<dyn LedgerPort> = Port::to(counting_ledger(&calls));
-    let second: Port<dyn LedgerPort> = Port::to(counting_ledger(&calls));
-    let error = match EffectPortRegistry::collect_from_declarations([
-        &declaration_for::<Call<LedgerWrite>, _>(&first),
-        &declaration_for::<Call<LedgerWrite>, _>(&second),
-    ]) {
-        Ok(_) => panic!("two systems named alike must not both answer one effect"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        EffectRegistrationCollectionError::DistinctBindings {
-            effect_type: "test.ledger_write",
-            ..
-        }
-    ));
+    let counting: Port<dyn LedgerPort> = Port::to(counting_ledger(&calls));
+    let refusing: Port<dyn LedgerPort> = Port::to(RefusingLedger);
+    EffectPortRegistry::collect_from_declarations([
+        &declaration_for::<Call<LedgerWrite>, _>(&counting),
+        &declaration_for::<Call<LedgerWrite>, _>(&refusing),
+    ])
+    .expect("each system answers the stage that binds it");
 }
 
 #[test]
-fn port_type_name_inferred_from_system() {
+fn port_type_inferred_from_system() {
     let calls = Arc::new(AtomicUsize::new(0));
     let by_value = Port::to(CountingLedger {
         calls: calls.clone(),
     });
     let shared = Port::to(counting_ledger(&calls));
     let deferred = Port::deferred(|| Ok(RefusingLedger));
-    let ports: [&Port<dyn LedgerPort>; 3] = [&by_value, &shared, &deferred];
-    assert_eq!(
-        ports.map(Port::system_name),
-        ["simulated-ledger", "simulated-ledger", "ledger-outage"]
-    );
+    let _ports: [&Port<dyn LedgerPort>; 3] = [&by_value, &shared, &deferred];
 }
 
-#[crate::effects::system("keyed-ledger")]
 struct KeyedLedger {
     keys: Arc<Mutex<Vec<IdempotencyKey>>>,
 }
@@ -540,58 +524,6 @@ async fn a_keyed_method_receives_the_key_every_row_of_its_call_journals() {
     );
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct VendorEvidence {
-    canonical: BoundedBindingEvidence,
-}
-
-impl EffectBindingEvidence for VendorEvidence {
-    const SCHEMA_VERSION: u32 = 1;
-
-    fn canonical_bytes(&self) -> BoundedBindingEvidence {
-        self.canonical.clone()
-    }
-}
-
-#[derive(Clone, Debug)]
-struct VendorScore {
-    binding: EffectBindingUse<Self>,
-}
-
-#[async_trait]
-impl Effect for VendorScore {
-    const EFFECT_TYPE: &'static str = "aml.score_transaction";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = Named<VendorEvidence>;
-    type Outcome = LedgerWritten;
-    type OutcomeSemantics = DomainFacts;
-
-    fn label(&self) -> &str {
-        "score_transaction"
-    }
-
-    fn canonical_input(&self) -> Value {
-        Value::Null
-    }
-
-    async fn execute(&self, _: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        Ok(LedgerWritten { value: 0 })
-    }
-}
-
-impl BoundEffect for VendorScore {
-    type BindingEvidence = VendorEvidence;
-
-    fn binding_use(&self) -> &EffectBindingUse<Self> {
-        &self.binding
-    }
-
-    fn required_slots() -> EffectPortSlotSet {
-        EffectPortSlotSet::single(LEDGER_PORT)
-    }
-}
-
 #[derive(Clone, Debug, serde::Serialize)]
 struct ScoreLike;
 
@@ -622,24 +554,6 @@ impl KeyRule<ScoreLike> for RequiresKey {
     fn key(request: &ScoreLike) -> Option<IdempotencyKey> {
         Some(request.idempotency_key())
     }
-}
-
-#[test]
-fn system_evidence_keeps_the_binding_digest_aml_records_today() {
-    let vendor = VendorEvidence {
-        canonical: BoundedBindingEvidence::try_new(
-            json!({ "system": "simulated-risk-engine" })
-                .to_string()
-                .into_bytes(),
-        )
-        .unwrap(),
-    };
-    assert_eq!(
-        super::super::binding::binding_identity::<Call<ScoreLike>>(
-            &SystemBindingEvidence::named("simulated-risk-engine").unwrap()
-        ),
-        super::super::binding::binding_identity::<VendorScore>(&vendor)
-    );
 }
 
 #[tokio::test]
@@ -720,7 +634,6 @@ struct SinkWrite {
     value: u64,
 }
 
-#[crate::effects::system("count-writes")]
 struct CountWrites(Arc<AtomicUsize>);
 
 #[crate::effects::port]
@@ -808,7 +721,6 @@ struct RefusedWrite {
     value: u64,
 }
 
-#[crate::effects::system("refuse-after-first")]
 struct RefuseAfterFirst(Arc<AtomicUsize>);
 
 #[crate::effects::port]
@@ -872,7 +784,6 @@ struct FailedWrite {
 #[derive(Clone, Debug, serde::Serialize)]
 struct RegisterAppend(u64);
 
-#[crate::effects::system("changed-register")]
 struct ChangedRegister;
 
 #[crate::effects::port]
@@ -921,7 +832,6 @@ async fn destination_refusal_records_no_outcome() {
     }
 }
 
-#[crate::effects::system("fail-every-write")]
 struct FailEveryWrite(Arc<AtomicUsize>);
 
 #[crate::effects::port]
@@ -982,7 +892,6 @@ trait RowFeed: Send + Sync {
     ) -> Result<crate::queries::FiniteRead<u64, RowsFrom>, crate::queries::QueryError>;
 }
 
-#[crate::effects::system("row-feed")]
 struct RowList;
 
 #[async_trait]
@@ -1038,7 +947,7 @@ async fn query_changed_request_refused() {
     );
     assert_eq!(
         error.to_string(),
-        "effect effect_stage#1/0: the request differs from the recording; binding and stage logic version match"
+        "effect effect_stage#1/0: the request differs from the recording; stage logic version matches"
     );
 }
 

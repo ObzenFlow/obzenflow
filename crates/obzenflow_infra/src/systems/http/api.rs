@@ -4,12 +4,11 @@
 
 use crate::clients::http::default_http_client;
 
-use obzenflow_core::effect_binding::{ConfigurationEvidence, HttpEndpoint};
+use obzenflow_adapters::sources::ListDetail;
 use obzenflow_core::event::observability::{HttpPullMeasurements, ObservationRecord};
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::http_client::{HttpClient, HttpClientError, HttpRequest, HttpResponse, Url};
-use obzenflow_core::BindingEvidenceError;
 use obzenflow_runtime::effects::EffectPortResolutionError;
 use obzenflow_runtime::queries::{QueryContext, QueryError};
 use obzenflow_runtime::systems::SystemConfig;
@@ -19,7 +18,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 /// `HttpApi` is the HTTP system that an application port can use to read JSON.
-#[obzenflow_runtime::effects::system("http-api")]
 pub struct HttpApi {
     base: Url,
     client: Arc<dyn HttpClient>,
@@ -27,9 +25,11 @@ pub struct HttpApi {
 }
 
 impl HttpApi {
-    pub fn json(base: Url) -> Result<JsonEndpoint, BindingEvidenceError> {
-        let endpoint = HttpEndpoint::from_url(&base)?;
-        Ok(JsonEndpoint { base, endpoint })
+    /// `json` configures a JSON endpoint below `base`. The port checks `base` when it
+    /// builds its HTTP client at the first live read: an `http` or `https` URL with a
+    /// host and no query or fragment.
+    pub fn json(base: Url) -> JsonEndpoint {
+        JsonEndpoint { base }
     }
 
     fn with_client(base: Url, client: Arc<dyn HttpClient>) -> Self {
@@ -149,40 +149,35 @@ fn rejected(response: &HttpResponse) -> QueryError {
 /// on the first live call.
 pub struct JsonEndpoint {
     base: Url,
-    endpoint: HttpEndpoint,
 }
 
 impl SystemConfig for JsonEndpoint {
     type System = HttpApi;
-    type Evidence = ConfigurationEvidence;
-
-    fn evidence(&self) -> ConfigurationEvidence {
-        ConfigurationEvidence::Json {
-            endpoint: self.endpoint.clone(),
-        }
-    }
-
-    fn configuration(&self) -> Result<ConfigurationEvidence, BindingEvidenceError> {
-        Ok(self.evidence())
-    }
 
     fn resolve(&self) -> Result<HttpApi, EffectPortResolutionError> {
+        let base = &self.base;
+        if !matches!(base.scheme(), "http" | "https")
+            || base.host().is_none()
+            || base.query().is_some()
+            || base.fragment().is_some()
+        {
+            return Err(EffectPortResolutionError::ClientConstructionFailed);
+        }
         let client = default_http_client()
             .map_err(|_| EffectPortResolutionError::ClientConstructionFailed)?;
-        Ok(HttpApi::with_client(self.base.clone(), client))
+        Ok(HttpApi::with_client(base.clone(), client))
     }
 }
 
 impl JsonEndpoint {
-    /// `list_detail` configures the endpoint to answer
-    /// [`ListDetail`](obzenflow_adapters::sources::ListDetail). `list` is the path of the
-    /// JSON array of item IDs below the base URL, and `detail` returns the path of one
-    /// item from its ID. The system skips an item whose document is `null`.
+    /// `list_detail` configures the endpoint to answer [`ListDetail`]. `list` is the
+    /// path of the JSON array of item IDs below the base URL, and `detail` returns the
+    /// path of one item from its ID. The system skips an item whose document is `null`.
     pub fn list_detail(
         self,
         list: impl Into<String>,
         detail: impl Fn(&str) -> String + Send + Sync + 'static,
-    ) -> list_detail::ListDetailEndpoint {
+    ) -> impl SystemConfig<System: ListDetail> {
         list_detail::ListDetailEndpoint {
             endpoint: self,
             list: list.into(),
@@ -194,20 +189,17 @@ impl JsonEndpoint {
 mod list_detail {
     use super::{HttpApi, JsonEndpoint};
     use async_trait::async_trait;
-    use obzenflow_adapters::sources::ListDetail;
-    use obzenflow_core::effect_binding::ConfigurationEvidence;
+    use obzenflow_adapters::sources::{ListDetail, ListDetailRead, ListDetailStep};
     use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
     use obzenflow_core::event::SourceDiagnosticReason;
-    use obzenflow_core::BindingEvidenceError;
     use obzenflow_runtime::effects::EffectPortResolutionError;
-    use obzenflow_runtime::queries::{QueryContext, QueryError};
+    use obzenflow_runtime::queries::{FiniteRead, QueryContext, QueryError};
     use obzenflow_runtime::systems::SystemConfig;
     use serde_json::Value;
     use std::sync::Arc;
 
     type DetailPath = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
-    /// The configuration of an HTTP API that answers the list-and-detail port.
     pub struct ListDetailEndpoint {
         pub(super) endpoint: JsonEndpoint,
         pub(super) list: String,
@@ -216,15 +208,6 @@ mod list_detail {
 
     impl SystemConfig for ListDetailEndpoint {
         type System = ListDetailApi;
-        type Evidence = ConfigurationEvidence;
-
-        fn evidence(&self) -> ConfigurationEvidence {
-            self.endpoint.evidence()
-        }
-
-        fn configuration(&self) -> Result<ConfigurationEvidence, BindingEvidenceError> {
-            Ok(self.evidence())
-        }
 
         fn resolve(&self) -> Result<ListDetailApi, EffectPortResolutionError> {
             Ok(ListDetailApi {
@@ -235,8 +218,6 @@ mod list_detail {
         }
     }
 
-    /// The HTTP API system that answers the list-and-detail port.
-    #[obzenflow_runtime::effects::system("http-api")]
     pub struct ListDetailApi {
         api: HttpApi,
         list: String,
@@ -245,26 +226,36 @@ mod list_detail {
 
     #[async_trait]
     impl ListDetail for ListDetailApi {
-        async fn list(&self, ctx: &QueryContext) -> Result<Vec<String>, QueryError> {
-            let ids: Vec<Value> = self.api.get_json(&self.list, ctx).await?;
-            ids.into_iter()
-                .map(|id| match id {
-                    Value::String(id) => Ok(id),
-                    Value::Number(id) => Ok(id.to_string()),
-                    _ => Err(QueryError::terminal(
-                        SourcePollErrorKind::Deserialization,
-                        SourceDiagnosticReason::MalformedInput,
-                    )),
-                })
-                .collect()
-        }
-
-        async fn detail(&self, id: &str, ctx: &QueryContext) -> Result<Option<Value>, QueryError> {
-            let item: Option<Value> = self.api.get_json(&(self.detail)(id), ctx).await?;
-            if item.is_none() {
-                tracing::info!(id = %id, "the API has no item at this ID; the source skips it");
+        async fn read(
+            &self,
+            from: &ListDetailRead,
+            ctx: &QueryContext,
+        ) -> Result<FiniteRead<Value, ListDetailRead>, QueryError> {
+            match from.step() {
+                ListDetailStep::List { .. } => {
+                    let ids: Vec<Value> = self.api.get_json(&self.list, ctx).await?;
+                    let ids = ids
+                        .into_iter()
+                        .map(|id| match id {
+                            Value::String(id) => Ok(id),
+                            Value::Number(id) => Ok(id.to_string()),
+                            _ => Err(QueryError::terminal(
+                                SourcePollErrorKind::Deserialization,
+                                SourceDiagnosticReason::MalformedInput,
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    from.list_reply(ids)
+                }
+                ListDetailStep::Detail { id } => {
+                    let item: Option<Value> = self.api.get_json(&(self.detail)(id), ctx).await?;
+                    if item.is_none() {
+                        tracing::info!(id = %id, "the API has no item at this ID; the source skips it");
+                    }
+                    from.detail_reply(item)
+                }
+                ListDetailStep::EndOfInput => Ok(FiniteRead::EndOfInput),
             }
-            Ok(item)
         }
     }
 }

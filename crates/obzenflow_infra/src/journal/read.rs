@@ -414,7 +414,7 @@ impl RunSnapshot {
         self.state.list_earlier_runs(runs).await
     }
     /// The first record of the row `record` rejects again: the oldest listed
-    /// earlier run's, while its source pinned one input across those runs.
+    /// earlier run's.
     pub async fn repeat_of(
         &mut self,
         record: &RunRecord,
@@ -462,7 +462,7 @@ impl RunTail {
         })
     }
     /// The first record of the row `record` rejects again: the oldest listed
-    /// earlier run's, while its source pinned one input across those runs.
+    /// earlier run's.
     pub async fn repeat_of(
         &mut self,
         record: &RunRecord,

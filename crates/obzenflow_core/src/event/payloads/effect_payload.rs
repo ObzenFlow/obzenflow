@@ -790,12 +790,30 @@ pub struct EffectRecord {
     pub outcome: EffectOutcomePayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<EffectFactOrigin>,
+    #[serde(default, skip_serializing_if = "CallKind::is_command")]
+    pub call: CallKind,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "present_request"
     )]
     pub request: Option<Value>,
+}
+
+/// `CallKind` is the kind of call that an effect record answers: a command that a
+/// stage performs, or a query that a source asks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallKind {
+    #[default]
+    Command,
+    Query,
+}
+
+impl CallKind {
+    fn is_command(&self) -> bool {
+        matches!(self, Self::Command)
+    }
 }
 
 fn present_request<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
@@ -939,19 +957,22 @@ impl EffectRecord {
     /// `event_type` returns the row name. A record that holds the request of a query
     /// is `query.answered` or `query.failed`.
     pub fn event_type(&self) -> &'static str {
-        match (&self.request, &self.outcome) {
-            (None, _) => self.observation.event_type(),
-            (Some(_), EffectOutcomePayload::Failed { .. }) => QUERY_FAILED_EVENT_TYPE,
-            (Some(_), _) => QUERY_ANSWERED_EVENT_TYPE,
+        match (self.call, &self.outcome) {
+            (CallKind::Command, _) => self.observation.event_type(),
+            (CallKind::Query, EffectOutcomePayload::Failed { .. }) => QUERY_FAILED_EVENT_TYPE,
+            (CallKind::Query, _) => QUERY_ANSWERED_EVENT_TYPE,
         }
     }
 
     /// `is_query` returns whether this record answers a query.
     pub fn is_query(&self) -> bool {
-        self.request.is_some()
+        self.call == CallKind::Query
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
+        if self.is_query() != self.request.is_some() {
+            return Err("a query record holds its request, and no other record holds one");
+        }
         let capture =
             self.descriptor.effect_type.is_capture() || self.descriptor.effect_type.is_settlement();
         let valid = match (&self.observation, &self.outcome) {
@@ -1019,6 +1040,7 @@ mod tests {
                 output: json!({"ok": true}),
             },
             origin: None,
+            call: CallKind::Command,
             request: None,
         }
     }
@@ -1026,6 +1048,7 @@ mod tests {
     #[test]
     fn query_record_names_follow_outcome() {
         let mut record = effect_record(EffectCursor::new("flow", "stage", 1, 0));
+        record.call = CallKind::Query;
         record.request = Some(json!({"after": null}));
         assert_eq!(record.event_type(), QUERY_ANSWERED_EVENT_TYPE);
         record.observation = EffectObservation::returned_failure();

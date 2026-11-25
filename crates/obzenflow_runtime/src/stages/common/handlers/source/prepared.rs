@@ -5,7 +5,6 @@
 use super::SourceContinuation;
 use crate::commands::StageEffectsError;
 use crate::effects::EffectDeclaration;
-use obzenflow_core::effect_binding::SystemBinding;
 use obzenflow_core::OneFactOutcome;
 
 pub(super) mod sealed {
@@ -16,7 +15,6 @@ pub(super) mod sealed {
 pub struct AdmittedSource<H> {
     pub(crate) handler: H,
     pub(crate) continuation: SourceContinuation,
-    pub(crate) binding: SystemBinding,
     pub(crate) declaration: Result<Option<EffectDeclaration>, StageEffectsError>,
 }
 
@@ -27,11 +25,6 @@ impl<H> AdmittedSource<H> {
 
     pub fn continuation(&self) -> SourceContinuation {
         self.continuation
-    }
-
-    /// `binding` returns the system binding that the source declares.
-    pub fn binding(&self) -> &SystemBinding {
-        &self.binding
     }
 
     /// `effect_declarations` returns the declaration of the source's query, which

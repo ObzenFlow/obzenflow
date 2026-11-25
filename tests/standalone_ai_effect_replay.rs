@@ -208,7 +208,6 @@ trait CollectEmbeddedPort: Send + Sync {
     fn collect(&self, output: &TicketEmbedded) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("embedded-collector")]
 struct CollectEmbedded {
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
 }

@@ -18,7 +18,7 @@ use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
     ChainPayload, Departure, DepartureAction, StageFatalReason, StageFatalRecorded,
 };
-use obzenflow_core::journal::archive_actions::{ArchiveRefusal, FailureEvidence};
+use obzenflow_core::journal::archive_actions::FailureEvidence;
 use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::{EventType, TypedPayload};
 use obzenflow_dsl::dsl::FlowBuildError;
@@ -146,7 +146,6 @@ const RECORDED: App = App {
 
 type Executed = Arc<Mutex<Vec<u64>>>;
 
-#[obzenflow_runtime::effects::system("scorer")]
 struct Scorer {
     executed: Executed,
 }
@@ -520,7 +519,7 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
     let refusal = assert_refused(&replay, StageFatalReason::DescriptorMismatch).await?;
     assert_eq!(
         refusal.detail,
-        "effect score#1/0: the request differs from the recording; binding and stage logic version match"
+        "effect score#1/0: the request differs from the recording; stage logic version matches"
     );
     assert_eq!(
         refusal.departure, None,
@@ -1083,6 +1082,8 @@ fn accounts_flow(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn changed_app_path_resume_refused() -> Result<()> {
+    const KEY: &str = "app.accounts_file";
+
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
     let recorded_file = temp.path().join("accounts.yaml");
@@ -1109,35 +1110,41 @@ async fn changed_app_path_resume_refused() -> Result<()> {
     }
     let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
 
-    let refused = {
+    let outcome = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
         );
-        accounts_flow(&journal_base, 0.5, 3.0, Arc::new(AtomicUsize::new(0)))
-            .build(context(json!({ "accounts_file": staging_file })))
+        let handle = build_accounts(
+            &journal_base,
+            &staging_file,
+            0.5,
+            3.0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .await?;
+        tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
             .await
-            .err()
-            .ok_or_else(|| anyhow!("a changed accounts path must refuse the resume"))?
+            .map_err(|_| anyhow!("timeout waiting for the refused resume to end"))?
     };
-    match &refused.error {
-        FlowBuildError::ArchiveVerbRefused(ArchiveRefusal::SourceSystems {
-            verb, changed, ..
-        }) => {
-            assert_eq!(*verb, ReplayVerb::Resume);
-            let stages: Vec<&str> = changed.iter().map(|system| system.stage.as_str()).collect();
-            assert_eq!(stages, ["accounts"]);
-        }
-        other => panic!("expected the changed binding refusal, got: {other}"),
-    }
+    assert!(outcome.is_err(), "a changed input refuses the resume");
+    let r1 = replay_testkit::latest_run_dir(&journal_base);
     assert_eq!(
-        std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?,
-        r0,
-        "the refused resume starts no run"
+        source_refusals(&r1).await?,
+        [(
+            "accounts".to_string(),
+            obzenflow_core::event::SourceDiagnosticReason::InputChanged
+        )]
+    );
+    assert_eq!(changed_keys(&r1)?, [(r0, vec![KEY.to_string()])]);
+    assert_eq!(
+        failure(&r1, ReplayVerb::Resume).await?,
+        FailureEvidence::DepartedFromArchive
     );
 
+    let r1 = std::fs::canonicalize(r1)?;
     {
         let _bootstrap = install_bootstrap_config(
-            replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
+            replay_testkit::bootstrap_with_archive(archive(r1.clone(), ReplayVerb::Resume)).await,
         );
         let handle = build_accounts(
             &journal_base,

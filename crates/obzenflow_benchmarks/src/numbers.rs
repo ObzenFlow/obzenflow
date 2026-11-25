@@ -22,7 +22,6 @@ pub trait NumberFeed {
     ) -> Result<FiniteRead<u64, NextNumber>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("numbers")]
 pub struct Numbers {
     total: Option<u64>,
     batch: u64,

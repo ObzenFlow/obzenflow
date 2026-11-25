@@ -868,7 +868,6 @@ async fn a_valid_webhook_signature_passes_authentication() {
 
 /// Acknowledgement follows the source commit, never delivery, so tests read
 /// admissions from the source journal and the sink only completes the graph.
-#[obzenflow_runtime::effects::system("ingress-discard")]
 #[derive(Debug, Clone)]
 struct DiscardSink;
 
@@ -1500,35 +1499,4 @@ async fn a_hosted_rate_limiter_refuses_through_a_running_flow() {
         SystemPayload::IngressRefusal { ingress_key, .. } if ingress_key.as_str() == "/api/limited"
     ));
     assert_eq!(source_rows(&handle, &slot).await.len(), 1);
-}
-
-#[test]
-fn ingress_registration_returns_ingress_named_port() {
-    let mut app = crate::application::FlowApplication::builder();
-    let neutral = app.ingress(ingress_source(
-        decoder::<Order>(),
-        IngestionConfig {
-            ingress_key: Some("direct".into()),
-            ..IngestionConfig::default()
-        },
-    ));
-    let http = app.http_ingress(
-        decoder::<Order>(),
-        IngestionConfig {
-            base_path: "/api/registered".to_string(),
-            ..IngestionConfig::default()
-        },
-    );
-    assert_eq!(neutral.system_name(), "ingress");
-    assert_eq!(http.system_name(), "http-ingress");
-}
-
-#[test]
-fn ingress_split_returns_ingress_named_port() {
-    let (neutral, _handle) =
-        ingress_source(decoder::<Order>(), IngestionConfig::default()).into_parts();
-    let (http, _attachment) =
-        http_ingress(decoder::<Order>(), IngestionConfig::default()).into_parts();
-    assert_eq!(neutral.system_name(), "ingress");
-    assert_eq!(http.system_name(), "http-ingress");
 }

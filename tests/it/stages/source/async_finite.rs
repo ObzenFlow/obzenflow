@@ -31,7 +31,6 @@ impl TypedPayload for AsyncTestEvent {
 #[derive(Clone, Debug, Serialize)]
 struct Received;
 
-#[obzenflow_runtime::effects::system("async-finite-counter")]
 struct CountReceived {
     received: Arc<AtomicU64>,
 }

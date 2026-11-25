@@ -31,7 +31,6 @@
 //!     fn dispatch(&self, request: &Dispatch) -> Result<(), EffectError>;
 //! }
 //!
-//! #[obzenflow::system("warehouse")]
 //! struct Warehouse;
 //!
 //! impl DispatchPort for Warehouse {

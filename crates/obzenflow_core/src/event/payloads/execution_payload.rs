@@ -82,7 +82,6 @@ pub enum ExecutionPayload {
     SourcePollFailed(SourcePollFailedFact),
     #[serde(rename = "source_input")]
     MemberRecorded(Box<crate::source::MemberRecorded>),
-    SourceBindingDeclared(crate::effect_binding::SystemBinding),
     SourceReattached(SourceReattachedFact),
     AiChunkingPlanned(AiChunkingPlannedFact),
     AccumulatorProgress {
@@ -541,8 +540,6 @@ pub enum ReattachGuarantee {
     /// The sender redelivers what was never acknowledged; only hosted ingress,
     /// which acknowledges after commit, records it.
     SenderRedelivers,
-    /// Each observation supersedes the last; re-seen rows are expected.
-    LatestState,
     /// No input is admitted twice. Input not committed at the interruption, and
     /// input that arrived while no reader was attached, may be lost.
     AtMostOnce,
@@ -594,7 +591,6 @@ impl ExecutionPayload {
             Self::SourceRecordRejected(_) => vocabulary::source::RECORD_REJECTED,
             Self::SourcePollFailed(_) => vocabulary::source::POLL_FAILED,
             Self::MemberRecorded(_) => crate::source::MEMBER_RECORDED_EVENT_TYPE,
-            Self::SourceBindingDeclared(_) => vocabulary::source::BINDING_DECLARED,
             Self::SourceReattached(_) => vocabulary::source::REATTACHED,
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
             Self::AccumulatorProgress { .. } => "stateful.accumulation_progress",
@@ -635,7 +631,6 @@ impl ExecutionPayload {
             | Self::Backpressure(_)
             | Self::SourceRecordRejected(_)
             | Self::SourcePollFailed(_)
-            | Self::SourceBindingDeclared(_)
             | Self::SourceReattached(_)
             | Self::AiChunkingPlanned(_)
             | Self::AccumulatorProgress { .. }

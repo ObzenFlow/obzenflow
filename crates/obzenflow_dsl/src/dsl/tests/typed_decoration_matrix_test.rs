@@ -19,7 +19,7 @@ mod tests {
     use obzenflow_runtime::events::source_channel;
     use obzenflow_runtime::queries::FiniteRead;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
-    use obzenflow_runtime::systems::{Port, System};
+    use obzenflow_runtime::systems::Port;
     use std::sync::Arc;
 
     use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead};
@@ -61,10 +61,6 @@ mod tests {
     }
 
     struct NoOut;
-
-    impl System for NoOut {
-        const NAME: &'static str = "no-out";
-    }
 
     #[async_trait]
     impl OutInput for NoOut {
@@ -236,7 +232,6 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::system("policy")]
     struct PolicyPort;
 
     #[derive(Clone, Debug, Serialize)]
@@ -321,7 +316,6 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::system("tx")]
     struct TxPort;
 
     #[derive(Clone, Debug, Serialize)]
@@ -531,9 +525,7 @@ mod tests {
     }
     #[test]
     fn transform_bare_preserves_transactional_safety() {
-        let tx = tx_system();
-        assert_eq!(tx.system_name(), "tx");
-        let handler = TxFxTr { tx };
+        let handler = TxFxTr { tx: tx_system() };
         let descriptor = crate::effectful_transform!(In -> Out => handler);
 
         let declarations = descriptor.effect_declarations();

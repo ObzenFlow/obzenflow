@@ -59,7 +59,6 @@ mod tests {
     payload!(FailedP, "test.branch.failed");
     payload!(UnrelatedP, "test.branch.unrelated");
 
-    #[obzenflow_runtime::effects::system("fixture")]
     struct FixturePort;
 
     #[derive(Clone, Debug, Serialize)]

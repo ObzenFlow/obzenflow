@@ -337,7 +337,6 @@ trait BatchInput {
     ) -> Result<FiniteRead<TxRow, BatchRead>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("pausing-batch")]
 struct Pausing {
     rows: Vec<TxRow>,
     release: Arc<std::sync::atomic::AtomicBool>,

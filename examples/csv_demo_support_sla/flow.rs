@@ -146,8 +146,7 @@ fn build_flow() -> FlowDefinition {
         let ticket_store: Port<dyn CsvFile> = match &settings.tickets {
             TicketInput::File(path) => CsvFileSystem::at(path).port(),
             TicketInput::Fixture(config) => config.clone().port(),
-        }
-        .map_err(resources_failed)?;
+        };
         let tickets = CsvSource::builder(TicketCsv)
             .through(ticket_store)
             .chunk_size(25)

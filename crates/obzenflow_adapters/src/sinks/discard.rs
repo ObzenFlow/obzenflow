@@ -6,9 +6,7 @@
 
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{
-    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkRole,
-};
+use obzenflow_runtime::effects::{port, Command, DeclaredEffectSet, EffectError, Port, SinkRole};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
 use std::marker::PhantomData;
@@ -26,7 +24,6 @@ pub trait DiscardPort {
     fn discard(&self, discarded: &Discarded) -> Result<(), EffectError>;
 }
 
-#[system("discard")]
 struct Discard;
 
 impl DiscardPort for Discard {

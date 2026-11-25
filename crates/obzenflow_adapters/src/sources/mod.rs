@@ -10,4 +10,4 @@ mod list_detail;
 
 pub use http::{HostedSource, HttpSourceConfig};
 pub use in_process::{ChannelSource, ValueFeed, ValuesRead, ValuesSource};
-pub use list_detail::{ListDetail, ListDetailRead};
+pub use list_detail::{ListDetail, ListDetailRead, ListDetailStep};

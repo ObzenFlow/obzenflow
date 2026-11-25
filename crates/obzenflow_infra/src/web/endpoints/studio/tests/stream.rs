@@ -1771,7 +1771,6 @@ trait CountedInput {
     ) -> Result<FiniteRead<usize, Position>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("flaky-count")]
 struct FlakyCount {
     end: usize,
     fails_at: usize,
@@ -1801,7 +1800,6 @@ impl CountedInput for FlakyCount {
     }
 }
 
-#[obzenflow_runtime::effects::system("gated")]
 struct GatedInput {
     gate: Arc<tokio::sync::Semaphore>,
     index: usize,

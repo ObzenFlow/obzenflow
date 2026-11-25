@@ -46,7 +46,6 @@ trait WindowFeed {
     ) -> Result<FiniteRead<WindowInput, WindowRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("delayed-sequence")]
 struct DelayedSequence {
     max: u64,
     per_event_delay: Duration,

@@ -45,7 +45,6 @@ impl TypedPayload for CompositionFact {
     const EVENT_TYPE: &'static str = "effect_control_composition.fact";
 }
 
-#[obzenflow::system("composition")]
 struct CompositionService;
 
 #[obzenflow::port]
@@ -830,7 +829,6 @@ trait ResendPort: Send + Sync {
 #[derive(Clone, Debug, Serialize)]
 struct ResendRequest;
 
-#[obzenflow_runtime::effects::system("resender")]
 struct Resender;
 
 impl ResendPort for Resender {

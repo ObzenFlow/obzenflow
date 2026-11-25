@@ -103,7 +103,6 @@ trait FactInput {
     ) -> Result<of::queries::FiniteRead<Fact, NextFact>, of::queries::QueryError>;
 }
 
-#[of::system("pure-input", effects = of::effects)]
 struct PureInput;
 
 #[async_trait]
@@ -202,7 +201,6 @@ trait PrintPort: Send + Sync {
     fn print(&self, request: &PrintFact) -> Result<(), of::effects::EffectError>;
 }
 
-#[of::system("facade-printer", effects = of::effects)]
 struct Printer;
 
 impl PrintPort for Printer {
@@ -458,7 +456,6 @@ trait CardPort: Send + Sync {
     fn charge(&self, request: &ChargeCard) -> Result<Fact, of::effects::EffectError>;
 }
 
-#[of::system("facade-card", effects = of::effects)]
 struct Card;
 
 impl CardPort for Card {

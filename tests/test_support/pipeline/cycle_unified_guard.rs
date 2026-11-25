@@ -62,7 +62,6 @@ trait SeedInput {
     ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("delayed-eof")]
 struct DelayedEof {
     eof_delay: Duration,
 }

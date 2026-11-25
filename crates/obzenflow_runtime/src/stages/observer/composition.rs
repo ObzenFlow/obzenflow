@@ -1070,7 +1070,6 @@ mod tests {
     impl EffectObserver for NoopObserver {}
     impl StageLifecycleObserver for NoopObserver {}
 
-    #[crate::effects::system("fixture")]
     struct FixturePort;
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

@@ -374,23 +374,6 @@ pub(crate) async fn record_source_stage_fatal(
     Ok(())
 }
 
-pub(crate) async fn commit_source_binding(
-    journal: &Arc<dyn Journal<ChainEvent>>,
-    flow: &FlowContext,
-    binding: &obzenflow_core::effect_binding::SystemBinding,
-) -> Result<crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>, BoxError> {
-    let event = ChainEventFactory::execution_event(
-        WriterId::from(flow.stage_id),
-        ExecutionPayload::SourceBindingDeclared(binding.clone()),
-    )
-    .with_flow_context(flow.clone());
-    Ok(
-        crate::supervised_base::publication::append(journal, event, AppendOptions::default())
-            .await?
-            .into(),
-    )
-}
-
 pub(crate) async fn around_source_boundary<'a>(
     boundary: Option<Arc<dyn SourceBoundary>>,
     execute: SourcePollExecution<'a>,

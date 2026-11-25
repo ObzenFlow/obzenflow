@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The framework's `file-system` and `csv-register` systems, and the CSV and YAML
+//! The framework's file system and CSV register system, and the CSV and YAML
 //! sources and the CSV sink that read and write files through them.
 
 pub mod csv;

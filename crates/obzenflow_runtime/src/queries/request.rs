@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::QueryContext;
+use crate::effects::SystemPortEvidence;
 use crate::effects::{
     BoundEffect, Effect, EffectBindingUse, EffectContext, EffectError, EffectPortSlot,
     EffectPortSlotSet, EffectSafety, Named, RecordedReply,
@@ -11,7 +12,6 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::source::QueryError;
-use obzenflow_core::SystemBindingEvidence;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::time::Duration;
 
@@ -119,7 +119,7 @@ impl<R: QueryRequest> Effect for QueryCall<R> {
     const EFFECT_TYPE: &'static str = R::QUERY_TYPE;
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    type BindingMode = Named<SystemBindingEvidence>;
+    type BindingMode = Named<SystemPortEvidence>;
     type Outcome = R::Answer;
     type OutcomeSemantics = RecordedReply;
 
@@ -164,8 +164,8 @@ where
         crate::effects::binding::validate_effect_type(R::QUERY_TYPE)
             .map_err(|_| crate::effects::EffectBindingBuildError::InvalidEffectType)?;
         let binding = crate::effects::EffectRegistrationBuilder::<QueryCall<R>>::new(
-            self.query_name(),
-            self.evidence.clone(),
+            self.binding_name(),
+            SystemPortEvidence,
         )
         .bind_system(query_port_slot::<R>(), &self.port)?
         .finish()?;
@@ -178,7 +178,7 @@ where
 }
 
 impl<R: QueryRequest> BoundEffect for QueryCall<R> {
-    type BindingEvidence = SystemBindingEvidence;
+    type BindingEvidence = SystemPortEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {
         &self.projection

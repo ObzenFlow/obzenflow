@@ -52,7 +52,6 @@ trait TestInput {
 type Answer = Result<FiniteRead<IdlePayload, NextInput>, QueryError>;
 type Answering = Arc<dyn Fn() -> BoxFuture<'static, Answer> + Send + Sync>;
 
-#[obzenflow_runtime::effects::system("scripted-input")]
 struct ScriptedInput {
     answer: Answering,
 }

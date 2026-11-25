@@ -293,7 +293,6 @@ trait CollectRowsPort: Send + Sync {
     fn collect(&self, row: &Row) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("row-collector")]
 struct CollectRows {
     delivered: Arc<Mutex<Vec<Row>>>,
 }
@@ -311,7 +310,6 @@ trait CollectHeldPort: Send + Sync {
     fn collect(&self, held: &HeldValue) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("held-collector")]
 struct CollectHeld {
     held: Arc<Mutex<Vec<HeldValue>>>,
 }

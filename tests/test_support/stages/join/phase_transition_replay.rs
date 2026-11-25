@@ -110,7 +110,6 @@ impl TypedPayload for FinalOutput {
     const EVENT_TYPE: &'static str = "join_replay.output";
 }
 
-#[obzenflow::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }

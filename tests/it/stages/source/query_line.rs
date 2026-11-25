@@ -29,7 +29,6 @@ impl TypedPayload for Tick {
     const EVENT_TYPE: &'static str = "query_line.tick";
 }
 
-#[obzenflow::system("query-line-ticks")]
 struct Ticks;
 
 #[obzenflow::port]
@@ -53,7 +52,6 @@ impl Ticks {
 #[derive(Clone, Debug, Serialize)]
 struct Seen;
 
-#[obzenflow::system("query-line-counter")]
 struct Counter {
     seen: Arc<AtomicU64>,
 }

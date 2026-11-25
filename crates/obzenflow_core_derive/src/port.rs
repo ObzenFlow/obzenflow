@@ -50,10 +50,6 @@ const RETURN_SHAPE: &str = "a port method returns a concrete `Result<Outcome, Ef
 
 const PORT_ARGUMENTS: &str = "`#[obzenflow::port]` takes only `effects = <path>`";
 
-const SYSTEM_ARGUMENT: &str = "a system names itself on its type, as in \
-                               `#[obzenflow::system(\"audit-ledger\")] struct AuditLedger;`, \
-                               also when the struct serves as its own port";
-
 const ONE_REQUEST_KIND: &str =
     "a port declares `#[effect]` methods or `#[query]` methods, not both";
 
@@ -66,9 +62,6 @@ impl PortArgs {
         let mut args = Self { effects };
         while !input.is_empty() {
             let key: Ident = input.parse()?;
-            if key == "system" {
-                return Err(syn::Error::new(key.span(), SYSTEM_ARGUMENT));
-            }
             if key != "effects" {
                 return Err(syn::Error::new(key.span(), PORT_ARGUMENTS));
             }
@@ -180,6 +173,7 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
         )
     };
     item = thread_safe(stripped_trait(item));
+    let shared = shared_forwarding(&effects, &item);
     let errors = errors.into_iter().map(syn::Error::into_compile_error);
     quote! {
         #item
@@ -198,9 +192,55 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
             }
         }
 
+        #shared
+
         #(#requests)*
 
         #(#errors)*
+    }
+}
+
+/// `shared_forwarding` implements the port for `Arc<T>` when `T` implements it, so that
+/// one system in an `Arc` can serve several ports.
+fn shared_forwarding(effects: &TokenStream, item: &ItemTrait) -> TokenStream {
+    let port = &item.ident;
+    let methods = item.items.iter().filter_map(|member| match member {
+        TraitItem::Fn(method) => Some(forwarded_method(&method.sig, &method.attrs)),
+        _ => None,
+    });
+    quote! {
+        #[#effects::__async_trait]
+        impl<ObzenflowShared> #port for ::std::sync::Arc<ObzenflowShared>
+        where
+            ObzenflowShared: #port + ?Sized,
+        {
+            #(#methods)*
+        }
+    }
+}
+
+fn forwarded_method(signature: &Signature, attrs: &[Attribute]) -> TokenStream {
+    let mut signature = signature.clone();
+    let mut arguments = Vec::new();
+    for (index, input) in signature.inputs.iter_mut().enumerate() {
+        if let FnArg::Typed(typed) = input {
+            let name = quote::format_ident!("obzenflow_argument_{index}");
+            *typed.pat = syn::parse_quote!(#name);
+            arguments.push(name);
+        }
+    }
+    let method = &signature.ident;
+    let call = if signature.asyncness.is_some() {
+        quote!((**self).#method(#(#arguments),*).await)
+    } else {
+        quote!((**self).#method(#(#arguments),*))
+    };
+    let cfgs = cfgs(attrs);
+    quote! {
+        #(#cfgs)*
+        #signature {
+            #call
+        }
     }
 }
 
@@ -327,6 +367,16 @@ fn expand_impl(args: &PortArgs, item: ItemImpl) -> TokenStream {
         impl #effects::ServesPort<#port, #port> for #effects::PortImpl<#port> {
             fn coerce(port: ::std::sync::Arc<#port>) -> ::std::sync::Arc<#port> {
                 port
+            }
+        }
+
+        impl #effects::ServesPort<#port, ::std::sync::Arc<#port>>
+            for #effects::PortImpl<::std::sync::Arc<#port>>
+        {
+            fn coerce(
+                port: ::std::sync::Arc<::std::sync::Arc<#port>>,
+            ) -> ::std::sync::Arc<#port> {
+                ::std::sync::Arc::clone(&*port)
             }
         }
 
@@ -977,32 +1027,6 @@ mod tests {
             !expanded.contains("ServesPort < dyn CardPort , dyn CardPort >"),
             "{expanded}"
         );
-    }
-
-    #[test]
-    fn system_argument_on_impl_refused() {
-        let expanded = expand(
-            quote!(system = "audit-ledger"),
-            quote!(impl AuditLedger {}),
-            EffectsPath::Facade,
-        )
-        .to_string();
-        assert!(expanded.contains("names itself on its type"), "{expanded}");
-        assert!(!expanded.contains("System for"), "{expanded}");
-    }
-
-    #[test]
-    fn system_argument_on_trait_refused() {
-        let expanded = expand(
-            quote!(system = "stripe"),
-            quote!(
-                trait CardPort: Send + Sync {}
-            ),
-            EffectsPath::Facade,
-        )
-        .to_string();
-        assert!(expanded.contains("trait CardPort"), "{expanded}");
-        assert!(expanded.contains("names itself on its type"), "{expanded}");
     }
 
     #[test]

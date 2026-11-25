@@ -8,7 +8,6 @@ use crate::effects::{EffectDeclaration, EffectError, EffectsCore};
 use crate::queries::{FiniteRead, QueryCall, QueryRequest};
 use crate::systems::Port;
 use async_trait::async_trait;
-use obzenflow_core::effect_binding::SystemBinding;
 use obzenflow_core::event::payloads::execution_payload::{
     ReattachGuarantee, SourcePollContinuation, SourcePollErrorKind,
 };
@@ -167,10 +166,6 @@ impl<Output: Send + Sync + 'static, L: ReadLifetime> SourceRead<Output, L> {
         self.continuation
     }
 
-    pub(crate) fn binding(&self) -> SystemBinding {
-        self.reads.binding()
-    }
-
     pub(crate) fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError> {
         self.reads.declaration()
     }
@@ -217,7 +212,6 @@ pub(crate) enum ReadEnd {
 
 #[async_trait]
 trait Reads<Output>: Send + Sync {
-    fn binding(&self) -> SystemBinding;
     fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError>;
     fn is_continuous(&self) -> bool;
     fn has_pending(&self) -> bool;
@@ -254,10 +248,6 @@ where
         + 'static,
     F: Fn(&M, Record) -> Result<Output, SourceError> + Send + Sync + 'static,
 {
-    fn binding(&self) -> SystemBinding {
-        self.port.binding().clone()
-    }
-
     fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError> {
         <Port<R::Port> as AnswersEffect<QueryCall<R>>>::declaration(&self.port).map(Some)
     }
@@ -430,12 +420,9 @@ fn reported(failure: SourceReadFailure) -> SourceError {
 impl<T: Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> SourceRead<T, Continuous> {
     /// Receive sender-initiated values from a bounded in-process channel.
     pub fn channel(receiver: Arc<crate::events::SourceReceiver<T>>) -> Self {
-        let evidence =
-            obzenflow_core::SystemBindingEvidence::named("channel").expect("valid channel binding");
         Self {
             reads: Box::new(ChannelEvents {
                 receiver,
-                binding: evidence.binding().clone(),
                 pending: None,
             }),
             continuation: SourceContinuation::Reattach {
@@ -448,7 +435,6 @@ impl<T: Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> SourceR
 
 struct ChannelEvents<T> {
     receiver: Arc<crate::events::SourceReceiver<T>>,
-    binding: SystemBinding,
     pending: Option<T>,
 }
 
@@ -456,10 +442,6 @@ struct ChannelEvents<T> {
 impl<T: Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> Reads<T>
     for ChannelEvents<T>
 {
-    fn binding(&self) -> SystemBinding {
-        self.binding.clone()
-    }
-
     fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError> {
         Ok(None)
     }

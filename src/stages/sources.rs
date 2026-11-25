@@ -12,17 +12,17 @@
 //! A `source!` row takes a source handler. A handler that pulls its input
 //! declares one query through a bound port. The source stage asks each query,
 //! and the system behind the port does the physical I/O. A handler that receives
-//! pushed input records each admitted event. The journal records the binding of
-//! the system and each answer or event. A replay uses only those records.
+//! pushed input records each admitted event. The journal records each answer or
+//! event. A replay uses only those records.
 //!
-//! | Input | Handler | System |
-//! |---|---|---|
-//! | Values in this process | [`ValuesSource::new`] | `in-memory` |
-//! | Source channel | [`ChannelSource::new`] | `channel` |
-//! | CSV or TSV file | [`CsvSource::builder`] | `file-system` |
-//! | YAML document | [`YamlSource::builder`] | `file-system` |
-//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` | `http-ingress` |
-//! | HTTP API | `query(ListDetailRead::first(n)).through(port)` | `http-api` |
+//! | Input | Handler |
+//! |---|---|
+//! | Values in this process | [`ValuesSource::new`] |
+//! | Source channel | [`ChannelSource::new`] |
+//! | CSV or TSV file | [`CsvSource::builder`] |
+//! | YAML document | [`YamlSource::builder`] |
+//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` |
+//! | HTTP API | `query(ListDetailRead::first(n)).through(port)` |
 //!
 //! An application writes a pull source as one line, `query(first).through(port)`,
 //! from the request of its first read and the port of the system that answers it.
@@ -40,12 +40,11 @@
 //!
 //! ## In-process sources
 //!
-//! A [`ValuesSource`] reads its values through the `in-memory` system, up to 1,000
-//! values in each read. [`ValuesSource::chunk_size`] sets a smaller number. Only
-//! this process holds the values, so ObzenFlow refuses to resume a run that did
-//! not read all of them. A [`ChannelSource`] receives the values that a sender
-//! puts on a channel from [`source_channel`](crate::events::source_channel). Its
-//! system is `channel`, and the
+//! A [`ValuesSource`] reads values that this process holds, up to 1,000 values in
+//! each read. [`ValuesSource::chunk_size`] sets a smaller number. Only this
+//! process holds the values, so ObzenFlow refuses to resume a run that did not
+//! read all of them. A [`ChannelSource`] receives the values that a sender puts on
+//! a channel from [`source_channel`](crate::events::source_channel), and the
 //! stage records each value before it publishes it. A closed channel is a source
 //! error. Use topology fan-out for more than one consumer.
 //! Values that are still in the channel when a run stops are lost, so a resumed
@@ -103,8 +102,8 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
-//! [`CsvSourceBuilder`] does no file I/O when it builds a [`CsvSource`]. The
-//! `file-system` system reads the file only for a live read, so a strict replay
+//! [`CsvSourceBuilder`] does no file I/O when it builds a [`CsvSource`]. The file
+//! system reads the file only for a live read, so a strict replay
 //! works when the original CSV is not available. [`CsvRowDecoder`] gives
 //! [`CsvRow`] output that keeps each field as a string.
 //!
@@ -181,12 +180,17 @@
 //! ## HTTP sources
 //!
 //! An HTTP API that lists IDs and then reads each item answers the framework's
-//! [`ListDetail`] port. `HttpApi::json(base)` binds a base URL to the
-//! [`HttpApi`](crate::systems::http::HttpApi) system, `http-api`, and
+//! [`ListDetail`] port. `HttpApi::json(base)` configures the
+//! [`HttpApi`](crate::systems::http::HttpApi) system with a base URL, and
 //! `.list_detail(list, detail)` names the list path and the path of each item.
 //! The line `query(ListDetailRead::first(n)).decode(f).through(port)` reads at
 //! most `n` items. The port resolves the system only for a live read. The
 //! default HTTP client is available only with the `http` feature.
+//!
+//! Another system answers [`ListDetail`] with its one `read` method. The method
+//! asks the request for its [`step`](ListDetailRead::step) and answers with
+//! [`list_reply`](ListDetailRead::list_reply) or
+//! [`detail_reply`](ListDetailRead::detail_reply).
 
 /// CSV file source, decoder contract, and string-preserving row support.
 pub use obzenflow_infra::systems::file::csv::{
@@ -200,8 +204,9 @@ pub use obzenflow_infra::systems::file::{CsvFile, CsvLine, CsvPage, CsvRead, Yam
 /// These items are the in-process sources, which own values or a source channel.
 pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 
-/// These items are the list-and-detail port of a pull source and its request.
-pub use obzenflow_adapters::sources::{ListDetail, ListDetailRead};
+/// These items are the list-and-detail port of a pull source, its request and the
+/// step that a request asks for.
+pub use obzenflow_adapters::sources::{ListDetail, ListDetailRead, ListDetailStep};
 
 /// Finite YAML source and its application decoder contract.
 pub use obzenflow_infra::systems::file::yaml::{

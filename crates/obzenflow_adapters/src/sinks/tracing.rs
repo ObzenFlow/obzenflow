@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
-    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkBatchDefaults, SinkRole,
+    port, Command, DeclaredEffectSet, EffectError, Port, SinkBatchDefaults, SinkRole,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
@@ -85,7 +85,6 @@ pub trait TracingPort {
     async fn emit(&self, output: &TracingOutput) -> Result<(), EffectError>;
 }
 
-#[system("tracing")]
 struct Tracing;
 
 #[async_trait]
@@ -215,7 +214,6 @@ mod tests {
         let request = sink.prepare(Item(7)).unwrap();
         assert_eq!(request.message, "terminal item observed");
         assert_eq!(request.fields.get("value"), Some(&Value::from(7)));
-        assert_eq!(sink.ports().0.system_name(), "tracing");
     }
 
     struct CountEvents(std::sync::Arc<std::sync::atomic::AtomicUsize>);

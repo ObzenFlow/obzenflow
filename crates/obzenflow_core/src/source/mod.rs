@@ -104,7 +104,6 @@ mod tests {
     fn reattach_admits_resume_whatever_its_recorded_completion() {
         for guarantee in [
             ReattachGuarantee::SenderRedelivers,
-            ReattachGuarantee::LatestState,
             ReattachGuarantee::AtMostOnce,
         ] {
             for recorded_eof in [

@@ -132,7 +132,6 @@ trait OrderInput {
     ) -> Result<FiniteRead<OrderAccepted, OrderRead>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("orders")]
 struct Orders {
     reads: Arc<AtomicUsize>,
 }
@@ -167,7 +166,6 @@ impl TypedFiniteSourceHandler for OrderSource {
     }
 }
 
-#[obzenflow_runtime::effects::system("shipping-desk")]
 struct ShippingDesk {
     calls: Arc<AtomicUsize>,
 }
@@ -231,7 +229,6 @@ struct HandOffRequest {
     order_id: u64,
 }
 
-#[obzenflow_runtime::effects::system("shipping-handoff")]
 struct ShippingHandoff {
     writes: Arc<AtomicUsize>,
 }

@@ -77,7 +77,6 @@ enum Script {
     },
 }
 
-#[obzenflow_runtime::effects::system("scripted-input")]
 struct ScriptedInput(Script);
 
 #[async_trait]

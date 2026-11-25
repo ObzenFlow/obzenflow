@@ -39,7 +39,6 @@ use std::marker::PhantomData;
 /// #     #[effect(type = "docs.perform.charge", exactly_once)]
 /// #     fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError>;
 /// # }
-/// # #[obzenflow_runtime::effects::system("scripted")]
 /// # struct Scripted;
 /// # impl PaymentGatewayPort for Scripted {
 /// #     fn charge(&self, _: &ChargeRequest) -> Result<Paid, EffectError> { Ok(Paid) }
@@ -95,7 +94,6 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     /// # }
     /// #[obzenflow_runtime::effects::port]
     /// trait TicketDesk {}
-    /// #[obzenflow_runtime::effects::system("desk")]
     /// struct Desk;
     /// impl TicketDesk for Desk {}
     ///
@@ -138,7 +136,6 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     ///         -> Result<FiniteRead<Ticket, NextTicket>, QueryError>;
     /// }
     ///
-    /// #[obzenflow_runtime::effects::system("ticket-feed")]
     /// struct Feed;
     ///
     /// #[async_trait::async_trait]
@@ -302,7 +299,6 @@ mod tests {
         fn resend(&self, request: &ResendRequest) -> Result<Paid, EffectError>;
     }
 
-    #[crate::effects::system("scripted")]
     struct Scripted;
 
     impl GatewayPort for Scripted {
@@ -378,7 +374,6 @@ mod tests {
         let charge = perform(ChargeRequest::for_invoice).through(Port::to(Scripted));
         let debug = format!("{charge:?}");
         assert!(debug.contains("ChargeRequest"), "{debug}");
-        assert!(debug.contains("\"scripted\""), "{debug}");
-        assert!(debug.contains("<not disclosed>"), "{debug}");
+        assert!(!debug.contains("Scripted"), "{debug}");
     }
 }

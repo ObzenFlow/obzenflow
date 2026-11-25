@@ -46,7 +46,6 @@ struct SequencePosition {
     next_id: usize,
 }
 
-#[obzenflow::system("high-volume-requests")]
 struct HighVolumeGenerator {
     total_events: usize,
     outage_interval: usize,

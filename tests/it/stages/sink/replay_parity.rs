@@ -100,7 +100,6 @@ trait RecordStorePort: Send + Sync {
     fn store(&self, request: &StoreRecord) -> Result<(), EffectError>;
 }
 
-#[obzenflow_runtime::effects::system("record-store")]
 struct RecordStore {
     calls: Arc<AtomicUsize>,
 }

@@ -29,7 +29,6 @@ pub trait SingleValueFeed {
     ) -> Result<FiniteRead<Value, NextSingleValue>, QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("single-values")]
 struct SingleValueList {
     values: Vec<Value>,
 }

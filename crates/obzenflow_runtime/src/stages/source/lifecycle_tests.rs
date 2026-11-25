@@ -15,18 +15,27 @@ use crate::supervised_base::{SupervisorBuilder, SupervisorHandle};
 use crate::systems::Port;
 use async_trait::async_trait;
 use futures::FutureExt;
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::effect_payload::{
     EffectAttemptOrdinal, EffectOutcomePayload, EffectRecord,
 };
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, RecoveryFact, SourcePollContinuation, SourcePollErrorKind, StageLifecycleFact,
 };
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ErrorKind;
-use obzenflow_core::event::{ChainPayload, JournalRecord, SourceDiagnosticReason};
+use obzenflow_core::event::{
+    ChainPayload, JournalRecord, SourceDiagnosticReason, StageFatalCode, StageFatalReason,
+};
+use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
+use obzenflow_core::journal::factory::CurrentRunLocator;
+use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
+use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, SystemId, TypedPayload};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,7 +83,6 @@ enum Reading {
     RejectThenPending,
 }
 
-#[obzenflow_runtime::effects::system("lifecycle-fixture")]
 #[derive(Clone)]
 struct Fixture {
     counts: Arc<Counts>,
@@ -194,6 +202,14 @@ async fn resources_with_ports(
     ports: EffectPortRegistry,
     declarations: Vec<EffectDeclaration>,
 ) -> (StageId, StageResources, Journals) {
+    resources_with(ports, declarations, None).await
+}
+
+async fn resources_with(
+    ports: EffectPortRegistry,
+    declarations: Vec<EffectDeclaration>,
+    archive: Option<Arc<dyn ReplayArchive>>,
+) -> (StageId, StageResources, Journals) {
     let mut topology = obzenflow_topology::TopologyBuilder::new();
     let source = topology.add_stage(Some("input".into()));
     let sink = topology.add_stage(Some("output".into()));
@@ -213,6 +229,7 @@ async fn resources_with_ports(
         HashMap::from([(stage, journal()), (sink, journal())]),
     )
     .with_effect_ports(ports)
+    .with_replay_archive(archive)
     .build()
     .await
     .unwrap();
@@ -512,15 +529,6 @@ fn query_rows(rows: &Rows) -> Vec<QueryRow> {
         .collect()
 }
 
-fn declared_binding(rows: &Rows) -> Option<obzenflow_core::effect_binding::SystemBinding> {
-    rows.iter().find_map(|row| match &row.payload {
-        ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(binding)) => {
-            Some(binding.clone())
-        }
-        _ => None,
-    })
-}
-
 fn attempt_starts(rows: &Rows) -> usize {
     rows.iter()
         .filter(|row| {
@@ -555,7 +563,6 @@ trait ScriptedInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextScripted>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("lifecycle-script")]
 #[derive(Clone)]
 struct Script(Arc<Vec<Vec<Marker>>>);
 
@@ -592,15 +599,13 @@ impl TypedAsyncFiniteSourceHandler for ScriptedRows {
 }
 
 #[tokio::test]
-async fn port_read_records_system_binding() {
+async fn port_read_records_each_answer() {
     let script = Script(Arc::new(vec![vec![Marker::Row], Vec::new()]));
     let (source, ports, declarations) =
         admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(ScriptedRows(Port::to(script)));
     let journals = run_finite(source, ports, declarations).await;
     let data = journals.data.read_all_unordered().await.unwrap();
 
-    let declared = declared_binding(&data).expect("the stage declares its binding");
-    assert_eq!(declared.name(), "lifecycle-script");
     let reads = query_rows(&data);
     assert_eq!(
         reads
@@ -687,7 +692,6 @@ trait InlineInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextInline>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("inline-input")]
 #[derive(Clone, Default)]
 struct Inline(Placement);
 
@@ -740,7 +744,6 @@ trait BlockingInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextBlocking>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("blocking-input")]
 #[derive(Clone, Default)]
 struct Blocking(Placement);
 
@@ -803,7 +806,6 @@ trait AwaitedInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextAwaited>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("awaited-input")]
 #[derive(Clone, Default)]
 struct Awaited {
     release: Arc<Notify>,
@@ -872,7 +874,7 @@ async fn async_read_awaits_system() {
 }
 
 #[tokio::test]
-async fn placeholder_source_read_records_placeholder() {
+async fn placeholder_read_ends_input() {
     let source = AdmittedSource::finite_placeholder(None);
     let declarations = source.effect_declarations().expect("a placeholder query");
     let ports = EffectPortRegistry::collect_from_declarations(declarations.iter())
@@ -884,8 +886,6 @@ async fn placeholder_source_read_records_placeholder() {
     let journals = run_finite(source, ports, declarations).await;
     let data = journals.data.read_all_unordered().await.unwrap();
 
-    let declared = declared_binding(&data).expect("the placeholder declares its binding");
-    assert_eq!(declared.name(), "placeholder");
     let reads = query_rows(&data);
     assert_eq!(reads.len(), 1, "one terminal read");
     assert_eq!(reads[0].record.cursor.input_seq.get(), 1);
@@ -1005,7 +1005,6 @@ trait LimitedInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextLimited>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("limited")]
 #[derive(Clone, Default)]
 struct Limited {
     calls: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
@@ -1120,7 +1119,6 @@ trait HangingInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextHanging>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("hanging-input")]
 #[derive(Clone, Default)]
 struct Hanging {
     ended: Arc<std::sync::Mutex<Vec<Duration>>>,
@@ -1214,7 +1212,6 @@ trait AnsweredInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextAnswered>, obzenflow_runtime::queries::QueryError>;
 }
 
-#[obzenflow_runtime::effects::system("answered-input")]
 #[derive(Clone, Default)]
 struct Answered {
     calls: Arc<AtomicUsize>,
@@ -1238,19 +1235,24 @@ impl AnsweredInput for Answered {
     }
 }
 
-#[tokio::test(start_paused = true)]
-async fn held_append_past_deadline_commits_once() {
-    let answered = Answered::default();
-    let line = crate::queries::query(NextAnswered(0))
+fn answered_line(answered: &Answered) -> crate::queries::Query<Row> {
+    crate::queries::query(NextAnswered(0))
         .decode(row)
         .poll_timeout(Duration::from_secs(1))
-        .through(Port::to(answered.clone()));
-    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(line);
-    let (stage, mut resources, _) = resources_with_ports(ports, declarations).await;
-    let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
-    let (writing, release) =
-        journal.block_matching_append(|event| event.event_type() == "query.answered");
-    resources.data_journal = journal.clone();
+        .through(Port::to(answered.clone()))
+}
+
+async fn start_finite<H>(
+    source: AdmittedSource<H>,
+    stage: StageId,
+    resources: StageResources,
+) -> crate::supervised_base::StandardHandle<
+    finite::FiniteSourceEvent<H>,
+    finite::FiniteSourceState<H>,
+>
+where
+    H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static,
+{
     let config = finite::FiniteSourceConfig::new(stage, "input", "lifecycle");
     let handle = finite::AsyncFiniteSourceBuilder::new(source, config, resources)
         .build()
@@ -1263,6 +1265,19 @@ async fn held_append_past_deadline_commits_once() {
     ] {
         handle.send_event(event).await.unwrap();
     }
+    handle
+}
+
+/// A run whose `query.answered` append holds for five seconds past a one-second deadline.
+async fn held_answer_run(answered: &Answered) -> (Arc<TestJournal<ChainEvent>>, StageId) {
+    let (source, ports, declarations) =
+        admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(answered_line(answered));
+    let (stage, mut resources, _) = resources_with_ports(ports, declarations).await;
+    let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
+    let (writing, release) =
+        journal.block_matching_append(|event| event.event_type() == "query.answered");
+    resources.data_journal = journal.clone();
+    let handle = start_finite(source, stage, resources).await;
     notified(&writing).await;
     tokio::time::sleep(Duration::from_secs(5)).await;
     release.notify_one();
@@ -1270,6 +1285,13 @@ async fn held_append_past_deadline_commits_once() {
         .await
         .expect("source terminates")
         .expect("source completes");
+    (journal, stage)
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_append_past_deadline_commits_once() {
+    let answered = Answered::default();
+    let (journal, _) = held_answer_run(&answered).await;
 
     assert_eq!(
         answered.calls.load(Ordering::SeqCst),
@@ -1295,4 +1317,225 @@ async fn held_append_past_deadline_commits_once() {
         ]
     );
     assert_eq!(facts(&rows), 1, "the held answer advances to its record");
+}
+
+/// The archive of one recorded source journal.
+struct RecordedArchive {
+    journal: Arc<TestJournal<ChainEvent>>,
+    flow_id: String,
+    stage: StageId,
+}
+
+impl RecordedArchive {
+    async fn reader(&self) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
+        self.journal
+            .reader()
+            .await
+            .map_err(|_| ReplayError::MissingJournal {
+                path: self.archive_path().to_path_buf(),
+            })
+    }
+}
+
+#[async_trait]
+impl ReplayArchive for RecordedArchive {
+    async fn open_source_reader(
+        &self,
+        _: &str,
+        _: StageType,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
+        self.reader().await
+    }
+
+    async fn open_effect_history(
+        &self,
+        _: &str,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
+        self.reader().await
+    }
+
+    fn source_data_journal_path(&self, _: &str) -> Result<PathBuf, ReplayError> {
+        Ok(self.archive_path().join("input.log"))
+    }
+
+    fn archive_flow_id(&self) -> &str {
+        &self.flow_id
+    }
+
+    fn archived_stage_id(&self, _: &str) -> Result<StageId, ReplayError> {
+        Ok(self.stage)
+    }
+
+    fn archive_status(&self) -> ArchiveStatus {
+        ArchiveStatus::Completed
+    }
+
+    fn status_derivation(&self) -> StatusDerivation {
+        StatusDerivation {
+            terminal_events_found: 1,
+            chosen: ArchiveStatus::Completed,
+            warning: None,
+        }
+    }
+
+    fn allow_incomplete_archive(&self) -> bool {
+        false
+    }
+
+    fn source_stage_keys(&self) -> Vec<String> {
+        vec!["input".to_string()]
+    }
+
+    fn recorded_source_eof(&self, _: &str) -> Option<EofKind> {
+        Some(EofKind::Natural)
+    }
+
+    fn archive_path(&self) -> &Path {
+        Path::new("recorded")
+    }
+
+    fn claim_continuation(&self, _: FlowId, _: &CurrentRunLocator) -> Result<(), ReplayError> {
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_append_replay_calls_no_supplier() {
+    let (recorded, stage) = held_answer_run(&Answered::default()).await;
+    let rows = recorded.read_all_unordered().await.unwrap();
+    let flow_id = query_rows(&rows)[0]
+        .record
+        .cursor
+        .recorded_flow_id
+        .to_string();
+    let archive = Arc::new(RecordedArchive {
+        journal: recorded,
+        flow_id,
+        stage,
+    });
+
+    let replayed = Answered::default();
+    let (source, ports, declarations) =
+        admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(answered_line(&replayed));
+    let (stage, resources, journals) = resources_with(ports, declarations, Some(archive)).await;
+    let handle = start_finite(source, stage, resources).await;
+    tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
+        .await
+        .expect("replay terminates")
+        .expect("replay completes");
+
+    assert_eq!(
+        replayed.calls.load(Ordering::SeqCst),
+        0,
+        "the strict replay asks no supplier"
+    );
+    let rows = journals.data.read_all_unordered().await.unwrap();
+    assert_eq!(facts(&rows), 1, "the replay publishes the recorded record");
+    assert!(has_eof(&rows));
+}
+
+#[tokio::test]
+async fn failed_answer_append_records_journal_fatal() {
+    let answered = Answered::default();
+    let (source, ports, declarations) =
+        admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(answered_line(&answered));
+    let (stage, mut resources, journals) = resources_with_ports(ports, declarations).await;
+    let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
+    journal.fail_matching_append(|event| event.event_type() == "query.answered");
+    resources.data_journal = journal.clone();
+    let handle = start_finite(source, stage, resources).await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), handle.wait_for_completion())
+            .await
+            .expect("source terminates")
+            .is_err(),
+        "the stage fails"
+    );
+
+    let mut rows = journal.read_all_unordered().await.unwrap();
+    rows.extend(journals.error.read_all_unordered().await.unwrap());
+    let fatals: Vec<_> = rows
+        .iter()
+        .filter_map(|row| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) => {
+                Some((fatal.code, fatal.reason))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fatals,
+        [(StageFatalCode::Journal, StageFatalReason::JournalFailure)]
+    );
+    assert!(query_rows(&rows).is_empty(), "no answer commits");
+}
+
+#[derive(Clone)]
+struct ChannelRows(Arc<crate::events::SourceReceiver<Row>>);
+
+#[async_trait]
+impl TypedAsyncInfiniteSourceHandler for ChannelRows {
+    type Output = Row;
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(1))
+    }
+
+    fn read(&self) -> SourceRead<Row, crate::stages::common::handlers::source::Continuous> {
+        SourceRead::channel(Arc::clone(&self.0))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_member_past_deadline_commits_once() {
+    let (sender, receiver) = crate::events::source_channel::<Row>(1);
+    let (source, ports, declarations) = admitted::<
+        dyn crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler,
+        _,
+    >(ChannelRows(Arc::new(receiver)));
+    let (stage, mut resources, _) = resources_with_ports(ports, declarations).await;
+    let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
+    let (writing, release) = journal.block_matching_append(|event| {
+        event.event_type() == obzenflow_core::source::MEMBER_RECORDED_EVENT_TYPE
+    });
+    resources.data_journal = journal.clone();
+    let config = infinite::InfiniteSourceConfig::new(stage, "input", "lifecycle");
+    let handle = infinite::AsyncInfiniteSourceBuilder::new(source, config, resources)
+        .build()
+        .await
+        .unwrap();
+    for event in [
+        infinite::InfiniteSourceEvent::Initialize,
+        infinite::InfiniteSourceEvent::Ready,
+        infinite::InfiniteSourceEvent::Start,
+    ] {
+        handle.send_event(event).await.unwrap();
+    }
+    sender.send(Row).await.expect("the channel has space");
+    notified(&writing).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while facts(&journal.read_all_unordered().await.unwrap()) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the held member publishes its record");
+    handle
+        .send_event(infinite::InfiniteSourceEvent::BeginDrain)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
+        .await
+        .expect("source terminates")
+        .expect("source completes");
+
+    let rows = journal.read_all_unordered().await.unwrap();
+    let members = rows
+        .iter()
+        .filter(|row| row.event_type() == obzenflow_core::source::MEMBER_RECORDED_EVENT_TYPE)
+        .count();
+    assert_eq!(members, 1, "the held member commits once");
+    assert_eq!(facts(&rows), 1, "the held member advances to its record");
 }
