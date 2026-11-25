@@ -918,7 +918,7 @@ where
             let declarations = descriptor.effect_declarations();
             authored_effect_declarations.extend(declarations);
         }
-        let mut effect_ports = EffectPortRegistry::collect_from_declarations(
+        let effect_ports = EffectPortRegistry::collect_from_declarations(
             authored_effect_declarations.iter(),
         )
         .map_err(|error| match error {
@@ -949,11 +949,6 @@ where
                 detail: "the authored declaration has no pending package",
             },
         })?;
-        for descriptor in descriptors.values() {
-            if let Some(system) = descriptor.source_system() {
-                effect_ports.install_source_system(&system);
-            }
-        }
 
         // Create services
         use obzenflow_runtime::pipeline::config::StageConfig;
@@ -977,11 +972,11 @@ where
         __run_state = Some(__substrate.clone());
 
         if let Some(root) = __journal_root {
-            let located = __substrate.locator().map(|locator| locator.path());
-            if !located.is_some_and(|path| path.starts_with(root)) {
+            let run_path = __substrate.locator().map(|locator| locator.path());
+            if !run_path.is_some_and(|path| path.starts_with(root)) {
                 return Err(FlowBuildError::JournalRootUnused {
                     root: root.to_path_buf(),
-                    located: located.map(std::path::Path::to_path_buf),
+                    run_path: run_path.map(std::path::Path::to_path_buf),
                 });
             }
         }
@@ -1005,9 +1000,9 @@ where
         )
         .map_err(|e| FlowBuildError::ResourcePreflightFailed(format!("{e}")))?;
 
-        // FLOWIP-120u F13: resume requires a located current run; an ephemeral
-        // continuation is unreachable and its live effects would re-execute on
-        // the next resume of the original archive.
+        // Resume requires a durable current run. An ephemeral continuation is
+        // unreachable, and its live effects would run again on the next resume
+        // of the original archive.
         if matches!(
             __substrate,
             obzenflow_core::journal::factory::RunSubstrateState::Ephemeral

@@ -29,10 +29,10 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    perform, EffectError, Port, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
-};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::{EffectError, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -208,11 +208,11 @@ trait CollectEmbeddedPort: Send + Sync {
     fn collect(&self, output: &TicketEmbedded) -> Result<(), EffectError>;
 }
 
+#[obzenflow_runtime::effects::system("embedded-collector")]
 struct CollectEmbedded {
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
 }
 
-#[obzenflow_runtime::effects::system("embedded-collector")]
 impl CollectEmbeddedPort for CollectEmbedded {
     fn collect(&self, output: &TicketEmbedded) -> Result<(), EffectError> {
         self.outputs

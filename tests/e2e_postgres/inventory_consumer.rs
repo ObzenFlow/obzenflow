@@ -10,11 +10,13 @@
 use crate::postgres_support;
 
 use async_trait::async_trait;
+use obzenflow::commands::perform;
 use obzenflow::effects::postgres::{
     self, default_postgres_client, PostgresClient, PostgresStatement,
 };
-use obzenflow::effects::{perform, EffectError, Port};
+use obzenflow::effects::EffectError;
 use obzenflow::stages::sources;
+use obzenflow::systems::Port;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -41,12 +43,12 @@ trait InventoryStorePort {
     async fn store(&self, level: &InventoryLevelChanged) -> Result<(), EffectError>;
 }
 
+#[obzenflow::system("inventory-postgres")]
 struct PostgresInventory {
     postgres: Arc<dyn PostgresClient>,
     insert: PostgresStatement,
 }
 
-#[obzenflow::system("inventory-postgres")]
 #[async_trait]
 impl InventoryStorePort for PostgresInventory {
     async fn store(&self, level: &InventoryLevelChanged) -> Result<(), EffectError> {

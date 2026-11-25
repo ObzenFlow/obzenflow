@@ -11,14 +11,12 @@ use obzenflow_core::event::{
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
-use obzenflow_runtime::effects::{perform, EffectError, Port, SystemName};
-use obzenflow_runtime::stages::common::handlers::source::{
-    Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
-};
-use obzenflow_runtime::stages::common::handlers::{
-    TypedAsyncFiniteSourceHandler, TypedInfiniteSourceHandler,
-};
-use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
+use obzenflow_runtime::queries::FiniteRead;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
+use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
+use obzenflow_runtime::systems::{Port, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
@@ -50,16 +48,8 @@ impl PendingSource {
     }
 }
 
-impl SystemName for PendingSource {
+impl System for PendingSource {
     const NAME: &'static str = "pending";
-}
-
-#[async_trait::async_trait]
-impl InputReadiness for PendingSource {
-    async fn ready(&self) -> Result<(), SourceError> {
-        self.poll().await;
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -96,35 +86,7 @@ impl PendingInput for PendingSource {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct PendingTake;
-
-#[obzenflow_runtime::effects::port]
-#[async_trait::async_trait]
-trait PendingLiveInput: InputReadiness {
-    #[query(type = "test.observation_pending.take")]
-    async fn take(
-        &self,
-        from: &PendingTake,
-        ctx: &obzenflow_runtime::queries::QueryContext,
-    ) -> Result<ContinuousRead<Payload, PendingTake>, obzenflow_runtime::queries::QueryError>;
-}
-
-#[async_trait::async_trait]
-impl PendingLiveInput for PendingSource {
-    async fn take(
-        &self,
-        _from: &PendingTake,
-        _ctx: &obzenflow_runtime::queries::QueryContext,
-    ) -> Result<ContinuousRead<Payload, PendingTake>, obzenflow_runtime::queries::QueryError> {
-        Ok(ContinuousRead {
-            records: Vec::new(),
-            next: PendingTake,
-        })
-    }
-}
-
-struct PendingFinite(obzenflow_runtime::queries::QueryPort<dyn PendingInput>);
+struct PendingFinite(Port<dyn PendingInput>);
 
 #[async_trait::async_trait]
 impl TypedAsyncFiniteSourceHandler for PendingFinite {
@@ -139,18 +101,6 @@ impl TypedAsyncFiniteSourceHandler for PendingFinite {
     }
 }
 
-struct PendingLive {
-    port: obzenflow_runtime::queries::QueryPort<dyn PendingLiveInput>,
-}
-
-impl TypedInfiniteSourceHandler for PendingLive {
-    type Output = Payload;
-
-    fn read(&self) -> SourceRead<Payload, Continuous> {
-        SourceRead::continuous(self.port.clone(), PendingTake, Ok)
-    }
-}
-
 #[derive(Clone, Debug, serde::Serialize)]
 struct Hold;
 
@@ -161,6 +111,7 @@ trait HoldPort {
     async fn hold(&self, request: &Hold) -> Result<(), EffectError>;
 }
 
+#[obzenflow_runtime::effects::system("holding")]
 #[derive(Clone, Debug)]
 struct CountingSink {
     writes: Arc<AtomicUsize>,
@@ -168,7 +119,6 @@ struct CountingSink {
     released: Arc<Notify>,
 }
 
-#[obzenflow_runtime::effects::system("holding")]
 #[async_trait::async_trait]
 impl HoldPort for CountingSink {
     async fn hold(&self, _: &Hold) -> Result<(), EffectError> {
@@ -179,7 +129,7 @@ impl HoldPort for CountingSink {
     }
 }
 
-async fn pending_flow(infinite: bool) -> (Arc<FlowHandle>, PendingSource, CountingSink) {
+async fn pending_flow() -> (Arc<FlowHandle>, PendingSource, CountingSink) {
     let source = PendingSource {
         started: Arc::new(Notify::new()),
         released: Arc::new(Notify::new()),
@@ -193,22 +143,11 @@ async fn pending_flow(infinite: bool) -> (Arc<FlowHandle>, PendingSource, Counti
     };
     let sink_handler = perform(|_: &Payload| Hold).through(Port::to(sink.clone()));
     let flow = FlowDefinition::materialize(move |_| {
-        Ok(if infinite {
-            let source_handler = PendingLive {
-                port: obzenflow_runtime::queries::QueryPort::to(source_handler),
-            };
-            flow! {
-                name: "observation_infinite", journals: crate::journal::memory_journals(),
-                stages: { src = source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },
-                topology: { src |> snk; }
-            }
-        } else {
-            let source_handler = PendingFinite(obzenflow_runtime::queries::QueryPort::to(source_handler));
-            flow! {
-                name: "observation_finite", journals: crate::journal::memory_journals(),
-                stages: { src = source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },
-                topology: { src |> snk; }
-            }
+        let source_handler = PendingFinite(Port::to(source_handler));
+        Ok(flow! {
+            name: "observation_finite", journals: crate::journal::memory_journals(),
+            stages: { src = source!(Payload => source_handler); snk = sink!(Payload => sink_handler); },
+            topology: { src |> snk; }
         })
     }).build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()).await.unwrap();
     (Arc::new(flow), source, sink)
@@ -335,7 +274,7 @@ async fn lagging_reader_sigterm_preserves_graceful_admission_and_original_deadli
     for before_running in [false, true] {
         for already_admitted in [false, true] {
             println!("lagging reader: before_running={before_running}, already_admitted={already_admitted}");
-            let (flow, source, sink) = pending_flow(false).await;
+            let (flow, source, sink) = pending_flow().await;
             flow.start().await.unwrap();
             source.started.notified().await;
             source.released.notify_one();
@@ -438,7 +377,7 @@ async fn lagging_reader_sigterm_preserves_graceful_admission_and_original_deadli
 #[tokio::test]
 async fn lagging_reader_sigterm_drains_admitted_work() {
     use crate::application::flow_application::ShutdownSignal;
-    let (flow, source, sink) = pending_flow(false).await;
+    let (flow, source, sink) = pending_flow().await;
     flow.start().await.unwrap();
     source.started.notified().await;
     source.released.notify_one();
@@ -475,7 +414,7 @@ async fn observation_failure_cancels_pending_runtime_and_retains_source_and_join
     use std::error::Error;
     // Manual terminal parking, automatic startup, standalone, and an admitted graceful stop.
     for phase in [0, 1, 2, 3] {
-        let (flow, source, _) = pending_flow(phase != 3).await;
+        let (flow, source, _) = pending_flow().await;
         let mut driver = ApplicationLifecycle::new(Duration::from_secs(10), OnTerminalArg::Park);
         let (release, waiting) = gated_observation(&mut driver, &flow, false).await;
         let (task, mut task_cancelled) = pending_task().await;

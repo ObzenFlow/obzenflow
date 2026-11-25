@@ -13,12 +13,11 @@ use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{flow, join, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
+use obzenflow_runtime::events::{source_channel, SourceReceiver, SourceSender};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::{
-    source_channel, SourceReceiver, SourceSender,
-};
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler,
     TypedStatefulHandler, TypedTransformHandler,
@@ -338,12 +337,12 @@ trait BatchInput {
     ) -> Result<FiniteRead<TxRow, BatchRead>, obzenflow_runtime::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("pausing-batch")]
 struct Pausing {
     rows: Vec<TxRow>,
     release: Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[obzenflow_runtime::effects::system("pausing-batch")]
 #[async_trait::async_trait]
 impl BatchInput for Pausing {
     async fn read(
@@ -364,7 +363,7 @@ impl BatchInput for Pausing {
     }
 }
 
-struct PausingBatch(obzenflow_runtime::queries::QueryPort<dyn BatchInput>);
+struct PausingBatch(obzenflow_runtime::systems::Port<dyn BatchInput>);
 
 impl TypedFiniteSourceHandler for PausingBatch {
     type Output = TxRow;
@@ -448,7 +447,7 @@ fn end_of_input_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let batch_source = PausingBatch(obzenflow_runtime::queries::QueryPort::to(Pausing {
+        let batch_source = PausingBatch(obzenflow_runtime::systems::Port::to(Pausing {
             rows: vec![tx("acct-1", 5), tx("acct-1", 7)],
             release,
         }));

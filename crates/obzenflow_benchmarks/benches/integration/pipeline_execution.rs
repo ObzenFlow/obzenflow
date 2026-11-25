@@ -15,12 +15,14 @@ use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Perform, Port};
+use obzenflow_runtime::commands::{perform, Perform};
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -62,11 +64,12 @@ struct Delivered {
     event_id: u64,
 }
 
+#[obzenflow_runtime::effects::system("delivery-log")]
 struct DeliveryLog {
     delivered: Arc<Mutex<Vec<u64>>>,
 }
 
-#[obzenflow_runtime::effects::port(system = "delivery-log")]
+#[obzenflow_runtime::effects::port]
 impl DeliveryLog {
     #[effect(type = "bench.pipeline.deliver", at_least_once, records = reply)]
     fn deliver(&self, delivered: &Delivered) -> Result<(), EffectError> {
@@ -106,7 +109,7 @@ fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::Path
     Ok((journal_path, temp_dir))
 }
 
-struct TimestampedSource(obzenflow_runtime::queries::QueryPort<dyn NumberFeed>);
+struct TimestampedSource(Port<dyn NumberFeed>);
 
 impl TimestampedSource {
     fn new(total_events: u64) -> Self {

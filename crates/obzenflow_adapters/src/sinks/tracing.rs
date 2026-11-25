@@ -85,9 +85,9 @@ pub trait TracingPort {
     async fn emit(&self, output: &TracingOutput) -> Result<(), EffectError>;
 }
 
+#[system("tracing")]
 struct Tracing;
 
-#[system("tracing")]
 #[async_trait]
 impl TracingPort for Tracing {
     async fn emit(&self, output: &TracingOutput) -> Result<(), EffectError> {

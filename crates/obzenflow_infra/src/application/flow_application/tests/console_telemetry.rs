@@ -436,12 +436,12 @@ trait ControlledInput {
     ) -> Result<FiniteRead<IdlePayload, NextControlled>, obzenflow_runtime::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("controlled")]
 struct Controlled {
     input: tokio::sync::Mutex<mpsc::Receiver<IdlePayload>>,
     entered: mpsc::UnboundedSender<()>,
 }
 
-#[obzenflow_runtime::effects::system("controlled")]
 #[async_trait]
 impl ControlledInput for Controlled {
     async fn take(
@@ -461,11 +461,11 @@ impl ControlledInput for Controlled {
     }
 }
 
-struct ControlledSource(obzenflow_runtime::queries::QueryPort<dyn ControlledInput>);
+struct ControlledSource(Port<dyn ControlledInput>);
 
 impl ControlledSource {
     fn new(input: mpsc::Receiver<IdlePayload>, entered: mpsc::UnboundedSender<()>) -> Self {
-        Self(obzenflow_runtime::queries::QueryPort::to(Controlled {
+        Self(Port::to(Controlled {
             input: tokio::sync::Mutex::new(input),
             entered,
         }))

@@ -12,23 +12,23 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_adapters::sinks::DiscardSink;
     use obzenflow_core::{ChainEvent, TypedPayload};
-    use obzenflow_runtime::effects::SystemName;
     use obzenflow_runtime::effects::{
-        EffectCommitHandle, EffectError, EffectPortResolutionError, EffectSafety, Effects, Port,
+        EffectCommitHandle, EffectError, EffectPortResolutionError, EffectSafety, Effects,
         StageCompletion,
     };
+    use obzenflow_runtime::events::source_channel;
+    use obzenflow_runtime::queries::FiniteRead;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
+    use obzenflow_runtime::systems::{Port, System};
+    use std::sync::Arc;
 
-    use obzenflow_runtime::stages::common::handlers::source::{
-        Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
-    };
+    use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead};
     use obzenflow_runtime::stages::common::handlers::{
         EffectfulStatefulHandler, EffectfulTransformHandler, JoinReferenceView, StatefulEmission,
         TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
         TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
         TypedStatefulHandler, TypedTransformHandler,
     };
-    use obzenflow_runtime::stages::SourceError;
     use obzenflow_runtime::typing::TransformTyping;
     use serde::{Deserialize, Serialize};
 
@@ -49,38 +49,21 @@ mod tests {
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct NextOut;
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    struct NextLiveOut;
-
     #[obzenflow_runtime::effects::port]
     #[async_trait]
-    trait OutInput: InputReadiness {
+    trait OutInput {
         #[query(type = "decoration_matrix.out.read")]
         async fn read(
             &self,
             from: &NextOut,
             ctx: &obzenflow_runtime::queries::QueryContext,
         ) -> Result<FiniteRead<Out, NextOut>, obzenflow_runtime::queries::QueryError>;
-
-        #[query(type = "decoration_matrix.out.take")]
-        async fn take(
-            &self,
-            from: &NextLiveOut,
-            ctx: &obzenflow_runtime::queries::QueryContext,
-        ) -> Result<ContinuousRead<Out, NextLiveOut>, obzenflow_runtime::queries::QueryError>;
     }
 
     struct NoOut;
 
-    impl SystemName for NoOut {
+    impl System for NoOut {
         const NAME: &'static str = "no-out";
-    }
-
-    #[async_trait]
-    impl InputReadiness for NoOut {
-        async fn ready(&self) -> Result<(), SourceError> {
-            std::future::pending().await
-        }
     }
 
     #[async_trait]
@@ -92,31 +75,17 @@ mod tests {
         ) -> Result<FiniteRead<Out, NextOut>, obzenflow_runtime::queries::QueryError> {
             Ok(FiniteRead::EndOfInput)
         }
-
-        async fn take(
-            &self,
-            _from: &NextLiveOut,
-            _ctx: &obzenflow_runtime::queries::QueryContext,
-        ) -> Result<ContinuousRead<Out, NextLiveOut>, obzenflow_runtime::queries::QueryError>
-        {
-            Ok(ContinuousRead {
-                records: Vec::new(),
-                next: NextLiveOut,
-            })
-        }
     }
 
-    fn no_out() -> obzenflow_runtime::queries::QueryPort<dyn OutInput> {
-        obzenflow_runtime::queries::QueryPort::to(NoOut)
+    fn no_out() -> Port<dyn OutInput> {
+        Port::to(NoOut)
     }
 
-    fn live_read(
-        port: &obzenflow_runtime::queries::QueryPort<dyn OutInput>,
-    ) -> SourceRead<Out, Continuous> {
-        SourceRead::continuous(port.clone(), NextLiveOut, Ok)
+    fn live_read() -> SourceRead<Out, Continuous> {
+        SourceRead::channel(Arc::new(source_channel::<Out>(1).1))
     }
 
-    struct Src(obzenflow_runtime::queries::QueryPort<dyn OutInput>);
+    struct Src(Port<dyn OutInput>);
 
     impl TypedFiniteSourceHandler for Src {
         type Output = Out;
@@ -126,7 +95,7 @@ mod tests {
         }
     }
 
-    struct AsyncSrc(obzenflow_runtime::queries::QueryPort<dyn OutInput>);
+    struct AsyncSrc(Port<dyn OutInput>);
 
     impl TypedAsyncFiniteSourceHandler for AsyncSrc {
         type Output = Out;
@@ -136,23 +105,23 @@ mod tests {
         }
     }
 
-    struct InfSrc(obzenflow_runtime::queries::QueryPort<dyn OutInput>);
+    struct InfSrc;
 
     impl TypedInfiniteSourceHandler for InfSrc {
         type Output = Out;
 
         fn read(&self) -> SourceRead<Out, Continuous> {
-            live_read(&self.0)
+            live_read()
         }
     }
 
-    struct AsyncInfSrc(obzenflow_runtime::queries::QueryPort<dyn OutInput>);
+    struct AsyncInfSrc;
 
     impl TypedAsyncInfiniteSourceHandler for AsyncInfSrc {
         type Output = Out;
 
         fn read(&self) -> SourceRead<Out, Continuous> {
-            live_read(&self.0)
+            live_read()
         }
     }
 
@@ -267,12 +236,13 @@ mod tests {
         }
     }
 
+    #[obzenflow_runtime::effects::system("policy")]
     struct PolicyPort;
 
     #[derive(Clone, Debug, Serialize)]
     struct PolicyRequest;
 
-    #[obzenflow_runtime::effects::port(system = "policy")]
+    #[obzenflow_runtime::effects::port]
     impl PolicyPort {
         #[effect(type = "test.stateful_policy_effect", at_most_once)]
         fn apply(&self, _: &PolicyRequest) -> Result<Out, EffectError> {
@@ -351,12 +321,13 @@ mod tests {
         }
     }
 
+    #[obzenflow_runtime::effects::system("tx")]
     struct TxPort;
 
     #[derive(Clone, Debug, Serialize)]
     struct TxRequest;
 
-    #[obzenflow_runtime::effects::port(system = "tx")]
+    #[obzenflow_runtime::effects::port]
     impl TxPort {
         #[effect(type = "test.tx_effect", exactly_once)]
         async fn post(
@@ -380,8 +351,8 @@ mod tests {
         use obzenflow_adapters::middleware::rate_limit;
         let finite = Src(no_out());
         let async_finite = AsyncSrc(no_out());
-        let infinite = InfSrc(no_out());
-        let async_infinite = AsyncInfSrc(no_out());
+        let infinite = InfSrc;
+        let async_infinite = AsyncInfSrc;
         let transform = Tr;
         let effectful_transform = FxTr;
         let stateful = St;
@@ -483,43 +454,43 @@ mod tests {
 
     #[test]
     fn infinite_source_typed_bare() {
-        let inf_src = InfSrc(no_out());
+        let inf_src = InfSrc;
         crate::source!(Out => inf_src);
     }
     #[test]
     fn infinite_source_typed_mw() {
-        let inf_src = InfSrc(no_out());
+        let inf_src = InfSrc;
         crate::source!(Out => inf_src );
     }
     #[test]
     fn infinite_source_typed_name() {
-        let inf_src = InfSrc(no_out());
+        let inf_src = InfSrc;
         crate::source!(name: "s", Out => inf_src);
     }
     #[test]
     fn infinite_source_typed_name_mw() {
-        let inf_src = InfSrc(no_out());
+        let inf_src = InfSrc;
         crate::source!(name: "s", Out => inf_src );
     }
 
     #[test]
     fn async_infinite_source_typed_bare() {
-        let async_inf_src = AsyncInfSrc(no_out());
+        let async_inf_src = AsyncInfSrc;
         crate::source!(Out => async_inf_src);
     }
     #[test]
     fn async_infinite_source_typed_mw() {
-        let async_inf_src = AsyncInfSrc(no_out());
+        let async_inf_src = AsyncInfSrc;
         crate::source!(Out => async_inf_src );
     }
     #[test]
     fn async_infinite_source_typed_name() {
-        let async_inf_src = AsyncInfSrc(no_out());
+        let async_inf_src = AsyncInfSrc;
         crate::source!(name: "s", Out => async_inf_src);
     }
     #[test]
     fn async_infinite_source_typed_name_mw() {
-        let async_inf_src = AsyncInfSrc(no_out());
+        let async_inf_src = AsyncInfSrc;
         crate::source!(name: "s", Out => async_inf_src );
     }
 

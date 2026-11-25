@@ -12,7 +12,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordedAction {
-    SourceInput(EffectCursor),
+    Member(EffectCursor),
     Effect {
         cursor: EffectCursor,
         effect_type: EffectType,
@@ -46,7 +46,7 @@ impl RecordedAction {
 
     pub(crate) fn key(&self) -> ActionKey {
         match self {
-            Self::SourceInput(cursor) => ActionKey::SourceInput(cursor.clone()),
+            Self::Member(cursor) => ActionKey::Member(cursor.clone()),
             Self::Effect { cursor, .. } => ActionKey::Effect(cursor.clone()),
             Self::Fact { id, .. } => ActionKey::Fact(*id),
             Self::Settlement { cursor } => ActionKey::Settlement(cursor.clone()),
@@ -55,9 +55,9 @@ impl RecordedAction {
 
     pub(crate) fn cursor(&self) -> Option<&EffectCursor> {
         match self {
-            Self::SourceInput(cursor)
-            | Self::Effect { cursor, .. }
-            | Self::Settlement { cursor } => Some(cursor),
+            Self::Member(cursor) | Self::Effect { cursor, .. } | Self::Settlement { cursor } => {
+                Some(cursor)
+            }
             Self::Fact { .. } => None,
         }
     }
@@ -77,9 +77,8 @@ impl RecordedAction {
                 input_position: cursor.input_seq,
                 effect_ordinal: cursor.effect_ordinal,
             },
-            Self::SourceInput(cursor) => DepartureAction::SourceInput {
+            Self::Member(cursor) => DepartureAction::MemberRecorded {
                 number: cursor.input_seq.get(),
-                attempt: cursor.effect_ordinal.get() + 1,
             },
             Self::Fact { id, event_type } => DepartureAction::Fact {
                 event_type: event_type.clone(),
@@ -95,7 +94,7 @@ impl RecordedAction {
 impl fmt::Display for RecordedAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SourceInput(cursor) => write!(f, "source input {}", cursor.input_seq),
+            Self::Member(cursor) => write!(f, "member {}", cursor.input_seq),
             Self::Effect { effect_type, .. } => {
                 write!(f, "a {} effect", display_name(effect_type.as_str()))
             }
@@ -111,7 +110,7 @@ impl fmt::Display for RecordedAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ActionKey {
-    SourceInput(EffectCursor),
+    Member(EffectCursor),
     Effect(EffectCursor),
     Fact(EventId),
     Settlement(EffectCursor),
@@ -119,7 +118,7 @@ pub(crate) enum ActionKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ActionRow {
-    SourceInput(EffectCursor),
+    Member(EffectCursor),
     Effect {
         cursor: EffectCursor,
         attempt: Option<EffectAttemptOrdinal>,
@@ -242,7 +241,7 @@ fn write_offered(
     offered: &RecordedAction,
 ) -> fmt::Result {
     match offered {
-        RecordedAction::SourceInput(cursor) => {
+        RecordedAction::Member(cursor) => {
             write!(f, "observed source input {}", cursor.input_seq)
         }
         RecordedAction::Effect { effect_type, .. } => write!(
@@ -312,7 +311,7 @@ impl RecordedActions {
             .iter()
             .filter_map(|action| match action {
                 RecordedAction::Fact { id, .. } => Some(*id),
-                RecordedAction::SourceInput(_)
+                RecordedAction::Member(_)
                 | RecordedAction::Effect { .. }
                 | RecordedAction::Settlement { .. } => None,
             })
@@ -506,38 +505,38 @@ impl ActionScan {
         {
             return Ok(());
         }
-        let row =
-            if let ChainPayload::Execution(ExecutionPayload::SourceInput(row)) = &event.payload {
-                let cursor = super::history::source_cursor(row)?;
-                self.actions
-                    .push(RecordedAction::SourceInput(cursor.clone()));
-                Some(ActionRow::SourceInput(cursor))
-            } else if EffectAttemptStarted::matches_event_type(&event.event_type()) {
-                let started = EffectAttemptStarted::try_from_event(event)
-                    .map_err(|error| EffectError::Serialization(error.to_string()))?;
-                self.effect(started.cursor.clone(), &started.effect_type);
-                Some(ActionRow::Effect {
-                    cursor: started.cursor,
-                    attempt: Some(started.attempt),
-                })
-            } else if let Some(provenance) = &event.effect_provenance {
-                self.effect(
-                    provenance.cursor.clone(),
-                    &provenance.descriptor.effect_type,
-                );
-                Some(ActionRow::Effect {
-                    cursor: provenance.cursor.clone(),
-                    attempt: provenance.attempt,
-                })
-            } else if event.consumes_data_credit() {
-                self.actions.push(RecordedAction::Fact {
-                    id: event.id,
-                    event_type: EventType::from(event.event_type()),
-                });
-                Some(ActionRow::Fact(event.id))
-            } else {
-                None
-            };
+        let row = if let ChainPayload::Execution(ExecutionPayload::MemberRecorded(row)) =
+            &event.payload
+        {
+            let cursor = super::history::member_cursor(row);
+            self.actions.push(RecordedAction::Member(cursor.clone()));
+            Some(ActionRow::Member(cursor))
+        } else if EffectAttemptStarted::matches_event_type(&event.event_type()) {
+            let started = EffectAttemptStarted::try_from_event(event)
+                .map_err(|error| EffectError::Serialization(error.to_string()))?;
+            self.effect(started.cursor.clone(), &started.effect_type);
+            Some(ActionRow::Effect {
+                cursor: started.cursor,
+                attempt: Some(started.attempt),
+            })
+        } else if let Some(provenance) = &event.effect_provenance {
+            self.effect(
+                provenance.cursor.clone(),
+                &provenance.descriptor.effect_type,
+            );
+            Some(ActionRow::Effect {
+                cursor: provenance.cursor.clone(),
+                attempt: provenance.attempt,
+            })
+        } else if event.consumes_data_credit() {
+            self.actions.push(RecordedAction::Fact {
+                id: event.id,
+                event_type: EventType::from(event.event_type()),
+            });
+            Some(ActionRow::Fact(event.id))
+        } else {
+            None
+        };
         if let Some(row) = row {
             if let Some(generation) = self.pending.take() {
                 let entry = self.anchors.entry(row).or_insert(generation);

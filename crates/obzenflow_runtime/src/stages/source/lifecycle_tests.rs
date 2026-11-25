@@ -4,21 +4,22 @@
 
 use super::finite::fsm::tests::TestJournal;
 use super::*;
-use crate::effects::{EffectPortRegistry, SystemName};
+use crate::effects::{EffectDeclaration, EffectPortRegistry};
 use crate::id_conversions::StageIdExt;
+use crate::queries::FiniteRead;
 use crate::stages::common::handlers::source::prepared::{AdmitSource, AdmittedSource};
-use crate::stages::common::handlers::source::{
-    Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
-};
-use crate::stages::common::handlers::{
-    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
-};
+use crate::stages::common::handlers::source::SourceRead;
+use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
 use crate::stages::resources_builder::{StageResources, StageResourcesBuilder};
 use crate::supervised_base::{SupervisorBuilder, SupervisorHandle};
+use crate::systems::Port;
 use async_trait::async_trait;
 use futures::FutureExt;
+use obzenflow_core::event::payloads::effect_payload::{
+    EffectAttemptOrdinal, EffectOutcomePayload, EffectRecord,
+};
 use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, SourcePollContinuation, SourcePollErrorKind, StageLifecycleFact,
+    ExecutionPayload, RecoveryFact, SourcePollContinuation, SourcePollErrorKind, StageLifecycleFact,
 };
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{ChainPayload, JournalRecord, SourceDiagnosticReason};
@@ -47,9 +48,6 @@ enum Marker {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct NextRead(u32);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct NextTake(u32);
-
 #[obzenflow_runtime::effects::port]
 #[async_trait]
 trait LifecycleInput: Send + Sync {
@@ -59,17 +57,6 @@ trait LifecycleInput: Send + Sync {
         from: &NextRead,
         ctx: &obzenflow_runtime::queries::QueryContext,
     ) -> Result<FiniteRead<Marker, NextRead>, obzenflow_runtime::queries::QueryError>;
-}
-
-#[obzenflow_runtime::effects::port]
-#[async_trait]
-trait LifecycleFeed: InputReadiness + Send + Sync {
-    #[query(type = "source.lifecycle.take")]
-    async fn take(
-        &self,
-        from: &NextTake,
-        ctx: &obzenflow_runtime::queries::QueryContext,
-    ) -> Result<ContinuousRead<Marker, NextTake>, obzenflow_runtime::queries::QueryError>;
 }
 
 #[derive(Default)]
@@ -85,17 +72,13 @@ enum Reading {
     RowThenPending,
     RowThenTerminal,
     RejectThenPending,
-    NeverReady,
 }
 
+#[obzenflow_runtime::effects::system("lifecycle-fixture")]
 #[derive(Clone)]
 struct Fixture {
     counts: Arc<Counts>,
     reading: Reading,
-}
-
-impl SystemName for Fixture {
-    const NAME: &'static str = "lifecycle-fixture";
 }
 
 impl Fixture {
@@ -132,30 +115,6 @@ impl LifecycleInput for Fixture {
     }
 }
 
-#[async_trait]
-impl InputReadiness for Fixture {
-    async fn ready(&self) -> Result<(), SourceError> {
-        if matches!(self.reading, Reading::NeverReady) {
-            std::future::pending::<()>().await;
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl LifecycleFeed for Fixture {
-    async fn take(
-        &self,
-        from: &NextTake,
-        _ctx: &obzenflow_runtime::queries::QueryContext,
-    ) -> Result<ContinuousRead<Marker, NextTake>, obzenflow_runtime::queries::QueryError> {
-        Ok(ContinuousRead {
-            records: self.records().await,
-            next: NextTake(from.0 + 1),
-        })
-    }
-}
-
 fn row(marker: Marker) -> Result<Row, SourceError> {
     match marker {
         Marker::Row => Ok(Row),
@@ -169,20 +128,16 @@ fn row(marker: Marker) -> Result<Row, SourceError> {
     }
 }
 
-fn deferred<P>(fixture: &Fixture) -> crate::queries::QueryPort<P>
-where
-    P: ?Sized + Send + Sync + 'static,
-    crate::effects::PortImpl<Fixture>: crate::effects::ServesPort<P, Fixture>,
-{
+fn deferred(fixture: &Fixture) -> Port<dyn LifecycleInput> {
     let fixture = fixture.clone();
-    obzenflow_runtime::queries::QueryPort::deferred(move || {
+    Port::deferred(move || {
         fixture.counts.builds.fetch_add(1, Ordering::SeqCst);
         Ok(fixture.clone())
     })
 }
 
 struct FiniteRows {
-    port: obzenflow_runtime::queries::QueryPort<dyn LifecycleInput>,
+    port: Port<dyn LifecycleInput>,
 }
 
 #[async_trait]
@@ -206,27 +161,6 @@ impl FiniteRows {
     }
 }
 
-struct LiveRows {
-    port: obzenflow_runtime::queries::QueryPort<dyn LifecycleFeed>,
-}
-
-#[async_trait]
-impl TypedAsyncInfiniteSourceHandler for LiveRows {
-    type Output = Row;
-
-    fn read(&self) -> SourceRead<Row, Continuous> {
-        SourceRead::continuous(self.port.clone(), NextTake(0), row)
-    }
-}
-
-impl LiveRows {
-    fn of(fixture: &Fixture) -> Self {
-        Self {
-            port: deferred(fixture),
-        }
-    }
-}
-
 struct Journals {
     data: Arc<dyn Journal<ChainEvent>>,
     error: Arc<dyn Journal<ChainEvent>>,
@@ -237,21 +171,28 @@ fn admitted<F, H>(
 ) -> (
     AdmittedSource<H::Handler>,
     EffectPortRegistry,
-    Vec<crate::effects::EffectDeclaration>,
+    Vec<EffectDeclaration>,
 )
 where
     F: ?Sized,
     H: AdmitSource<F>,
 {
     let admitted = handler.admit();
-    let mut ports = EffectPortRegistry::new();
-    ports.install_source_system(admitted.system());
-    (admitted, ports, Vec::new())
+    let declarations = admitted
+        .effect_declarations()
+        .expect("the source declares its query");
+    let ports = EffectPortRegistry::collect_from_declarations(declarations.iter())
+        .expect("the declaration registers its port");
+    let declarations = declarations
+        .iter()
+        .map(EffectDeclaration::runtime_projection)
+        .collect();
+    (admitted, ports, declarations)
 }
 
 async fn resources_with_ports(
     ports: EffectPortRegistry,
-    declarations: Vec<crate::effects::EffectDeclaration>,
+    declarations: Vec<EffectDeclaration>,
 ) -> (StageId, StageResources, Journals) {
     let mut topology = obzenflow_topology::TopologyBuilder::new();
     let source = topology.add_stage(Some("input".into()));
@@ -325,164 +266,198 @@ async fn notified(notify: &Notify) {
         .expect("source progress");
 }
 
-macro_rules! lifecycle_family {
-    ($module:ident, $builder:path, $config:path, $event:path, $state:path, $family:path, $rows:ident) => {
-        mod $module {
-            use super::*;
-            use $builder as Builder;
-            use $config as Config;
-            use $event as Event;
-            use $state as State;
-            type Handler = <$rows as AdmitSource<dyn $family>>::Handler;
-            type Handle = crate::supervised_base::StandardHandle<Event<Handler>, State<Handler>>;
+mod finite_lifecycle {
+    use super::*;
+    use finite::AsyncFiniteSourceBuilder as Builder;
+    use finite::FiniteSourceConfig as Config;
+    use finite::FiniteSourceEvent as Event;
+    use finite::FiniteSourceState as State;
+    type Handler = <FiniteRows as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler>>::Handler;
+    type Handle = crate::supervised_base::StandardHandle<Event<Handler>, State<Handler>>;
 
-            async fn build(
-                fixture: &Fixture,
-            ) -> (Handle, Journals) {
-                let (source, ports, declarations) = admitted::<dyn $family, _>($rows::of(fixture));
-                let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
-                let config = Config::new(stage, "input", "lifecycle");
-                (
-                    Builder::new(source, config, resources)
-                        .build()
-                        .await
-                        .unwrap(),
-                    journals,
-                )
-            }
-
-            async fn start(handle: &Handle) {
-                for event in [Event::Initialize, Event::Ready, Event::Start] {
-                    handle.send_event(event).await.unwrap();
-                }
-            }
-
-            async fn finish(handle: &Handle) -> Result<(), crate::supervised_base::HandleError> {
-                tokio::time::timeout(Duration::from_secs(3), handle.wait_for_completion())
-                    .await
-                    .expect("source terminates")
-            }
-
-            #[tokio::test]
-            async fn stop_before_start_skips_resolution() {
-                let fixture = Fixture::new(Reading::Pending);
-                let (handle, journals) = build(&fixture).await;
-                start(&handle).await;
-                handle.send_event(Event::BeginDrain).await.unwrap();
-                finish(&handle).await.unwrap();
-                assert_eq!(fixture.counts.builds.load(Ordering::SeqCst), 0);
-                assert_eq!(fixture.counts.reads.load(Ordering::SeqCst), 0);
-                let data = journals.data.read_all_unordered().await.unwrap();
-                assert_eq!(facts(&data), 0);
-            }
-
-            #[tokio::test]
-            async fn failure_during_publication_returns_before_settling() {
-                let fixture = Fixture::new(Reading::RowThenPending);
-                let (source, ports, declarations) = admitted::<dyn $family, _>($rows::of(&fixture));
-                let (stage, mut resources, _) = resources_with_ports(ports, declarations).await;
-                let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
-                let (writing, release) = journal.block_matching_append(|event| {
-                    matches!(event.payload, ChainPayload::Fact(_))
-                });
-                resources.data_journal = journal.clone();
-                let config = Config::new(stage, "input", "lifecycle");
-                let handle = Builder::new(source, config, resources).build().await.unwrap();
-                start(&handle).await;
-                notified(&writing).await;
-                handle
-                    .send_event(Event::Error("failure during source publication".into()))
-                    .await
-                    .unwrap();
-                let failure = tokio::time::timeout(Duration::from_secs(3), handle.wait_for_failure())
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(failure.cause.to_string().contains("failure during source publication"));
-                assert!(matches!(handle.current_state(), State::Failing(_)));
-                assert!(handle.wait_for_stage_exit().now_or_never().is_none());
-                release.notify_one();
-                assert!(finish(&handle).await.is_err());
-                let records = journal.read_all_unordered().await.unwrap();
-                assert_eq!(facts(&records), 1);
-            }
-
-            #[tokio::test]
-            async fn terminal_read_failure_fails_without_eof() {
-                let fixture = Fixture::new(Reading::RowThenTerminal);
-                let (handle, journals) = build(&fixture).await;
-                start(&handle).await;
-                assert!(finish(&handle).await.is_err(), "terminal report fails the stage");
-                assert!(matches!(
-                    handle.current_state(),
-                    State::Failed(reason)
-                        if reason == "Source 'input' cannot continue: terminal source transport error: the input is unavailable"
-                ));
-                assert_eq!(fixture.counts.reads.load(Ordering::SeqCst), 2, "no read after a terminal report");
-
-                let data = journals.data.read_all_unordered().await.unwrap();
-                let errors = journals.error.read_all_unordered().await.unwrap();
-                let failures = source_failures(&errors);
-                assert_eq!(failures.len(), 1, "{failures:?}");
-                let (diagnostic_id, ExecutionPayload::SourcePollFailed(poll)) = failures[0] else {
-                    panic!("expected runtime.source.poll_failed, got {failures:?}");
-                };
-                assert_eq!(poll.continuation, SourcePollContinuation::Terminal);
-                assert_eq!(poll.kind, ErrorKind::Remote);
-                assert_eq!(failed_cause(&data), Some(Some(diagnostic_id)));
-                assert!(!has_eof(&data), "a terminal source writes no EOF");
-                assert_eq!(facts(&data), 1, "the row accepted before the failure stays committed");
-            }
-
-            #[tokio::test]
-            async fn rejected_record_keeps_source_reading() {
-                let fixture = Fixture::new(Reading::RejectThenPending);
-                let (handle, journals) = build(&fixture).await;
-                start(&handle).await;
-                tokio::time::timeout(Duration::from_secs(3), async {
-                    while fixture.counts.reads.load(Ordering::SeqCst) < 2 {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                    }
-                })
+    async fn build(fixture: &Fixture) -> (Handle, Journals) {
+        let (source, ports, declarations) =
+            admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(FiniteRows::of(fixture));
+        let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
+        let config = Config::new(stage, "input", "lifecycle");
+        (
+            Builder::new(source, config, resources)
+                .build()
                 .await
-                .expect("reading continues after a rejection");
-                let errors = journals.error.read_all_unordered().await.unwrap();
-                let failures = source_failures(&errors);
-                assert_eq!(failures.len(), 1, "{failures:?}");
-                let (_, ExecutionPayload::SourceRecordRejected(rejected)) = failures[0] else {
-                    panic!("expected runtime.source.record_rejected, got {failures:?}");
-                };
-                assert_eq!(rejected.kind, ErrorKind::Validation);
-                handle.send_event(Event::BeginDrain).await.unwrap();
-                finish(&handle).await.unwrap();
-            }
-        }
-    };
-}
+                .unwrap(),
+            journals,
+        )
+    }
 
-lifecycle_family!(
-    finite_lifecycle,
-    finite::AsyncFiniteSourceBuilder,
-    finite::FiniteSourceConfig,
-    finite::FiniteSourceEvent,
-    finite::FiniteSourceState,
-    UnifiedAsyncFiniteSourceHandler,
-    FiniteRows
-);
-lifecycle_family!(
-    infinite_lifecycle,
-    infinite::AsyncInfiniteSourceBuilder,
-    infinite::InfiniteSourceConfig,
-    infinite::InfiniteSourceEvent,
-    infinite::InfiniteSourceState,
-    UnifiedAsyncInfiniteSourceHandler,
-    LiveRows
-);
+    async fn start(handle: &Handle) {
+        for event in [Event::Initialize, Event::Ready, Event::Start] {
+            handle.send_event(event).await.unwrap();
+        }
+    }
+
+    async fn finish(handle: &Handle) -> Result<(), crate::supervised_base::HandleError> {
+        tokio::time::timeout(Duration::from_secs(3), handle.wait_for_completion())
+            .await
+            .expect("source terminates")
+    }
+
+    #[tokio::test]
+    async fn stop_before_start_skips_resolution() {
+        let fixture = Fixture::new(Reading::Pending);
+        let (handle, journals) = build(&fixture).await;
+        start(&handle).await;
+        handle.send_event(Event::BeginDrain).await.unwrap();
+        finish(&handle).await.unwrap();
+        assert_eq!(fixture.counts.builds.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.counts.reads.load(Ordering::SeqCst), 0);
+        let data = journals.data.read_all_unordered().await.unwrap();
+        assert_eq!(facts(&data), 0);
+    }
+
+    #[tokio::test]
+    async fn failure_during_publication_returns_before_settling() {
+        let fixture = Fixture::new(Reading::RowThenPending);
+        let (source, ports, declarations) =
+            admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(FiniteRows::of(&fixture));
+        let (stage, mut resources, _) = resources_with_ports(ports, declarations).await;
+        let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
+        let (writing, release) =
+            journal.block_matching_append(|event| matches!(event.payload, ChainPayload::Fact(_)));
+        resources.data_journal = journal.clone();
+        let config = Config::new(stage, "input", "lifecycle");
+        let handle = Builder::new(source, config, resources)
+            .build()
+            .await
+            .unwrap();
+        start(&handle).await;
+        notified(&writing).await;
+        handle
+            .send_event(Event::Error("failure during source publication".into()))
+            .await
+            .unwrap();
+        let failure = tokio::time::timeout(Duration::from_secs(3), handle.wait_for_failure())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(failure
+            .cause
+            .to_string()
+            .contains("failure during source publication"));
+        assert!(matches!(handle.current_state(), State::Failing(_)));
+        assert!(handle.wait_for_stage_exit().now_or_never().is_none());
+        release.notify_one();
+        assert!(finish(&handle).await.is_err());
+        let records = journal.read_all_unordered().await.unwrap();
+        assert_eq!(facts(&records), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_read_failure_fails_without_eof() {
+        let fixture = Fixture::new(Reading::RowThenTerminal);
+        let (handle, journals) = build(&fixture).await;
+        start(&handle).await;
+        assert!(
+            finish(&handle).await.is_err(),
+            "terminal report fails the stage"
+        );
+        assert!(matches!(
+            handle.current_state(),
+            State::Failed(reason)
+                if reason == "Source 'input' cannot continue: terminal source transport error: the input is unavailable"
+        ));
+        assert_eq!(
+            fixture.counts.reads.load(Ordering::SeqCst),
+            2,
+            "no read after a terminal report"
+        );
+
+        let data = journals.data.read_all_unordered().await.unwrap();
+        let errors = journals.error.read_all_unordered().await.unwrap();
+        let failures = source_failures(&errors);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let (diagnostic_id, ExecutionPayload::SourcePollFailed(poll)) = failures[0] else {
+            panic!("expected runtime.source.poll_failed, got {failures:?}");
+        };
+        assert_eq!(poll.continuation, SourcePollContinuation::Terminal);
+        assert_eq!(poll.kind, ErrorKind::Remote);
+        assert_eq!(failed_cause(&data), Some(Some(diagnostic_id)));
+        assert!(!has_eof(&data), "a terminal source writes no EOF");
+        assert_eq!(
+            facts(&data),
+            1,
+            "the row accepted before the failure stays committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_record_keeps_source_reading() {
+        let fixture = Fixture::new(Reading::RejectThenPending);
+        let (handle, journals) = build(&fixture).await;
+        start(&handle).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while fixture.counts.reads.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("reading continues after a rejection");
+        let errors = journals.error.read_all_unordered().await.unwrap();
+        let failures = source_failures(&errors);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let (_, ExecutionPayload::SourceRecordRejected(rejected)) = failures[0] else {
+            panic!("expected runtime.source.record_rejected, got {failures:?}");
+        };
+        assert_eq!(rejected.kind, ErrorKind::Validation);
+        handle.send_event(Event::BeginDrain).await.unwrap();
+        finish(&handle).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_resolver_stops_without_read() {
+        let unbuilt = FiniteRows {
+            port: Port::deferred(
+                || -> Result<Fixture, crate::effects::EffectPortResolutionError> {
+                    Err(crate::effects::EffectPortResolutionError::ClientConstructionFailed)
+                },
+            ),
+        };
+        let (source, ports, declarations) =
+            admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(unbuilt);
+        let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
+        let config = Config::new(stage, "input", "lifecycle");
+        let handle = Builder::new(source, config, resources)
+            .build()
+            .await
+            .unwrap();
+        start(&handle).await;
+        assert!(finish(&handle).await.is_err(), "the stage fails");
+
+        let mut rows = journals.data.read_all_unordered().await.unwrap();
+        rows.extend(journals.error.read_all_unordered().await.unwrap());
+        assert!(
+            query_rows(&rows).is_empty(),
+            "the source writes no read row"
+        );
+        let reasons: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) => {
+                    Some(fatal.reason)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            [obzenflow_core::event::StageFatalReason::EffectPortResolutionFailed]
+        );
+    }
+}
 
 async fn run_finite<H>(
     source: AdmittedSource<H>,
     ports: EffectPortRegistry,
-    declarations: Vec<crate::effects::EffectDeclaration>,
+    declarations: Vec<EffectDeclaration>,
 ) -> Journals
 where
     H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static,
@@ -507,11 +482,30 @@ where
     journals
 }
 
-fn source_inputs(rows: &Rows) -> Vec<obzenflow_core::query::SourceInputRecord> {
+/// A query's record, with the attempt that its row names.
+struct QueryRow {
+    record: EffectRecord,
+    attempt: Option<EffectAttemptOrdinal>,
+    event_type: String,
+}
+
+fn query_rows(rows: &Rows) -> Vec<QueryRow> {
     rows.iter()
         .filter_map(|row| match &row.payload {
-            ChainPayload::Execution(ExecutionPayload::SourceInput(record)) => {
-                Some(record.as_ref().clone())
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+                if record.is_query() =>
+            {
+                Some(QueryRow {
+                    record: record.as_ref().clone(),
+                    attempt: row
+                        .envelope
+                        .provenance
+                        .event
+                        .effect_provenance
+                        .as_ref()
+                        .and_then(|provenance| provenance.attempt),
+                    event_type: row.event_type(),
+                })
             }
             _ => None,
         })
@@ -538,9 +532,9 @@ fn attempt_starts(rows: &Rows) -> usize {
         .count()
 }
 
-fn reply<T: serde::de::DeserializeOwned>(record: &obzenflow_core::query::SourceInputRecord) -> T {
-    match &record.input {
-        obzenflow_core::query::SourceInput::QueryAnswered { answer: output, .. } => {
+fn reply<T: serde::de::DeserializeOwned>(row: &QueryRow) -> T {
+    match &row.record.outcome {
+        EffectOutcomePayload::Succeeded { output } => {
             serde_json::from_value(output.clone()).expect("the recorded reply decodes")
         }
         other => panic!("expected a recorded reply, got {other:?}"),
@@ -561,12 +555,9 @@ trait ScriptedInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextScripted>, obzenflow_runtime::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("lifecycle-script")]
 #[derive(Clone)]
 struct Script(Arc<Vec<Vec<Marker>>>);
-
-impl SystemName for Script {
-    const NAME: &'static str = "lifecycle-script";
-}
 
 #[async_trait]
 impl ScriptedInput for Script {
@@ -585,7 +576,7 @@ impl ScriptedInput for Script {
     }
 }
 
-struct ScriptedRows(obzenflow_runtime::queries::QueryPort<dyn ScriptedInput>);
+struct ScriptedRows(Port<dyn ScriptedInput>);
 
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for ScriptedRows {
@@ -603,21 +594,24 @@ impl TypedAsyncFiniteSourceHandler for ScriptedRows {
 #[tokio::test]
 async fn port_read_records_system_binding() {
     let script = Script(Arc::new(vec![vec![Marker::Row], Vec::new()]));
-    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(
-        ScriptedRows(obzenflow_runtime::queries::QueryPort::to(script)),
-    );
+    let (source, ports, declarations) =
+        admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(ScriptedRows(Port::to(script)));
     let journals = run_finite(source, ports, declarations).await;
     let data = journals.data.read_all_unordered().await.unwrap();
 
     let declared = declared_binding(&data).expect("the stage declares its binding");
     assert_eq!(declared.name(), "lifecycle-script");
-    let reads = source_inputs(&data);
+    let reads = query_rows(&data);
     assert_eq!(
-        reads.iter().map(|read| read.number).collect::<Vec<_>>(),
+        reads
+            .iter()
+            .map(|read| read.record.cursor.input_seq.get())
+            .collect::<Vec<_>>(),
         [1, 2, 3],
         "the empty answer and the end of input have their own read numbers"
     );
-    assert!(reads.iter().all(|read| matches!(&read.input,obzenflow_core::query::SourceInput::QueryAnswered{query_type,..} if query_type=="source.lifecycle.scripted_read")));
+    assert!(reads.iter().all(|read| read.event_type == "query.answered"
+        && read.record.descriptor.effect_type.as_str() == "source.lifecycle.scripted_read"));
     let replies: Vec<FiniteRead<Marker, NextScripted>> = reads.iter().map(reply).collect();
     assert!(
         matches!(&replies[0], FiniteRead::Batch { records, next } if records.len() == 1 && next.0 == 1)
@@ -631,146 +625,25 @@ async fn port_read_records_system_binding() {
     assert!(has_eof(&data));
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct NextGuarded(u32);
-
-#[obzenflow_runtime::effects::port]
-#[async_trait]
-trait GuardedTake: InputReadiness + Send + Sync {
-    #[query(type = "source.lifecycle.guarded_take")]
-    async fn take(
-        &self,
-        from: &NextGuarded,
-        ctx: &obzenflow_runtime::queries::QueryContext,
-    ) -> Result<ContinuousRead<Marker, NextGuarded>, obzenflow_runtime::queries::QueryError>;
-}
-
-#[derive(Clone, Default)]
-struct Guarded {
-    calls: Arc<AtomicUsize>,
-}
-
-impl SystemName for Guarded {
-    const NAME: &'static str = "guarded-take";
-}
-
-#[async_trait]
-impl InputReadiness for Guarded {
-    async fn ready(&self) -> Result<(), SourceError> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl GuardedTake for Guarded {
-    async fn take(
-        &self,
-        from: &NextGuarded,
-        _ctx: &obzenflow_runtime::queries::QueryContext,
-    ) -> Result<ContinuousRead<Marker, NextGuarded>, obzenflow_runtime::queries::QueryError> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if call > 2 {
-            return std::future::pending().await;
-        }
-        Ok(ContinuousRead {
-            records: vec![Marker::Row],
-            next: NextGuarded(from.0 + 1),
-        })
-    }
-}
-
-struct GuardedRows(obzenflow_runtime::queries::QueryPort<dyn GuardedTake>);
-
-#[async_trait]
-impl TypedAsyncInfiniteSourceHandler for GuardedRows {
-    type Output = Row;
-
-    fn read(&self) -> SourceRead<Row, Continuous> {
-        SourceRead::continuous(self.0.clone(), NextGuarded(0), row)
-    }
-}
-
 #[tokio::test]
-async fn pending_query_records_completed_answers() {
-    let guarded = Guarded::default();
-    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncInfiniteSourceHandler, _>(
-        GuardedRows(obzenflow_runtime::queries::QueryPort::to(guarded.clone())),
-    );
-    let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
-    let config = infinite::InfiniteSourceConfig::new(stage, "input", "lifecycle");
-    let handle = infinite::AsyncInfiniteSourceBuilder::new(source, config, resources)
-        .build()
-        .await
-        .unwrap();
-    for event in [
-        infinite::InfiniteSourceEvent::Initialize,
-        infinite::InfiniteSourceEvent::Ready,
-        infinite::InfiniteSourceEvent::Start,
-    ] {
-        handle.send_event(event).await.unwrap();
-    }
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while guarded.calls.load(Ordering::SeqCst) < 3 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the source takes three times");
-    handle
-        .send_event(infinite::InfiniteSourceEvent::BeginDrain)
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), handle.wait_for_completion())
-        .await
-        .expect("source terminates")
-        .unwrap();
-    let rows = journals.data.read_all_unordered().await.unwrap();
-    assert_eq!(source_inputs(&rows).len(), 2);
-    assert_eq!(facts(&rows), 2);
-    assert_eq!(attempt_starts(&rows), 0);
-}
-
-#[tokio::test]
-async fn readiness_wait_issues_no_call() {
-    let fixture = Fixture::new(Reading::NeverReady);
+async fn source_fact_parent_names_answer() {
+    let script = Script(Arc::new(vec![vec![Marker::Row]]));
     let (source, ports, declarations) =
-        admitted::<dyn UnifiedAsyncInfiniteSourceHandler, _>(WaitingRows(deferred(&fixture)));
-    let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
-    let config = infinite::InfiniteSourceConfig::new(stage, "input", "lifecycle");
-    let handle = infinite::AsyncInfiniteSourceBuilder::new(source, config, resources)
-        .build()
-        .await
-        .unwrap();
-    for event in [
-        infinite::InfiniteSourceEvent::Initialize,
-        infinite::InfiniteSourceEvent::Ready,
-        infinite::InfiniteSourceEvent::Start,
-    ] {
-        handle.send_event(event).await.unwrap();
-    }
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    handle
-        .send_event(infinite::InfiniteSourceEvent::BeginDrain)
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), handle.wait_for_completion())
-        .await
-        .expect("source terminates")
-        .unwrap();
-    assert_eq!(fixture.counts.reads.load(Ordering::SeqCst), 0);
+        admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(ScriptedRows(Port::to(script)));
+    let journals = run_finite(source, ports, declarations).await;
     let data = journals.data.read_all_unordered().await.unwrap();
-    assert!(source_inputs(&data).is_empty());
-}
-
-struct WaitingRows(obzenflow_runtime::queries::QueryPort<dyn LifecycleFeed>);
-
-#[async_trait]
-impl TypedAsyncInfiniteSourceHandler for WaitingRows {
-    type Output = Row;
-
-    fn read(&self) -> SourceRead<Row, Continuous> {
-        SourceRead::continuous(self.0.clone(), NextTake(0), row)
-    }
+    let answer = data
+        .iter()
+        .find(|row| row.event_type() == "query.answered")
+        .expect("the first read is answered");
+    let fact = data
+        .iter()
+        .find(|row| matches!(row.payload, ChainPayload::Fact(_)))
+        .expect("the read supplies one fact");
+    assert_eq!(
+        fact.envelope.provenance.event.causality.parent_ids.first(),
+        Some(&answer.envelope.provenance.event.id),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -814,12 +687,9 @@ trait InlineInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextInline>, obzenflow_runtime::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("inline-input")]
 #[derive(Clone, Default)]
 struct Inline(Placement);
-
-impl SystemName for Inline {
-    const NAME: &'static str = "inline-input";
-}
 
 impl InlineInput for Inline {
     fn read(
@@ -831,7 +701,7 @@ impl InlineInput for Inline {
     }
 }
 
-struct InlineRows(obzenflow_runtime::queries::QueryPort<dyn InlineInput>);
+struct InlineRows(Port<dyn InlineInput>);
 
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for InlineRows {
@@ -849,9 +719,8 @@ impl TypedAsyncFiniteSourceHandler for InlineRows {
 #[tokio::test(flavor = "current_thread")]
 async fn sync_read_runs_inline() {
     let inline = Inline::default();
-    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(
-        InlineRows(obzenflow_runtime::queries::QueryPort::to(inline.clone())),
-    );
+    let (source, ports, declarations) =
+        admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(InlineRows(Port::to(inline.clone())));
     let journals = run_finite(source, ports, declarations).await;
     let threads = inline.0.threads();
     assert_eq!(threads.len(), 2);
@@ -871,12 +740,9 @@ trait BlockingInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextBlocking>, obzenflow_runtime::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("blocking-input")]
 #[derive(Clone, Default)]
 struct Blocking(Placement);
-
-impl SystemName for Blocking {
-    const NAME: &'static str = "blocking-input";
-}
 
 #[async_trait]
 impl BlockingInput for Blocking {
@@ -897,7 +763,7 @@ impl BlockingInput for Blocking {
     }
 }
 
-struct BlockingRows(obzenflow_runtime::queries::QueryPort<dyn BlockingInput>);
+struct BlockingRows(Port<dyn BlockingInput>);
 
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for BlockingRows {
@@ -916,7 +782,7 @@ impl TypedAsyncFiniteSourceHandler for BlockingRows {
 async fn blocking_system_read_uses_blocking_pool() {
     let blocking = Blocking::default();
     let (source, ports, declarations) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(
-        BlockingRows(obzenflow_runtime::queries::QueryPort::to(blocking.clone())),
+        BlockingRows(Port::to(blocking.clone())),
     );
     let journals = run_finite(source, ports, declarations).await;
     let threads = blocking.0.threads();
@@ -937,14 +803,11 @@ trait AwaitedInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextAwaited>, obzenflow_runtime::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("awaited-input")]
 #[derive(Clone, Default)]
 struct Awaited {
     release: Arc<Notify>,
     waiting: Arc<Notify>,
-}
-
-impl SystemName for Awaited {
-    const NAME: &'static str = "awaited-input";
 }
 
 #[async_trait]
@@ -959,7 +822,7 @@ impl AwaitedInput for Awaited {
     }
 }
 
-struct AwaitedRows(obzenflow_runtime::queries::QueryPort<dyn AwaitedInput>);
+struct AwaitedRows(Port<dyn AwaitedInput>);
 
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for AwaitedRows {
@@ -977,9 +840,8 @@ impl TypedAsyncFiniteSourceHandler for AwaitedRows {
 #[tokio::test]
 async fn async_read_awaits_system() {
     let awaited = Awaited::default();
-    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(
-        AwaitedRows(obzenflow_runtime::queries::QueryPort::to(awaited.clone())),
-    );
+    let (source, ports, declarations) =
+        admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(AwaitedRows(Port::to(awaited.clone())));
     let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
     let config = finite::FiniteSourceConfig::new(stage, "input", "lifecycle");
     let handle = finite::AsyncFiniteSourceBuilder::new(source, config, resources)
@@ -995,10 +857,7 @@ async fn async_read_awaits_system() {
     }
     notified(&awaited.waiting).await;
     let before = journals.data.read_all_unordered().await.unwrap();
-    assert!(
-        source_inputs(&before).is_empty(),
-        "the read is still awaited"
-    );
+    assert!(query_rows(&before).is_empty(), "the read is still awaited");
     assert_eq!(facts(&before), 0);
     awaited.release.notify_one();
     notified(&awaited.waiting).await;
@@ -1008,23 +867,28 @@ async fn async_read_awaits_system() {
         .expect("source terminates")
         .unwrap();
     let after = journals.data.read_all_unordered().await.unwrap();
-    assert_eq!(source_inputs(&after).len(), 2);
+    assert_eq!(query_rows(&after).len(), 2);
     assert_eq!(facts(&after), 1);
 }
 
 #[tokio::test]
 async fn placeholder_source_read_records_placeholder() {
     let source = AdmittedSource::finite_placeholder(None);
-    let mut ports = EffectPortRegistry::new();
-    ports.install_source_system(source.system());
-    let journals = run_finite(source, ports, Vec::new()).await;
+    let declarations = source.effect_declarations().expect("a placeholder query");
+    let ports = EffectPortRegistry::collect_from_declarations(declarations.iter())
+        .expect("the declaration registers its port");
+    let declarations = declarations
+        .iter()
+        .map(EffectDeclaration::runtime_projection)
+        .collect();
+    let journals = run_finite(source, ports, declarations).await;
     let data = journals.data.read_all_unordered().await.unwrap();
 
     let declared = declared_binding(&data).expect("the placeholder declares its binding");
     assert_eq!(declared.name(), "placeholder");
-    let reads = source_inputs(&data);
+    let reads = query_rows(&data);
     assert_eq!(reads.len(), 1, "one terminal read");
-    assert_eq!(reads[0].number, 1);
+    assert_eq!(reads[0].record.cursor.input_seq.get(), 1);
     let answer: FiniteRead<
         serde_json::Value,
         crate::stages::common::handlers::source::placeholder::PlaceholderRead,
@@ -1039,19 +903,25 @@ async fn shared_cold_port_resolves_once() {
     let builds = Arc::new(AtomicUsize::new(0));
     let script = Script(Arc::new(vec![vec![Marker::Row], vec![Marker::Row]]));
     let counted = builds.clone();
-    let port: obzenflow_runtime::queries::QueryPort<dyn ScriptedInput> =
-        obzenflow_runtime::queries::QueryPort::deferred(move || {
-            counted.fetch_add(1, Ordering::SeqCst);
-            Ok(script.clone())
-        });
+    let port: Port<dyn ScriptedInput> = Port::deferred(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(script.clone())
+    });
     let left =
         AdmitSource::<dyn UnifiedAsyncFiniteSourceHandler>::admit(ScriptedRows(port.clone()));
     let right = AdmitSource::<dyn UnifiedAsyncFiniteSourceHandler>::admit(ScriptedRows(port));
-    let left_declarations = Vec::new();
-    let right_declarations = Vec::new();
-    let mut ports = EffectPortRegistry::new();
-    ports.install_source_system(left.system());
-    ports.install_source_system(right.system());
+    let left_declarations = left.effect_declarations().unwrap();
+    let right_declarations = right.effect_declarations().unwrap();
+    let ports = EffectPortRegistry::collect_from_declarations(
+        left_declarations.iter().chain(right_declarations.iter()),
+    )
+    .expect("one shared port registers once");
+    let runtime = |declarations: Vec<EffectDeclaration>| {
+        declarations
+            .iter()
+            .map(EffectDeclaration::runtime_projection)
+            .collect::<Vec<_>>()
+    };
 
     let mut topology = obzenflow_topology::TopologyBuilder::new();
     let left_stage = StageId::from_topology_id(topology.add_stage(Some("left".into())));
@@ -1081,8 +951,8 @@ async fn shared_cold_port_resolves_once() {
     let mut handles = Vec::new();
     let mut journals = Vec::new();
     for (stage, name, source, declarations) in [
-        (left_stage, "left", left, left_declarations),
-        (right_stage, "right", right, right_declarations),
+        (left_stage, "left", left, runtime(left_declarations)),
+        (right_stage, "right", right, runtime(right_declarations)),
     ] {
         let mut stage_resources = resources.take_stage_resources(stage).unwrap();
         stage_resources.effect_declarations = declarations;
@@ -1112,9 +982,9 @@ async fn shared_cold_port_resolves_once() {
         let data = journal.read_all_unordered().await.unwrap();
         assert_eq!(facts(&data), 2, "each stage reads its own input");
         assert_eq!(
-            source_inputs(&data)
+            query_rows(&data)
                 .iter()
-                .map(|read| read.number)
+                .map(|read| read.record.cursor.input_seq.get())
                 .collect::<Vec<_>>(),
             [1, 2, 3]
         );
@@ -1135,13 +1005,10 @@ trait LimitedInput: Send + Sync {
     ) -> Result<FiniteRead<Marker, NextLimited>, obzenflow_runtime::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("limited")]
 #[derive(Clone, Default)]
 struct Limited {
     calls: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
-}
-
-impl SystemName for Limited {
-    const NAME: &'static str = "limited";
 }
 
 const LIMITED_DELAY: Duration = Duration::from_millis(300);
@@ -1173,7 +1040,7 @@ impl LimitedInput for Limited {
     }
 }
 
-struct LimitedRows(obzenflow_runtime::queries::QueryPort<dyn LimitedInput>);
+struct LimitedRows(Port<dyn LimitedInput>);
 
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for LimitedRows {
@@ -1189,11 +1056,10 @@ impl TypedAsyncFiniteSourceHandler for LimitedRows {
 }
 
 #[tokio::test]
-async fn rate_limited_retry_keeps_read_number() {
+async fn rate_limited_read_keeps_one_cursor() {
     let limited = Limited::default();
-    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(
-        LimitedRows(obzenflow_runtime::queries::QueryPort::to(limited.clone())),
-    );
+    let (source, ports, declarations) =
+        admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(LimitedRows(Port::to(limited.clone())));
     let journals = run_finite(source, ports, declarations).await;
     let calls = limited.calls.lock().unwrap().clone();
     assert_eq!(
@@ -1206,91 +1072,227 @@ async fn rate_limited_retry_keeps_read_number() {
         "the retry waits for the delay that the system asked for"
     );
     let data = journals.data.read_all_unordered().await.unwrap();
-    let cursors: Vec<(u64, u32)> = source_inputs(&data)
+    let rows: Vec<(u64, u32, Option<u32>, String)> = query_rows(&data)
         .iter()
-        .map(|record| (record.number, record.attempt))
+        .map(|row| {
+            (
+                row.record.cursor.input_seq.get(),
+                row.record.cursor.effect_ordinal.get(),
+                row.attempt.map(EffectAttemptOrdinal::get),
+                row.event_type.clone(),
+            )
+        })
         .collect();
-    assert_eq!(cursors, [(1, 1), (1, 2), (2, 1)]);
+    assert_eq!(
+        rows,
+        [
+            (1, 0, Some(1), "query.failed".to_string()),
+            (1, 0, Some(2), "query.answered".to_string()),
+            (2, 0, Some(1), "query.answered".to_string()),
+        ]
+    );
+    let scheduled: Vec<(u64, u32)> = data
+        .iter()
+        .filter_map(|row| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::Recovery(RecoveryFact::RetryScheduled {
+                cursor,
+                next_attempt,
+                ..
+            })) => Some((cursor.input_seq.get(), *next_attempt)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(scheduled, [(1, 2)], "the failed attempt schedules the next");
     assert_eq!(facts(&data), 1);
 }
 
-struct Scripted {
-    rows: AtomicUsize,
-}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NextHanging(u32);
 
-impl SystemName for Scripted {
-    const NAME: &'static str = "scripted-feed";
-}
-
+#[obzenflow_runtime::effects::port]
 #[async_trait]
-impl InputReadiness for Scripted {
-    async fn ready(&self) -> Result<(), SourceError> {
-        if self.rows.load(Ordering::SeqCst) == 0 {
-            std::future::pending::<()>().await;
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl LifecycleFeed for Scripted {
-    async fn take(
+trait HangingInput: Send + Sync {
+    #[query(type = "source.lifecycle.hanging_read")]
+    async fn read(
         &self,
-        from: &NextTake,
-        _ctx: &obzenflow_runtime::queries::QueryContext,
-    ) -> Result<ContinuousRead<Marker, NextTake>, obzenflow_runtime::queries::QueryError> {
-        self.rows.fetch_sub(1, Ordering::SeqCst);
-        Ok(ContinuousRead {
-            records: vec![Marker::Row],
-            next: NextTake(from.0 + 1),
-        })
+        from: &NextHanging,
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<Marker, NextHanging>, obzenflow_runtime::queries::QueryError>;
+}
+
+#[obzenflow_runtime::effects::system("hanging-input")]
+#[derive(Clone, Default)]
+struct Hanging {
+    ended: Arc<std::sync::Mutex<Vec<Duration>>>,
+}
+
+struct CallEnded {
+    started: tokio::time::Instant,
+    ended: Arc<std::sync::Mutex<Vec<Duration>>>,
+}
+
+impl Drop for CallEnded {
+    fn drop(&mut self) {
+        self.ended.lock().unwrap().push(self.started.elapsed());
     }
 }
 
-#[tokio::test]
-async fn continuous_read_second_system_supplies_rows() {
-    let rows = LiveRows {
-        port: obzenflow_runtime::queries::QueryPort::to(Scripted {
-            rows: AtomicUsize::new(2),
-        }),
-    };
-    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncInfiniteSourceHandler, _>(rows);
-    let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
-    let config = infinite::InfiniteSourceConfig::new(stage, "input", "lifecycle");
-    let handle = infinite::AsyncInfiniteSourceBuilder::new(source, config, resources)
+#[async_trait]
+impl HangingInput for Hanging {
+    async fn read(
+        &self,
+        _from: &NextHanging,
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<Marker, NextHanging>, obzenflow_runtime::queries::QueryError> {
+        let _call = CallEnded {
+            started: tokio::time::Instant::now(),
+            ended: self.ended.clone(),
+        };
+        std::future::pending().await
+    }
+}
+
+async fn first_call_end<H>(hanging: &Hanging, line: H) -> Duration
+where
+    H: AdmitSource<dyn UnifiedAsyncFiniteSourceHandler>,
+    H::Handler: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static,
+{
+    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(line);
+    let (stage, resources, _journals) = resources_with_ports(ports, declarations).await;
+    let config = finite::FiniteSourceConfig::new(stage, "input", "lifecycle");
+    let handle = finite::AsyncFiniteSourceBuilder::new(source, config, resources)
         .build()
         .await
         .unwrap();
     for event in [
-        infinite::InfiniteSourceEvent::Initialize,
-        infinite::InfiniteSourceEvent::Ready,
-        infinite::InfiniteSourceEvent::Start,
+        finite::FiniteSourceEvent::Initialize,
+        finite::FiniteSourceEvent::Ready,
+        finite::FiniteSourceEvent::Start,
     ] {
         handle.send_event(event).await.unwrap();
     }
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let data = journals.data.read_all_unordered().await.unwrap();
-            if facts(&data) == 2 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+    loop {
+        if let Some(ended) = hanging.ended.lock().unwrap().first() {
+            return *ended;
         }
-    })
-    .await
-    .expect("the second system supplies both rows");
-    handle
-        .send_event(infinite::InfiniteSourceEvent::BeginDrain)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn query_line_default_deadline_ends_call() {
+    let hanging = Hanging::default();
+    let line = crate::queries::query(NextHanging(0))
+        .decode(row)
+        .through(Port::to(hanging.clone()));
+    let ended = first_call_end(&hanging, line).await;
+    assert_eq!(ended, Duration::from_secs(30));
+}
+
+#[tokio::test(start_paused = true)]
+async fn query_line_poll_timeout_ends_call() {
+    let hanging = Hanging::default();
+    let line = crate::queries::query(NextHanging(0))
+        .decode(row)
+        .poll_timeout(Duration::from_secs(5))
+        .through(Port::to(hanging.clone()));
+    let ended = first_call_end(&hanging, line).await;
+    assert_eq!(ended, Duration::from_secs(5));
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NextAnswered(u32);
+
+#[obzenflow_runtime::effects::port]
+#[async_trait]
+trait AnsweredInput: Send + Sync {
+    #[query(type = "source.lifecycle.answered_read")]
+    async fn read(
+        &self,
+        from: &NextAnswered,
+        ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<Marker, NextAnswered>, obzenflow_runtime::queries::QueryError>;
+}
+
+#[obzenflow_runtime::effects::system("answered-input")]
+#[derive(Clone, Default)]
+struct Answered {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AnsweredInput for Answered {
+    async fn read(
+        &self,
+        from: &NextAnswered,
+        _ctx: &obzenflow_runtime::queries::QueryContext,
+    ) -> Result<FiniteRead<Marker, NextAnswered>, obzenflow_runtime::queries::QueryError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(match from.0 {
+            0 => FiniteRead::Batch {
+                records: vec![Marker::Row],
+                next: NextAnswered(1),
+            },
+            _ => FiniteRead::EndOfInput,
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_append_past_deadline_commits_once() {
+    let answered = Answered::default();
+    let line = crate::queries::query(NextAnswered(0))
+        .decode(row)
+        .poll_timeout(Duration::from_secs(1))
+        .through(Port::to(answered.clone()));
+    let (source, ports, declarations) = admitted::<dyn UnifiedAsyncFiniteSourceHandler, _>(line);
+    let (stage, mut resources, _) = resources_with_ports(ports, declarations).await;
+    let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
+    let (writing, release) =
+        journal.block_matching_append(|event| event.event_type() == "query.answered");
+    resources.data_journal = journal.clone();
+    let config = finite::FiniteSourceConfig::new(stage, "input", "lifecycle");
+    let handle = finite::AsyncFiniteSourceBuilder::new(source, config, resources)
+        .build()
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(3), handle.wait_for_completion())
+    for event in [
+        finite::FiniteSourceEvent::Initialize,
+        finite::FiniteSourceEvent::Ready,
+        finite::FiniteSourceEvent::Start,
+    ] {
+        handle.send_event(event).await.unwrap();
+    }
+    notified(&writing).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
         .await
         .expect("source terminates")
-        .unwrap();
-    let data = journals.data.read_all_unordered().await.unwrap();
+        .expect("source completes");
+
     assert_eq!(
-        source_inputs(&data).len(),
+        answered.calls.load(Ordering::SeqCst),
         2,
-        "the readiness waits made no read"
+        "one supplier call for each read"
     );
+    let rows = journal.read_all_unordered().await.unwrap();
+    let reads: Vec<(u64, Option<u32>, String)> = query_rows(&rows)
+        .iter()
+        .map(|row| {
+            (
+                row.record.cursor.input_seq.get(),
+                row.attempt.map(EffectAttemptOrdinal::get),
+                row.event_type.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reads,
+        [
+            (1, Some(1), "query.answered".to_string()),
+            (2, Some(1), "query.answered".to_string()),
+        ]
+    );
+    assert_eq!(facts(&rows), 1, "the held answer advances to its record");
 }

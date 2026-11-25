@@ -11,10 +11,12 @@ pub mod ai;
 pub mod backpressure;
 pub mod bootstrap;
 pub(crate) mod classified_de;
+pub mod commands;
 pub mod contracts;
 pub mod control_plane;
 pub mod effects;
 pub mod errors;
+pub mod events;
 pub mod execution;
 pub mod feed_plan;
 pub mod id_conversions;
@@ -25,6 +27,7 @@ pub mod run_context;
 pub mod runtime_config;
 pub mod runtime_resource_limits;
 pub mod supervised_base;
+pub mod systems;
 pub mod typing;
 
 // Major subsystems
@@ -98,7 +101,7 @@ pub mod testing;
 ///
 /// Sink commands implement [`SinkRole`](crate::effects::SinkRole). Its
 /// [`prepare`](crate::effects::SinkRole::prepare) method builds one request per
-/// input. The runtime sends that request through the command's [`Port`](crate::effects::Port).
+/// input. The runtime sends that request through the command's [`Port`](crate::systems::Port).
 ///
 /// **Event flow** —
 /// [`UpstreamSubscription`](crate::messaging::UpstreamSubscription) for
@@ -117,21 +120,23 @@ pub mod prelude {
     pub use crate::message_bus::{FsmMessageBus, StageCommand};
 
     // Handlers
+    pub use crate::events::{IngressDecodeError, IngressDecoder, IngressRecord};
     pub use crate::stages::{
-        EffectfulStatefulHandler, EffectfulTransformHandler, HostedSource, IngressDecodeError,
-        IngressDecoder, IngressRecord, ObserverHandler, ResourceManaged, SourceError,
-        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, HostedSource, ObserverHandler,
+        ResourceManaged, SourceError, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     pub use crate::typing::{SourceTyping, TransformTyping};
 
     // Event flow
+    pub use crate::commands::Command;
     pub use crate::effects::{
-        Command, EffectCommitHandle, EffectContext, EffectDeclaration, EffectError,
-        EffectOutcomeKind, EffectOutcomePayload, EffectSafety, Effects, IdempotencyKey, Keyed,
-        Port,
+        EffectCommitHandle, EffectContext, EffectDeclaration, EffectError, EffectOutcomeKind,
+        EffectOutcomePayload, EffectSafety, Effects, IdempotencyKey, Keyed,
     };
     pub use crate::messaging::UpstreamSubscription;
+    pub use crate::systems::Port;
 
     // Metrics
 }

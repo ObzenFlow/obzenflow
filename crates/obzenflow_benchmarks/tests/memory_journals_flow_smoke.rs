@@ -5,8 +5,10 @@
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::pipeline::PipelineState;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,11 +27,12 @@ use std::time::Duration;
 #[derive(Clone, Debug, Serialize)]
 struct Received;
 
+#[obzenflow_runtime::effects::system("smoke-counter")]
 struct CountingSink {
     received: Arc<AtomicU64>,
 }
 
-#[obzenflow_runtime::effects::port(system = "smoke-counter")]
+#[obzenflow_runtime::effects::port]
 impl CountingSink {
     #[effect(type = "bench.smoke.receive", at_least_once, records = reply)]
     fn receive(&self, _: &Received) -> Result<(), EffectError> {

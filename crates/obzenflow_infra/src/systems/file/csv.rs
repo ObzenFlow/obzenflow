@@ -8,15 +8,15 @@
 //! records each reply. The handler decodes each recorded record. The handler
 //! reports each row that the decoder rejects. The read then continues.
 
-use super::file_system::{CsvFile, CsvFileSystem, CsvFormat, CsvLine, CsvPage, CsvRead};
-use super::file_version::input_changed;
+use super::system::{CsvFile, CsvFileSystem, CsvFormat, CsvLine, CsvPage, CsvRead};
+use super::version::input_changed;
 use anyhow::{anyhow, bail, Result};
 use csv::StringRecord;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::queries::QueryPort;
 use obzenflow_runtime::stages::common::handlers::source::{SourceRead, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::source::SourceError;
+use obzenflow_runtime::systems::Port;
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -206,7 +206,7 @@ impl CsvDecoder for CsvRowDecoder {
 pub struct CsvSourceBuilder<D> {
     decoder: D,
     path: Option<PathBuf>,
-    port: Option<QueryPort<dyn CsvFile>>,
+    port: Option<Port<dyn CsvFile>>,
     has_headers: Option<bool>,
     headers: Option<Vec<String>>,
     delimiter: Option<u8>,
@@ -220,7 +220,7 @@ impl<D> std::fmt::Debug for CsvSourceBuilder<D> {
         f.debug_struct("CsvSourceBuilder")
             .field("decoder", &std::any::type_name::<D>())
             .field("path", &self.path)
-            .field("port", &self.port.as_ref().map(QueryPort::system_name))
+            .field("port", &self.port.as_ref().map(Port::system_name))
             .field("has_headers", &self.has_headers)
             .field("headers", &self.headers)
             .field("delimiter", &self.delimiter)
@@ -254,7 +254,7 @@ impl<D> CsvSourceBuilder<D> {
     /// `through` reads through `port` instead of a file at a path. The system
     /// behind the port supplies the location and the CSV format, so a source with
     /// a port takes no path, delimiter or headers.
-    pub fn through(mut self, port: QueryPort<dyn CsvFile>) -> Self {
+    pub fn through(mut self, port: Port<dyn CsvFile>) -> Self {
         self.port = Some(port);
         self
     }
@@ -351,7 +351,7 @@ where
 /// Its decoder maps each recorded record to the output.
 #[derive(Clone)]
 pub struct CsvSource<D> {
-    port: QueryPort<dyn CsvFile>,
+    port: Port<dyn CsvFile>,
     decoder: D,
     chunk_size: usize,
     skip_rows: usize,
@@ -407,13 +407,13 @@ fn decode_line<D: CsvDecoder>(
             let fields = StringRecord::from(values);
             decoder
                 .decode(CsvRecord::new(headers, &fields))
-                .map_err(|error| SourceError::Validation(located_line(error.0.record(index), line)))
+                .map_err(|error| SourceError::Validation(at_line(error.0.record(index), line)))
         }
         CsvLine::Malformed {
             index,
             line,
             reason,
-        } => Err(SourceError::Validation(located_line(
+        } => Err(SourceError::Validation(at_line(
             SourceDiagnostic::from(reason).record(index),
             line,
         ))),
@@ -422,7 +422,7 @@ fn decode_line<D: CsvDecoder>(
     }
 }
 
-fn located_line(diagnostic: SourceDiagnostic, line: u64) -> SourceDiagnostic {
+fn at_line(diagnostic: SourceDiagnostic, line: u64) -> SourceDiagnostic {
     match u32::try_from(line).ok().and_then(NonZeroU32::new) {
         Some(line) => diagnostic.position(line, None),
         None => diagnostic,
@@ -564,17 +564,17 @@ mod tests {
 
     #[test]
     fn through_port_source_needs_no_path() {
-        use obzenflow_core::effect_binding::{DelimitedHeaders, SystemLocation};
+        use obzenflow_core::effect_binding::{ConfigurationEvidence, DelimitedHeaders};
         use obzenflow_runtime::__private::AdmitSource;
         use obzenflow_runtime::stages::common::handlers::source::SyncFiniteReads;
 
-        let store = super::super::file_system::CsvFileSystem::at("/data/tickets.csv")
+        let store = super::super::system::CsvFileSystem::at("/data/tickets.csv")
             .delimiter(b';')
             .port()
-            .expect("the location fits the binding evidence");
+            .expect("the configuration fits the binding evidence");
         assert_eq!(
-            store.binding().location(),
-            Some(&SystemLocation::Delimited {
+            store.binding().configuration(),
+            Some(&ConfigurationEvidence::Delimited {
                 path: "/data/tickets.csv".into(),
                 delimiter: ';',
                 headers: DelimitedHeaders::FirstRow,
@@ -587,10 +587,10 @@ mod tests {
             .build()
             .expect("a port supplies the file");
         let admitted = AdmitSource::<SyncFiniteReads>::admit(source);
-        assert_eq!(admitted.system().binding(), &binding);
+        assert_eq!(admitted.binding(), &binding);
 
         let other = || {
-            super::super::file_system::CsvFileSystem::at("/data/other.csv")
+            super::super::system::CsvFileSystem::at("/data/other.csv")
                 .port()
                 .unwrap()
         };

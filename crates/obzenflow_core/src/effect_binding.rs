@@ -44,24 +44,26 @@ impl std::fmt::Debug for BoundedBindingEvidence {
 pub enum BindingEvidenceError {
     #[error("binding evidence exceeds the framework byte bound")]
     TooLarge,
-    #[error("the configured system location cannot be represented in binding evidence")]
-    InvalidLocation,
+    #[error("the system configuration cannot be represented in binding evidence")]
+    InvalidConfiguration,
 }
 
-/// `SystemBinding` identifies a configured system and its optional location. A source
-/// and the descriptor of its read record it.
+/// `SystemBinding` identifies a system and, when configuration chooses it, the
+/// configuration evidence of that system. A source and the descriptor of its read
+/// record it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemBinding {
     system: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    location: Option<SystemLocation>,
+    configuration: Option<ConfigurationEvidence>,
 }
 
-/// `SystemLocation` is the place that a framework system reads and the format
-/// configuration that it reads with. It holds no credentials.
+/// `ConfigurationEvidence` is the configuration that a system is built from, such as
+/// the file and format that it reads or the endpoint that it calls. It holds no
+/// credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "format", rename_all = "snake_case")]
-pub enum SystemLocation {
+pub enum ConfigurationEvidence {
     /// `Delimited` is a file of delimited text records, such as CSV or TSV.
     Delimited {
         path: std::path::PathBuf,
@@ -105,15 +107,15 @@ impl HttpEndpoint {
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            return Err(BindingEvidenceError::InvalidLocation);
+            return Err(BindingEvidenceError::InvalidConfiguration);
         }
         let mut endpoint = url.clone();
         endpoint
             .set_password(None)
-            .map_err(|_| BindingEvidenceError::InvalidLocation)?;
+            .map_err(|_| BindingEvidenceError::InvalidConfiguration)?;
         endpoint
             .set_username("")
-            .map_err(|_| BindingEvidenceError::InvalidLocation)?;
+            .map_err(|_| BindingEvidenceError::InvalidConfiguration)?;
         Ok(Self(endpoint.into()))
     }
 }
@@ -122,12 +124,13 @@ impl TryFrom<String> for HttpEndpoint {
     type Error = BindingEvidenceError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let url = url::Url::parse(&value).map_err(|_| BindingEvidenceError::InvalidLocation)?;
+        let url =
+            url::Url::parse(&value).map_err(|_| BindingEvidenceError::InvalidConfiguration)?;
         let endpoint = Self::from_url(&url)?;
         if endpoint.0 == value {
             Ok(endpoint)
         } else {
-            Err(BindingEvidenceError::InvalidLocation)
+            Err(BindingEvidenceError::InvalidConfiguration)
         }
     }
 }
@@ -143,25 +146,27 @@ impl SystemBinding {
         &self.system
     }
 
-    pub fn location(&self) -> Option<&SystemLocation> {
-        self.location.as_ref()
+    pub fn configuration(&self) -> Option<&ConfigurationEvidence> {
+        self.configuration.as_ref()
     }
 
     /// `quoted` returns the binding as a refusal quotes it.
     pub fn quoted(&self) -> String {
-        match &self.location {
+        match &self.configuration {
             None => format!("'{}'", self.system),
-            Some(location) => format!("'{}' at '{}'", self.system, location.place()),
+            Some(configuration) => format!("'{}' at '{}'", self.system, configuration.place()),
         }
     }
 
-    /// `format` returns the format that the system reads at its location.
+    /// `format` returns the format that the configuration names.
     pub fn format(&self) -> Option<String> {
-        self.location.as_ref().map(SystemLocation::format)
+        self.configuration
+            .as_ref()
+            .map(ConfigurationEvidence::format)
     }
 }
 
-impl SystemLocation {
+impl ConfigurationEvidence {
     fn place(&self) -> String {
         match self {
             Self::Delimited { path, .. } | Self::Yaml { path } => path.display().to_string(),
@@ -201,9 +206,9 @@ impl SystemLocation {
 impl std::fmt::Display for SystemBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.system)?;
-        match &self.location {
+        match &self.configuration {
             None => Ok(()),
-            Some(location) => write!(f, " at {}", location.place()),
+            Some(configuration) => write!(f, " at {}", configuration.place()),
         }
     }
 }
@@ -220,22 +225,30 @@ impl SystemBindingEvidence {
         Self::new(system, None)
     }
 
-    pub fn located(system: &str, location: SystemLocation) -> Result<Self, BindingEvidenceError> {
-        Self::new(system, Some(location))
+    pub fn configured(
+        system: &str,
+        configuration: ConfigurationEvidence,
+    ) -> Result<Self, BindingEvidenceError> {
+        Self::new(system, Some(configuration))
     }
 
-    fn new(system: &str, location: Option<SystemLocation>) -> Result<Self, BindingEvidenceError> {
+    fn new(
+        system: &str,
+        configuration: Option<ConfigurationEvidence>,
+    ) -> Result<Self, BindingEvidenceError> {
         let binding = SystemBinding {
             system: system.to_owned(),
-            location: location.map(|location| match location {
-                SystemLocation::Application { configuration } => SystemLocation::Application {
-                    configuration: crate::source::canonicalize(configuration),
-                },
+            configuration: configuration.map(|configuration| match configuration {
+                ConfigurationEvidence::Application { configuration } => {
+                    ConfigurationEvidence::Application {
+                        configuration: crate::source::canonicalize(configuration),
+                    }
+                }
                 other => other,
             }),
         };
         let canonical =
-            serde_json::to_vec(&binding).map_err(|_| BindingEvidenceError::InvalidLocation)?;
+            serde_json::to_vec(&binding).map_err(|_| BindingEvidenceError::InvalidConfiguration)?;
         Ok(Self {
             binding,
             canonical: BoundedBindingEvidence::try_new(canonical)?,

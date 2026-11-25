@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow::effects::{Command, Port};
+use obzenflow::commands::Command;
+use obzenflow::systems::Port;
 
 #[obzenflow::port]
 trait ReadPort {}
@@ -10,13 +11,13 @@ trait ReadPort {}
 #[obzenflow::effects::port]
 trait WritePort {}
 
+#[obzenflow::effects::system("reader")]
 struct Reader;
+#[obzenflow::system("writer")]
 struct Writer;
 
-#[obzenflow::effects::system("reader")]
 impl ReadPort for Reader {}
 
-#[obzenflow::system("writer")]
 impl WritePort for Writer {}
 
 #[obzenflow::command(through = ReadPort)]

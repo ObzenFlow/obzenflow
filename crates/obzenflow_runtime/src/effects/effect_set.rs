@@ -11,8 +11,9 @@
 //! effect; the stable runtime and archive identity remains `EFFECT_TYPE`. Sets
 //! are zero-sized declarations, never persisted.
 
-use super::call::{Call, CallRequest};
+use super::call::Call;
 use super::declaration::Effect;
+use crate::commands::CallRequest;
 use obzenflow_core::event::schema::{
     const_str_eq, require_distinct, EmptySet, MemberList, WithMember,
 };

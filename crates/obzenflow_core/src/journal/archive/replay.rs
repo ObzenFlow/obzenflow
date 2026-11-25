@@ -232,12 +232,6 @@ pub trait ReplayArchive: Send + Sync {
         stage_key: &str,
     ) -> Option<crate::effect_binding::SystemBinding>;
 
-    /// `recorded_source_rejections` returns the number of records that a source rejected in
-    /// this run. Each run keeps only the rejections of the records that it read.
-    fn recorded_source_rejections(&self, _stage_key: &str) -> u64 {
-        0
-    }
-
     fn archive_path(&self) -> &Path;
 
     /// Take this archive's write-once continuation claim for the run resuming

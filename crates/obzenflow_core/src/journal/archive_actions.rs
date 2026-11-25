@@ -731,11 +731,11 @@ mod tests {
 
     #[test]
     fn moved_ingress_endpoint_refused() {
-        use crate::effect_binding::{SystemBindingEvidence, SystemLocation};
+        use crate::effect_binding::{ConfigurationEvidence, SystemBindingEvidence};
         let endpoint = |key: &str| {
-            SystemBindingEvidence::located(
+            SystemBindingEvidence::configured(
                 "http-ingress",
-                SystemLocation::Ingress {
+                ConfigurationEvidence::Ingress {
                     key: key.to_owned(),
                 },
             )

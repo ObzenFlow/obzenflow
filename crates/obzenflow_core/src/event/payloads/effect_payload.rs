@@ -788,11 +788,25 @@ pub struct EffectRecord {
     pub descriptor_hash: EffectDescriptorHash,
     pub descriptor: EffectDescriptor,
     pub outcome: EffectOutcomePayload,
-    /// Origin recorded on the fact's provenance. `None` on framework rows and
-    /// older journals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<EffectFactOrigin>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_request"
+    )]
+    pub request: Option<Value>,
 }
+
+fn present_request<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+/// The row name of a query that its system answered.
+pub const QUERY_ANSWERED_EVENT_TYPE: &str = "query.answered";
+
+/// The row name of a query that failed.
+pub const QUERY_FAILED_EVENT_TYPE: &str = "query.failed";
 
 /// Replay identity for an effect-produced fact.
 ///
@@ -922,8 +936,19 @@ pub fn effect_recovery_progress_group_id(cursor: &EffectCursor, wait: u32) -> Ef
 pub const EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX: &str = "effect-recovery-progress:v1:";
 
 impl EffectRecord {
+    /// `event_type` returns the row name. A record that holds the request of a query
+    /// is `query.answered` or `query.failed`.
     pub fn event_type(&self) -> &'static str {
-        self.observation.event_type()
+        match (&self.request, &self.outcome) {
+            (None, _) => self.observation.event_type(),
+            (Some(_), EffectOutcomePayload::Failed { .. }) => QUERY_FAILED_EVENT_TYPE,
+            (Some(_), _) => QUERY_ANSWERED_EVENT_TYPE,
+        }
+    }
+
+    /// `is_query` returns whether this record answers a query.
+    pub fn is_query(&self) -> bool {
+        self.request.is_some()
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -973,6 +998,8 @@ pub fn is_framework_effect_event_type(event_type: &str) -> bool {
             | "effect.execution_unresolved"
             | "effect.execution_succeeded"
             | "effect.value_captured"
+            | QUERY_ANSWERED_EVENT_TYPE
+            | QUERY_FAILED_EVENT_TYPE
     )
 }
 
@@ -992,7 +1019,25 @@ mod tests {
                 output: json!({"ok": true}),
             },
             origin: None,
+            request: None,
         }
+    }
+
+    #[test]
+    fn query_record_names_follow_outcome() {
+        let mut record = effect_record(EffectCursor::new("flow", "stage", 1, 0));
+        record.request = Some(json!({"after": null}));
+        assert_eq!(record.event_type(), QUERY_ANSWERED_EVENT_TYPE);
+        record.observation = EffectObservation::returned_failure();
+        record.outcome = EffectOutcomePayload::Failed {
+            error_type: "rate_limited".into(),
+            error_message: String::new(),
+            retry: RetryDisposition::Retryable,
+            cause: None,
+            detail: None,
+        };
+        assert_eq!(record.event_type(), QUERY_FAILED_EVENT_TYPE);
+        assert!(is_framework_effect_event_type(record.event_type()));
     }
 
     #[test]

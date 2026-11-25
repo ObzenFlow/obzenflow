@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::domain::{EmailSent, LocatedParcel, ParcelUpdate, SmsSent};
+use super::domain::{DepotFound, EmailSent, ParcelUpdate, SmsSent};
 use async_trait::async_trait;
 use obzenflow::effects::EffectError;
 use serde::Serialize;
@@ -12,7 +12,7 @@ use std::time::Duration;
 #[async_trait]
 pub trait DepotDirectory {
     #[effect(type = "depot.lookup", exactly_once)]
-    async fn lookup(&self, request: &DepotLookup) -> Result<LocatedParcel, EffectError>;
+    async fn lookup(&self, request: &DepotLookup) -> Result<DepotFound, EffectError>;
 }
 
 #[obzenflow::port]
@@ -40,11 +40,11 @@ impl DepotLookup {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct EmailNotice {
-    parcel: LocatedParcel,
+    parcel: DepotFound,
 }
 
 impl EmailNotice {
-    pub fn for_parcel(parcel: &LocatedParcel) -> Self {
+    pub fn for_parcel(parcel: &DepotFound) -> Self {
         Self {
             parcel: parcel.clone(),
         }
@@ -53,24 +53,24 @@ impl EmailNotice {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SmsNotice {
-    parcel: LocatedParcel,
+    parcel: DepotFound,
 }
 
 impl SmsNotice {
-    pub fn for_parcel(parcel: &LocatedParcel) -> Self {
+    pub fn for_parcel(parcel: &DepotFound) -> Self {
         Self {
             parcel: parcel.clone(),
         }
     }
 }
 
+#[obzenflow::system("depot-directory")]
 #[derive(Debug)]
 pub struct SimulatedDepots;
 
-#[obzenflow::system("depot-directory")]
 #[async_trait]
 impl DepotDirectory for SimulatedDepots {
-    async fn lookup(&self, request: &DepotLookup) -> Result<LocatedParcel, EffectError> {
+    async fn lookup(&self, request: &DepotLookup) -> Result<DepotFound, EffectError> {
         tokio::time::sleep(Duration::from_millis(40)).await;
         let depot = match request.update.postal_code.chars().next() {
             Some('M') => "Toronto",
@@ -79,14 +79,14 @@ impl DepotDirectory for SimulatedDepots {
             Some('T') => "Calgary",
             _ => "Ottawa",
         };
-        Ok(request.update.located(depot))
+        Ok(request.update.depot_found(depot))
     }
 }
 
+#[obzenflow::system("messaging-provider")]
 #[derive(Debug)]
 pub struct SimulatedMessaging;
 
-#[obzenflow::system("messaging-provider")]
 #[async_trait]
 impl CustomerMessaging for SimulatedMessaging {
     async fn email(&self, notice: &EmailNotice) -> Result<EmailSent, EffectError> {

@@ -10,7 +10,9 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::MiddlewarePlanError;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Perform, Port};
+use obzenflow_runtime::commands::{perform, Perform};
+use obzenflow_runtime::effects::EffectError;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -33,9 +35,9 @@ trait ArchiveGatePort: Send + Sync {
     fn record(&self, request: &Record) -> Result<(), EffectError>;
 }
 
+#[obzenflow_runtime::effects::system("archive-gate")]
 struct ArchiveGateDestination;
 
-#[obzenflow_runtime::effects::system("archive-gate")]
 impl ArchiveGatePort for ArchiveGateDestination {
     fn record(&self, _: &Record) -> Result<(), EffectError> {
         Ok(())
@@ -295,8 +297,8 @@ async fn claimed_hosted_slot_fails_preflight() {
         }
         let shared_slot = slot.clone();
         let definition = FlowDefinition::materialize(move |_| {
-            let (_, first_rx) = obzenflow::stages::sources::source_channel(1);
-            let (_, second_rx) = obzenflow::stages::sources::source_channel(1);
+            let (_, first_rx) = obzenflow::events::source_channel(1);
+            let (_, second_rx) = obzenflow::events::source_channel(1);
             let first = HostedSource::<Input>::ingress(first_rx, shared_slot.clone());
             let second = HostedSource::<Input>::ingress(second_rx, shared_slot);
             Ok(flow! {

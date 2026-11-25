@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use crate::effects_path::EffectsPath;
-use crate::system::name_error;
 use proc_macro2::{Span, TokenStream, TokenTree};
 use quote::{quote, quote_spanned, ToTokens};
 use syn::parse::{ParseStream, Parser};
@@ -49,38 +48,32 @@ const KEY_AND_HANDLE: &str =
 const RETURN_SHAPE: &str = "a port method returns a concrete `Result<Outcome, EffectError>`, \
                             without `Self`, `impl` or the method's generic parameters";
 
-const PORT_ARGUMENTS: &str =
-    "`#[obzenflow::port]` takes `system = \"…\"` on the `impl` block of a \
-                              struct that serves as its own port, and optionally \
-                              `effects = <path>`";
+const PORT_ARGUMENTS: &str = "`#[obzenflow::port]` takes only `effects = <path>`";
 
-const SYSTEM_ON_TRAIT: &str =
-    "`system = \"…\"` names a struct that serves as its own port; a port \
-                               trait's systems name themselves with \
-                               `#[obzenflow::system(\"…\")]` on their `impl` blocks";
+const SYSTEM_ARGUMENT: &str = "a system names itself on its type, as in \
+                               `#[obzenflow::system(\"audit-ledger\")] struct AuditLedger;`, \
+                               also when the struct serves as its own port";
+
+const ONE_REQUEST_KIND: &str =
+    "a port declares `#[effect]` methods or `#[query]` methods, not both";
 
 struct PortArgs {
     effects: EffectsPath,
-    system: Option<LitStr>,
 }
 
 impl PortArgs {
     fn parse(input: ParseStream<'_>, effects: EffectsPath) -> syn::Result<Self> {
-        let mut args = Self {
-            effects,
-            system: None,
-        };
+        let mut args = Self { effects };
         while !input.is_empty() {
             let key: Ident = input.parse()?;
-            if key != "effects" && key != "system" {
+            if key == "system" {
+                return Err(syn::Error::new(key.span(), SYSTEM_ARGUMENT));
+            }
+            if key != "effects" {
                 return Err(syn::Error::new(key.span(), PORT_ARGUMENTS));
             }
             input.parse::<Token![=]>()?;
-            if key == "effects" {
-                args.effects = EffectsPath::Written(input.parse::<Path>()?);
-            } else {
-                args.system = Some(input.parse::<LitStr>()?);
-            }
+            args.effects = EffectsPath::Written(input.parse::<Path>()?);
             if !input.is_empty() {
                 input.parse::<Token![,]>()?;
             }
@@ -134,10 +127,6 @@ fn refused(item: TokenStream, error: syn::Error) -> TokenStream {
 }
 
 fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
-    if let Some(system) = &args.system {
-        let error = syn::Error::new(system.span(), SYSTEM_ON_TRAIT);
-        return refused(stripped_trait(item).to_token_stream(), error);
-    }
     let methods = item
         .items
         .iter()
@@ -167,7 +156,7 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
         .any(|(_, attrs)| attrs.iter().any(|a| a.path().is_ident("query")));
     for &(signature, attrs) in &methods {
         if query_port {
-            match query_method(&effects, &port, signature, attrs) {
+            match query_method(&effects, &quote!(dyn #port), signature, attrs) {
                 Ok(tokens) => answers.push(tokens),
                 Err(error) => errors.push(error),
             }
@@ -217,7 +206,7 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
 
 fn query_method(
     effects: &TokenStream,
-    port: &Ident,
+    port: &TokenStream,
     signature: &Signature,
     attrs: &[Attribute],
 ) -> syn::Result<TokenStream> {
@@ -254,11 +243,11 @@ fn query_method(
         #[#effects::__async_trait]
         impl #effects::__queries::QueryRequest for #request {
             const QUERY_TYPE: &'static str = #name;
-            type Port = dyn #port;
+            type Port = #port;
             type Answer = <#answer as #effects::__queries::QueryResult>::Answer;
             async fn query(&self, port: &Self::Port, ctx: &#effects::__queries::QueryContext)
                 -> ::core::result::Result<Self::Answer,#effects::__queries::QueryError> {
-                #port::#method(port, self #ctx)#awaited
+                <#port>::#method(port, self #ctx)#awaited
             }
         }
     })
@@ -305,26 +294,30 @@ fn expand_impl(args: &PortArgs, item: ItemImpl) -> TokenStream {
         Err(error) => return refused(stripped_impl(item).to_token_stream(), error),
     };
     let effects = args.effects.tokens();
+    let port = port.to_token_stream();
     let mut errors = Vec::new();
     let mut declared = Vec::new();
-    let system = args.system.as_ref().map(|name| {
-        errors.extend(name_error(name));
-        quote! {
-            impl #effects::SystemName for #port {
-                const NAME: &'static str = #name;
-            }
-        }
-    });
+    let mut queries = Vec::new();
     for member in &item.items {
-        if let ImplItem::Fn(method) = member {
-            match read_effect(&method.sig, &method.attrs) {
-                Ok(Some(method)) => declared.push(method),
-                Ok(None) => {}
+        let ImplItem::Fn(method) = member else {
+            continue;
+        };
+        if method.attrs.iter().any(is_query) {
+            match query_method(&effects, &port, &method.sig, &method.attrs) {
+                Ok(tokens) => queries.push(tokens),
                 Err(error) => errors.push(error),
             }
+            continue;
+        }
+        match read_effect(&method.sig, &method.attrs) {
+            Ok(Some(method)) => declared.push(method),
+            Ok(None) => {}
+            Err(error) => errors.push(error),
         }
     }
-    let port = port.to_token_stream();
+    if !queries.is_empty() && !declared.is_empty() {
+        errors.push(syn::Error::new_spanned(&item.self_ty, ONE_REQUEST_KIND));
+    }
     let requests = generated_requests(&effects, &port, &port, declared, &mut errors);
     let item = stripped_impl(item);
     let errors = errors.into_iter().map(syn::Error::into_compile_error);
@@ -337,7 +330,7 @@ fn expand_impl(args: &PortArgs, item: ItemImpl) -> TokenStream {
             }
         }
 
-        #system
+        #(#queries)*
 
         #(#requests)*
 
@@ -348,10 +341,16 @@ fn expand_impl(args: &PortArgs, item: ItemImpl) -> TokenStream {
 fn stripped_impl(mut item: ItemImpl) -> ItemImpl {
     for member in &mut item.items {
         if let ImplItem::Fn(method) = member {
-            method.attrs.retain(|attribute| !is_effect(attribute));
+            method
+                .attrs
+                .retain(|attribute| !is_effect(attribute) && !is_query(attribute));
         }
     }
     item
+}
+
+fn is_query(attribute: &Attribute) -> bool {
+    attribute.path().is_ident("query")
 }
 
 fn port_struct(item: &ItemImpl) -> Result<&TypePath, syn::Error> {
@@ -981,37 +980,19 @@ mod tests {
     }
 
     #[test]
-    fn system_arg_expands_system_name_impl() {
+    fn system_argument_on_impl_refused() {
         let expanded = expand(
             quote!(system = "audit-ledger"),
             quote!(impl AuditLedger {}),
             EffectsPath::Facade,
         )
         .to_string();
-        assert!(
-            expanded.contains(
-                "SystemName for AuditLedger { const NAME : & 'static str = \"audit-ledger\" ; }"
-            ),
-            "{expanded}"
-        );
+        assert!(expanded.contains("names itself on its type"), "{expanded}");
+        assert!(!expanded.contains("System for"), "{expanded}");
     }
 
     #[test]
-    fn invalid_system_arg_refused() {
-        let expanded = expand(
-            quote!(system = "audit ledger"),
-            quote!(impl AuditLedger {}),
-            EffectsPath::Facade,
-        )
-        .to_string();
-        assert!(
-            expanded.contains("a system name is 1 to 64 characters"),
-            "{expanded}"
-        );
-    }
-
-    #[test]
-    fn system_arg_on_trait_refused() {
+    fn system_argument_on_trait_refused() {
         let expanded = expand(
             quote!(system = "stripe"),
             quote!(
@@ -1021,10 +1002,50 @@ mod tests {
         )
         .to_string();
         assert!(expanded.contains("trait CardPort"), "{expanded}");
+        assert!(expanded.contains("names itself on its type"), "{expanded}");
+    }
+
+    #[test]
+    fn struct_port_query_expands_request() {
+        let expanded = expanded(syn::parse_quote! {
+            impl HighVolumeGenerator {
+                #[query(type = "docs.requests.read")]
+                async fn read(
+                    &self,
+                    from: &SequencePosition,
+                    ctx: &QueryContext,
+                ) -> Result<FiniteRead<DataRequest, SequencePosition>, QueryError> {
+                    todo!()
+                }
+            }
+        });
         assert!(
-            expanded.contains("names a struct that serves as its own port"),
+            expanded.contains("QueryRequest for SequencePosition"),
             "{expanded}"
         );
+        assert!(
+            expanded.contains("type Port = HighVolumeGenerator ;"),
+            "{expanded}"
+        );
+        assert!(!expanded.contains("# [query"), "{expanded}");
+    }
+
+    #[test]
+    fn struct_port_mixing_kinds_refused() {
+        let expanded = expanded(syn::parse_quote! {
+            impl Ledger {
+                #[query(type = "docs.ledger.read")]
+                async fn read(&self, from: &Position, ctx: &QueryContext)
+                    -> Result<FiniteRead<Row, Position>, QueryError> {
+                    todo!()
+                }
+                #[effect(type = "docs.ledger.append", exactly_once)]
+                fn append(&self, row: &Row) -> Result<Appended, EffectError> {
+                    todo!()
+                }
+            }
+        });
+        assert!(expanded.contains(ONE_REQUEST_KIND), "{expanded}");
     }
 
     #[test]

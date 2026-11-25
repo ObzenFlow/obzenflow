@@ -7,23 +7,22 @@
 
 pub use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
 pub use obzenflow_runtime::effects::__facade::{command, port, system};
-pub use obzenflow_runtime::effects::{
-    perform, Command, Keyed, Perform, PerformRequest, Port, SinkRequest, SinkRole, StagePort,
-    SystemName,
-};
+#[doc(hidden)]
+pub use obzenflow_runtime::effects::__queries;
 pub use obzenflow_runtime::effects::{
     BindingAuthorityFault, BindingMismatchKind, EffectAttemptOrdinal, EffectCursor,
     EffectDescriptorHash, EffectInputPosition, EffectLabel, EffectOrdinal, EffectStageKey,
     EffectType, RecordedFlowId,
 };
+#[doc(hidden)]
+pub use obzenflow_runtime::effects::{BuiltSystem, Command, Port, System};
 pub use obzenflow_runtime::effects::{
     EffectBinding, EffectCommitHandle, EffectContext, EffectError, EffectFailureCause,
     EffectFailureCode, EffectFailureDetail, EffectFailureKind, EffectFailureSource,
     EffectPortResolutionError, EffectSet, Effects, IdempotencyKey, RetryDisposition,
     StageCompletion,
 };
-#[doc(hidden)]
-pub use obzenflow_runtime::queries as __queries;
+pub use obzenflow_runtime::effects::{Keyed, SinkRequest, SinkRole};
 
 #[doc(hidden)]
 pub use obzenflow_runtime::effects::{

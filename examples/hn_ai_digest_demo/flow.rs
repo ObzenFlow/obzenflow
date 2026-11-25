@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::config::{DigestOutput, HnDigestPostgresConfig, HnRunInputs, Stories};
-use super::decoder::{HnStories, StoriesPort};
+use super::decoder::decode_item;
 use super::domain::{FormattedStory, HnStory};
 use super::scripted::ScriptedStories;
 use super::util::truncate_chars;
@@ -12,19 +12,22 @@ use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk,
     EstimateSource, Partials, Prompt, SystemPrompt, UserPrompt,
 };
+use obzenflow::commands::perform;
 use obzenflow::effects::postgres::{
     self, default_postgres_client, PostgresClient, PostgresStatement,
 };
-use obzenflow::effects::{perform, EffectError, EffectPortResolutionError, Port};
+use obzenflow::effects::{EffectError, EffectPortResolutionError};
 use obzenflow::error::HandlerError;
 use obzenflow::flow::FlowBuildError;
 use obzenflow::flow::{ai, flow, sink, source, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry};
-use obzenflow::queries::QueryPort;
+use obzenflow::queries::query;
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sources::HttpApi;
+use obzenflow::stages::sources::{ListDetail, ListDetailRead};
 use obzenflow::stages::transforms;
+use obzenflow::systems::http::HttpApi;
+use obzenflow::systems::{Port, SystemConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -76,9 +79,9 @@ trait DigestOutputPort {
     async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError>;
 }
 
+#[obzenflow::system("hn-digest-console")]
 struct ConsoleDigest;
 
-#[obzenflow::system("hn-digest-console")]
 #[async_trait]
 impl DigestOutputPort for ConsoleDigest {
     async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError> {
@@ -87,6 +90,7 @@ impl DigestOutputPort for ConsoleDigest {
     }
 }
 
+#[obzenflow::system("hn-digest-postgres")]
 struct PostgresDigest {
     postgres: Arc<dyn PostgresClient>,
     insert: PostgresStatement,
@@ -108,7 +112,6 @@ fn postgres_unavailable(error: impl std::fmt::Display) -> EffectPortResolutionEr
     EffectPortResolutionError::ClientConstructionFailed
 }
 
-#[obzenflow::system("hn-digest-postgres")]
 #[async_trait]
 impl DigestOutputPort for PostgresDigest {
     async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError> {
@@ -320,18 +323,18 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         } = inputs;
         let HnFlowOptions { journal_base } = options;
 
-        let stories_port: QueryPort<dyn StoriesPort> = match stories {
-            Stories::Scripted => QueryPort::deferred(|| Ok(ScriptedStories)),
+        let stories_port: Port<dyn ListDetail> = match stories {
+            Stories::Scripted => Port::deferred(|| Ok(ScriptedStories)),
             Stories::HackerNews => HttpApi::json(base_url)
-                .and_then(QueryPort::located)
+                .map(|api| api.list_detail("v0/topstories.json", |id| format!("v0/item/{id}.json")))
+                .and_then(SystemConfig::port)
                 .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?,
         };
         let source_system = stories_port.binding().to_string();
-        let hn_source = HnStories {
-            port: stories_port,
-            max_stories,
-            poll_timeout: Duration::from_secs(poll_timeout_secs),
-        };
+        let hn_source = query(ListDetailRead::first(max_stories))
+            .decode(decode_item)
+            .poll_timeout(Duration::from_secs(poll_timeout_secs))
+            .through(stories_port);
 
         let roles = HnDigest {
             interests,

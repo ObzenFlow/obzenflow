@@ -17,13 +17,15 @@ use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -44,12 +46,12 @@ trait RowInput {
     ) -> Result<FiniteRead<serde_json::Value, RowRead>, obzenflow::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("rows")]
 struct Rows {
     rows: Vec<serde_json::Value>,
     reads: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::system("rows")]
 #[async_trait::async_trait]
 impl RowInput for Rows {
     async fn read(
@@ -69,7 +71,7 @@ impl RowInput for Rows {
 }
 
 struct CountedSource<T> {
-    port: obzenflow::queries::QueryPort<dyn RowInput>,
+    port: Port<dyn RowInput>,
     output: std::marker::PhantomData<fn() -> T>,
 }
 
@@ -80,7 +82,7 @@ impl<T: Serialize> CountedSource<T> {
             .map(|row| serde_json::to_value(row).expect("a row serializes"))
             .collect();
         Self {
-            port: obzenflow::queries::QueryPort::to(Rows { rows, reads }),
+            port: Port::to(Rows { rows, reads }),
             output: std::marker::PhantomData,
         }
     }

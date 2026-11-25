@@ -3,9 +3,9 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::effects::{
-    AnswersEffect, AtLeastOnce, EffectName, Idempotent, Keyed, Port, RequiresKey,
-};
+use crate::commands::{perform, AnswersEffect};
+use crate::effects::{AtLeastOnce, EffectName, Idempotent, Keyed, RequiresKey};
+use crate::systems::Port;
 use obzenflow_core::SystemBindingEvidence;
 
 #[derive(Debug, thiserror::Error)]
@@ -18,11 +18,11 @@ trait LedgerPort: Send + Sync {
     async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError>;
 }
 
+#[crate::effects::system("simulated-ledger")]
 struct CountingLedger {
     calls: Arc<AtomicUsize>,
 }
 
-#[crate::effects::system("simulated-ledger")]
 #[async_trait]
 impl LedgerPort for CountingLedger {
     async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError> {
@@ -31,9 +31,9 @@ impl LedgerPort for CountingLedger {
     }
 }
 
+#[crate::effects::system("ledger-outage")]
 struct RefusingLedger;
 
-#[crate::effects::system("ledger-outage")]
 #[async_trait]
 impl LedgerPort for RefusingLedger {
     async fn write(&self, _: u64) -> Result<LedgerWritten, EffectError> {
@@ -411,6 +411,7 @@ fn port_type_name_inferred_from_system() {
     );
 }
 
+#[crate::effects::system("keyed-ledger")]
 struct KeyedLedger {
     keys: Arc<Mutex<Vec<IdempotencyKey>>>,
 }
@@ -431,7 +432,7 @@ struct UnkeyedWrite {
     value: u64,
 }
 
-#[crate::effects::port(system = "keyed-ledger")]
+#[crate::effects::port]
 impl KeyedLedger {
     #[effect(type = "test.keyed_write", exactly_once)]
     fn keyed(
@@ -719,9 +720,10 @@ struct SinkWrite {
     value: u64,
 }
 
+#[crate::effects::system("count-writes")]
 struct CountWrites(Arc<AtomicUsize>);
 
-#[crate::effects::port(system = "count-writes")]
+#[crate::effects::port]
 impl CountWrites {
     #[effect(type = "test.sink_write", at_least_once, records = reply)]
     fn write(&self, _: &SinkWrite) -> Result<(), EffectError> {
@@ -806,9 +808,10 @@ struct RefusedWrite {
     value: u64,
 }
 
+#[crate::effects::system("refuse-after-first")]
 struct RefuseAfterFirst(Arc<AtomicUsize>);
 
-#[crate::effects::port(system = "refuse-after-first")]
+#[crate::effects::port]
 impl RefuseAfterFirst {
     #[effect(type = "test.refused_write", at_least_once, records = reply)]
     fn write(&self, _: &RefusedWrite) -> Result<(), EffectError> {
@@ -869,9 +872,10 @@ struct FailedWrite {
 #[derive(Clone, Debug, serde::Serialize)]
 struct RegisterAppend(u64);
 
+#[crate::effects::system("changed-register")]
 struct ChangedRegister;
 
-#[crate::effects::port(system = "changed-register")]
+#[crate::effects::port]
 impl ChangedRegister {
     #[effect(type = "test.register_append", exactly_once, records = reply)]
     fn append(&self, _: &RegisterAppend) -> Result<(), EffectError> {
@@ -917,9 +921,10 @@ async fn destination_refusal_records_no_outcome() {
     }
 }
 
+#[crate::effects::system("fail-every-write")]
 struct FailEveryWrite(Arc<AtomicUsize>);
 
-#[crate::effects::port(system = "fail-every-write")]
+#[crate::effects::port]
 impl FailEveryWrite {
     #[effect(type = "test.failed_write", exactly_once, records = reply)]
     fn write(&self, _: &FailedWrite) -> Result<(), EffectError> {
@@ -961,6 +966,80 @@ async fn grouped_late_refusal_records_failure() {
         EffectObservation::returned_failure()
     );
     assert_eq!(journal.events()[0].event_type(), "effect.execution_failed");
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct RowsFrom(u64);
+
+#[crate::effects::port]
+#[async_trait]
+trait RowFeed: Send + Sync {
+    #[query(type = "test.rows.read")]
+    async fn read(
+        &self,
+        from: &RowsFrom,
+        ctx: &crate::queries::QueryContext,
+    ) -> Result<crate::queries::FiniteRead<u64, RowsFrom>, crate::queries::QueryError>;
+}
+
+#[crate::effects::system("row-feed")]
+struct RowList;
+
+#[async_trait]
+impl RowFeed for RowList {
+    async fn read(
+        &self,
+        from: &RowsFrom,
+        _: &crate::queries::QueryContext,
+    ) -> Result<crate::queries::FiniteRead<u64, RowsFrom>, crate::queries::QueryError> {
+        Ok(crate::queries::FiniteRead::Batch {
+            records: vec![from.0],
+            next: RowsFrom(from.0 + 1),
+        })
+    }
+}
+
+#[tokio::test]
+async fn query_changed_request_refused() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let port = Port::to(RowList);
+    let declaration = declaration_for::<crate::queries::QueryCall<RowsFrom>, _>(&port);
+    let registry = EffectPortRegistry::collect_from_declarations([&declaration]).unwrap();
+    let mut live = EffectsCore::new(ledger_context(
+        journal.clone(),
+        stage,
+        registry.clone().into_run_registry(),
+        vec![declaration.runtime_projection()],
+        None,
+    ));
+    live.query(RowsFrom(0), None)
+        .await
+        .expect("the live read answers");
+    let records = effect_records(&journal);
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("history indexes the read"),
+    );
+    let mut replay = EffectsCore::new(ledger_context(
+        Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
+        stage,
+        registry.into_run_registry(),
+        vec![declaration.runtime_projection()],
+        Some(history),
+    ));
+    let error = replay
+        .query(RowsFrom(7), None)
+        .await
+        .expect_err("a changed request is refused");
+    assert!(
+        matches!(error, EffectError::DescriptorMismatch { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "effect effect_stage#1/0: the request differs from the recording; binding and stage logic version match"
+    );
 }
 
 #[test]

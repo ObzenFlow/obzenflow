@@ -9,7 +9,7 @@ use super::IngestionState;
 use async_trait::async_trait;
 use obzenflow_core::ingress::BatchSubmission;
 use obzenflow_core::web::{EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request};
-use obzenflow_runtime::stages::IngressDecoder;
+use obzenflow_runtime::events::IngressDecoder;
 use tokio::time::Instant;
 
 pub struct BatchEventEndpoint<D: IngressDecoder> {

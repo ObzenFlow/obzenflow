@@ -383,7 +383,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// ```
 ///
 /// Middleware stays in the stage's `with` clause. The handler is a
-/// [`Command`](crate::effects::Command), which allows every effect the ports it
+/// [`Command`](crate::commands::Command), which allows every effect the ports it
 /// works through declare.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not satisfy `EffectfulStatefulHandler` for this stage",
@@ -393,7 +393,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
             `Output` mirrors the arrow"
 )]
 #[async_trait]
-pub trait EffectfulStatefulHandler: crate::effects::Command + Send + Sync {
+pub trait EffectfulStatefulHandler: crate::commands::Command + Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: obzenflow_core::EffectfulOutcome + Send + Sync + 'static;

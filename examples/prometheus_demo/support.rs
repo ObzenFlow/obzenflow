@@ -5,16 +5,18 @@
 //! The demo's flow and its typed events, shared with the journal integration
 //! test that runs the same flow under `cargo test`.
 
-use async_trait::async_trait;
 use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit};
+use obzenflow::queries::{
+    query, FiniteRead, QueryContext, QueryError, SourceDiagnosticReason, SourcePollErrorKind,
+};
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::ConsoleSink;
-use obzenflow::stages::sources::{FiniteRead, SourceError, SourceRead, TypedFiniteSourceHandler};
 use obzenflow::stages::stateful::emit;
 use obzenflow::stages::transforms::TryMapTyped;
 use obzenflow::stages::{stateful, transforms};
+use obzenflow::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -44,31 +46,21 @@ struct SequencePosition {
     next_id: usize,
 }
 
-#[obzenflow::port]
-#[async_trait]
-trait RequestSequence {
-    #[query(type = "prometheus_demo.requests.read")]
-    async fn read(
-        &self,
-        from: &SequencePosition,
-        ctx: &obzenflow::queries::QueryContext,
-    ) -> Result<FiniteRead<usize, SequencePosition>, obzenflow::queries::QueryError>;
-}
-
+#[obzenflow::system("high-volume-requests")]
 struct HighVolumeGenerator {
     total_events: usize,
     outage_interval: usize,
     outage_failures: AtomicU8,
 }
 
-#[obzenflow::system("high-volume-requests")]
-#[async_trait]
-impl RequestSequence for HighVolumeGenerator {
+#[obzenflow::port]
+impl HighVolumeGenerator {
+    #[query(type = "prometheus_demo.requests.read")]
     async fn read(
         &self,
         from: &SequencePosition,
-        _ctx: &obzenflow::queries::QueryContext,
-    ) -> Result<FiniteRead<usize, SequencePosition>, obzenflow::queries::QueryError> {
+        _ctx: &QueryContext,
+    ) -> Result<FiniteRead<DataRequest, SequencePosition>, QueryError> {
         let id = from.next_id;
         if id >= self.total_events {
             println!("🏁 Source complete: Generated {id} total events");
@@ -85,9 +77,9 @@ impl RequestSequence for HighVolumeGenerator {
                 attempt,
                 "Simulated source outage: circuit breaker will wait five seconds before probing"
             );
-            return Err(obzenflow::queries::QueryError::recoverable(
-                obzenflow::queries::SourcePollErrorKind::Timeout,
-                obzenflow::queries::SourceDiagnosticReason::TimedOut,
+            return Err(QueryError::recoverable(
+                SourcePollErrorKind::Timeout,
+                SourceDiagnosticReason::TimedOut,
             ));
         }
 
@@ -96,34 +88,14 @@ impl RequestSequence for HighVolumeGenerator {
             println!("📊 Generated {} events...", id + 1);
         }
         Ok(FiniteRead::Batch {
-            records: vec![id],
+            records: vec![DataRequest {
+                id,
+                should_fail: id.is_multiple_of(100),
+                batch: id / 100,
+            }],
             next: SequencePosition { next_id: id + 1 },
         })
     }
-}
-
-struct HighVolumeSource {
-    port: obzenflow::queries::QueryPort<dyn RequestSequence>,
-}
-
-impl TypedFiniteSourceHandler for HighVolumeSource {
-    type Output = DataRequest;
-
-    fn read(&self) -> SourceRead<DataRequest> {
-        SourceRead::finite(
-            self.port.clone(),
-            SequencePosition { next_id: 0 },
-            data_request,
-        )
-    }
-}
-
-fn data_request(id: usize) -> Result<DataRequest, SourceError> {
-    Ok(DataRequest {
-        id,
-        should_fail: id.is_multiple_of(100),
-        batch: id / 100,
-    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,13 +176,12 @@ pub(crate) fn flow_definition_with_options(
         "source outage interval must be positive"
     );
     FlowDefinition::materialize(move |_runtime_config| {
-        let high_volume_source_handler = HighVolumeSource {
-            port: obzenflow::queries::QueryPort::to(HighVolumeGenerator {
+        let high_volume_source_handler =
+            query(SequencePosition { next_id: 0 }).through(Port::to(HighVolumeGenerator {
                 total_events,
                 outage_interval,
                 outage_failures: AtomicU8::new(0),
-            }),
-        };
+            }));
         let error_processor_handler = error_prone_transform();
         let event_counter_handler = stateful::reduce(
             EventCountState::default(),

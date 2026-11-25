@@ -3,22 +3,20 @@
 // https://obzenflow.dev
 
 use super::csv::CsvPosition;
-use super::file_version::FileVersion;
+use super::version::FileVersion;
 use super::yaml::{read_yaml_page, YamlPage, YamlRead};
-use crate::sinks::blocking::blocking_io;
 use async_trait::async_trait;
 use csv::{ReaderBuilder, StringRecord};
-use obzenflow_core::effect_binding::{DelimitedHeaders, SystemLocation};
+use obzenflow_adapters::sinks::blocking::blocking_io;
+use obzenflow_core::effect_binding::{ConfigurationEvidence, DelimitedHeaders};
 use obzenflow_core::event::payloads::execution_payload::{
     SourcePollContinuation, SourcePollErrorKind,
 };
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceReadFailure};
 use obzenflow_core::BindingEvidenceError;
-use obzenflow_runtime::effects::{
-    EffectError, EffectPortResolutionError, LocatedSystem, SystemName,
-};
-use obzenflow_runtime::queries::{QueryBookmark, QueryContext, QueryError, QueryPort};
-use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
+use obzenflow_runtime::effects::{EffectError, EffectPortResolutionError};
+use obzenflow_runtime::queries::{FiniteRead, QueryBookmark, QueryContext, QueryError};
+use obzenflow_runtime::systems::{Port, SystemConfig};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
@@ -26,6 +24,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 /// `FileSystem` is the framework system that reads a file at a configured path.
+#[obzenflow_runtime::effects::system("file-system")]
 pub struct FileSystem {
     path: PathBuf,
     format: FileFormat,
@@ -35,10 +34,6 @@ pub struct FileSystem {
 enum FileFormat {
     Csv(CsvFormat),
     Yaml,
-}
-
-impl SystemName for FileSystem {
-    const NAME: &'static str = "file-system";
 }
 
 #[derive(Clone)]
@@ -86,8 +81,8 @@ impl CsvFileSystem {
     }
 
     /// `port` returns a port whose system reads this file when a live read needs it.
-    pub fn port(self) -> Result<QueryPort<dyn CsvFile>, BindingEvidenceError> {
-        QueryPort::located(self)
+    pub fn port(self) -> Result<Port<dyn CsvFile>, BindingEvidenceError> {
+        SystemConfig::port(self)
     }
 
     pub(crate) fn new(path: PathBuf, format: CsvFormat) -> Self {
@@ -95,11 +90,12 @@ impl CsvFileSystem {
     }
 }
 
-impl LocatedSystem for CsvFileSystem {
+impl SystemConfig for CsvFileSystem {
     type System = FileSystem;
+    type Evidence = ConfigurationEvidence;
 
-    fn location(&self) -> SystemLocation {
-        SystemLocation::Delimited {
+    fn evidence(&self) -> ConfigurationEvidence {
+        ConfigurationEvidence::Delimited {
             path: self.path.clone(),
             delimiter: char::from(self.format.delimiter),
             headers: match &self.format.headers {
@@ -109,7 +105,11 @@ impl LocatedSystem for CsvFileSystem {
         }
     }
 
-    fn build(&self) -> Result<FileSystem, EffectPortResolutionError> {
+    fn configuration(&self) -> Result<ConfigurationEvidence, BindingEvidenceError> {
+        Ok(self.evidence())
+    }
+
+    fn resolve(&self) -> Result<FileSystem, EffectPortResolutionError> {
         Ok(FileSystem {
             path: self.path.clone(),
             format: FileFormat::Csv(self.format.clone()),
@@ -117,6 +117,8 @@ impl LocatedSystem for CsvFileSystem {
     }
 }
 
+/// `YamlFileSystem` configures the `file-system` system to read a YAML file. The
+/// binding of its port records the path, and the system reads the same file.
 #[derive(Clone)]
 pub struct YamlFileSystem {
     path: PathBuf,
@@ -126,21 +128,28 @@ impl YamlFileSystem {
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
-    pub fn port(self) -> Result<QueryPort<dyn YamlFile>, BindingEvidenceError> {
-        QueryPort::located(self)
+
+    /// `port` returns a port whose system reads this file when a live read needs it.
+    pub fn port(self) -> Result<Port<dyn YamlFile>, BindingEvidenceError> {
+        SystemConfig::port(self)
     }
 }
 
-impl LocatedSystem for YamlFileSystem {
+impl SystemConfig for YamlFileSystem {
     type System = FileSystem;
+    type Evidence = ConfigurationEvidence;
 
-    fn location(&self) -> SystemLocation {
-        SystemLocation::Yaml {
+    fn evidence(&self) -> ConfigurationEvidence {
+        ConfigurationEvidence::Yaml {
             path: self.path.clone(),
         }
     }
 
-    fn build(&self) -> Result<FileSystem, EffectPortResolutionError> {
+    fn configuration(&self) -> Result<ConfigurationEvidence, BindingEvidenceError> {
+        Ok(self.evidence())
+    }
+
+    fn resolve(&self) -> Result<FileSystem, EffectPortResolutionError> {
         Ok(FileSystem {
             path: self.path.clone(),
             format: FileFormat::Yaml,
@@ -175,8 +184,11 @@ pub trait CsvFile: Send + Sync {
     async fn read(&self, from: &CsvRead, ctx: &QueryContext) -> Result<CsvPage, QueryError>;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// `CsvRead` is the request of one CSV read. A replay and a resume compare it
+/// without `limit`, so a build may read pages of another size.
+#[derive(Clone, Debug, Serialize)]
 pub struct CsvRead {
+    #[serde(skip_serializing)]
     pub limit: NonZeroUsize,
     pub skip_rows: usize,
     pub columns: Option<Vec<String>>,

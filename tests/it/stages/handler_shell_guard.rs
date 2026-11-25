@@ -959,7 +959,7 @@ fn default_http_source_transport_stays_cold_until_execute() {
     let mut guarded = vec![
         root.join("src/stages/sources.rs"),
         root.join("crates/obzenflow_infra/src/clients/http/mod.rs"),
-        root.join("crates/obzenflow_infra/src/clients/http/api.rs"),
+        root.join("crates/obzenflow_infra/src/systems/http/api.rs"),
         root.join("crates/obzenflow_infra/src/web/studio_registration.rs"),
     ];
     rust_sources_under(&root.join("examples/hn_ai_digest_demo"), &mut guarded);

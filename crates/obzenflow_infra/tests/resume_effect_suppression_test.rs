@@ -32,10 +32,11 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
-use obzenflow_runtime::effects::{EffectError, Effects, Port};
+use obzenflow_runtime::effects::{EffectError, Effects};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -74,6 +75,7 @@ impl TypedPayload for Enriched {
 
 /// Counts real executions via the shared counter; a suppressed catch-up
 /// replay never reaches the counter.
+#[obzenflow_runtime::effects::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
@@ -83,7 +85,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "call-counter")]
+#[obzenflow_runtime::effects::port]
 impl CallCounter {
     #[effect(type = "resume_effects.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<EffectValue, EffectError> {
@@ -678,10 +680,6 @@ impl ReplayArchive for HistoryReads {
 
     fn recorded_source_eof(&self, stage_key: &str) -> Option<EofKind> {
         self.inner.recorded_source_eof(stage_key)
-    }
-
-    fn recorded_source_rejections(&self, stage_key: &str) -> u64 {
-        self.inner.recorded_source_rejections(stage_key)
     }
 
     fn recorded_source_binding(

@@ -31,7 +31,8 @@ impl TypedPayload for SeedEvent {
     const EVENT_TYPE: &'static str = "cycle.seed_event";
 }
 use obzenflow::stages::sources::ValuesSource;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::queries::FiniteRead;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,11 +62,11 @@ trait SeedInput {
     ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("delayed-eof")]
 struct DelayedEof {
     eof_delay: Duration,
 }
 
-#[obzenflow_runtime::effects::system("delayed-eof")]
 #[async_trait]
 impl SeedInput for DelayedEof {
     async fn read(
@@ -84,11 +85,11 @@ impl SeedInput for DelayedEof {
     }
 }
 
-struct DelayedEofEventSource(obzenflow::queries::QueryPort<dyn SeedInput>);
+struct DelayedEofEventSource(obzenflow::systems::Port<dyn SeedInput>);
 
 impl DelayedEofEventSource {
     fn new(eof_delay: Duration) -> Self {
-        Self(obzenflow::queries::QueryPort::to(DelayedEof { eof_delay }))
+        Self(obzenflow::systems::Port::to(DelayedEof { eof_delay }))
     }
 }
 

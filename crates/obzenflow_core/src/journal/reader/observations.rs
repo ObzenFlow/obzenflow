@@ -17,14 +17,14 @@ pub struct ObservationKey {
 }
 
 #[derive(Debug, Clone)]
-pub struct LocatedObservation {
+pub struct PositionedObservation {
     /// Portable committed-record position, independent of EventId uniqueness.
     pub position: u64,
     pub observation: ObservabilityContext,
 }
 
 #[derive(Debug, Clone)]
-pub enum ObservationLookup<T = Option<LocatedObservation>> {
+pub enum ObservationLookup<T = Option<PositionedObservation>> {
     Ready {
         committed_len: u64,
         observation: T,
@@ -48,5 +48,5 @@ pub trait JournalObservationReader: Send + Sync {
     async fn latest_observations(
         &self,
         observer: WriterId,
-    ) -> Result<ObservationLookup<Vec<LocatedObservation>>, JournalError>;
+    ) -> Result<ObservationLookup<Vec<PositionedObservation>>, JournalError>;
 }

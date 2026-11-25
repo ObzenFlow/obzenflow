@@ -34,10 +34,8 @@ thiserror = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-csv = { workspace = true }
 http = { workspace = true }
 ring = { workspace = true }
-saphyr-parser = { workspace = true }
 
 [features]
 default = []

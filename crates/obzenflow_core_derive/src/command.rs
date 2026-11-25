@@ -216,8 +216,8 @@ fn command_impl(effects: &EffectsPath, command: &ItemStruct, held: &[HeldPort]) 
     for HeldPort { ty, listed, .. } in held {
         for request in listed.iter().flatten() {
             let span = request.span();
-            let ty = located_at(ty.to_token_stream(), span);
-            let path = located_at(effects.clone(), span);
+            let ty = at_span(ty.to_token_stream(), span);
+            let path = at_span(effects.clone(), span);
             predicates.push(parse_quote_spanned! {span=>
                 #ty: #path::PortServesRequest<#request>
             });
@@ -334,17 +334,17 @@ fn field_name(port: &Path) -> Ident {
     format_ident!("{name}")
 }
 
-fn located_at(tokens: TokenStream, span: Span) -> TokenStream {
+fn at_span(tokens: TokenStream, span: Span) -> TokenStream {
     tokens
         .into_iter()
         .map(|token| match token {
             TokenTree::Group(group) => {
-                let mut moved = Group::new(group.delimiter(), located_at(group.stream(), span));
-                moved.set_span(group.span().located_at(span));
+                let mut moved = Group::new(group.delimiter(), at_span(group.stream(), span));
+                moved.set_span(span.resolved_at(group.span()));
                 TokenTree::Group(moved)
             }
             mut token => {
-                token.set_span(token.span().located_at(span));
+                token.set_span(span.resolved_at(token.span()));
                 token
             }
         })

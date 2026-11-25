@@ -8,9 +8,6 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_adapters::sinks::CountingSink;
-use obzenflow_adapters::sources::{
-    YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
-};
 use obzenflow_core::event::payloads::effect_payload::{
     EffectInputPosition, EffectOrdinal, EffectType, SETTLEMENT_EFFECT_TYPE,
 };
@@ -31,13 +28,18 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::journal::read::{
     open_disk_run, read_config_changes, read_configuration_refusals, ConfigChanges,
 };
+use obzenflow_infra::systems::file::{
+    YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
+};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{Command, EffectError, Effects, Port};
+use obzenflow_runtime::commands::Command;
+use obzenflow_runtime::effects::{EffectError, Effects};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{AppTable, CandidateSet, ResolvedRuntimeConfig};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -144,6 +146,7 @@ const RECORDED: App = App {
 
 type Executed = Arc<Mutex<Vec<u64>>>;
 
+#[obzenflow_runtime::effects::system("scorer")]
 struct Scorer {
     executed: Executed,
 }
@@ -154,7 +157,7 @@ struct ScoreRequest {
     threshold: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "scorer")]
+#[obzenflow_runtime::effects::port]
 impl Scorer {
     #[effect(type = "app_identity.score", exactly_once)]
     fn score(&self, request: &ScoreRequest) -> Result<Score, EffectError> {

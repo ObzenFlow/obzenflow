@@ -718,6 +718,7 @@ mod tests {
                     descriptor: EffectDescriptor::new("sink.record", "record", 1, "1", "input"),
                     outcome,
                     origin: None,
+                    request: None,
                 })),
             )
         };

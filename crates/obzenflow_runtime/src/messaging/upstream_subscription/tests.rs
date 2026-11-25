@@ -2420,6 +2420,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
             output: json!({"ok": true}),
         },
         origin: None,
+        request: None,
     };
 
     upstream_journal

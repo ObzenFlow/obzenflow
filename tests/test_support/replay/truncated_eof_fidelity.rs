@@ -29,7 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::replay_testkit;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::queries::FiniteRead;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TickRead(u64);
@@ -45,12 +46,12 @@ trait TickInput {
     ) -> Result<FiniteRead<Tick, TickRead>, obzenflow::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("ticks")]
 struct TickFeed {
     emit: u64,
     seal: bool,
 }
 
-#[obzenflow_runtime::effects::system("ticks")]
 #[async_trait::async_trait]
 impl TickInput for TickFeed {
     async fn read(
@@ -71,21 +72,15 @@ impl TickInput for TickFeed {
     }
 }
 
-struct Ticks(obzenflow::queries::QueryPort<dyn TickInput>);
+struct Ticks(obzenflow::systems::Port<dyn TickInput>);
 
 impl Ticks {
     fn stalling(emit: u64) -> Self {
-        Self(obzenflow::queries::QueryPort::to(TickFeed {
-            emit,
-            seal: false,
-        }))
+        Self(obzenflow::systems::Port::to(TickFeed { emit, seal: false }))
     }
 
     fn sealing(emit: u64) -> Self {
-        Self(obzenflow::queries::QueryPort::to(TickFeed {
-            emit,
-            seal: true,
-        }))
+        Self(obzenflow::systems::Port::to(TickFeed { emit, seal: true }))
     }
 }
 

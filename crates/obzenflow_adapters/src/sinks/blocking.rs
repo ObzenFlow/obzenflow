@@ -4,7 +4,7 @@
 
 use obzenflow_runtime::effects::EffectError;
 
-pub(crate) async fn blocking_io<T: Send + 'static>(
+pub async fn blocking_io<T: Send + 'static>(
     io: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, EffectError> {
     match tokio::task::spawn_blocking(io).await {

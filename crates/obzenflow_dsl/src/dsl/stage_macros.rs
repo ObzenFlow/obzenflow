@@ -1989,7 +1989,8 @@ macro_rules! effectful_stateful {
 /// ```
 /// # use async_trait::async_trait;
 /// # use obzenflow_adapters::middleware::{rate_limit, MiddlewareFactory};
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -2029,7 +2030,9 @@ macro_rules! effectful_stateful {
 /// The port method supplies the guarantee. A delivery suffix is a compile error.
 ///
 /// ```compile_fail
-/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "row.fact"; }
@@ -2051,7 +2054,8 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_adapters::middleware::rate_limit;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -2089,7 +2093,8 @@ macro_rules! effectful_stateful {
 /// ```
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -2104,8 +2109,8 @@ macro_rules! effectful_stateful {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
-/// # struct Card;
 /// # #[obzenflow_runtime::effects::system("card")]
+/// # struct Card;
 /// # impl CardPort for Card { fn charge(&self, _: &ChargeCardRequest) -> Result<Charged, EffectError> { Ok(Charged) } }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
@@ -2139,7 +2144,9 @@ macro_rules! effectful_stateful {
 ///
 /// ```
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # use serde::{Deserialize, Serialize};
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Order;
@@ -2155,8 +2162,8 @@ macro_rules! effectful_stateful {
 /// #     #[effect(type = "row_doc.charge_card", exactly_once)]
 /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
 /// # }
-/// # struct Card;
 /// # #[obzenflow_runtime::effects::system("card")]
+/// # struct Card;
 /// # impl CardPort for Card { fn charge(&self, _: &ChargeCardRequest) -> Result<Charged, EffectError> { Ok(Charged) } }
 /// let charge = perform(ChargeCardRequest::for_order).through(Port::to(Card));
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => charge);
@@ -2167,7 +2174,8 @@ macro_rules! effectful_stateful {
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{perform, EffectError};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
 /// # use serde::{Deserialize, Serialize};
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Order;
@@ -2193,7 +2201,8 @@ macro_rules! effectful_stateful {
 /// ```compile_fail,E0277
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -2235,7 +2244,8 @@ macro_rules! effectful_stateful {
 /// ```compile_fail,E0277
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -2282,7 +2292,8 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -2329,7 +2340,8 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -2369,7 +2381,8 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -2409,7 +2422,8 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -2451,7 +2465,8 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectCommitHandle, EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectCommitHandle, EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -2492,7 +2507,8 @@ macro_rules! effectful_stateful {
 /// # use async_trait::async_trait;
 /// # use obzenflow_adapters::middleware::retry;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -2532,7 +2548,8 @@ macro_rules! effectful_stateful {
 /// ```compile_fail
 /// # use async_trait::async_trait;
 /// # use obzenflow_core::TypedPayload;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use serde::{Deserialize, Serialize};
@@ -3233,7 +3250,9 @@ macro_rules! join {
 /// guarantee, so the row takes no decoration.
 ///
 /// ```
-/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
@@ -3246,9 +3265,9 @@ macro_rules! join {
 ///     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// }
 ///
+/// #[obzenflow_runtime::effects::system("ledger")]
 /// struct Ledger;
 ///
-/// #[obzenflow_runtime::effects::system("ledger")]
 /// impl LedgerPort for Ledger {
 ///     fn record(&self, _: &Entry) -> Result<(), EffectError> {
 ///         Ok(())
@@ -3262,7 +3281,9 @@ macro_rules! join {
 /// A request whose port method records facts belongs in `effectful_transform!`:
 ///
 /// ```compile_fail,E0277
-/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
@@ -3278,9 +3299,9 @@ macro_rules! join {
 ///     fn record(&self, entry: &Entry) -> Result<Recorded, EffectError>;
 /// }
 ///
+/// #[obzenflow_runtime::effects::system("ledger")]
 /// struct Ledger;
 ///
-/// #[obzenflow_runtime::effects::system("ledger")]
 /// impl LedgerPort for Ledger {
 ///     fn record(&self, _: &Entry) -> Result<Recorded, EffectError> {
 ///         Ok(Recorded)
@@ -3305,7 +3326,9 @@ macro_rules! join {
 /// `.idempotent()` and `.non_idempotent()` were removed:
 ///
 /// ```compile_fail
-/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
@@ -3316,8 +3339,8 @@ macro_rules! join {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
-/// # struct Ledger;
 /// # #[obzenflow_runtime::effects::system("ledger")]
+/// # struct Ledger;
 /// # impl LedgerPort for Ledger {
 /// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
 /// # }
@@ -3326,7 +3349,9 @@ macro_rules! join {
 /// ```
 ///
 /// ```compile_fail
-/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
@@ -3337,8 +3362,8 @@ macro_rules! join {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
-/// # struct Ledger;
 /// # #[obzenflow_runtime::effects::system("ledger")]
+/// # struct Ledger;
 /// # impl LedgerPort for Ledger {
 /// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
 /// # }
@@ -3349,7 +3374,9 @@ macro_rules! join {
 /// `handler_set!` was removed:
 ///
 /// ```compile_fail
-/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
@@ -3360,8 +3387,8 @@ macro_rules! join {
 /// #     #[effect(type = "sink_doc.record", exactly_once, records = reply)]
 /// #     fn record(&self, entry: &Entry) -> Result<(), EffectError>;
 /// # }
-/// # struct Ledger;
 /// # #[obzenflow_runtime::effects::system("ledger")]
+/// # struct Ledger;
 /// # impl LedgerPort for Ledger {
 /// #     fn record(&self, _: &Entry) -> Result<(), EffectError> { Ok(()) }
 /// # }
@@ -3373,7 +3400,8 @@ macro_rules! join {
 ///
 /// ```compile_fail,E0277
 /// # use async_trait::async_trait;
-/// # use obzenflow_runtime::effects::{EffectError, Effects, Port, StageCompletion};
+/// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+/// # use obzenflow_runtime::systems::Port;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -3499,15 +3527,15 @@ macro_rules! sink {
 /// ```
 ///
 /// The handler slot of a source stage takes a source handler or
-/// `placeholder!()`. The handler declares its read port. The framework reads
-/// through that port. Hosted ingress registration returns a hosted source
-/// handler.
+/// `placeholder!()`. A pull source is the line `query(first).through(port)`,
+/// and the framework reads through that port. Hosted ingress registration
+/// returns a hosted source handler.
 ///
 /// ```
-/// # use obzenflow_runtime::queries::{QueryContext, QueryError, QueryPort};
-/// # use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
-/// # use obzenflow_runtime::stages::source::TypedFiniteSourceHandler;
-/// # use obzenflow_runtime::stages::{HostedSource, HostedSubmission};
+/// # use obzenflow_runtime::events::{source_channel, HostedSubmission};
+/// # use obzenflow_runtime::queries::{query, FiniteRead, QueryContext, QueryError};
+/// # use obzenflow_runtime::stages::HostedSource;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
@@ -3525,9 +3553,9 @@ macro_rules! sink {
 ///     ) -> Result<FiniteRead<Fact, NextFact>, QueryError>;
 /// }
 ///
+/// #[obzenflow_runtime::effects::system("fact-file")]
 /// struct FactFile;
 ///
-/// #[obzenflow_runtime::effects::system("fact-file")]
 /// #[async_trait::async_trait]
 /// impl FactInput for FactFile {
 ///     async fn read(
@@ -3539,20 +3567,8 @@ macro_rules! sink {
 ///     }
 /// }
 ///
-/// struct Facts(QueryPort<dyn FactInput>);
-///
-/// impl TypedFiniteSourceHandler for Facts {
-///     type Output = Fact;
-///     fn read(&self) -> SourceRead<Fact> {
-///         SourceRead::finite(self.0.clone(), NextFact, Ok)
-///     }
-/// }
-///
-/// let facts = Facts(QueryPort::to(FactFile));
-/// # let (_, submissions) =
-/// #     obzenflow_runtime::stages::common::handlers::source::source_channel::<
-/// #         HostedSubmission<Fact>,
-/// #     >(1);
+/// let facts = query(NextFact).through(Port::to(FactFile));
+/// # let (_, submissions) = source_channel::<HostedSubmission<Fact>>(1);
 /// # let posted = HostedSource::ingress(
 /// #     submissions,
 /// #     obzenflow_core::ingress::HostedIngressBindingSlot::new("grammar.facts"),
@@ -3564,8 +3580,8 @@ macro_rules! sink {
 /// A port is not a source handler, so the compiler refuses it.
 ///
 /// ```compile_fail,E0277
-/// # use obzenflow_runtime::queries::{QueryContext, QueryError, QueryPort};
-/// # use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
+/// # use obzenflow_runtime::queries::{FiniteRead, QueryContext, QueryError};
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
@@ -3581,8 +3597,8 @@ macro_rules! sink {
 /// #         ctx: &QueryContext,
 /// #     ) -> Result<FiniteRead<Fact, NextFact>, QueryError>;
 /// # }
-/// # struct FactFile;
 /// # #[obzenflow_runtime::effects::system("fact-file")]
+/// # struct FactFile;
 /// # #[async_trait::async_trait]
 /// # impl FactInput for FactFile {
 /// #     async fn read(
@@ -3593,7 +3609,7 @@ macro_rules! sink {
 /// #         Ok(FiniteRead::EndOfInput)
 /// #     }
 /// # }
-/// let fact_file: QueryPort<dyn FactInput> = QueryPort::to(FactFile);
+/// let fact_file: Port<dyn FactInput> = Port::to(FactFile);
 /// let read = obzenflow_dsl::source!(Fact => fact_file);
 /// ```
 #[macro_export]

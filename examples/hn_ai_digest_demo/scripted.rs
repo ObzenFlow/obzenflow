@@ -2,11 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::decoder::{item, selection, StoriesPort, StoryPosition, StoryReply};
 use super::domain::{HnStory, HnStoryId};
 use async_trait::async_trait;
-use obzenflow::queries::{QueryContext, QueryError};
-use obzenflow::stages::sources::{FiniteRead, SourceDiagnosticReason, SourcePollErrorKind};
+use obzenflow::queries::{QueryContext, QueryError, SourceDiagnosticReason, SourcePollErrorKind};
+use obzenflow::stages::sources::ListDetail;
+use serde_json::Value;
 
 const LISTED_STORIES: usize = 64;
 const DELETED_EVERY_NTH: usize = 11;
@@ -49,49 +49,40 @@ fn scripted_story(offset: usize) -> HnStory {
     }
 }
 
+#[obzenflow::system("scripted-stories")]
 pub struct ScriptedStories;
 
-#[obzenflow::system("scripted-stories")]
 #[async_trait]
-impl StoriesPort for ScriptedStories {
-    async fn read(
-        &self,
-        from: &StoryPosition,
-        _ctx: &QueryContext,
-    ) -> Result<StoryReply, QueryError> {
-        match from {
-            StoryPosition::Start { limit } => Ok(selection(
-                (0..LISTED_STORIES.min(*limit))
-                    .map(|i| HnStoryId(100 + i as u64))
-                    .collect(),
-            )),
-            StoryPosition::Selected { ids, next_index } => match ids.get(*next_index) {
-                Some(id) => {
-                    let offset =
-                        id.0.checked_sub(100)
-                            .and_then(|offset| usize::try_from(offset).ok())
-                            .filter(|offset| *offset < LISTED_STORIES)
-                            .ok_or_else(|| {
-                                QueryError::terminal(
-                                    SourcePollErrorKind::Validation,
-                                    SourceDiagnosticReason::InvalidValue,
-                                )
-                            })?;
-                    let record = if (offset + 1) % DELETED_EVERY_NTH == 0 {
-                        None
-                    } else {
-                        Some(serde_json::to_value(scripted_story(offset)).map_err(|_| {
-                            QueryError::terminal(
-                                SourcePollErrorKind::Other,
-                                SourceDiagnosticReason::UnrepresentableValue,
-                            )
-                        })?)
-                    };
-                    Ok(item(ids, *next_index, record))
-                }
-                None => Ok(FiniteRead::EndOfInput),
-            },
+impl ListDetail for ScriptedStories {
+    async fn list(&self, _ctx: &QueryContext) -> Result<Vec<String>, QueryError> {
+        Ok((0..LISTED_STORIES)
+            .map(|offset| (100 + offset).to_string())
+            .collect())
+    }
+
+    async fn detail(&self, id: &str, _ctx: &QueryContext) -> Result<Option<Value>, QueryError> {
+        let offset = id
+            .parse::<usize>()
+            .ok()
+            .and_then(|id| id.checked_sub(100))
+            .filter(|offset| *offset < LISTED_STORIES)
+            .ok_or_else(|| {
+                QueryError::terminal(
+                    SourcePollErrorKind::Validation,
+                    SourceDiagnosticReason::InvalidValue,
+                )
+            })?;
+        if (offset + 1) % DELETED_EVERY_NTH == 0 {
+            return Ok(None);
         }
+        serde_json::to_value(scripted_story(offset))
+            .map(Some)
+            .map_err(|_| {
+                QueryError::terminal(
+                    SourcePollErrorKind::Other,
+                    SourceDiagnosticReason::UnrepresentableValue,
+                )
+            })
     }
 }
 

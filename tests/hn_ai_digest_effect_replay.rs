@@ -66,12 +66,13 @@ use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, FlowApplicationBuilder};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::effects::{
-    perform, EffectError, Port, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
-};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::{EffectError, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE};
+use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
+use obzenflow_runtime::systems::Port;
 use obzenflow_runtime::testing::BackpressureAckGate;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -223,11 +224,11 @@ trait CollectOutPort: Send + Sync {
     fn collect(&self, output: &DigestOut) -> Result<(), EffectError>;
 }
 
+#[obzenflow_runtime::effects::system("digest-collector")]
 struct CollectOut {
     outputs: Arc<Mutex<Vec<DigestOut>>>,
 }
 
-#[obzenflow_runtime::effects::system("digest-collector")]
 impl CollectOutPort for CollectOut {
     fn collect(&self, output: &DigestOut) -> Result<(), EffectError> {
         self.outputs
@@ -466,20 +467,14 @@ fn stories_then_eof(rows: &[JournalRecord<ChainPayload>]) -> Vec<u64> {
 
 #[tokio::test]
 async fn scripted_polls_return_single_stories() {
-    use decoder::{StoriesPort, StoryPosition};
-    use obzenflow::stages::sources::FiniteRead;
+    use obzenflow::stages::sources::ListDetail;
     let ctx = obzenflow::queries::QueryContext::for_test("stories", 1);
     let system = scripted::ScriptedStories;
-    let mut position = StoryPosition::Start { limit: 60 };
     let mut ids = Vec::new();
-    while let FiniteRead::Batch { records, next } = system.read(&position, &ctx).await.unwrap() {
-        assert!(records.len() <= 1);
-        ids.extend(
-            records
-                .into_iter()
-                .map(|record| decoder::decode_item(record).unwrap().id.0),
-        );
-        position = next;
+    for id in system.list(&ctx).await.unwrap().into_iter().take(60) {
+        if let Some(record) = system.detail(&id, &ctx).await.unwrap() {
+            ids.push(decoder::decode_item(record).unwrap().id.0);
+        }
     }
     assert_eq!(
         ids,
@@ -2360,20 +2355,23 @@ async fn hn_replay_reconstructs_digest() {
     let answers = |rows: &[JournalRecord<ChainPayload>]| {
         rows.iter()
             .filter_map(|row| {
-                let ChainPayload::Execution(ExecutionPayload::SourceInput(record)) = &row.payload
+                let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &row.payload
                 else {
                     return None;
                 };
-                let obzenflow_core::query::SourceInput::QueryAnswered {
-                    query_type,
-                    request,
-                    answer,
-                } = &record.input
-                else {
-                    panic!("expected a query answer")
-                };
-                assert_eq!(query_type, "hn.stories.read");
-                Some((record.number, *row.id(), request.clone(), answer.clone()))
+                if !record.is_query() {
+                    return None;
+                }
+                assert_eq!(
+                    record.descriptor.effect_type.as_str(),
+                    "obzenflow.list_detail.read"
+                );
+                Some((
+                    record.cursor.input_seq.get(),
+                    *row.id(),
+                    record.request.clone(),
+                    record.outcome.clone(),
+                ))
             })
             .collect::<Vec<_>>()
     };
@@ -2713,6 +2711,7 @@ trait ItemFeed {
     ) -> Result<FiniteRead<DigestItem, Offset>, obzenflow::queries::QueryError>;
 }
 
+#[obzenflow::system("continuable-items")]
 #[derive(Clone, Copy, Debug)]
 struct ContinuableItems {
     last: u64,
@@ -2728,7 +2727,6 @@ impl ContinuableItems {
     }
 }
 
-#[obzenflow::system("continuable-items")]
 #[async_trait::async_trait]
 impl ItemFeed for ContinuableItems {
     async fn read(
@@ -2752,7 +2750,7 @@ impl ItemFeed for ContinuableItems {
     }
 }
 
-struct KeyedItems(obzenflow::queries::QueryPort<dyn ItemFeed>);
+struct KeyedItems(Port<dyn ItemFeed>);
 
 impl TypedFiniteSourceHandler for KeyedItems {
     type Output = DigestItem;
@@ -2767,7 +2765,7 @@ fn build_keyed_flow(
     outputs: Arc<Mutex<Vec<DigestOut>>>,
     keyed_items: ContinuableItems,
 ) -> FlowDefinition {
-    let keyed_items = KeyedItems(obzenflow::queries::QueryPort::to(keyed_items));
+    let keyed_items = KeyedItems(Port::to(keyed_items));
     FlowDefinition::materialize(move |_| {
         let by_parity = ai::map(MapRole::default())
             .key_by(parity)

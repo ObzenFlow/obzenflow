@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_runtime::effects::{EffectError, SystemName};
+use obzenflow_runtime::effects::EffectError;
+use obzenflow_runtime::systems::System;
 
 /// Why a statement didn't complete.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -31,7 +32,7 @@ pub enum PostgresClientError {
 
 /// The effect error for a statement that failed. A connection that never
 /// opened is the system's retryable refusal, a definite no.
-pub fn unsent<S: SystemName>(error: PostgresClientError) -> EffectError {
+pub fn unsent<S: System>(error: PostgresClientError) -> EffectError {
     match error {
         PostgresClientError::Connection(message) => {
             EffectError::unavailable(S::NAME, "connect_failed", message)
@@ -47,11 +48,8 @@ pub fn unsent<S: SystemName>(error: PostgresClientError) -> EffectError {
 mod tests {
     use super::*;
 
+    #[obzenflow_runtime::effects::system("ledger")]
     struct Ledger;
-
-    impl SystemName for Ledger {
-        const NAME: &'static str = "ledger";
-    }
 
     #[test]
     fn refused_connection_names_system() {

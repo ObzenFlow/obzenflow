@@ -21,8 +21,10 @@ use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{web::SseFrame, EventId, FlowId, JournalOwner, StageId};
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::queries::FiniteRead;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
+use obzenflow_runtime::systems::Port;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -1438,7 +1440,7 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     let path = directory.path().to_path_buf();
     let definition = FlowDefinition::materialize(move |_| {
         let input_handler = CountedSource {
-            port: obzenflow_runtime::queries::QueryPort::to(FlakyCount {
+            port: Port::to(FlakyCount {
                 end: 1000,
                 fails_at: 1,
                 failed: std::sync::atomic::AtomicBool::new(false),
@@ -1769,13 +1771,13 @@ trait CountedInput {
     ) -> Result<FiniteRead<usize, Position>, obzenflow_runtime::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("flaky-count")]
 struct FlakyCount {
     end: usize,
     fails_at: usize,
     failed: std::sync::atomic::AtomicBool,
 }
 
-#[obzenflow_runtime::effects::system("flaky-count")]
 #[async_trait::async_trait]
 impl CountedInput for FlakyCount {
     async fn read(
@@ -1799,13 +1801,13 @@ impl CountedInput for FlakyCount {
     }
 }
 
+#[obzenflow_runtime::effects::system("gated")]
 struct GatedInput {
     gate: Arc<tokio::sync::Semaphore>,
     index: usize,
     progress: Arc<ComposedProgress>,
 }
 
-#[obzenflow_runtime::effects::system("gated")]
 #[async_trait::async_trait]
 impl CountedInput for GatedInput {
     async fn read(
@@ -1829,7 +1831,7 @@ impl CountedInput for GatedInput {
 }
 
 struct CountedSource<T> {
-    port: obzenflow_runtime::queries::QueryPort<dyn CountedInput>,
+    port: Port<dyn CountedInput>,
     item: fn(usize) -> T,
 }
 
@@ -1958,7 +1960,7 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
         for index in 0..stages - 1 {
             let name = format!("source_{index:03}");
             let handler = CountedSource {
-                port: obzenflow_runtime::queries::QueryPort::to(GatedInput {
+                port: Port::to(GatedInput {
                     gate: gate.clone(),
                     index,
                     progress: progress.clone(),

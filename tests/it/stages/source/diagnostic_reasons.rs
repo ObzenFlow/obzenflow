@@ -19,7 +19,7 @@ impl TypedPayload for SkipsEmptyTags {
 /// Hosted admission's journal-form proof (FLOWIP-084l B4).
 fn unrepresentable_value() -> SourceError {
     let refused =
-        obzenflow_runtime::stages::prove_journal_form(SkipsEmptyTags { tags: Vec::new() })
+        obzenflow_runtime::events::prove_journal_form(SkipsEmptyTags { tags: Vec::new() })
             .expect_err("an empty skipped list cannot be recorded faithfully");
     SourceError::Validation(refused.into_diagnostic())
 }

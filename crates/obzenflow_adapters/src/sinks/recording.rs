@@ -34,12 +34,12 @@ pub trait RecordingPort {
     fn record(&self, input: &RecordedInput) -> Result<(), EffectError>;
 }
 
+#[system("recording")]
 struct Recorder {
     rows: Arc<Mutex<Vec<Value>>>,
     arrived: Arc<Notify>,
 }
 
-#[system("recording")]
 impl RecordingPort for Recorder {
     fn record(&self, input: &RecordedInput) -> Result<(), EffectError> {
         self.rows
@@ -204,9 +204,9 @@ impl CallCounter for AtomicU64 {
     }
 }
 
+#[system("counting")]
 struct Counter(Arc<dyn CallCounter>);
 
-#[system("counting")]
 impl CountingPort for Counter {
     fn count(&self, _: &Counted) -> Result<(), EffectError> {
         self.0.add_one();

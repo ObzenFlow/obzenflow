@@ -4,7 +4,9 @@
 
 use super::*;
 use crate::journal::DiskJournal;
-use obzenflow_core::effect_binding::{DelimitedHeaders, SystemBindingEvidence, SystemLocation};
+use obzenflow_core::effect_binding::{
+    ConfigurationEvidence, DelimitedHeaders, SystemBindingEvidence,
+};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::SourceRecordRejectedFact;
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -156,9 +158,9 @@ impl Run {
     }
 
     async fn bind(&self, file: &str) {
-        let binding = SystemBindingEvidence::located(
+        let binding = SystemBindingEvidence::configured(
             "file-system",
-            SystemLocation::Delimited {
+            ConfigurationEvidence::Delimited {
                 path: file.into(),
                 delimiter: ',',
                 headers: DelimitedHeaders::FirstRow,

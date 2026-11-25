@@ -14,17 +14,16 @@
 mod de;
 mod document;
 
-use super::file_system::{YamlFile, YamlFileSystem};
-use super::file_version::{input_changed, FileVersion};
+use super::system::{YamlFile, YamlFileSystem};
+use super::version::{input_changed, FileVersion};
 use document::Node;
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::OneFactOutcome;
-use obzenflow_runtime::queries::{QueryBookmark, QueryError, QueryPort};
-use obzenflow_runtime::stages::common::handlers::source::{
-    FiniteRead, SourceRead, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::queries::{FiniteRead, QueryBookmark, QueryError};
+use obzenflow_runtime::stages::common::handlers::source::{SourceRead, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::source::SourceError;
+use obzenflow_runtime::systems::Port;
 use obzenflow_runtime::typing::SourceTyping;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -121,7 +120,7 @@ impl YamlDecodeError {
 pub struct YamlSourceBuilder<D> {
     decoder: D,
     path: Option<PathBuf>,
-    port: Option<QueryPort<dyn YamlFile>>,
+    port: Option<Port<dyn YamlFile>>,
     selection: YamlSelection,
     batch_size: usize,
     max_bytes: usize,
@@ -143,7 +142,7 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
         self
     }
 
-    pub fn through(mut self, port: QueryPort<dyn YamlFile>) -> Self {
+    pub fn through(mut self, port: Port<dyn YamlFile>) -> Self {
         self.port = Some(port);
         self
     }
@@ -203,7 +202,7 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
 /// port. Its decoder maps each recorded record to the output.
 #[derive(Clone)]
 pub struct YamlSource<D> {
-    port: QueryPort<dyn YamlFile>,
+    port: Port<dyn YamlFile>,
     decoder: D,
     selection: YamlSelection,
     batch_size: usize,
@@ -280,8 +279,11 @@ fn decode_line<D: YamlDecoder>(decoder: &D, line: YamlLine) -> Result<D::Output,
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// `YamlRead` is the request of one YAML read. A replay and a resume compare it
+/// without `limit`, so a build may read pages of another size.
+#[derive(Clone, Debug, Serialize)]
 pub struct YamlRead {
+    #[serde(skip_serializing)]
     pub limit: std::num::NonZeroUsize,
     pub selection: YamlSelection,
     pub max_bytes: usize,
@@ -524,11 +526,8 @@ mod tests {
             .expect("the input is refused")
     }
 
+    #[obzenflow_runtime::effects::system("scripted-orders")]
     struct ScriptedOrders(&'static [&'static str]);
-
-    impl obzenflow_runtime::effects::SystemName for ScriptedOrders {
-        const NAME: &'static str = "scripted-orders";
-    }
 
     #[async_trait::async_trait]
     impl YamlFile for ScriptedOrders {
@@ -565,7 +564,7 @@ mod tests {
             "{order_id: s-2, amount_cents: 900}",
             "{order_id: s-3, amount_cents: 1100}",
         ]));
-        let port = QueryPort::to(supplier.clone());
+        let port = Port::to(supplier.clone());
         let binding = port.binding().clone();
         let source = YamlSource::builder(OrderYaml)
             .through(port)
@@ -573,7 +572,7 @@ mod tests {
             .build()
             .expect("a port supplies the records");
         let admitted = AdmitSource::<SyncFiniteReads>::admit(source);
-        assert_eq!(admitted.system().binding(), &binding);
+        assert_eq!(admitted.binding(), &binding);
         assert_eq!(binding.name(), "scripted-orders");
 
         let ctx = QueryContext::for_test("orders", 0);

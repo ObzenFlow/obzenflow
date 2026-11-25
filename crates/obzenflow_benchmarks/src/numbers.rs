@@ -3,7 +3,8 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
+use obzenflow_runtime::queries::FiniteRead;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ pub trait NumberFeed {
     ) -> Result<FiniteRead<u64, NextNumber>, obzenflow_runtime::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("numbers")]
 pub struct Numbers {
     total: Option<u64>,
     batch: u64,
@@ -51,12 +53,11 @@ impl Numbers {
         }
     }
 
-    pub fn port(self) -> obzenflow_runtime::queries::QueryPort<dyn NumberFeed> {
-        obzenflow_runtime::queries::QueryPort::to(self)
+    pub fn port(self) -> Port<dyn NumberFeed> {
+        Port::to(self)
     }
 }
 
-#[obzenflow_runtime::effects::system("numbers")]
 #[async_trait]
 impl NumberFeed for Numbers {
     async fn read(

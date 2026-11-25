@@ -25,7 +25,7 @@ use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::journal::{AppendOptions, JournalConfig};
 use obzenflow_core::journal::{
-    JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
+    JournalObservationReader, ObservationKey, ObservationLookup, PositionedObservation,
 };
 use obzenflow_core::FlowId;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -396,7 +396,7 @@ impl<T: JournalEvent> MemoryJournalState<T> {
     fn observation(
         &self,
         key: &ObservationKey,
-    ) -> Result<Option<LocatedObservation>, JournalError> {
+    ) -> Result<Option<PositionedObservation>, JournalError> {
         let Some(locator) = self
             .observations
             .entries
@@ -429,7 +429,7 @@ impl<T: JournalEvent> JournalObservationReader for MemoryJournal<T> {
     async fn latest_observations(
         &self,
         observer: WriterId,
-    ) -> Result<ObservationLookup<Vec<LocatedObservation>>, JournalError> {
+    ) -> Result<ObservationLookup<Vec<PositionedObservation>>, JournalError> {
         self.state.lock().unwrap().lookup(|state| {
             state
                 .observations

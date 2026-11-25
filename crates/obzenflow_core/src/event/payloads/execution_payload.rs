@@ -80,7 +80,8 @@ pub enum ExecutionPayload {
     Backpressure(BackpressureFact),
     SourceRecordRejected(SourceRecordRejectedFact),
     SourcePollFailed(SourcePollFailedFact),
-    SourceInput(Box<crate::query::SourceInputRecord>),
+    #[serde(rename = "source_input")]
+    MemberRecorded(Box<crate::source::MemberRecorded>),
     SourceBindingDeclared(crate::effect_binding::SystemBinding),
     SourceReattached(SourceReattachedFact),
     AiChunkingPlanned(AiChunkingPlannedFact),
@@ -592,7 +593,7 @@ impl ExecutionPayload {
             Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourceRecordRejected(_) => vocabulary::source::RECORD_REJECTED,
             Self::SourcePollFailed(_) => vocabulary::source::POLL_FAILED,
-            Self::SourceInput(record) => record.input.event_type(),
+            Self::MemberRecorded(_) => crate::source::MEMBER_RECORDED_EVENT_TYPE,
             Self::SourceBindingDeclared(_) => vocabulary::source::BINDING_DECLARED,
             Self::SourceReattached(_) => vocabulary::source::REATTACHED,
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
@@ -618,7 +619,7 @@ impl ExecutionPayload {
         match self {
             Self::StageFatalRecorded(_)
             | Self::StageProcessingFailed(_)
-            | Self::SourceInput(_)
+            | Self::MemberRecorded(_)
             | Self::EffectRecord(_)
             | Self::EffectAttemptStarted(_)
             | Self::EffectRecoveryAbandoned(_) => true,

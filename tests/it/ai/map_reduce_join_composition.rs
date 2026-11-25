@@ -18,9 +18,11 @@ use obzenflow_dsl::{ai, flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -291,11 +293,11 @@ trait CollectRowsPort: Send + Sync {
     fn collect(&self, row: &Row) -> Result<(), EffectError>;
 }
 
+#[obzenflow_runtime::effects::system("row-collector")]
 struct CollectRows {
     delivered: Arc<Mutex<Vec<Row>>>,
 }
 
-#[obzenflow_runtime::effects::system("row-collector")]
 impl CollectRowsPort for CollectRows {
     fn collect(&self, row: &Row) -> Result<(), EffectError> {
         self.delivered.lock().unwrap().push(row.clone());
@@ -309,11 +311,11 @@ trait CollectHeldPort: Send + Sync {
     fn collect(&self, held: &HeldValue) -> Result<(), EffectError>;
 }
 
+#[obzenflow_runtime::effects::system("held-collector")]
 struct CollectHeld {
     held: Arc<Mutex<Vec<HeldValue>>>,
 }
 
-#[obzenflow_runtime::effects::system("held-collector")]
 impl CollectHeldPort for CollectHeld {
     fn collect(&self, held: &HeldValue) -> Result<(), EffectError> {
         self.held.lock().unwrap().push(held.clone());

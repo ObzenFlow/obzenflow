@@ -71,7 +71,7 @@ impl LogicalEffectBindingName {
         Ok(Self(value))
     }
 
-    pub(super) fn of_system(name: &'static str) -> Self {
+    pub(crate) fn of_system(name: &'static str) -> Self {
         Self(name.to_owned())
     }
 
@@ -156,7 +156,7 @@ fn is_binding_name(value: &str) -> bool {
         )
 }
 
-pub(super) const fn is_system_name(value: &str) -> bool {
+pub(crate) const fn is_system_name(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > 64 || !bytes[0].is_ascii_alphanumeric() {
         return false;
@@ -375,6 +375,10 @@ impl BindingCoordinate {
     pub(super) fn mint() -> Self {
         static NEXT_COORDINATE: AtomicU64 = AtomicU64::new(1);
         Self(NEXT_COORDINATE.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(super) fn ordinal(self) -> u64 {
+        self.0
     }
 }
 

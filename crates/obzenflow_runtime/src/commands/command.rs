@@ -2,408 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::binding::is_system_name;
-use super::call::{call_port_slot, Call, CallRequest};
-use super::ports::SystemPort;
-use super::{
-    Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectError, EffectName,
-    EffectPortResolutionError, EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName,
-    NamedEffect, RequestList,
+use super::request::CallRequest;
+use crate::effects::{
+    call_port_slot, Call, Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration,
+    EffectError, EffectName, EffectRegistrationBuilder, EffectSet, NamedEffect, RequestList,
 };
 use crate::stages::common::handlers::{EffectfulStatefulHandler, EffectfulTransformHandler};
+use crate::systems::Port;
 use obzenflow_core::event::schema::{EffectOutcome, EmptySet, WithMember};
-use obzenflow_core::SystemBindingEvidence;
 use std::marker::PhantomData;
-use std::sync::Arc;
-
-/// A port `P` with the system that answers it chosen. A command holds one per
-/// port type, in a `#[port]` field or through `through`, and performs requests
-/// through `fx` without ever seeing the system.
-///
-/// A port trait is `Send` and `Sync`, so a system that isn't thread-safe is
-/// refused at its own `impl`:
-///
-/// ```compile_fail,E0277
-/// #[obzenflow_runtime::effects::port]
-/// trait CustomerMessaging {}
-/// struct SimulatedMessaging(std::rc::Rc<()>);
-/// #[obzenflow_runtime::effects::system("simulated")]
-/// impl CustomerMessaging for SimulatedMessaging {}
-/// ```
-pub struct Port<P: ?Sized + Send + Sync + 'static> {
-    name: LogicalEffectBindingName,
-    evidence: SystemBindingEvidence,
-    port: Arc<SystemPort>,
-    port_type: PhantomData<fn() -> Arc<P>>,
-}
-
-impl<P: ?Sized + Send + Sync + 'static> Port<P> {
-    /// A port answered by a system that is already built, by value or in an
-    /// `Arc`. The port's trait comes from the `#[obzenflow::port]` trait the
-    /// system implements, so the port needs no annotation.
-    ///
-    /// ```
-    /// # use obzenflow_runtime::effects::Port;
-    /// # use std::sync::Arc;
-    /// # #[obzenflow_runtime::effects::port]
-    /// # trait RiskEnginePort: Send + Sync {}
-    /// # struct RiskEngineOutage;
-    /// # #[obzenflow_runtime::effects::system("risk-engine-outage")]
-    /// # impl RiskEnginePort for RiskEngineOutage {}
-    /// let outage = Port::to(RiskEngineOutage);
-    /// let shared = Port::to(Arc::new(RiskEngineOutage));
-    /// # let ports: [Port<dyn RiskEnginePort>; 2] = [outage, shared];
-    /// ```
-    ///
-    /// A port trait left unmarked does not compile:
-    ///
-    /// ```compile_fail,E0277
-    /// # use obzenflow_runtime::effects::Port;
-    /// trait RiskEnginePort: Send + Sync {}
-    /// struct RiskEngineOutage;
-    /// # #[obzenflow_runtime::effects::system("risk-engine-outage")]
-    /// impl RiskEnginePort for RiskEngineOutage {}
-    /// # fn main() {
-    /// let outage = Port::to(RiskEngineOutage);
-    /// # let port: Port<dyn RiskEnginePort> = outage;
-    /// # }
-    /// ```
-    ///
-    /// An already-erased port names no system, so it does not compile either:
-    ///
-    /// ```compile_fail,E0277
-    /// # use obzenflow_runtime::effects::Port;
-    /// # use std::sync::Arc;
-    /// # #[obzenflow_runtime::effects::port]
-    /// # trait RiskEnginePort: Send + Sync {}
-    /// # struct RiskEngineOutage;
-    /// # #[obzenflow_runtime::effects::system("risk-engine-outage")]
-    /// # impl RiskEnginePort for RiskEngineOutage {}
-    /// # fn main() {
-    /// let erased: Arc<dyn RiskEnginePort> = Arc::new(RiskEngineOutage);
-    /// let outage = Port::to(erased);
-    /// # let port: Port<dyn RiskEnginePort> = outage;
-    /// # }
-    /// ```
-    ///
-    /// A struct whose inherent `impl` block carries `#[obzenflow::port]` serves
-    /// as its own port and names itself there:
-    ///
-    /// ```
-    /// # use obzenflow_runtime::effects::{EffectError, Port};
-    /// # #[derive(Clone, Debug, serde::Serialize)]
-    /// # struct AuditEntry;
-    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-    /// # struct AuditAppended;
-    /// # impl obzenflow_core::TypedPayload for AuditAppended { const EVENT_TYPE: &'static str = "docs.audit.appended"; }
-    /// struct AuditLedger;
-    ///
-    /// #[obzenflow_runtime::effects::port(system = "audit-ledger")]
-    /// impl AuditLedger {
-    ///     #[effect(type = "docs.audit.append", exactly_once)]
-    ///     fn append(&self, _: &AuditEntry) -> Result<AuditAppended, EffectError> {
-    ///         Ok(AuditAppended)
-    ///     }
-    /// }
-    /// # fn main() {
-    /// let ledger = Port::to(AuditLedger);
-    /// # let port: Port<AuditLedger> = ledger;
-    /// # }
-    /// ```
-    ///
-    /// A struct left unmarked does not compile:
-    ///
-    /// ```compile_fail,E0277
-    /// # use obzenflow_runtime::effects::{Port, SystemName};
-    /// struct AuditLedger;
-    /// # impl SystemName for AuditLedger { const NAME: &'static str = "audit-ledger"; }
-    /// # fn main() {
-    /// let ledger = Port::to(AuditLedger);
-    /// # let port: Port<AuditLedger> = ledger;
-    /// # }
-    /// ```
-    ///
-    /// A name outside the grammar does not compile, even from a hand-written
-    /// [`SystemName`]:
-    ///
-    /// ```compile_fail,E0080
-    /// # use obzenflow_runtime::effects::{Port, SystemName};
-    /// # #[obzenflow_runtime::effects::port]
-    /// # trait RiskEnginePort: Send + Sync {}
-    /// struct RiskEngineOutage;
-    /// impl RiskEnginePort for RiskEngineOutage {}
-    /// impl SystemName for RiskEngineOutage {
-    ///     const NAME: &'static str = "risk engine outage";
-    /// }
-    /// # fn main() {
-    /// let outage = Port::to(RiskEngineOutage);
-    /// # let port: Port<dyn RiskEnginePort> = outage;
-    /// # }
-    /// ```
-    pub fn to<S>(system: S) -> Self
-    where
-        S: BuiltSystem,
-        S::System: Send + Sync + 'static,
-        PortImpl<S::System>: ServesPort<P, S::System>,
-    {
-        Self::answered_by::<S::System>(SystemPort::eager(<PortImpl<S::System> as ServesPort<
-            P,
-            S::System,
-        >>::coerce(system.shared())))
-    }
-
-    /// A port whose system is built only when a live call needs it, at most
-    /// once per run. The port's trait comes from the `#[obzenflow::port]` trait
-    /// the system implements.
-    ///
-    /// ```
-    /// # use obzenflow_runtime::effects::{EffectPortResolutionError, Port};
-    /// # #[obzenflow_runtime::effects::port]
-    /// # trait RiskEnginePort: Send + Sync {}
-    /// # struct SimulatedRiskEngine;
-    /// # #[obzenflow_runtime::effects::system("simulated-risk-engine")]
-    /// # impl RiskEnginePort for SimulatedRiskEngine {}
-    /// # impl SimulatedRiskEngine {
-    /// #     fn from_env() -> Result<Self, EffectPortResolutionError> {
-    /// #         Ok(Self)
-    /// #     }
-    /// # }
-    /// let engine = Port::deferred(SimulatedRiskEngine::from_env);
-    /// # let port: Port<dyn RiskEnginePort> = engine;
-    /// ```
-    ///
-    /// A resolver that returns an `Arc` does not compile; the port wraps the
-    /// system itself:
-    ///
-    /// ```compile_fail,E0277
-    /// # use obzenflow_runtime::effects::{EffectPortResolutionError, Port};
-    /// # use std::sync::Arc;
-    /// # #[obzenflow_runtime::effects::port]
-    /// # trait RiskEnginePort: Send + Sync {}
-    /// # struct SimulatedRiskEngine;
-    /// # #[obzenflow_runtime::effects::system("simulated-risk-engine")]
-    /// # impl RiskEnginePort for SimulatedRiskEngine {}
-    /// # fn main() {
-    /// let engine = Port::deferred(|| -> Result<Arc<SimulatedRiskEngine>, EffectPortResolutionError> {
-    ///     Ok(Arc::new(SimulatedRiskEngine))
-    /// });
-    /// # let port: Port<dyn RiskEnginePort> = engine;
-    /// # }
-    /// ```
-    pub fn deferred<T, F>(resolver: F) -> Self
-    where
-        T: SystemName + Send + Sync + 'static,
-        F: Fn() -> Result<T, EffectPortResolutionError> + Send + Sync + 'static,
-        PortImpl<T>: ServesPort<P, T>,
-    {
-        Self::answered_by::<T>(SystemPort::deferred::<P>(Arc::new(move || {
-            resolver().map(|system| <PortImpl<T> as ServesPort<P, T>>::coerce(Arc::new(system)))
-        })))
-    }
-
-    #[doc(hidden)]
-    pub fn deferred_grouped<R, T, F>(resolver: F) -> Self
-    where
-        R: super::SinkRequest<Port = P>,
-        T: SystemName + super::SinkGroupSystem<R>,
-        PortImpl<T>: ServesPort<P, T>,
-        F: Fn() -> Result<T, EffectPortResolutionError> + Send + Sync + 'static,
-    {
-        Self::answered_by::<T>(SystemPort::grouped::<P, R, T, F>(resolver))
-    }
-
-    fn answered_by<T: SystemName>(port: SystemPort) -> Self {
-        Self::named(checked_system_name::<T>(), port)
-    }
-
-    fn named(name: &'static str, port: SystemPort) -> Self {
-        Self {
-            name: LogicalEffectBindingName::of_system(name),
-            evidence: SystemBindingEvidence::named(name)
-                .expect("a checked system name fits the evidence bound"),
-            port: Arc::new(port),
-            port_type: PhantomData,
-        }
-    }
-
-    /// The name of the system behind this port, as its evidence and diagnostics
-    /// record it.
-    pub fn system_name(&self) -> &str {
-        if self.binding().location().is_some() {
-            self.binding().name()
-        } else {
-            self.name.as_str()
-        }
-    }
-
-    /// `binding` returns the system binding that this port records when it answers a call.
-    pub fn binding(&self) -> &obzenflow_core::effect_binding::SystemBinding {
-        self.evidence.binding()
-    }
-
-    /// The same port bound under `system.instance`, for a framework system
-    /// whose instances each hold their own destination, such as one file each.
-    /// Characters a binding name can't hold become `_`.
-    #[doc(hidden)]
-    pub fn instance(mut self, instance: &str) -> Self
-    where
-        P: PortEffects,
-    {
-        if let Ok(name) = LogicalEffectBindingName::new(instance_name(self.name.as_str(), instance))
-        {
-            self.name = name;
-        }
-        self
-    }
-}
-
-fn instance_name(base: &str, instance: &str) -> String {
-    let valid = |character: char| {
-        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-            character
-        } else {
-            '_'
-        }
-    };
-    let suffix: String = format!(".{instance}").chars().map(valid).take(63).collect();
-    let base: String = base
-        .chars()
-        .map(valid)
-        .take(64 - suffix.chars().count())
-        .collect();
-    format!("{base}{suffix}")
-}
-
-pub(crate) const fn checked_system_name<T: SystemName>() -> &'static str {
-    const {
-        assert!(
-            is_system_name(T::NAME),
-            "a system name is 1 to 64 characters from `[A-Za-z0-9._-]` and starts with a letter or digit"
-        );
-    }
-    T::NAME
-}
-
-/// The name a system answers under, which every call it answers records.
-/// `#[obzenflow::system("name")]` implements it on the system's `impl` of its
-/// port, and `#[obzenflow::port(system = "name")]` on a struct that serves as
-/// its own port. Name a system once, with one of those attributes.
-///
-/// A system without a name cannot become a [`Port`], whether it implements a
-/// port trait:
-///
-/// ```compile_fail,E0277
-/// # use obzenflow_runtime::effects::Port;
-/// # #[obzenflow_runtime::effects::port]
-/// # trait RiskEnginePort: Send + Sync {}
-/// struct RiskEngineOutage;
-/// impl RiskEnginePort for RiskEngineOutage {}
-/// # fn main() {
-/// let outage = Port::to(RiskEngineOutage);
-/// # let port: Port<dyn RiskEnginePort> = outage;
-/// # }
-/// ```
-///
-/// or serves as its own port:
-///
-/// ```compile_fail,E0277
-/// # use obzenflow_runtime::effects::Port;
-/// struct AuditLedger;
-///
-/// #[obzenflow_runtime::effects::port]
-/// impl AuditLedger {}
-/// # fn main() {
-/// let ledger = Port::to(AuditLedger);
-/// # let port: Port<AuditLedger> = ledger;
-/// # }
-/// ```
-///
-/// Two names for one type do not compile:
-///
-/// ```compile_fail,E0119
-/// # #[obzenflow_runtime::effects::port]
-/// # trait RiskEnginePort: Send + Sync {}
-/// # #[obzenflow_runtime::effects::port]
-/// # trait CaseSystemPort: Send + Sync {}
-/// struct Vendor;
-///
-/// #[obzenflow_runtime::effects::system("vendor-risk")]
-/// impl RiskEnginePort for Vendor {}
-///
-/// #[obzenflow_runtime::effects::system("vendor-cases")]
-/// impl CaseSystemPort for Vendor {}
-/// ```
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name",
-    note = "put `#[obzenflow::system(\"…\")]` above its `impl` of the port trait",
-    note = "if `{Self}` is its own port, put `system = \"…\"` on its `#[obzenflow::port]` block",
-    label = "this system does not name itself",
-    note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
-)]
-pub trait SystemName {
-    const NAME: &'static str;
-}
-
-/// `LocatedSystem` is the configuration of a framework system that reads at a
-/// location. [`QueryPort::located`](crate::queries::QueryPort::located) records the
-/// location and builds the system from the same value.
-pub trait LocatedSystem: Send + Sync + 'static {
-    type System: SystemName + Send + Sync + 'static;
-
-    /// `location` returns the place and the format configuration that the system reads.
-    fn location(&self) -> obzenflow_core::effect_binding::SystemLocation;
-
-    /// `build` makes the system for a live call.
-    fn build(&self) -> Result<Self::System, EffectPortResolutionError>;
-}
-
-/// A built system, by value or in an `Arc`, as [`Port::to`] takes it.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` has no system name",
-    note = "put `#[obzenflow::system(\"…\")]` above its `impl` of the port trait",
-    note = "if `{Self}` is its own port, put `system = \"…\"` on its `#[obzenflow::port]` block",
-    label = "this system does not name itself",
-    note = "a resolver returns the system itself, never an `Arc`; `Port::to` takes the system by value or in an `Arc` of its concrete type, and an erased `Arc<dyn Port>` names no system"
-)]
-pub trait BuiltSystem {
-    type System: SystemName;
-
-    fn shared(self) -> Arc<Self::System>;
-}
-
-impl<T: SystemName> BuiltSystem for T {
-    type System = T;
-
-    fn shared(self) -> Arc<T> {
-        Arc::new(self)
-    }
-}
-
-impl<T: SystemName> BuiltSystem for Arc<T> {
-    type System = T;
-
-    fn shared(self) -> Arc<T> {
-        self
-    }
-}
-
-/// The type a system is looked up under. The port attribute implements
-/// [`ServesPort`] for it.
-#[doc(hidden)]
-pub struct PortImpl<T>(PhantomData<fn() -> Arc<T>>);
-
-/// Turns a system `T` into the trait object `P` of the port it serves,
-/// generated for each trait marked `#[obzenflow::port]`.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "this system implements no trait marked `#[obzenflow::port]`",
-    label = "the system this port is built from",
-    note = "mark the port trait it implements, or the `impl` block of a struct that serves as its own port, with `#[obzenflow::port]`"
-)]
-pub trait ServesPort<P: ?Sized, T> {
-    fn coerce(port: Arc<T>) -> Arc<P>;
-}
 
 /// The answer a port method gives, its request's outcome or an `EffectError`.
 /// `#[obzenflow::port]` requires it of every method on a port trait.
@@ -494,27 +101,6 @@ where
 #[doc(hidden)]
 pub fn assert_port_answer<T: PortAnswer>() {}
 
-impl<P: ?Sized + Send + Sync + 'static> Clone for Port<P> {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            evidence: self.evidence.clone(),
-            port: Arc::clone(&self.port),
-            port_type: PhantomData,
-        }
-    }
-}
-
-impl<P: ?Sized + Send + Sync + 'static> std::fmt::Debug for Port<P> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Port")
-            .field("system", &self.name.as_str())
-            .field("port", &"<not disclosed>")
-            .finish()
-    }
-}
-
 mod sealed {
     pub trait StagePort {}
 }
@@ -546,11 +132,11 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// # trait RiskEnginePort: Send + Sync {}
 /// # #[obzenflow_runtime::effects::port]
 /// # trait CaseSystemPort: Send + Sync {}
-/// # struct Vendor;
 /// # #[obzenflow_runtime::effects::system("vendor")]
+/// # struct Vendor;
 /// # impl RiskEnginePort for Vendor {}
 /// # impl CaseSystemPort for Vendor {}
-/// # use obzenflow_runtime::effects::Port;
+/// # use obzenflow_runtime::systems::Port;
 /// #[obzenflow_runtime::effects::command(through = RiskEnginePort)]
 /// #[derive(Clone, Debug)]
 /// struct Scorer;
@@ -574,7 +160,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// A command with state of its own names its port as a field:
 ///
 /// ```
-/// # use obzenflow_runtime::effects::Port;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {}
 /// #[obzenflow_runtime::effects::command]
@@ -639,7 +225,7 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// Nor two ports of one type:
 ///
 /// ```compile_fail
-/// # use obzenflow_runtime::effects::Port;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[obzenflow_runtime::effects::port]
 /// # trait RiskEnginePort: Send + Sync {}
 /// #[obzenflow_runtime::effects::command]
@@ -666,7 +252,8 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// A field lists only requests its own port declares:
 ///
 /// ```compile_fail,E0277
-/// # use obzenflow_runtime::effects::{EffectError, Port};
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Scored;
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.handler.scored"; }
@@ -695,7 +282,8 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// lists each request once:
 ///
 /// ```compile_fail
-/// # use obzenflow_runtime::effects::{EffectError, Port};
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Scored;
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.handler.scored"; }
@@ -717,7 +305,8 @@ impl<E: NamedEffect> StagePort for EffectBinding<E> {}
 /// and lists at least one, since a bare `#[port]` allows the whole port:
 ///
 /// ```compile_fail
-/// # use obzenflow_runtime::effects::{EffectError, Port};
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Scored;
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.handler.scored"; }
@@ -906,7 +495,7 @@ where
     R: CallRequest<Port = P>,
 {
     fn declaration(&self) -> Result<EffectDeclaration, StageEffectsError> {
-        super::binding::validate_effect_type(R::EFFECT_TYPE)
+        crate::effects::binding::validate_effect_type(R::EFFECT_TYPE)
             .map_err(|_| EffectBindingBuildError::InvalidEffectType)?;
         let binding =
             EffectRegistrationBuilder::<Call<R>>::new(self.name.clone(), self.evidence.clone())
@@ -1116,20 +705,4 @@ where
     >>::Marked: EveryPortAnswers,
 {
     declare_stage_effects::<H::AllowedEffects, H::Ports, Index>(&handler.ports())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::instance_name;
-
-    #[test]
-    fn long_base_instance_keeps_suffix() {
-        let base = format!("r{}", "a".repeat(63));
-        let one = instance_name(&base, "1");
-        let two = instance_name(&base, "2");
-        assert_ne!(one, two);
-        assert_eq!(one.len(), 64);
-        assert!(one.ends_with(".1"), "{one}");
-        assert_eq!(instance_name("in-memory", "7"), "in-memory.7");
-    }
 }

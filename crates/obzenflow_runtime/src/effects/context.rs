@@ -172,13 +172,22 @@ impl EffectContext {
         tokio::time::sleep(duration)
     }
 
+    pub(crate) fn query_context(&self) -> crate::queries::QueryContext {
+        crate::queries::QueryContext {
+            stage_key: self.stage_key.clone(),
+            number: self.input_seq.0,
+            recorder: self.recorder.clone(),
+        }
+    }
+
     /// The commit handle of a [`Transactional`] request. Its port commits the
     /// outcome through it, and the committed record is the outcome. Code that
     /// `#[effect]` generates for a method taking an `EffectCommitHandle` calls it.
     ///
     /// ```
     /// # use async_trait::async_trait;
-    /// # use obzenflow_runtime::effects::{CallRequest, DomainFacts, EffectCommitHandle, EffectContext, EffectError, Transactional};
+    /// # use obzenflow_runtime::commands::CallRequest;
+    /// # use obzenflow_runtime::effects::{DomainFacts, EffectCommitHandle, EffectContext, EffectError, Transactional};
     /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     /// # struct Entry;
     /// # impl obzenflow_core::TypedPayload for Entry { const EVENT_TYPE: &'static str = "docs.transaction.entry"; }
@@ -213,7 +222,8 @@ impl EffectContext {
     ///
     /// ```compile_fail,E0271
     /// # use async_trait::async_trait;
-    /// # use obzenflow_runtime::effects::{CallRequest, DomainFacts, EffectCommitHandle, EffectContext, EffectError, Idempotent};
+    /// # use obzenflow_runtime::commands::CallRequest;
+    /// # use obzenflow_runtime::effects::{DomainFacts, EffectCommitHandle, EffectContext, EffectError, Idempotent};
     /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     /// # struct Entry;
     /// # impl obzenflow_core::TypedPayload for Entry { const EVENT_TYPE: &'static str = "docs.transaction.entry"; }

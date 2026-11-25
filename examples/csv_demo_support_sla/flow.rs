@@ -11,11 +11,12 @@ use obzenflow::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{flow, join, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::queries::QueryPort;
 use obzenflow::stages::joins::{JoinReferenceView, TypedJoinHandler};
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
-use obzenflow::stages::sources::{CsvDecoder, CsvFile, CsvFileSystem, CsvSource};
+use obzenflow::stages::sources::{CsvDecoder, CsvFile, CsvSource};
 use obzenflow::stages::transforms::TypedTransformHandler;
+use obzenflow::systems::file::CsvFileSystem;
+use obzenflow::systems::{Port, SystemConfig};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -142,9 +143,9 @@ fn build_flow() -> FlowDefinition {
             .path(&settings.customers_csv)
             .build()
             .map_err(resources_failed)?;
-        let ticket_store: QueryPort<dyn CsvFile> = match &settings.tickets {
+        let ticket_store: Port<dyn CsvFile> = match &settings.tickets {
             TicketInput::File(path) => CsvFileSystem::at(path).port(),
-            TicketInput::Fixture(config) => QueryPort::located(config.clone()),
+            TicketInput::Fixture(config) => config.clone().port(),
         }
         .map_err(resources_failed)?;
         let tickets = CsvSource::builder(TicketCsv)

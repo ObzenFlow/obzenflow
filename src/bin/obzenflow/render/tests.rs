@@ -827,6 +827,7 @@ fn all_six_effect_occurrences_retain_their_names_and_evidence_in_human_and_jsonl
                 }
             },
             origin: None,
+            request: None,
         };
         body.validate().unwrap();
         let record = execution(100, &[], ExecutionPayload::EffectRecord(Box::new(body)));

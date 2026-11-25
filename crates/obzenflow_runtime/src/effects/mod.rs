@@ -5,7 +5,9 @@
 //! Replay-safe user effects.
 
 #[doc(hidden)]
-pub use crate::queries as __queries;
+pub mod __queries {
+    pub use crate::queries::{QueryContext, QueryError, QueryRequest, QueryResult};
+}
 use async_trait::async_trait;
 pub use obzenflow_core::event::payloads::effect_payload::{
     effect_escape_controls_group_id, effect_outcome_group_id, effect_recovery_progress_group_id,
@@ -49,10 +51,9 @@ use crate::stages::common::supervision::output_committer::{
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 
 mod actions;
-mod binding;
+pub(crate) mod binding;
 mod boundary;
 mod call;
-mod command;
 mod commit;
 mod completion;
 mod context;
@@ -63,8 +64,7 @@ mod error;
 mod fault;
 mod history;
 mod identity;
-mod perform;
-mod ports;
+pub(crate) mod ports;
 mod recovery;
 mod replay;
 mod runtime;
@@ -74,6 +74,13 @@ mod typed;
 #[cfg(test)]
 mod tests;
 
+#[doc(hidden)]
+pub use crate::commands::{
+    assert_port_answer, CallRequest, Command, FieldsEffects, NarrowedPort, PortAnswer, PortEffects,
+    PortReply, PortServesRequest, WholePort,
+};
+#[doc(hidden)]
+pub use crate::systems::{BuiltSystem, Port, PortImpl, ServesPort, System};
 pub(crate) use actions::{
     ActionCheck, ActionDeparture, ActionRow, RecordedAction, RecordedActions,
 };
@@ -93,24 +100,12 @@ pub use boundary::{
     SingleUseEffectBoundaryReport, SingleUseEffectExecution, SingleUseEffectOperation,
     SinkAdmission, SinkFinalizer, SinkPermit,
 };
+pub(crate) use call::call_port_slot;
 #[doc(hidden)]
 pub use call::KeyRule;
 pub use call::{
-    AtLeastOnce, AtMostOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey,
-    Transactional,
+    AtLeastOnce, AtMostOnce, Call, CallSafety, Idempotent, Keyed, RequiresKey, Transactional,
 };
-pub(crate) use command::checked_system_name;
-#[doc(hidden)]
-pub use command::{
-    assert_command, assert_handler_performs_no_ai_effect, assert_port_answer,
-    assert_stateful_handler_performs_no_ai_effect, effectful_stateful_effects,
-    effectful_transform_effects, AnswersEffect, BuiltSystem, DeclareEffects, EveryPortAnswers,
-    FieldEffects, FieldsEffects, FindPort, HandlerPerformableEffects, JoinMembers, MarkPortUsed,
-    NarrowedPort, PortAfter, PortAnswer, PortAnswersAnEffect, PortEffects, PortFound, PortImpl,
-    PortList, PortMark, PortReply, PortServesRequest, ServesPort, StageEffectsError, Unused, Used,
-    WholePort,
-};
-pub use command::{Command, LocatedSystem, Port, StagePort, SystemName};
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
 pub use context::{
@@ -127,9 +122,6 @@ pub use obzenflow_core_derive::{
 pub mod __facade {
     pub use obzenflow_core_derive::{command, port, system};
 }
-#[doc(hidden)]
-pub use perform::PerformedRequest;
-pub use perform::{perform, Perform, PerformRequest};
 #[doc(hidden)]
 pub use sink::{OpenSinkBatch, SinkHandler};
 pub use sink::{SinkBatchDefaults, SinkGroupSystem, SinkRequest, SinkRole};
@@ -166,9 +158,7 @@ pub use ports::{
     EffectRegistrationCollectionError,
 };
 #[doc(hidden)]
-pub use ports::{
-    EffectPortResolverWithMetadata, EffectRegistrationBuilder, ResolvedEffectPort, SourceSystem,
-};
+pub use ports::{EffectPortResolverWithMetadata, EffectRegistrationBuilder, ResolvedEffectPort};
 pub(crate) use recovery::ProgressJournal;
 pub use recovery::{EffectProgress, InputHolds};
 pub(crate) use runtime::EffectsCore;

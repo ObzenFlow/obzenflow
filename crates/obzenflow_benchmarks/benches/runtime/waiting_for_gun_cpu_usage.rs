@@ -24,7 +24,7 @@ use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
 
-struct IdleSource(obzenflow_runtime::queries::QueryPort<dyn NumberFeed>);
+struct IdleSource(obzenflow_runtime::systems::Port<dyn NumberFeed>);
 
 impl IdleSource {
     fn new() -> Self {

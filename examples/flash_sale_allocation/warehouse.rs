@@ -6,7 +6,8 @@
 
 use super::domain::{HoldId, OrderId, Sku, StockReleased, StockReserved};
 use async_trait::async_trait;
-use obzenflow::effects::{EffectError, Port, SystemName};
+use obzenflow::effects::EffectError;
+use obzenflow::systems::{Port, System};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -68,6 +69,7 @@ pub trait WarehousePort {
     async fn release(&self, request: &StockRelease) -> Result<StockReleased, EffectError>;
 }
 
+#[obzenflow::system("warehouse-demo")]
 #[derive(Debug)]
 struct SimulatedWarehouse {
     reserve_latency: Duration,
@@ -92,7 +94,6 @@ impl SimulatedWarehouse {
     }
 }
 
-#[obzenflow::system("warehouse-demo")]
 #[async_trait]
 impl WarehousePort for SimulatedWarehouse {
     async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError> {
@@ -104,12 +105,12 @@ impl WarehousePort for SimulatedWarehouse {
     }
 }
 
+#[obzenflow::system("warehouse-other")]
 #[derive(Debug)]
 struct OtherWarehouse {
     warehouse: SimulatedWarehouse,
 }
 
-#[obzenflow::system("warehouse-other")]
 #[async_trait]
 impl WarehousePort for OtherWarehouse {
     async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError> {

@@ -5,14 +5,16 @@
 use super::domain::{sample_payments, PaymentAuthorized};
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::commands::perform;
 use obzenflow::effects::postgres::{
     self, default_postgres_client, PostgresClient, PostgresConnection, PostgresStatement,
     PostgresTransport,
 };
-use obzenflow::effects::{perform, EffectError, EffectPortResolutionError, Port};
+use obzenflow::effects::{EffectError, EffectPortResolutionError};
 use obzenflow::flow::{flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::stages::sources;
+use obzenflow::systems::Port;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -30,12 +32,12 @@ pub(crate) trait PaymentStorePort {
     async fn store(&self, payment: &PaymentAuthorized) -> Result<(), EffectError>;
 }
 
+#[obzenflow::system("payments-postgres")]
 struct PostgresPayments {
     postgres: Arc<dyn PostgresClient>,
     insert: PostgresStatement,
 }
 
-#[obzenflow::system("payments-postgres")]
 #[async_trait]
 impl PaymentStorePort for PostgresPayments {
     async fn store(&self, payment: &PaymentAuthorized) -> Result<(), EffectError> {

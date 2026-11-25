@@ -20,9 +20,11 @@ use obzenflow_runtime::__private::{
     AdmitSource, AdmittedSource, JoinBinding, TypedJoinHandlerAdapter,
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
 };
+use obzenflow_runtime::commands::{
+    effectful_transform_effects, Command, DeclareEffects, EveryPortAnswers, PortList,
+};
 use obzenflow_runtime::effects::{
-    effectful_transform_effects, Command, DeclareEffects, DeclaredEffectSet, Effects,
-    EveryPortAnswers, PortList, SinkHandler, SinkRole, StageCompletion,
+    DeclaredEffectSet, Effects, SinkHandler, SinkRole, StageCompletion,
 };
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, OutcomeContract,
@@ -1550,8 +1552,8 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.source_continuation()
     }
 
-    fn source_system(&self) -> Option<obzenflow_runtime::effects::SourceSystem> {
-        self.inner.source_system()
+    fn source_binding(&self) -> Option<obzenflow_core::effect_binding::SystemBinding> {
+        self.inner.source_binding()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
@@ -1975,12 +1977,7 @@ pub(crate) fn flow_evidence_with_cycle(
     cycle_members.sort();
     let systems = descriptors
         .values()
-        .filter_map(|descriptor| {
-            Some((
-                descriptor.name().to_owned(),
-                descriptor.source_system()?.binding().clone(),
-            ))
-        })
+        .filter_map(|descriptor| Some((descriptor.name().to_owned(), descriptor.source_binding()?)))
         .collect();
     let mut sources = Vec::new();
     for descriptor in descriptors.values() {
@@ -2769,8 +2766,8 @@ impl StageDescriptor for DeterministicOrdererOverride {
         self.inner.source_continuation()
     }
 
-    fn source_system(&self) -> Option<obzenflow_runtime::effects::SourceSystem> {
-        self.inner.source_system()
+    fn source_binding(&self) -> Option<obzenflow_core::effect_binding::SystemBinding> {
+        self.inner.source_binding()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {

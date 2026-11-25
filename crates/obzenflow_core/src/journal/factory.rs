@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 /// Erased substrate fact for consumers outside the build (FLOWIP-120u).
 ///
-/// Durable means located: the locator names the single addressable place
+/// A durable run has a locator that names the single addressable place
 /// holding every artifact the run produces. An ephemeral run has none.
 #[derive(Clone, Debug)]
 pub enum RunSubstrateState {

@@ -25,11 +25,13 @@ mod replay_testkit {
 
 use obzenflow::flow::{flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
+use obzenflow::queries::FiniteRead;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sources::{
-    FiniteRead, SourceDiagnostic, SourceDiagnosticReason, SourceError, SourceRead,
+    SourceDiagnostic, SourceDiagnosticReason, SourceError, SourceRead,
     TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler, ValuesSource,
 };
+use obzenflow::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -128,12 +130,12 @@ trait TickNumbers {
     ) -> Result<FiniteRead<u64, TickRead>, obzenflow::queries::QueryError>;
 }
 
+#[obzenflow::system("tick-numbers")]
 struct Numbers {
     last: Option<u64>,
     pace: Duration,
 }
 
-#[obzenflow::system("tick-numbers")]
 #[async_trait::async_trait]
 impl TickNumbers for Numbers {
     async fn read(
@@ -153,11 +155,11 @@ impl TickNumbers for Numbers {
     }
 }
 
-struct RejectingTicks(obzenflow::queries::QueryPort<dyn TickNumbers>);
+struct RejectingTicks(Port<dyn TickNumbers>);
 
 impl RejectingTicks {
     fn new() -> Self {
-        Self(obzenflow::queries::QueryPort::to(Numbers {
+        Self(Port::to(Numbers {
             last: Some(503),
             pace: Duration::ZERO,
         }))
@@ -179,11 +181,11 @@ impl TypedFiniteSourceHandler for RejectingTicks {
     }
 }
 
-struct PacedTicks(obzenflow::queries::QueryPort<dyn TickNumbers>);
+struct PacedTicks(Port<dyn TickNumbers>);
 
 impl PacedTicks {
     fn new() -> Self {
-        Self(obzenflow::queries::QueryPort::to(Numbers {
+        Self(Port::to(Numbers {
             last: None,
             pace: Duration::from_millis(30),
         }))
@@ -2517,11 +2519,12 @@ mod hosted {
 #[derive(Clone, Debug, serde::Serialize)]
 struct Discard;
 
+#[obzenflow::system("slow-discard")]
 struct SlowDiscard {
     delay: Duration,
 }
 
-#[obzenflow::port(system = "slow-discard")]
+#[obzenflow::port]
 impl SlowDiscard {
     #[effect(type = "cli_verify.slow_discard", at_least_once, records = reply)]
     async fn discard(&self, _: &Discard) -> Result<(), obzenflow::effects::EffectError> {
@@ -2533,8 +2536,8 @@ impl SlowDiscard {
 fn lagging_sink_flow(root: PathBuf, delay: Duration) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let ticks_handler = ticks();
-        let out_handler = obzenflow::effects::perform(|_: &Tick| Discard)
-            .through(obzenflow::effects::Port::to(SlowDiscard { delay }));
+        let out_handler = obzenflow::commands::perform(|_: &Tick| Discard)
+            .through(Port::to(SlowDiscard { delay }));
         Ok(flow! {
             name: "cli_verify",
             journals: disk_journals(root),

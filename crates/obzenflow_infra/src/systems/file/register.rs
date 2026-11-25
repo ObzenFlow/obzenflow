@@ -11,18 +11,20 @@
 //! write, and moves a tail that no record holds into an inert file beside it,
 //! named `<file>.<length>.damage`.
 
-use super::blocking::blocking_io;
-use super::hex;
 use async_trait::async_trait;
 use csv::{ReaderBuilder, WriterBuilder};
+use obzenflow_adapters::sinks::blocking::blocking_io;
+use obzenflow_adapters::sinks::{hex, queued_batch_defaults};
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::commands::Command;
 use obzenflow_runtime::effects::{
-    port, system, Command, DeclaredEffectSet, EffectContext, EffectError,
-    EffectPortResolutionError, Port, SinkRole,
+    port, system, DeclaredEffectSet, EffectContext, EffectError, EffectPortResolutionError,
+    SinkRole,
 };
 use obzenflow_runtime::effects::{SinkBatchDefaults, SinkGroupSystem};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::systems::Port;
 use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -97,12 +99,12 @@ enum Written {
     Header,
 }
 
+#[system("csv-register")]
 struct CsvRegister {
     layout: Arc<CsvLayout>,
     state: Arc<Mutex<RegisterState>>,
 }
 
-#[system("csv-register")]
 #[async_trait]
 impl CsvRegisterPort for CsvRegister {
     async fn append(&self, row: &CsvRow, ctx: &EffectContext) -> Result<Appended, EffectError> {
@@ -578,7 +580,7 @@ impl<P: CsvProjection> SinkRole<P::Input> for CsvSink<P> {
     fn batch_defaults(&self) -> SinkBatchDefaults {
         let mut batch = self.batch;
         if batch.size.is_none() && matches!(self.destination, CsvDestination::File(_)) {
-            batch.size = super::queued_batch_defaults().size;
+            batch.size = queued_batch_defaults().size;
         }
         batch
     }
@@ -717,9 +719,9 @@ mod tests {
     }
 
     fn assert_registers_conflict(first: &Path, second: &Path) {
+        use obzenflow_runtime::commands::effectful_transform_effects;
         use obzenflow_runtime::effects::{
-            effectful_transform_effects, EffectPortRegistry, EffectRegistrationCollectionError,
-            SinkHandler,
+            EffectPortRegistry, EffectRegistrationCollectionError, SinkHandler,
         };
         let declarations = |path: &Path| {
             let sink = CsvSink::builder(EntryRow).path(path).build().unwrap();
@@ -735,9 +737,9 @@ mod tests {
 
     #[test]
     fn cloned_register_stages_refused() {
+        use obzenflow_runtime::commands::effectful_transform_effects;
         use obzenflow_runtime::effects::{
-            effectful_transform_effects, EffectPortRegistry, EffectRegistrationCollectionError,
-            SinkHandler,
+            EffectPortRegistry, EffectRegistrationCollectionError, SinkHandler,
         };
         let sink = CsvSink::builder(EntryRow)
             .path("register.csv")

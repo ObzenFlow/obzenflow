@@ -523,9 +523,9 @@ pub trait ConsolePort {
     async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError>;
 }
 
+#[system("console")]
 struct Stdout;
 
-#[system("console")]
 #[async_trait]
 impl ConsolePort for Stdout {
     async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError> {
@@ -533,9 +533,9 @@ impl ConsolePort for Stdout {
     }
 }
 
+#[system("console-stderr")]
 struct Stderr;
 
-#[system("console-stderr")]
 #[async_trait]
 impl ConsolePort for Stderr {
     async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError> {
@@ -680,6 +680,7 @@ pub trait ConsoleTablePort {
     async fn write_row(&self, row: &TableRow, ctx: &EffectContext) -> Result<(), EffectError>;
 }
 
+#[system("console-table")]
 #[derive(Clone)]
 struct ConsoleTable {
     columns: Vec<String>,
@@ -713,7 +714,6 @@ impl ConsoleTable {
     }
 }
 
-#[system("console-table")]
 #[async_trait]
 impl ConsoleTablePort for ConsoleTable {
     async fn write_row(&self, row: &TableRow, _: &EffectContext) -> Result<(), EffectError> {
@@ -856,9 +856,9 @@ mod tests {
         }
     }
 
+    #[system("captured-console")]
     struct Captured(Arc<Mutex<Vec<ConsoleOutput>>>);
 
-    #[system("captured-console")]
     #[async_trait]
     impl ConsolePort for Captured {
         async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError> {
@@ -918,9 +918,8 @@ mod tests {
 
     #[test]
     fn distinct_console_tables_collect() {
-        use obzenflow_runtime::effects::{
-            effectful_transform_effects, EffectPortRegistry, SinkHandler,
-        };
+        use obzenflow_runtime::commands::effectful_transform_effects;
+        use obzenflow_runtime::effects::{EffectPortRegistry, SinkHandler};
         let table = |column: &str, width, stderr, size| {
             let formatter =
                 TableFormatter::new(&[column], |row: &TestEvent| vec![row.value.clone()])

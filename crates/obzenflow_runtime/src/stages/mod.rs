@@ -18,9 +18,8 @@ pub mod transform;
 pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
-    prove_journal_form, EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig,
-    HostedSource, HostedSubmission, IngressDecodeError, IngressDecoder, IngressReceiptSender,
-    IngressRecord, ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision, SignalGate,
+    EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig, HostedSource,
+    ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision, SignalGate,
     StatefulEmission, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedStatefulHandler,
 };

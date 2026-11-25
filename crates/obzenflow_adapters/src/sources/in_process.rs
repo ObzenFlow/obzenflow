@@ -6,14 +6,13 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::SystemName;
-use obzenflow_runtime::queries::{QueryContext, QueryError, QueryPort};
-use obzenflow_runtime::stages::common::handlers::source::{
-    Continuous, FiniteRead, SourceRead, SourceReceiver,
-};
+use obzenflow_runtime::events::SourceReceiver;
+use obzenflow_runtime::queries::{FiniteRead, QueryContext, QueryError};
+use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead};
 use obzenflow_runtime::stages::source::{
     SourceError, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
 };
+use obzenflow_runtime::systems::{Port, System};
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -107,7 +106,12 @@ enum ValuesState<I: IntoIterator> {
     Exhausted,
 }
 
-impl<I: IntoIterator> SystemName for InMemory<I> {
+impl<I> System for InMemory<I>
+where
+    I: IntoIterator + Send + Sync + 'static,
+    I::IntoIter: Send + Sync,
+    I::Item: TypedPayload + Send + Sync + 'static,
+{
     const NAME: &'static str = "in-memory";
 }
 
@@ -206,7 +210,7 @@ where
     type Output = I::Item;
 
     fn read(&self) -> SourceRead<Self::Output> {
-        let port = QueryPort::<dyn ValueFeed>::to(self.system.clone());
+        let port = Port::<dyn ValueFeed>::to(self.system.clone());
         SourceRead::finite(port, ValuesRead { at: 0 }, |value| {
             serde_json::from_value(value)
                 .map_err(|_| SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into()))
@@ -245,7 +249,7 @@ impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler fo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_runtime::stages::common::handlers::source::source_channel;
+    use obzenflow_runtime::events::source_channel;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
 

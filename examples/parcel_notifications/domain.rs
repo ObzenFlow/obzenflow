@@ -48,8 +48,8 @@ impl TypedPayload for ParcelUpdate {
 }
 
 impl ParcelUpdate {
-    pub fn located(&self, depot: &str) -> LocatedParcel {
-        LocatedParcel {
+    pub fn depot_found(&self, depot: &str) -> DepotFound {
+        DepotFound {
             parcel_id: self.parcel_id.clone(),
             customer: self.customer.clone(),
             status: self.status,
@@ -59,18 +59,18 @@ impl ParcelUpdate {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LocatedParcel {
+pub struct DepotFound {
     pub parcel_id: String,
     pub customer: String,
     pub status: ParcelStatus,
     pub depot: String,
 }
 
-impl TypedPayload for LocatedParcel {
-    const EVENT_TYPE: &'static str = "parcel.located";
+impl TypedPayload for DepotFound {
+    const EVENT_TYPE: &'static str = "parcel.depot_found";
 }
 
-impl LocatedParcel {
+impl DepotFound {
     pub fn emailed(&self, message: String) -> EmailSent {
         EmailSent {
             parcel_id: self.parcel_id.clone(),

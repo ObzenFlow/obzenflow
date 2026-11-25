@@ -26,9 +26,9 @@ pub trait DiscardPort {
     fn discard(&self, discarded: &Discarded) -> Result<(), EffectError>;
 }
 
+#[system("discard")]
 struct Discard;
 
-#[system("discard")]
 impl DiscardPort for Discard {
     fn discard(&self, _: &Discarded) -> Result<(), EffectError> {
         Ok(())

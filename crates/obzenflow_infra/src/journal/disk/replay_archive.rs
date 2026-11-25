@@ -49,7 +49,6 @@ pub struct DiskReplayArchive {
     /// Each source journal's count of records a replay re-admits or
     /// preserves, from the same scan.
     replayable_by_source: HashMap<String, u64>,
-    rejections_by_source: HashMap<String, u64>,
     /// The generation whose reconstruction this run recorded as complete
     /// (FLOWIP-134i B6).
     reconstruction_completed: Option<u64>,
@@ -337,7 +336,6 @@ impl DiskReplayArchive {
                 recorded_source_eof: HashMap::new(),
                 recorded_binding: HashMap::new(),
                 replayable_by_source: HashMap::new(),
-                rejections_by_source: HashMap::new(),
                 reconstruction_completed: None,
                 ancestors: Vec::new(),
                 live_writer,
@@ -385,7 +383,6 @@ impl DiskReplayArchive {
             Default::default()
         };
 
-        let rejections_by_source = scan_source_rejections(&archive_path, &manifest)?;
         let scan = scan_source_journals(
             &archive_path,
             &manifest,
@@ -420,7 +417,6 @@ impl DiskReplayArchive {
             recorded_source_eof: scan.eof_by_source,
             recorded_binding: scan.binding_by_source,
             replayable_by_source: scan.replayable_by_source,
-            rejections_by_source,
             reconstruction_completed,
             ancestors: Vec::new(),
             live_writer,
@@ -822,13 +818,6 @@ impl ReplayArchive for DiskReplayArchive {
         self.recorded_source_eof.get(stage_key).copied()
     }
 
-    fn recorded_source_rejections(&self, stage_key: &str) -> u64 {
-        self.rejections_by_source
-            .get(stage_key)
-            .copied()
-            .unwrap_or(0)
-    }
-
     fn recorded_source_binding(
         &self,
         stage_key: &str,
@@ -944,7 +933,6 @@ impl DiskReplayArchive {
             recorded_source_eof: HashMap::new(),
             recorded_binding: HashMap::new(),
             replayable_by_source: HashMap::from([("src".to_string(), replayable)]),
-            rejections_by_source: HashMap::new(),
             reconstruction_completed: None,
             ancestors: Vec::new(),
             live_writer: false,
@@ -1266,77 +1254,6 @@ fn scan_marker_generation(
         }
     }
     Ok(max_generation)
-}
-
-fn scan_source_rejections(
-    archive_path: &Path,
-    manifest: &RunManifest,
-) -> Result<HashMap<String, u64>, ReplayError> {
-    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-    use obzenflow_core::event::ChainPayload;
-    let policy = ReadPolicy::SealedScan {
-        tolerate_torn_tail: true,
-    };
-    let mut rejections = HashMap::new();
-    for (stage_key, stage_info) in &manifest.stages {
-        if !stage_info.stage_type.is_source() {
-            continue;
-        }
-        let path = archive_path.join(&stage_info.error_journal_file);
-        if !path.exists() {
-            continue;
-        }
-        let file = File::open(&path).map_err(|e| ReplayError::Io {
-            message: format!("Failed to open error journal at {}", path.display()),
-            source: e,
-        })?;
-        let mut reader = BufReader::new(file);
-        let mut buf = Vec::new();
-        let mut offset = 0u64;
-        let mut decoder = Decoder::new(&path);
-        let mut rejected = 0u64;
-        while let Some((consumed, termination)) =
-            read_frame_sync(&mut reader, &mut buf).map_err(|e| ReplayError::Io {
-                message: format!("Failed to read error journal at {}", path.display()),
-                source: e,
-            })?
-        {
-            let record_offset = offset;
-            offset += consumed as u64;
-            match dispose(
-                classify_frame::<ChainEvent>(&buf, &mut decoder, record_offset),
-                termination,
-                policy,
-                || tail_after(&path, &buf, record_offset, &mut reader),
-            ) {
-                Disposition::Yield(frame) => {
-                    rejected += frame
-                        .into_records()
-                        .into_iter()
-                        .filter(|record| {
-                            matches!(
-                                record.payload,
-                                ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(_))
-                            )
-                        })
-                        .count() as u64;
-                }
-                Disposition::EndOfCommittedRecords
-                | Disposition::Interrupted(_)
-                | Disposition::Skip => break,
-                Disposition::Corrupt(_) => {
-                    return Err(ReplayError::Io {
-                        message: format!("Corrupt error journal at {}", path.display()),
-                        source: std::io::Error::other("corrupt frame"),
-                    })
-                }
-            }
-        }
-        if rejected > 0 {
-            rejections.insert(stage_key.clone(), rejected);
-        }
-    }
-    Ok(rejections)
 }
 
 fn scan_failure_evidence(

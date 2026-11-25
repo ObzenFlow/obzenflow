@@ -17,11 +17,13 @@ use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, Outcomes, TransportContract};
 use obzenflow_dsl::{flow, sink, source, test_flow, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::systems::Port;
 use obzenflow_runtime::testing::{BackpressureAckGate, JournalProbe};
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +45,8 @@ const KIND_SEED: &str = "seed";
 const KIND_ITER: &str = "iter";
 const KIND_DONE: &str = "done";
 use obzenflow::stages::sources::{ChannelSource, ValuesSource};
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::queries::FiniteRead;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -74,12 +77,12 @@ trait SeedInput {
     ) -> Result<FiniteRead<SeedEvent, SeedRead>, obzenflow::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("seed-then-eof")]
 struct SeedThenEof {
     target: u64,
     iteration_started: Arc<Notify>,
 }
 
-#[obzenflow_runtime::effects::system("seed-then-eof")]
 #[async_trait]
 impl SeedInput for SeedThenEof {
     async fn read(
@@ -98,11 +101,11 @@ impl SeedInput for SeedThenEof {
     }
 }
 
-struct SeedThenEofSource(obzenflow::queries::QueryPort<dyn SeedInput>);
+struct SeedThenEofSource(Port<dyn SeedInput>);
 
 impl SeedThenEofSource {
     fn new(target: u64, iteration_started: Arc<Notify>) -> Self {
-        Self(obzenflow::queries::QueryPort::to(SeedThenEof {
+        Self(Port::to(SeedThenEof {
             target,
             iteration_started,
         }))
@@ -374,11 +377,11 @@ trait DoneCounterPort: Send + Sync {
     fn count(&self, seed: &SeedKind) -> Result<(), EffectError>;
 }
 
+#[obzenflow_runtime::effects::system("done-counter")]
 struct DoneCounter {
     done_events: Arc<AtomicU64>,
 }
 
-#[obzenflow_runtime::effects::system("done-counter")]
 impl DoneCounterPort for DoneCounter {
     fn count(&self, seed: &SeedKind) -> Result<(), EffectError> {
         if seed.kind == KIND_DONE {
@@ -555,7 +558,7 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let sink = perform(seed_kind).through(Port::to(DoneCounter {
         done_events: done_count.clone(),
     }));
-    let (seed_input, seeds) = obzenflow::stages::sources::source_channel(1);
+    let (seed_input, seeds) = obzenflow::events::source_channel(1);
     seed_input
         .try_send(seed(target_iterations))
         .expect("the channel holds the seed");

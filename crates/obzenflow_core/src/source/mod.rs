@@ -2,7 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! This module controls how the interrupted input of a source continues on resume.
+//! The portable data of sources: the queries a source asks, the members a sender
+//! pushes, and how the interrupted input of a source continues on resume.
+
+mod input;
+mod query;
+
+pub use input::{MemberRecorded, MEMBER_RECORDED_EVENT_TYPE};
+pub use query::{QueryBookmark, QueryError};
 
 use serde_json::{Map, Value};
 

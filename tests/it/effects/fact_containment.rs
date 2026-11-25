@@ -13,11 +13,11 @@ use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, Typ
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    effectful_transform_effects, EffectDeclaration, EffectError, Effects, Port, StageEffectsError,
-};
+use obzenflow_runtime::commands::{effectful_transform_effects, StageEffectsError};
+use obzenflow_runtime::effects::{EffectDeclaration, EffectError, Effects};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -50,6 +50,7 @@ impl TypedPayload for ContainmentEffectValue {
     const EVENT_TYPE: &'static str = "containment.effect_value";
 }
 
+#[obzenflow::system("values")]
 struct ValueService;
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,7 +58,7 @@ struct ValueRequest {
     value: u64,
 }
 
-#[obzenflow::port(system = "values")]
+#[obzenflow::port]
 impl ValueService {
     #[effect(type = "containment.value", exactly_once)]
     fn value(&self, request: &ValueRequest) -> Result<ContainmentEffectValue, EffectError> {
@@ -262,12 +263,13 @@ impl obzenflow_core::Outcome for CollidingOutcome {
 
 impl obzenflow_core::EffectOutcome for CollidingOutcome {}
 
+#[obzenflow::system("colliding")]
 struct CollidingService;
 
 #[derive(Clone, Debug, Serialize)]
 struct CollidingRequest;
 
-#[obzenflow::port(system = "colliding")]
+#[obzenflow::port]
 impl CollidingService {
     #[effect(type = "containment.colliding", exactly_once)]
     fn collide(&self, _: &CollidingRequest) -> Result<CollidingOutcome, EffectError> {

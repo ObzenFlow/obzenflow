@@ -5,9 +5,9 @@
 //! Ready-made sinks. Each is a command a `sink!` row takes, sending one
 //! request per input through a port the framework declares.
 
-pub(crate) mod blocking;
+#[doc(hidden)]
+pub mod blocking;
 pub mod console;
-pub mod csv;
 pub mod discard;
 #[cfg(feature = "test-support")]
 pub mod recording;
@@ -19,7 +19,6 @@ pub use console::{
     TableConsoleSink, TableFormatter, TableRow,
 };
 
-pub use csv::{Appended, CsvProjection, CsvRegisterPort, CsvRow, CsvSink, CsvSinkBuilder};
 pub use discard::{DiscardPort, DiscardSink, Discarded};
 #[cfg(feature = "test-support")]
 pub use recording::{
@@ -28,14 +27,16 @@ pub use recording::{
 };
 pub use tracing::{TracingLevel, TracingOutput, TracingPort, TracingSink};
 
-fn queued_batch_defaults() -> obzenflow_runtime::effects::SinkBatchDefaults {
+#[doc(hidden)]
+pub fn queued_batch_defaults() -> obzenflow_runtime::effects::SinkBatchDefaults {
     obzenflow_runtime::effects::SinkBatchDefaults {
         size: std::num::NonZeroUsize::new(64),
         max_wait: None,
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+#[doc(hidden)]
+pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

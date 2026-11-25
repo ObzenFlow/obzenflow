@@ -24,12 +24,13 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{EffectError, Effects, Port};
+use obzenflow_runtime::effects::{EffectError, Effects};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -97,6 +98,7 @@ impl TypedTransformHandler for MergeTransform {
     }
 }
 
+#[obzenflow_runtime::effects::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
@@ -106,7 +108,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "call-counter")]
+#[obzenflow_runtime::effects::port]
 impl CallCounter {
     #[effect(type = "resume_abort.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<EffectValue, EffectError> {

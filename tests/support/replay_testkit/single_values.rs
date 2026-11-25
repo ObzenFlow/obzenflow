@@ -5,10 +5,11 @@
 use async_trait::async_trait;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::queries::{QueryContext, QueryError, QueryPort};
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::queries::{FiniteRead, QueryContext, QueryError};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::systems::Port;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,11 +29,11 @@ pub trait SingleValueFeed {
     ) -> Result<FiniteRead<Value, NextSingleValue>, QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("single-values")]
 struct SingleValueList {
     values: Vec<Value>,
 }
 
-#[obzenflow_runtime::effects::system("single-values")]
 #[async_trait]
 impl SingleValueFeed for SingleValueList {
     async fn read(
@@ -54,7 +55,7 @@ impl SingleValueFeed for SingleValueList {
 }
 
 pub struct SingleValues<T> {
-    port: QueryPort<dyn SingleValueFeed>,
+    port: Port<dyn SingleValueFeed>,
     output: PhantomData<fn() -> T>,
 }
 
@@ -68,7 +69,7 @@ where
         .map(|value| serde_json::to_value(value).expect("a single value serializes"))
         .collect();
     SingleValues {
-        port: QueryPort::to(SingleValueList { values }),
+        port: Port::to(SingleValueList { values }),
         output: PhantomData,
     }
 }

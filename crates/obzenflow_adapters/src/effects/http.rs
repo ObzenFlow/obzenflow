@@ -7,7 +7,8 @@
 
 use http::StatusCode;
 use obzenflow_core::http_client::{HttpClientError, HttpResponse};
-use obzenflow_runtime::effects::{EffectError, SystemName};
+use obzenflow_runtime::effects::EffectError;
+use obzenflow_runtime::systems::System;
 use std::fmt::Display;
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ const BODY_PREFIX_BYTES: usize = 512;
 
 /// The effect error for a send that got no response. A refused connection
 /// names the system, since it certainly did not act.
-pub fn unsent<S: SystemName>(error: HttpClientError) -> EffectError {
+pub fn unsent<S: System>(error: HttpClientError) -> EffectError {
     unsent_from(S::NAME, error)
 }
 
@@ -94,11 +95,8 @@ mod tests {
     use obzenflow_core::event::RetryDisposition;
     use obzenflow_core::http_client::HeaderMap;
 
+    #[obzenflow_runtime::effects::system("stripe")]
     struct Stripe;
-
-    impl SystemName for Stripe {
-        const NAME: &'static str = "stripe";
-    }
 
     fn response(status: u16, headers: &[(&'static str, &'static str)], body: &str) -> HttpResponse {
         let mut map = HeaderMap::new();

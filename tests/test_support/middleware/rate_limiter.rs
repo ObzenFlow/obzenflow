@@ -29,7 +29,8 @@ impl TypedPayload for RateLimiterTestEvent {
     const EVENT_TYPE: &'static str = "rate_limiter.event";
 }
 use obzenflow::stages::sources::ValuesSource;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::queries::FiniteRead;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -252,11 +253,11 @@ trait BatchInput {
     ) -> Result<FiniteRead<RateLimiterTestEvent, BatchRead>, obzenflow::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("batches")]
 struct Batches {
     sizes: Vec<u64>,
 }
 
-#[obzenflow_runtime::effects::system("batches")]
 #[async_trait]
 impl BatchInput for Batches {
     async fn read(
@@ -279,11 +280,11 @@ impl BatchInput for Batches {
     }
 }
 
-struct BatchedSource(obzenflow::queries::QueryPort<dyn BatchInput>);
+struct BatchedSource(obzenflow::systems::Port<dyn BatchInput>);
 
 impl BatchedSource {
     fn new(sizes: Vec<u64>) -> Self {
-        Self(obzenflow::queries::QueryPort::to(Batches { sizes }))
+        Self(obzenflow::systems::Port::to(Batches { sizes }))
     }
 }
 
@@ -326,12 +327,12 @@ trait ScriptedInput {
     ) -> Result<FiniteRead<RateLimiterTestEvent, ScriptRead>, obzenflow::queries::QueryError>;
 }
 
+#[obzenflow_runtime::effects::system("scripted")]
 struct Script {
     steps: Vec<SourceStep>,
     played: AtomicUsize,
 }
 
-#[obzenflow_runtime::effects::system("scripted")]
 #[async_trait]
 impl ScriptedInput for Script {
     async fn read(
@@ -368,7 +369,7 @@ impl ScriptedInput for Script {
 
 fn script(steps: Vec<SourceStep>) -> SourceRead<RateLimiterTestEvent> {
     SourceRead::finite(
-        obzenflow::queries::QueryPort::to(Script {
+        obzenflow::systems::Port::to(Script {
             steps,
             played: AtomicUsize::new(0),
         }),

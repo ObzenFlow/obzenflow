@@ -18,6 +18,7 @@ use obzenflow_adapters::middleware::{
     MiddlewareSurfaceKind, PerEffectPolicyBoundary, PerSourcePolicyBoundary,
     TopologyMiddlewareConfigSlot,
 };
+use obzenflow_core::effect_binding::SystemBinding;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::__private::{AdmittedSource, UnifiedJoinHandler};
@@ -25,9 +26,8 @@ use obzenflow_runtime::stages::observer::{
     observer_shell_surfaces_for_stage as runtime_observer_shell_surfaces_for_stage, ObserverSurface,
 };
 use obzenflow_runtime::{
-    effects::{
-        EffectBoundary, EffectDeclaration, EffectPortRegistry, SourceSystem, StageEffectsError,
-    },
+    commands::StageEffectsError,
+    effects::{EffectBoundary, EffectDeclaration, EffectPortRegistry},
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
 };
@@ -606,9 +606,9 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     /// for the same reason: resume admission must see every source (FLOWIP-134i B8).
     fn source_continuation(&self) -> Option<SourceContinuation>;
 
-    /// For a source stage, `source_system` returns the system of its port. For every other
-    /// stage, it returns `None`.
-    fn source_system(&self) -> Option<SourceSystem> {
+    /// For a source stage, `source_binding` returns the binding of its system. For every
+    /// other stage, it returns `None`.
+    fn source_binding(&self) -> Option<SystemBinding> {
         None
     }
 
@@ -725,8 +725,24 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
         Some(self.source.continuation())
     }
 
-    fn source_system(&self) -> Option<SourceSystem> {
-        Some(self.source.system().clone())
+    fn source_binding(&self) -> Option<SystemBinding> {
+        Some(self.source.binding().clone())
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        self.source.effect_declarations().unwrap_or_default()
+    }
+
+    fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
+        let declarations = self
+            .source
+            .effect_declarations()
+            .map_err(|refusal| refusal.for_stage(&self.name))?;
+        validate_pre_collection_effect_configuration(
+            &self.name,
+            &declarations,
+            self.effect_policy_attachments(),
+        )
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -881,8 +897,24 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
         Some(self.source.continuation())
     }
 
-    fn source_system(&self) -> Option<SourceSystem> {
-        Some(self.source.system().clone())
+    fn source_binding(&self) -> Option<SystemBinding> {
+        Some(self.source.binding().clone())
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        self.source.effect_declarations().unwrap_or_default()
+    }
+
+    fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
+        let declarations = self
+            .source
+            .effect_declarations()
+            .map_err(|refusal| refusal.for_stage(&self.name))?;
+        validate_pre_collection_effect_configuration(
+            &self.name,
+            &declarations,
+            self.effect_policy_attachments(),
+        )
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -2995,9 +3027,7 @@ mod tests {
     #[test]
     fn topology_uses_resolved_family_settings_and_stable_semantic_keys() {
         let (_submissions, receiver) =
-            obzenflow_runtime::stages::common::handlers::source::source_channel::<
-                DemoTransactionalOutput,
-            >(1);
+            obzenflow_runtime::events::source_channel::<DemoTransactionalOutput>(1);
         let mut descriptor = AsyncInfiniteSourceDescriptor::new(
             "source",
             obzenflow_runtime::__private::AdmitSource::<dyn UnifiedAsyncInfiniteSourceHandler>::admit(

@@ -188,6 +188,7 @@ where
                         observation: EffectObservation::settled_success(),
                         outcome: EffectOutcomePayload::Succeeded { output },
                         origin: None,
+                        request: None,
                     };
                     let event = build_effect_record_event(
                         self.inner.writer_id,
@@ -307,6 +308,7 @@ where
             observation: EffectObservation::settled_failure(),
             outcome: outcome.clone(),
             origin: None,
+            request: None,
         };
 
         let mut event = build_effect_record_event(
@@ -560,6 +562,7 @@ pub(super) fn build_domain_effect_success_facts(
                 outcome_fact_count,
             },
             origin: origin.clone(),
+            request: None,
         };
 
         let mut event = fact.into_derived_event(writer_id, parent.view(), lineage);
@@ -631,7 +634,7 @@ pub(super) async fn append_effect_record(
     event: ChainEvent,
     parent: &DeliveredRecord<ChainPayload>,
     backpressure_writer: &BackpressureWriter,
-) -> Result<(), EffectError> {
+) -> Result<obzenflow_core::JournalRecord<ChainPayload>, EffectError> {
     // Framework effect/capture records are physical Data rows even though the
     // transport filter hides them from handlers. Track them around the durable
     // append so downstream filtering can complete the same physical credit.
@@ -648,8 +651,7 @@ pub(super) async fn append_effect_record(
     committer
         .commit_prebuilt(event, Some(parent), CommitOptions::default())
         .await
-        .map_err(|e| EffectError::Journal(e.to_string()))?;
-    Ok(())
+        .map_err(|e| EffectError::Journal(e.to_string()))
 }
 
 pub(super) fn build_effect_record_event(

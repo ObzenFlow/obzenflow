@@ -2,10 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::command::{Command, Port, PortEffects};
-use super::{CallRequest, DeclaredEffectSet, Effects, StageCompletion};
+use super::command::{Command, PortEffects};
+use super::request::CallRequest;
+use crate::effects::{DeclaredEffectSet, Effects, StageCompletion};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
+use crate::systems::Port;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::{EffectOutcome, EmptySet, FactsOf, WithMember};
 use obzenflow_core::TypedPayload;
@@ -17,7 +19,9 @@ use std::marker::PhantomData;
 ///
 /// ```
 /// # use obzenflow_core::event::schema::TypedPayload;
-/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # use serde::{Deserialize, Serialize};
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Invoice;
@@ -35,8 +39,8 @@ use std::marker::PhantomData;
 /// #     #[effect(type = "docs.perform.charge", exactly_once)]
 /// #     fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError>;
 /// # }
-/// # struct Scripted;
 /// # #[obzenflow_runtime::effects::system("scripted")]
+/// # struct Scripted;
 /// # impl PaymentGatewayPort for Scripted {
 /// #     fn charge(&self, _: &ChargeRequest) -> Result<Paid, EffectError> { Ok(Paid) }
 /// # }
@@ -46,7 +50,7 @@ use std::marker::PhantomData;
 /// A function that builds no request does not compile:
 ///
 /// ```compile_fail,E0277
-/// # use obzenflow_runtime::effects::perform;
+/// # use obzenflow_runtime::commands::perform;
 /// # #[derive(Clone, Debug)]
 /// # struct Invoice;
 /// fn same_invoice(invoice: &Invoice) -> Invoice {
@@ -81,9 +85,9 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     /// `#[obzenflow::port]` trait answers a request:
     ///
     /// ```
-    /// # use obzenflow_runtime::effects::{
-    /// #     perform, CallRequest, DomainFacts, EffectContext, EffectError, Idempotent, Port,
-    /// # };
+    /// # use obzenflow_runtime::commands::{perform, CallRequest};
+    /// # use obzenflow_runtime::effects::{DomainFacts, EffectContext, EffectError, Idempotent};
+    /// # use obzenflow_runtime::systems::Port;
     /// # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     /// # struct Ticket;
     /// # impl obzenflow_core::TypedPayload for Ticket {
@@ -91,8 +95,8 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     /// # }
     /// #[obzenflow_runtime::effects::port]
     /// trait TicketDesk {}
-    /// struct Desk;
     /// #[obzenflow_runtime::effects::system("desk")]
+    /// struct Desk;
     /// impl TicketDesk for Desk {}
     ///
     /// # #[derive(Debug, Clone, serde::Serialize)]
@@ -109,6 +113,43 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     /// #     }
     /// # }
     /// let read = perform(|_: &Ticket| Read).through(Port::to(Desk));
+    /// ```
+    ///
+    /// The request of a `#[query]` method is not a command's request, so a `perform`
+    /// line that builds one does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// # use obzenflow_runtime::commands::perform;
+    /// # use obzenflow_runtime::queries::{FiniteRead, QueryContext, QueryError};
+    /// # use obzenflow_runtime::systems::Port;
+    /// # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    /// # struct Ticket;
+    /// # impl obzenflow_core::TypedPayload for Ticket {
+    /// #     const EVENT_TYPE: &'static str = "doc.ticket";
+    /// # }
+    /// #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    /// struct NextTicket;
+    ///
+    /// #[obzenflow_runtime::effects::port]
+    /// #[async_trait::async_trait]
+    /// trait TicketFeed: Send + Sync {
+    ///     #[query(type = "doc.tickets.read")]
+    ///     async fn read(&self, from: &NextTicket, ctx: &QueryContext)
+    ///         -> Result<FiniteRead<Ticket, NextTicket>, QueryError>;
+    /// }
+    ///
+    /// #[obzenflow_runtime::effects::system("ticket-feed")]
+    /// struct Feed;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl TicketFeed for Feed {
+    ///     async fn read(&self, _: &NextTicket, _: &QueryContext)
+    ///         -> Result<FiniteRead<Ticket, NextTicket>, QueryError> {
+    ///         Ok(FiniteRead::EndOfInput)
+    ///     }
+    /// }
+    ///
+    /// let read = perform(|_: &Ticket| NextTicket).through(Port::to(Feed));
     /// ```
     pub fn through(self, port: Port<R::Port>) -> Perform<F, In, R>
     where
@@ -191,11 +232,11 @@ where
     }
 }
 
-impl<F, In, R> super::sink::SinkRole<In> for Perform<F, In, R>
+impl<F, In, R> crate::effects::SinkRole<In> for Perform<F, In, R>
 where
     F: for<'input> Fn(&'input In) -> R + Send + Sync + 'static,
     In: 'static,
-    R: super::sink::SinkRequest,
+    R: crate::effects::SinkRequest,
 {
     type Request = R;
 
@@ -206,8 +247,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::{effectful_transform_effects, EffectError, EffectSafety, EffectSet};
     use super::*;
+    use crate::commands::effectful_transform_effects;
+    use crate::effects::{EffectError, EffectSafety, EffectSet};
     use obzenflow_core::Outcome;
     use serde::{Deserialize, Serialize};
 
@@ -260,9 +302,9 @@ mod tests {
         fn resend(&self, request: &ResendRequest) -> Result<Paid, EffectError>;
     }
 
+    #[crate::effects::system("scripted")]
     struct Scripted;
 
-    #[crate::effects::system("scripted")]
     impl GatewayPort for Scripted {
         fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError> {
             Ok(Paid {

@@ -13,17 +13,17 @@ use obzenflow_topology::TopologyError;
 use crate::dsl::typing::EdgeInputRole;
 use std::path::{Path, PathBuf};
 
-fn journal_root_unused(root: &Path, located: Option<&Path>) -> String {
-    match located {
+fn journal_root_unused(root: &Path, run_path: Option<&Path>) -> String {
+    match run_path {
         None => format!(
             "journal.root is {}, but this flow records to memory journals, which keep no run \
              location; unset journal.root or record the flow with disk_journals",
             root.display()
         ),
-        Some(located) => format!(
+        Some(run_path) => format!(
             "journal.root is {}, but the flow's journal provider placed this run at {}",
             root.display(),
-            located.display()
+            run_path.display()
         ),
     }
 }
@@ -206,10 +206,10 @@ pub enum FlowBuildError {
 
     /// `journal.root` is set, but the flow's journal provider keeps no run
     /// location under it.
-    #[error("{}", journal_root_unused(.root, .located.as_deref()))]
+    #[error("{}", journal_root_unused(.root, .run_path.as_deref()))]
     JournalRootUnused {
         root: PathBuf,
-        located: Option<PathBuf>,
+        run_path: Option<PathBuf>,
     },
 
     /// `journal.sync` is set in the configuration file, but the flow records

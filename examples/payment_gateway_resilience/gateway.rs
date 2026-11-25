@@ -160,6 +160,7 @@ impl ValidatedOrder {
     }
 }
 
+#[obzenflow::system("simulated-processor")]
 pub struct SimulatedProcessor {
     calls: CallLog<ProcessorResponse>,
     outage_timeouts_left: AtomicU32,
@@ -184,7 +185,6 @@ impl SimulatedProcessor {
     }
 }
 
-#[obzenflow::system("simulated-processor")]
 #[async_trait]
 impl PaymentGatewayPort for SimulatedProcessor {
     async fn authorize(
@@ -226,11 +226,11 @@ pub fn simulated_processor(calls: &Path) -> Port<dyn PaymentGatewayPort> {
     Port::deferred(move || SimulatedProcessor::open(&calls).map_err(processor_unavailable))
 }
 
+#[obzenflow::system("simulated-processor")]
 pub struct SlowAnswerProcessor {
     processor: SimulatedProcessor,
 }
 
-#[obzenflow::system("simulated-processor")]
 #[async_trait]
 impl PaymentGatewayPort for SlowAnswerProcessor {
     async fn authorize(

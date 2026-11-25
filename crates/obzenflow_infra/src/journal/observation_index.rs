@@ -4,7 +4,7 @@
 
 use obzenflow_core::event::observability::families::observation_families;
 use obzenflow_core::event::observability::{CaptureSeq, ObservabilityContext};
-use obzenflow_core::journal::{JournalError, LocatedObservation, ObservationKey};
+use obzenflow_core::journal::{JournalError, ObservationKey, PositionedObservation};
 use std::collections::{HashMap, VecDeque};
 
 pub(super) const HISTORY_PER_KEY: usize = 4;
@@ -74,7 +74,7 @@ pub(super) fn locate(
     key: &ObservationKey,
     locator: &Locator,
     packet: ObservabilityContext,
-) -> Result<LocatedObservation, JournalError> {
+) -> Result<PositionedObservation, JournalError> {
     let observation = observation_families(packet)
         .into_iter()
         .flatten()
@@ -86,7 +86,7 @@ pub(super) fn locate(
                 .then_some(packet)
         })
         .ok_or_else(|| unavailable("attachment locator no longer matches its carrier"))?;
-    Ok(LocatedObservation {
+    Ok(PositionedObservation {
         position: locator.position,
         observation,
     })

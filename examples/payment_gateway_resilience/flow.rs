@@ -13,7 +13,6 @@ use super::gateway::{
     simulated_processor, slow_answer_processor, AuthorizePayment, PaymentGatewayPort,
 };
 use super::validation;
-use obzenflow::effects::Port;
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{
@@ -21,6 +20,7 @@ use obzenflow::middleware::{
 };
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
+use obzenflow::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;

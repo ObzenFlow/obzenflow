@@ -46,13 +46,13 @@ fn position(marker: &Marker) -> TextPosition {
     }
 }
 
-fn located(reason: SourceDiagnosticReason, at: TextPosition) -> SourceDiagnostic {
+fn positioned(reason: SourceDiagnosticReason, at: TextPosition) -> SourceDiagnostic {
     SourceDiagnostic::new(reason).position(at.line, at.column)
 }
 
 /// The whole input could not be decoded as one supported document.
 fn undecodable(reason: SourceDiagnosticReason, at: TextPosition) -> SourceError {
-    SourceError::Deserialization(located(reason, at))
+    SourceError::Deserialization(positioned(reason, at))
 }
 
 /// Parses one bounded UTF-8 document into an owned snapshot.
@@ -393,7 +393,7 @@ fn array_index(token: &str) -> Option<usize> {
 /// Resolves the configured selection into the records it names.
 pub(super) fn select(root: Node, selection: &YamlSelection) -> Result<Vec<Node>, SourceError> {
     let not_found = |at: TextPosition| {
-        SourceError::Validation(located(SourceDiagnosticReason::SelectionNotFound, at))
+        SourceError::Validation(positioned(SourceDiagnosticReason::SelectionNotFound, at))
     };
     match selection {
         YamlSelection::Document => Ok(vec![root]),
@@ -422,7 +422,7 @@ pub(super) fn select(root: Node, selection: &YamlSelection) -> Result<Vec<Node>,
 fn into_sequence(node: Node) -> Result<Vec<Node>, SourceError> {
     match node.kind {
         NodeKind::Seq(items) => Ok(items),
-        _ => Err(SourceError::Validation(located(
+        _ => Err(SourceError::Validation(positioned(
             SourceDiagnosticReason::UnexpectedShape,
             node.start,
         ))),

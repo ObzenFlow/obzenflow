@@ -110,6 +110,7 @@ impl TypedPayload for FinalOutput {
     const EVENT_TYPE: &'static str = "join_replay.output";
 }
 
+#[obzenflow::system("call-counter")]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
@@ -119,7 +120,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow::port(system = "call-counter")]
+#[obzenflow::port]
 impl CallCounter {
     #[effect(type = "join_replay.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<JoinEffectValue, EffectError> {

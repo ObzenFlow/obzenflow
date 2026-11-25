@@ -6,16 +6,14 @@ use crate::effects_path::EffectsPath;
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::parse::{ParseStream, Parser};
-use syn::{Ident, Item, ItemImpl, LitStr, Path, Token};
+use syn::{Generics, Ident, Item, LitStr, Path, Token};
 
 const ARGUMENTS: &str =
     "`#[obzenflow::system]` takes the system's name, as in `#[obzenflow::system(\"stripe\")]`";
 
-const NOT_A_PORT_IMPL: &str = "`#[obzenflow::system(\"…\")]` marks a system's `impl` of its port \
-                               trait, as in \
-                               `impl PaymentGatewayPort for StripeProcessor`; a struct that \
-                               serves as its own port names itself with \
-                               `#[obzenflow::port(system = \"…\")]`";
+const NOT_A_TYPE: &str = "`#[obzenflow::system(\"…\")]` names a system on its type, as in \
+                          `#[obzenflow::system(\"stripe\")] pub struct StripeProcessor`; the type \
+                          names itself once, whatever ports it serves";
 
 const NAME_GRAMMAR: &str =
     "a system name is 1 to 64 characters from `[A-Za-z0-9._-]` and starts with a letter or digit";
@@ -45,7 +43,7 @@ impl SystemArgs {
     }
 }
 
-pub(crate) fn name_error(name: &LitStr) -> Option<syn::Error> {
+fn name_error(name: &LitStr) -> Option<syn::Error> {
     let value = name.value();
     let bytes = value.as_bytes();
     let within_grammar = !bytes.is_empty()
@@ -63,35 +61,35 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream, default: EffectsPath)
         Ok(args) => args,
         Err(error) => return refused(item, error),
     };
-    let Ok(Item::Impl(port_impl)) = syn::parse2::<Item>(item.clone()) else {
-        return refused(
-            item,
-            syn::Error::new(proc_macro2::Span::call_site(), NOT_A_PORT_IMPL),
-        );
+    let (ident, generics) = match syn::parse2::<Item>(item.clone()) {
+        Ok(Item::Struct(system)) => (system.ident, system.generics),
+        Ok(Item::Enum(system)) => (system.ident, system.generics),
+        Ok(Item::Impl(system)) => {
+            return refused(item, syn::Error::new_spanned(&system.self_ty, NOT_A_TYPE))
+        }
+        _ => {
+            return refused(
+                item,
+                syn::Error::new(proc_macro2::Span::call_site(), NOT_A_TYPE),
+            )
+        }
     };
-    if port_impl.trait_.is_none() {
-        return refused(
-            item,
-            syn::Error::new_spanned(&port_impl.self_ty, NOT_A_PORT_IMPL),
-        );
-    }
     if let Some(error) = name_error(&args.name) {
         return refused(item, error);
     }
-    let system_name = system_name_impl(&args, &port_impl);
+    let system = system_impl(&args, &ident, &generics);
     quote! {
-        #port_impl
-        #system_name
+        #item
+        #system
     }
 }
 
-fn system_name_impl(args: &SystemArgs, port_impl: &ItemImpl) -> TokenStream {
+fn system_impl(args: &SystemArgs, ident: &Ident, generics: &Generics) -> TokenStream {
     let effects = args.effects.tokens();
     let name = &args.name;
-    let system = &port_impl.self_ty;
-    let (impl_generics, _, where_clause) = port_impl.generics.split_for_impl();
+    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     quote! {
-        impl #impl_generics #effects::SystemName for #system #where_clause {
+        impl #impl_generics #effects::System for #ident #type_generics #where_clause {
             const NAME: &'static str = #name;
         }
     }
@@ -114,37 +112,52 @@ mod tests {
     }
 
     #[test]
-    fn expands_system_name_impl() {
+    fn struct_expands_system_impl() {
         let expanded = expanded(
             quote!("stripe"),
             quote! {
-                #[async_trait]
-                impl PaymentGatewayPort for StripeProcessor {}
+                #[derive(Debug)]
+                pub struct StripeProcessor;
             },
         );
         assert!(
-            expanded.contains("# [async_trait] impl PaymentGatewayPort for StripeProcessor { }"),
+            expanded.contains("# [derive (Debug)] pub struct StripeProcessor ;"),
             "{expanded}"
         );
         assert!(
             expanded.contains(
-                ":: obzenflow :: effects :: SystemName for StripeProcessor { const NAME : & 'static str = \"stripe\" ; }"
+                ":: obzenflow :: effects :: System for StripeProcessor { const NAME : & 'static str = \"stripe\" ; }"
             ),
             "{expanded}"
         );
     }
 
     #[test]
-    fn generics_propagate_to_system_name_impl() {
+    fn enum_expands_system_impl() {
+        let expanded = expanded(
+            quote!("ledger"),
+            quote!(
+                enum Ledger {
+                    Memory,
+                }
+            ),
+        );
+        assert!(expanded.contains("System for Ledger"), "{expanded}");
+    }
+
+    #[test]
+    fn generics_propagate_to_system_impl() {
         let expanded = expanded(
             quote!("scripted"),
             quote!(
-                impl<T> CardPort for Scripted<T> where T: Send {}
+                struct Scripted<T>(T)
+                where
+                    T: Send;
             ),
         );
         assert!(
             expanded.contains(
-                "impl < T > :: obzenflow :: effects :: SystemName for Scripted < T > where T : Send"
+                "impl < T > :: obzenflow :: effects :: System for Scripted < T > where T : Send"
             ),
             "{expanded}"
         );
@@ -154,12 +167,14 @@ mod tests {
     fn system_runtime_default_expands_runtime_path() {
         let expanded = expand(
             quote!("ledger"),
-            quote!(impl LedgerPort for Ledger {}),
+            quote!(
+                struct Ledger;
+            ),
             EffectsPath::Runtime,
         );
         let expected = quote! {
-            impl LedgerPort for Ledger {}
-            impl ::obzenflow_runtime::effects::SystemName for Ledger {
+            struct Ledger;
+            impl ::obzenflow_runtime::effects::System for Ledger {
                 const NAME: &'static str = "ledger";
             }
         };
@@ -171,12 +186,14 @@ mod tests {
         for default in [EffectsPath::Facade, EffectsPath::Runtime] {
             let expanded = expand(
                 quote!("ledger", effects = crate::effects),
-                quote!(impl LedgerPort for Ledger {}),
+                quote!(
+                    struct Ledger;
+                ),
                 default,
             )
             .to_string();
             assert!(
-                expanded.contains("crate :: effects :: SystemName for Ledger"),
+                expanded.contains("crate :: effects :: System for Ledger"),
                 "{expanded}"
             );
         }
@@ -191,9 +208,14 @@ mod tests {
             "https://user:secret@vendor.example",
             &"s".repeat(65),
         ] {
-            let expanded = expanded(quote!(#name), quote!(impl CardPort for Card {}));
+            let expanded = expanded(
+                quote!(#name),
+                quote!(
+                    struct Card;
+                ),
+            );
             assert!(expanded.contains(NAME_GRAMMAR), "{name}: {expanded}");
-            assert!(!expanded.contains("SystemName"), "{name}: {expanded}");
+            assert!(!expanded.contains("System for"), "{name}: {expanded}");
         }
     }
 
@@ -206,34 +228,39 @@ mod tests {
             "0ledger",
             &"s".repeat(64),
         ] {
-            let expanded = expanded(quote!(#name), quote!(impl CardPort for Card {}));
-            assert!(
-                expanded.contains("SystemName for Card"),
-                "{name}: {expanded}"
+            let expanded = expanded(
+                quote!(#name),
+                quote!(
+                    struct Card;
+                ),
             );
+            assert!(expanded.contains("System for Card"), "{name}: {expanded}");
         }
     }
 
     #[test]
     fn missing_name_refused() {
-        let expanded = expanded(quote!(), quote!(impl CardPort for Card {}));
+        let expanded = expanded(
+            quote!(),
+            quote!(
+                struct Card;
+            ),
+        );
         assert!(expanded.contains("takes the system's name"), "{expanded}");
     }
 
     #[test]
-    fn non_port_impl_refused() {
+    fn non_type_refused() {
         for item in [
+            quote!(impl CardPort for Card {}),
             quote!(impl Card {}),
-            quote!(
-                struct Card;
-            ),
             quote!(
                 trait CardPort {}
             ),
         ] {
             let expanded = expanded(quote!("card"), item);
             assert!(
-                expanded.contains("`#[obzenflow::port(system = \\\"…\\\")]`"),
+                expanded.contains("names a system on its type"),
                 "{expanded}"
             );
         }

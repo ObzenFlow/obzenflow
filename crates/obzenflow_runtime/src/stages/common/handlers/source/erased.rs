@@ -97,7 +97,6 @@ pub trait UnifiedAsyncFiniteSourceHandler: sealed::AsyncFinite + Send + Sync {
     }
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext);
     fn poll_cancelled(&mut self) {}
-    fn poll_timeout(&self) -> Option<Duration>;
     async fn next_invocation(&mut self) -> ErasedSourceInvocation;
 }
 
@@ -124,7 +123,6 @@ pub trait UnifiedAsyncInfiniteSourceHandler: sealed::AsyncInfinite + Send + Sync
     fn replayed_facts(&self) -> u64 {
         0
     }
-    fn poll_timeout(&self) -> Option<Duration>;
     /// The binding slot of Runtime-owned hosted ingress (FLOWIP-122i B3).
     fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
         None

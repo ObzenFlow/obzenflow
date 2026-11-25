@@ -13,9 +13,11 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -172,11 +174,11 @@ trait CollectBriefPort: Send + Sync {
     fn collect(&self, brief: &DecisionBrief) -> Result<(), EffectError>;
 }
 
+#[obzenflow_runtime::effects::system("brief-collector")]
 struct CollectBrief {
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
 }
 
-#[obzenflow_runtime::effects::system("brief-collector")]
 impl CollectBriefPort for CollectBrief {
     fn collect(&self, brief: &DecisionBrief) -> Result<(), EffectError> {
         self.outputs

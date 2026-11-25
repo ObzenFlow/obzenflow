@@ -7,7 +7,6 @@
 use super::fsm::{FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState};
 use crate::execution::SourceExecutionPhase;
 use crate::metrics::instrumentation::snapshot_stage_accounting;
-use crate::stages::common::handlers::source::SourceError;
 use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -539,8 +538,8 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                 let archived = stage
                     .effect_history
                     .as_ref()
-                    .and_then(|history| history.source_origin.as_ref());
-                let parent = if let Some(record) = archived {
+                    .and_then(|history| history.declared_binding.clone());
+                let parent = if let Some(record) = archived.as_ref() {
                     let origin = obzenflow_core::event::CausalFrontier::from_record(record)?;
                     let event = record
                         .authored()
@@ -693,49 +692,17 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                     .expect("Running owns a source handler");
                 let live_poll = !replaying && !handler.has_pending_records();
                 let source_boundary = self.source_boundary.clone().filter(|_| live_poll);
-                let poll_timeout = handler.poll_timeout().filter(|_| live_poll);
                 let boundary_future = around_source_boundary(
                     source_boundary,
                     Box::pin(async {
                         let poll_started_at = time::Instant::now();
-                        match poll_timeout {
-                            Some(timeout) => {
-                                match time::timeout(
-                                    timeout,
-                                    self.handler
-                                        .as_mut()
-                                        .expect("Running owns a source handler")
-                                        .next_invocation(),
-                                )
-                                .await
-                                {
-                                    Ok(invocation) => SourcePollReport::from_erased(
-                                        invocation,
-                                        poll_started_at.elapsed(),
-                                    ),
-                                    Err(_) => {
-                                        let poll_duration = poll_started_at.elapsed();
-                                        let timeout_error = SourceError::Timeout(
-                                            obzenflow_core::event::SourceDiagnosticReason::TimedOut
-                                                .into(),
-                                        );
-                                        SourcePollReport::handler_error(
-                                            timeout_error,
-                                            poll_duration,
-                                        )
-                                    }
-                                }
-                            }
-                            None => {
-                                let invocation = self
-                                    .handler
-                                    .as_mut()
-                                    .expect("Running owns a source handler")
-                                    .next_invocation()
-                                    .await;
-                                SourcePollReport::from_erased(invocation, poll_started_at.elapsed())
-                            }
-                        }
+                        let invocation = self
+                            .handler
+                            .as_mut()
+                            .expect("Running owns a source handler")
+                            .next_invocation()
+                            .await;
+                        SourcePollReport::from_erased(invocation, poll_started_at.elapsed())
                     }),
                 );
 

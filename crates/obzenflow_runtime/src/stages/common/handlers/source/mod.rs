@@ -4,17 +4,13 @@
 
 //! Source handler components
 
-mod channel;
 mod erased;
 mod hosted;
 pub(crate) mod placeholder;
 pub(crate) mod prepared;
 pub(crate) mod read;
-mod record_de;
-pub use channel::{source_channel, SourceClosed, SourcePermit, SourceReceiver, SourceSender};
-pub use read::{
-    Continuous, ContinuousRead, Finite, FiniteRead, InputReadiness, ReadLifetime, SourceRead,
-};
+pub(crate) mod record_de;
+pub use read::{Continuous, Finite, ReadLifetime, SourceRead};
 #[doc(hidden)]
 pub mod traits;
 pub(crate) mod typed;
@@ -26,15 +22,14 @@ pub use erased::{
 };
 #[cfg(test)]
 pub(crate) use erased::{SealAsyncFinite, SealAsyncInfinite};
-pub use hosted::{HostedSource, HostedSubmission, IngressReceiptSender};
+pub use hosted::HostedSource;
 #[doc(hidden)]
 pub use obzenflow_core::source::{ResumeRefusal, SourceContinuation};
 pub use record_de::RecordDeError;
 pub use traits::SourceError;
+#[doc(hidden)]
+pub use typed::{FiniteReadAdapter, InfiniteReadAdapter, SyncFiniteReads, SyncInfiniteReads};
 pub use typed::{
-    prove_journal_form, IngressDecodeError, IngressDecoder, IngressRecord,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
 };
-#[doc(hidden)]
-pub use typed::{FiniteReadAdapter, InfiniteReadAdapter, SyncFiniteReads, SyncInfiniteReads};

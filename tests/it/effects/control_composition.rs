@@ -17,9 +17,8 @@ use obzenflow_dsl::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDe
 use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use obzenflow_dsl::{effectful_stateful, effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{
-    effectful_transform_effects, EffectDeclaration, EffectError, Effects, Port, StageCompletion,
-};
+use obzenflow_runtime::commands::effectful_transform_effects;
+use obzenflow_runtime::effects::{EffectDeclaration, EffectError, Effects, StageCompletion};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::DslConfigDefault;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -27,6 +26,7 @@ use obzenflow_runtime::stages::common::handlers::{
     EffectfulStatefulHandler, EffectfulTransformHandler,
 };
 use obzenflow_runtime::stages::observer::EffectObserver;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -45,9 +45,10 @@ impl TypedPayload for CompositionFact {
     const EVENT_TYPE: &'static str = "effect_control_composition.fact";
 }
 
+#[obzenflow::system("composition")]
 struct CompositionService;
 
-#[obzenflow::port(system = "composition")]
+#[obzenflow::port]
 impl CompositionService {
     #[effect(type = "effect_control_composition.a", exactly_once)]
     fn a(&self, _: &RequestA) -> Result<CompositionFact, EffectError> {
@@ -829,9 +830,9 @@ trait ResendPort: Send + Sync {
 #[derive(Clone, Debug, Serialize)]
 struct ResendRequest;
 
+#[obzenflow_runtime::effects::system("resender")]
 struct Resender;
 
-#[obzenflow_runtime::effects::system("resender")]
 impl ResendPort for Resender {
     fn resend(&self, _: &ResendRequest) -> Result<CompositionFact, EffectError> {
         Ok(CompositionFact)
