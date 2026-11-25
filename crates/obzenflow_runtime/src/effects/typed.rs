@@ -161,7 +161,7 @@ where
     R: CallRequest,
     R::Outcome: EffectOutcome,
 {
-    pub(super) async fn call_as_output(&mut self, request: R) -> Result<R::Outcome, EffectError> {
+    pub(crate) async fn call_as_output(&mut self, request: R) -> Result<R::Outcome, EffectError> {
         let projection = self.core.project_named_effect::<Call<R>>()?;
         Box::pin(self.core.perform(Call::new(request, projection))).await
     }
@@ -251,7 +251,8 @@ where
     /// ```
     /// # use async_trait::async_trait;
     /// # use obzenflow_core::TypedPayload;
-    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+    /// # use obzenflow_runtime::systems::Port;
     /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
     /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
     /// # use serde::{Deserialize, Serialize};
@@ -298,7 +299,8 @@ where
     /// ```compile_fail,E0277
     /// # use async_trait::async_trait;
     /// # use obzenflow_core::TypedPayload;
-    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+    /// # use obzenflow_runtime::systems::Port;
     /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
     /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
     /// # use serde::{Deserialize, Serialize};
@@ -339,7 +341,8 @@ where
     /// ```compile_fail,E0277
     /// # use async_trait::async_trait;
     /// # use obzenflow_core::TypedPayload;
-    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+    /// # use obzenflow_runtime::systems::Port;
     /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
     /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
     /// # use serde::{Deserialize, Serialize};
@@ -384,7 +387,8 @@ where
     /// ```compile_fail,E0277
     /// # use async_trait::async_trait;
     /// # use obzenflow_core::TypedPayload;
-    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+    /// # use obzenflow_runtime::systems::Port;
     /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
     /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
     /// # use serde::{Deserialize, Serialize};
@@ -432,7 +436,8 @@ where
     /// ```compile_fail,E0277
     /// # use async_trait::async_trait;
     /// # use obzenflow_core::TypedPayload;
-    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, Port};
+    /// # use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+    /// # use obzenflow_runtime::systems::Port;
     /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
     /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
     /// # use serde::{Deserialize, Serialize};

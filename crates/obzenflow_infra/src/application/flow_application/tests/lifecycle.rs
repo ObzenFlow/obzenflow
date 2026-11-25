@@ -57,16 +57,12 @@ impl Drop for PendingPollDrop {
     }
 }
 
-fn pending_lifetime_source() -> (
-    IdleInfiniteSource,
-    oneshot::Receiver<()>,
-    oneshot::Receiver<()>,
-) {
+fn pending_lifetime_source() -> (FiniteInput, oneshot::Receiver<()>, oneshot::Receiver<()>) {
     let (started_tx, started_rx) = oneshot::channel();
     let (cancelled_tx, cancelled_rx) = oneshot::channel();
     let started = Arc::new(Mutex::new(Some(started_tx)));
     let cancelled = Arc::new(Mutex::new(Some(cancelled_tx)));
-    let source = IdleInfiniteSource::waiting(move || {
+    let source = FiniteInput::answering(move || {
         let started = started.lock().unwrap().take();
         let dropped = PendingPollDrop(cancelled.lock().unwrap().take());
         Box::pin(async move {
@@ -405,7 +401,7 @@ enabled = false
         let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
         let hook_observed = observed.clone();
         let definition = FlowDefinition::materialize(move |_| {
-            let source = counting_source(source_calls);
+            let source = FiniteInput::new(false, source_calls);
             let sink = noop_sink();
             Ok(flow! {
                 name: "startup_signal", journals: crate::journal::memory_journals(),

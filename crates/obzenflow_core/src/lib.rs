@@ -17,7 +17,6 @@ pub mod id;
 pub mod ingress;
 pub mod journal;
 pub mod metrics;
-pub mod query;
 mod serde_support;
 pub mod source;
 pub mod time;
@@ -26,7 +25,7 @@ pub mod web;
 // Re-export key types for convenience
 pub use effect_binding::{
     BindingEvidenceDigest, BindingEvidenceError, BoundedBindingEvidence, EffectBindingIdentity,
-    SystemBindingEvidence, MAX_BINDING_EVIDENCE_BYTES,
+    MAX_BINDING_EVIDENCE_BYTES,
 };
 pub use error::Result;
 pub use event::chain_event::ChainEvent;

@@ -9,7 +9,6 @@ use super::fsm::{
 };
 use crate::execution::SourceExecutionPhase;
 use crate::metrics::instrumentation::snapshot_stage_accounting;
-use crate::stages::common::handlers::source::SourceError;
 use crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -71,7 +70,9 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     /// The continuation admitted with the source (FLOWIP-134i B8).
     pub(crate) continuation: SourceContinuation,
 
-    pub(crate) system: obzenflow_core::effect_binding::SystemBinding,
+    pub(crate) registered: Arc<
+        std::sync::OnceLock<crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>>,
+    >,
 
     /// Adaptive backoff for async polls that deliver no data.
     pub(crate) idle_backoff: IdleBackoff,
@@ -347,10 +348,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
         _context: &Self::Context,
         descriptor: SupervisorDescriptor,
     ) -> Registration {
-        base::register_stage(
+        base::register_source_stage(
             self.data_journal.clone(),
             self.flow_context.clone(),
             descriptor,
+            self.registered.clone(),
         )
     }
 
@@ -471,7 +473,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
             flow_context: self.flow_context.clone(),
             stage_id: self.stage_id,
             continuation: self.continuation,
-            system: self.system.clone(),
+            registered: self.registered.clone(),
             external_events: self.external_events.begin_turn(),
             state_watcher: self.state_watcher.clone(),
             last_state: Some(state.clone()),
@@ -543,33 +545,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
 
             InfiniteSourceState::AcquiringInput => {
                 let stage = &self.reads;
-                let archived = stage
-                    .effect_history
-                    .as_ref()
-                    .and_then(|history| history.source_origin.as_ref());
-                let parent = if let Some(record) = archived {
-                    let origin = obzenflow_core::event::CausalFrontier::from_record(record)?;
-                    let event = record
-                        .authored()
-                        .with_flow_context(self.flow_context.clone());
-                    crate::supervised_base::publication::with_snapshot(
-                        origin,
-                        crate::supervised_base::publication::append(
-                            &self.data_journal,
-                            event,
-                            Default::default(),
-                        ),
-                    )
-                    .await?
-                    .into()
-                } else {
-                    crate::stages::source::supervision::commit_source_binding(
-                        &self.data_journal,
-                        &self.flow_context,
-                        &self.system,
-                    )
-                    .await?
-                };
+                let parent = self
+                    .registered
+                    .get()
+                    .cloned()
+                    .ok_or("the source reads before its registration row commits")?;
                 if let Some(archive) = ctx.runtime_execution.archive_for_io() {
                     crate::stages::source::supervision::announce_replay_started(
                         archive,
@@ -757,49 +737,17 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                     .expect("Running owns a source handler");
                 let live_poll = !replaying && !handler.has_pending_records();
                 let source_boundary = self.source_boundary.clone().filter(|_| live_poll);
-                let poll_timeout = handler.poll_timeout().filter(|_| live_poll);
                 let boundary_future = around_source_boundary(
                     source_boundary,
                     Box::pin(async {
                         let poll_started_at = time::Instant::now();
-                        match poll_timeout {
-                            Some(timeout) => {
-                                match time::timeout(
-                                    timeout,
-                                    self.handler
-                                        .as_mut()
-                                        .expect("Running owns a source handler")
-                                        .next_invocation(),
-                                )
-                                .await
-                                {
-                                    Ok(invocation) => SourcePollReport::from_erased(
-                                        invocation,
-                                        poll_started_at.elapsed(),
-                                    ),
-                                    Err(_) => {
-                                        let poll_duration = poll_started_at.elapsed();
-                                        let timeout_error = SourceError::Timeout(
-                                            obzenflow_core::event::SourceDiagnosticReason::TimedOut
-                                                .into(),
-                                        );
-                                        SourcePollReport::handler_error(
-                                            timeout_error,
-                                            poll_duration,
-                                        )
-                                    }
-                                }
-                            }
-                            None => {
-                                let invocation = self
-                                    .handler
-                                    .as_mut()
-                                    .expect("Running owns a source handler")
-                                    .next_invocation()
-                                    .await;
-                                SourcePollReport::from_erased(invocation, poll_started_at.elapsed())
-                            }
-                        }
+                        let invocation = self
+                            .handler
+                            .as_mut()
+                            .expect("Running owns a source handler")
+                            .next_invocation()
+                            .await;
+                        SourcePollReport::from_erased(invocation, poll_started_at.elapsed())
                     }),
                 );
 

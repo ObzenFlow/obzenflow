@@ -15,7 +15,8 @@ use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
-use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
@@ -26,6 +27,7 @@ use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedAsyncFiniteSourceHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
@@ -35,7 +37,7 @@ use std::{
 use tokio::runtime::Runtime;
 
 struct Source {
-    port: obzenflow_runtime::queries::QueryPort<dyn NumberFeed>,
+    port: Port<dyn NumberFeed>,
     origin: Instant,
 }
 
@@ -92,7 +94,7 @@ struct Recorder {
     delivered: Delivered,
     constrained: bool,
 }
-#[obzenflow_runtime::effects::port(system = "throughput-recorder")]
+#[obzenflow_runtime::effects::port]
 impl Recorder {
     #[effect(type = "bench.throughput.record", at_least_once, records = reply)]
     async fn record(&self, event: &Input) -> Result<(), EffectError> {
@@ -257,7 +259,7 @@ struct Ledger;
 struct Settle {
     index: u64,
 }
-#[obzenflow_runtime::effects::port(system = "ledger")]
+#[obzenflow_runtime::effects::port]
 impl Ledger {
     #[effect(type = "bench.settle", exactly_once)]
     fn settle(&self, request: &Settle) -> Result<Settled, EffectError> {
@@ -290,7 +292,7 @@ impl EffectfulTransformHandler for SettleEach {
 struct SettledLog {
     settled: Arc<Mutex<Vec<u64>>>,
 }
-#[obzenflow_runtime::effects::port(system = "settled-log")]
+#[obzenflow_runtime::effects::port]
 impl SettledLog {
     #[effect(type = "bench.throughput.settled", at_least_once, records = reply)]
     fn record(&self, event: &Settled) -> Result<(), EffectError> {

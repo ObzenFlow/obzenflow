@@ -10,15 +10,14 @@ use super::domain::{
     AllocationInput, CancelIgnored, HoldId, OrderCancelled, OrderId, OrderPlaced,
     ReservationConfirmed, ReservationFailed, Sku, SoldOut, StockReleased, StockReserved,
 };
-use super::warehouse::{
-    warehouse_port, Reservations, StockReservation, WarehouseConfig, WarehouseId,
-};
+use super::warehouse::{warehouse_port, Reservations, StockReservation, WarehouseConfig};
 use obzenflow::flow::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, MiddlewareFactory};
 use obzenflow::stages::sinks::{TracingOutput, TracingSink};
 use obzenflow::stages::sources;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -27,13 +26,19 @@ pub const DEMO_JOURNAL_ROOT: &str = "target/flash-sale-allocation-logs";
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlashSaleSettings {
+    allocation: AllocationSettings,
     warehouse: WarehouseSettings,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct AllocationSettings {
+    capacity_per_sku: NonZeroU32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct WarehouseSettings {
-    id: WarehouseId,
     reserve_latency_ms: u64,
     reservations: Reservations,
     reservation_pace_ms: u64,
@@ -46,7 +51,6 @@ impl WarehouseSettings {
 
     fn into_config(self) -> WarehouseConfig {
         WarehouseConfig::new(
-            self.id,
             Duration::from_millis(self.reserve_latency_ms),
             self.reservations,
         )
@@ -104,6 +108,7 @@ pub fn settings_flow(inputs: Vec<AllocationInput>, journal_root: PathBuf) -> Flo
         let reservation_pace = settings.warehouse.reservation_pace();
         Ok(allocation_flow(
             inputs,
+            settings.allocation.capacity_per_sku,
             settings.warehouse.into_config(),
             reservation_pace,
             journal_root,
@@ -113,6 +118,7 @@ pub fn settings_flow(inputs: Vec<AllocationInput>, journal_root: PathBuf) -> Flo
 
 fn allocation_flow(
     inputs: Vec<AllocationInput>,
+    capacity_per_sku: NonZeroU32,
     warehouse_config: WarehouseConfig,
     reservation_pace: Duration,
     journal_root: PathBuf,
@@ -131,7 +137,8 @@ fn allocation_flow(
 
     let allocation_feed = sources::ValuesSource::new(inputs);
     let phone_feed = sources::ValuesSource::new(phone_reservations());
-    let allocator = Allocator::new(warehouse, 1).with_reservation_pace(reservation_pace);
+    let allocator =
+        Allocator::new(warehouse, capacity_per_sku.get()).with_reservation_pace(reservation_pace);
     let desk = ReservationDesk;
     let record_confirmation = TracingSink::new(|confirmed: &ReservationConfirmed| {
         TracingOutput::info("reservation confirmation delivered")

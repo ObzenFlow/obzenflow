@@ -6,4 +6,5 @@ mod async_finite;
 mod diagnostic_reasons;
 mod journal_parity;
 mod output_guard;
+mod query_line;
 mod witness_guard;

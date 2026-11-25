@@ -179,7 +179,7 @@ impl EffectDeclaration {
         Self::for_binding::<E>(binding.declaration_binding())
     }
 
-    pub(super) fn for_binding<E>(binding: EffectDeclarationBinding) -> Self
+    pub(crate) fn for_binding<E>(binding: EffectDeclarationBinding) -> Self
     where
         E: Effect,
     {
@@ -304,6 +304,11 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
+        None
+    }
+
+    #[doc(hidden)]
+    fn recorded_request(&self) -> Option<Value> {
         None
     }
 }

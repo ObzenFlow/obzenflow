@@ -72,7 +72,6 @@ pub trait RiskEnginePort {
 
 pub struct RiskEngineOutage;
 
-#[obzenflow::system("risk-engine-outage")]
 #[async_trait]
 impl RiskEnginePort for RiskEngineOutage {
     async fn score(
@@ -110,7 +109,6 @@ impl SimulatedRiskEngine {
     }
 }
 
-#[obzenflow::system("simulated-risk-engine")]
 #[async_trait]
 impl RiskEnginePort for SimulatedRiskEngine {
     async fn score(

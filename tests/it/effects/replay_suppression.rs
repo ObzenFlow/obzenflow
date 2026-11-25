@@ -10,9 +10,11 @@ use obzenflow::stages::stateful::fold;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_stateful, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Effects, IdempotencyKey, Keyed, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::{EffectError, Effects, IdempotencyKey, Keyed};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulStatefulHandler;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -64,7 +66,7 @@ struct CallCounter {
     offset: u64,
 }
 
-#[obzenflow::port(system = "call-counter")]
+#[obzenflow::port]
 impl CallCounter {
     #[effect(type = "effect_replay.counting", exactly_once)]
     fn count(
@@ -264,7 +266,6 @@ struct CollectSink {
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 }
 
-#[obzenflow_runtime::effects::system("replay-output-collector")]
 impl CollectOutputPort for CollectSink {
     fn collect(&self, output: &ReplayOutput) -> Result<(), EffectError> {
         self.outputs

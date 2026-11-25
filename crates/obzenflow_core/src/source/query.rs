@@ -8,7 +8,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
-/// A supplier's serializable position within its input.
+/// `QueryBookmark` is a serializable position in the input of a supplier.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct QueryBookmark(Value);
@@ -33,7 +33,7 @@ impl QueryBookmark {
     }
 }
 
-/// The diagnostic and retry delay recorded for a failed query.
+/// `QueryError` holds the recorded diagnostic and retry delay of a failed query.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, thiserror::Error)]
 #[error("query failed: {}", failure.diagnostic)]
 pub struct QueryError {
@@ -69,44 +69,5 @@ impl QueryError {
     pub fn with_retry_after(mut self, delay: Duration) -> Self {
         self.retry_after = Some(delay);
         self
-    }
-}
-
-/// One stage-local input observation. Read numbers start at one.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SourceInputRecord {
-    pub recorded_flow_id: String,
-    pub stage_key: String,
-    pub number: u64,
-    pub attempt: u32,
-    #[serde(flatten)]
-    pub input: SourceInput,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "input_kind", rename_all = "snake_case")]
-pub enum SourceInput {
-    QueryAnswered {
-        query_type: String,
-        request: Value,
-        answer: Value,
-    },
-    QueryFailed {
-        query_type: String,
-        request: Value,
-        error: QueryError,
-    },
-    IngressMember {
-        member: Value,
-    },
-}
-
-impl SourceInput {
-    pub const fn event_type(&self) -> &'static str {
-        match self {
-            Self::QueryAnswered { .. } => "query.answered",
-            Self::QueryFailed { .. } => "query.failed",
-            Self::IngressMember { .. } => "runtime.ingress.member_recorded",
-        }
     }
 }

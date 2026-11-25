@@ -22,7 +22,7 @@ use super::{
 use crate::application::config::CorsModeArg;
 use crate::application::config::{ConsoleDefaults, ResolvedStartupConfig};
 use crate::web::endpoints::event_ingestion::{
-    http_ingress, HttpIngressAttachment, IngestionConfig, Ingress, IngressDecoder, IngressHandle,
+    http_ingress, HttpIngressAttachment, IngestionConfig, Ingress, IngressHandle,
 };
 #[cfg(feature = "warp-server")]
 use crate::web::host_config::{HostConfig, HostCorsConfig, HostCorsMode};
@@ -38,6 +38,7 @@ use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
+use obzenflow_runtime::events::IngressDecoder;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::HostedSource;
 use obzenflow_runtime::stages::LivenessSnapshots;

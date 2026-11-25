@@ -14,9 +14,11 @@ use obzenflow::stages::sources::ValuesSource;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{JoinReferenceView, TypedJoinHandler};
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -117,7 +119,6 @@ struct Collect {
     rows: Arc<Mutex<Vec<BuildOnlyOut>>>,
 }
 
-#[obzenflow_runtime::effects::system("amr-collector")]
 impl CollectOutPort for Collect {
     fn collect(&self, out: &BuildOnlyOut) -> Result<(), EffectError> {
         self.rows.lock().expect("collected rows").push(out.clone());

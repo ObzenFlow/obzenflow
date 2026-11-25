@@ -371,7 +371,9 @@ async fn assert_completed_disk_cohort(run_path: &std::path::Path, inputs: usize)
                     assert!(row.envelope.provenance.event.processing.status.is_success());
                     *facts.entry(record.journal.stage.unwrap().key).or_insert(0) += 1;
                 }
-                ChainPayload::Execution(ExecutionPayload::EffectRecord(effect)) => {
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(effect))
+                    if !effect.is_query() =>
+                {
                     assert_eq!(record.journal.kind, RunJournalKind::Data);
                     assert_eq!(record.journal.stage.unwrap().key, "console_sink");
                     assert!(matches!(
@@ -441,7 +443,6 @@ struct Controlled {
     entered: mpsc::UnboundedSender<()>,
 }
 
-#[obzenflow_runtime::effects::system("controlled")]
 #[async_trait]
 impl ControlledInput for Controlled {
     async fn take(
@@ -461,11 +462,11 @@ impl ControlledInput for Controlled {
     }
 }
 
-struct ControlledSource(obzenflow_runtime::queries::QueryPort<dyn ControlledInput>);
+struct ControlledSource(Port<dyn ControlledInput>);
 
 impl ControlledSource {
     fn new(input: mpsc::Receiver<IdlePayload>, entered: mpsc::UnboundedSender<()>) -> Self {
-        Self(obzenflow_runtime::queries::QueryPort::to(Controlled {
+        Self(Port::to(Controlled {
             input: tokio::sync::Mutex::new(input),
             entered,
         }))

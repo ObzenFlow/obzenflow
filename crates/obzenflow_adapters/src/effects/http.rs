@@ -7,7 +7,7 @@
 
 use http::StatusCode;
 use obzenflow_core::http_client::{HttpClientError, HttpResponse};
-use obzenflow_runtime::effects::{EffectError, SystemName};
+use obzenflow_runtime::effects::EffectError;
 use std::fmt::Display;
 use std::time::Duration;
 
@@ -15,10 +15,10 @@ pub(crate) const CONNECT_FAILED: &str = "connect_failed";
 
 const BODY_PREFIX_BYTES: usize = 512;
 
-/// The effect error for a send that got no response. A refused connection
-/// names the system, since it certainly did not act.
-pub fn unsent<S: SystemName>(error: HttpClientError) -> EffectError {
-    unsent_from(S::NAME, error)
+/// `unsent` returns the effect error for a send that got no response. The error of a
+/// refused connection names `http` as its failure source.
+pub fn unsent(error: HttpClientError) -> EffectError {
+    unsent_from("http", error)
 }
 
 /// [`unsent`] for a sender that names its source itself.
@@ -94,12 +94,6 @@ mod tests {
     use obzenflow_core::event::RetryDisposition;
     use obzenflow_core::http_client::HeaderMap;
 
-    struct Stripe;
-
-    impl SystemName for Stripe {
-        const NAME: &'static str = "stripe";
-    }
-
     fn response(status: u16, headers: &[(&'static str, &'static str)], body: &str) -> HttpResponse {
         let mut map = HeaderMap::new();
         for (name, value) in headers {
@@ -111,24 +105,24 @@ mod tests {
     #[test]
     fn unsent_classifies_each_failure() {
         assert!(matches!(
-            unsent::<Stripe>(HttpClientError::Timeout("slow".into())),
+            unsent(HttpClientError::Timeout("slow".into())),
             EffectError::Timeout(message) if message == "slow"
         ));
         assert!(matches!(
-            unsent::<Stripe>(HttpClientError::Connection("refused".into())),
+            unsent(HttpClientError::Connection("refused".into())),
             EffectError::DependencyFailed { failure_source, code, retry: RetryDisposition::Retryable, .. }
-                if failure_source.as_str() == "stripe" && code.as_str() == CONNECT_FAILED
+                if failure_source.as_str() == "http" && code.as_str() == CONNECT_FAILED
         ));
         assert!(matches!(
-            unsent::<Stripe>(HttpClientError::Transport("reset".into())),
+            unsent(HttpClientError::Transport("reset".into())),
             EffectError::Transport(_)
         ));
         assert!(matches!(
-            unsent::<Stripe>(HttpClientError::Cancelled),
+            unsent(HttpClientError::Cancelled),
             EffectError::Transport(_)
         ));
         assert!(matches!(
-            unsent::<Stripe>(HttpClientError::Unencodable("bad header".into())),
+            unsent(HttpClientError::Unencodable("bad header".into())),
             EffectError::Permanent(message)
                 if message == "the request could not be encoded: bad header"
         ));

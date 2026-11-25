@@ -9,9 +9,11 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
 use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the async-finite source stage test. The JSON
@@ -33,7 +35,7 @@ struct CountReceived {
     received: Arc<AtomicU64>,
 }
 
-#[obzenflow_runtime::effects::port(system = "async-finite-counter")]
+#[obzenflow_runtime::effects::port]
 impl CountReceived {
     #[effect(type = "async_finite_source.receive", at_least_once, records = reply)]
     fn receive(&self, _: &Received) -> Result<(), EffectError> {

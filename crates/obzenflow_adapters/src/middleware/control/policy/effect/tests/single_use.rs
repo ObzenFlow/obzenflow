@@ -14,13 +14,15 @@ use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{FlowId, JournalId, JournalOwner, TypedPayload};
 use obzenflow_runtime::backpressure::BackpressureWriter;
+use obzenflow_runtime::commands::AnswersEffect;
 use obzenflow_runtime::effects::{
-    AnswersEffect, CurrentRunHistory, EffectCommitHandle, EffectInvocationContext, EffectName,
-    EffectPortRegistry, Effects, Port, StageConstants,
+    CurrentRunHistory, EffectCommitHandle, EffectInvocationContext, EffectName, EffectPortRegistry,
+    Effects, StageConstants,
 };
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::feed_plan::OutcomeContract;
 use obzenflow_runtime::messaging::upstream_subscription::StageInputPosition;
+use obzenflow_runtime::systems::Port;
 use serde_json::json;
 
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -216,7 +218,6 @@ enum TransactionProbeMode {
     MissingCommit,
 }
 
-#[obzenflow_runtime::effects::system("tx")]
 #[async_trait]
 impl TransactionProbeLedger for TransactionProbePort {
     async fn write(

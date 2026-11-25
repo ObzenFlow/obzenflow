@@ -34,7 +34,7 @@ impl TypedPayload for Fact {
 #[derive(Clone, Debug)]
 struct FactIngress;
 
-impl sources::IngressDecoder for FactIngress {
+impl of::events::IngressDecoder for FactIngress {
     type Output = Fact;
 }
 
@@ -83,7 +83,7 @@ impl TypedPayload for Right {
 }
 
 type Facts = Fact;
-type NoEffects = <Pure as of::effects::Command>::AllowedEffects;
+type NoEffects = <Pure as of::commands::Command>::AllowedEffects;
 
 #[of::effects::command(effects = of::effects)]
 #[derive(Clone, Debug)]
@@ -100,29 +100,19 @@ trait FactInput {
         &self,
         from: &NextFact,
         ctx: &of::queries::QueryContext,
-    ) -> Result<sources::FiniteRead<Fact, NextFact>, of::queries::QueryError>;
+    ) -> Result<of::queries::FiniteRead<Fact, NextFact>, of::queries::QueryError>;
 }
 
 struct PureInput;
 
-#[of::system("pure-input", effects = of::effects)]
 #[async_trait]
 impl FactInput for PureInput {
     async fn read(
         &self,
         _from: &NextFact,
         _ctx: &of::queries::QueryContext,
-    ) -> Result<sources::FiniteRead<Fact, NextFact>, of::queries::QueryError> {
-        Ok(sources::FiniteRead::EndOfInput)
-    }
-}
-
-struct PureSource(of::queries::QueryPort<dyn FactInput>);
-
-impl sources::TypedFiniteSourceHandler for PureSource {
-    type Output = Fact;
-    fn read(&self) -> sources::SourceRead<Fact> {
-        sources::SourceRead::finite(self.0.clone(), NextFact, Ok)
+    ) -> Result<of::queries::FiniteRead<Fact, NextFact>, of::queries::QueryError> {
+        Ok(of::queries::FiniteRead::EndOfInput)
     }
 }
 
@@ -213,7 +203,6 @@ trait PrintPort: Send + Sync {
 
 struct Printer;
 
-#[of::system("facade-printer", effects = of::effects)]
 impl PrintPort for Printer {
     fn print(&self, _: &PrintFact) -> Result<(), of::effects::EffectError> {
         Ok(())
@@ -302,7 +291,7 @@ fn renamed_facade_macros_and_constructors_compile() {
         let folded = stateful::reduce(Fact(0), |sum: &mut Fact, fact: &Fact| sum.0 += fact.0)
             .emit(stateful::emit::on_eof);
         let output =
-            of::effects::perform(|_: &Fact| PrintFact).through(of::effects::Port::to(Printer));
+            of::commands::perform(|_: &Fact| PrintFact).through(of::systems::Port::to(Printer));
         Ok(of::flow::flow! {
             name: "facade",
             journals: of::journal::memory_journals(),
@@ -365,7 +354,7 @@ fn renamed_facade_macros_and_constructors_compile() {
     join!(catalog input: Fact, Fact -> Fact => priced);
     let point_in_time = joins::AsOfJoin::new(PointInTime);
     of::flow::join!(catalog input: Fact, Fact -> Fact => point_in_time);
-    let pure = PureSource(of::queries::QueryPort::to(PureInput));
+    let pure = of::queries::query(NextFact).through(of::systems::Port::to(PureInput));
     source!(Fact => pure);
     let values = sources::ValuesSource::new(vec![Fact(1)]);
     of::flow::source!(Fact => values);
@@ -373,7 +362,7 @@ fn renamed_facade_macros_and_constructors_compile() {
     stateful!(Fact -> Fact => Pure);
     join!(catalog input: Fact, Fact -> Fact => Pure);
     let printed =
-        of::effects::perform(|_: &Fact| PrintFact).through(of::effects::Port::to(Printer));
+        of::commands::perform(|_: &Fact| PrintFact).through(of::systems::Port::to(Printer));
     sink!(Fact => printed);
 
     FlowDefinition::materialize(|_config| {
@@ -469,7 +458,6 @@ trait CardPort: Send + Sync {
 
 struct Card;
 
-#[of::system("facade-card", effects = of::effects)]
 impl CardPort for Card {
     fn charge(&self, _: &ChargeCard) -> Result<Fact, of::effects::EffectError> {
         Ok(Fact(1))
@@ -497,9 +485,10 @@ impl transforms::EffectfulTransformHandler for ThroughCard {
 
 #[test]
 fn renamed_facade_command_rows_compile() {
-    let through = ThroughCard::through(of::effects::Port::to(Card));
+    let through = ThroughCard::through(of::systems::Port::to(Card));
     effectful_transform!(Fact -> Fact => through);
-    let performed = of::effects::perform(ChargeCard::for_fact).through(of::effects::Port::to(Card));
+    let performed =
+        of::commands::perform(ChargeCard::for_fact).through(of::systems::Port::to(Card));
     effectful_transform!(Fact -> Fact => performed);
 }
 

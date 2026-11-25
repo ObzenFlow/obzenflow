@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
-    port, system, Command, DeclaredEffectSet, EffectContext, EffectError, Port, SinkBatchDefaults,
+    port, Command, DeclaredEffectSet, EffectContext, EffectError, Port, SinkBatchDefaults,
     SinkGroupSystem, SinkRole,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -525,7 +525,6 @@ pub trait ConsolePort {
 
 struct Stdout;
 
-#[system("console")]
 #[async_trait]
 impl ConsolePort for Stdout {
     async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError> {
@@ -535,7 +534,6 @@ impl ConsolePort for Stdout {
 
 struct Stderr;
 
-#[system("console-stderr")]
 #[async_trait]
 impl ConsolePort for Stderr {
     async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError> {
@@ -705,15 +703,11 @@ impl ConsoleTable {
             .unwrap_or_else(|e| e.into_inner());
         Ok(ports
             .entry(instance.clone())
-            .or_insert_with(|| {
-                Port::deferred_grouped::<TableRow, _, _>(move || Ok(self.clone()))
-                    .instance(&instance)
-            })
+            .or_insert_with(|| Port::deferred_grouped::<TableRow, _, _>(move || Ok(self.clone())))
             .clone())
     }
 }
 
-#[system("console-table")]
 #[async_trait]
 impl ConsoleTablePort for ConsoleTable {
     async fn write_row(&self, row: &TableRow, _: &EffectContext) -> Result<(), EffectError> {
@@ -858,7 +852,6 @@ mod tests {
 
     struct Captured(Arc<Mutex<Vec<ConsoleOutput>>>);
 
-    #[system("captured-console")]
     #[async_trait]
     impl ConsolePort for Captured {
         async fn write(&self, output: &ConsoleOutput) -> Result<(), EffectError> {
@@ -918,9 +911,8 @@ mod tests {
 
     #[test]
     fn distinct_console_tables_collect() {
-        use obzenflow_runtime::effects::{
-            effectful_transform_effects, EffectPortRegistry, SinkHandler,
-        };
+        use obzenflow_runtime::commands::effectful_transform_effects;
+        use obzenflow_runtime::effects::{EffectPortRegistry, SinkHandler};
         let table = |column: &str, width, stderr, size| {
             let formatter =
                 TableFormatter::new(&[column], |row: &TestEvent| vec![row.value.clone()])
@@ -936,11 +928,6 @@ mod tests {
             table("customer", 30, true, 8),
             table("customer", 30, false, 16),
         ];
-        let names: std::collections::HashSet<_> = tables
-            .iter()
-            .map(|table| table.port.system_name())
-            .collect();
-        assert_eq!(names.len(), 4);
         let declarations: Vec<_> = tables
             .into_iter()
             .flat_map(|table| {
@@ -956,7 +943,6 @@ mod tests {
         let captured = Captured(seen.clone());
         let sink = ConsoleSink::<TestEvent, _>::new(|e: &TestEvent| format!("got {}", e.value))
             .through(Port::to(Captured(seen.clone())));
-        assert_eq!(sink.ports().0.system_name(), "captured-console");
         let request = sink
             .prepare(TestEvent {
                 value: "one".into(),

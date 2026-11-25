@@ -16,9 +16,8 @@
 //! request ID turns a retry into the original row instead of another copy.
 
 pub use obzenflow_core::ingress::{
-    BatchSubmission, EdgeShedReason, EventSubmission, IngressContext, IngressKey,
-    IngressRefusalKind, IngressRefusalReason, IngressRequestId, IngressRequestIdentity,
-    IngressTiming, InvalidIngressRequestId,
+    EdgeShedReason, IngressContext, IngressKey, IngressRefusalKind, IngressRefusalReason,
+    IngressTiming,
 };
 pub use obzenflow_infra::web::endpoints::event_ingestion::{
     http_ingress, ingress_source, HttpIngress, HttpIngressAttachment, IngestionConfig, Ingress,

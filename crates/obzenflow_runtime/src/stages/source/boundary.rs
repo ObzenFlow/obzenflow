@@ -70,14 +70,6 @@ impl SourcePollReport {
             retry_after,
         }
     }
-
-    pub(crate) fn handler_error(error: SourceError, poll_duration: Duration) -> Self {
-        Self {
-            result: SourcePollResult::HandlerError(error),
-            poll_duration,
-            retry_after: None,
-        }
-    }
 }
 
 /// Source-boundary outcome for one guarded poll.

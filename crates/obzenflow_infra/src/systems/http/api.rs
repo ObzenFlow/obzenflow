@@ -2,16 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::default_http_client;
+use crate::clients::http::default_http_client;
 
-use obzenflow_core::effect_binding::{HttpEndpoint, SystemLocation};
+use obzenflow_adapters::sources::ListDetail;
 use obzenflow_core::event::observability::{HttpPullMeasurements, ObservationRecord};
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::http_client::{HttpClient, HttpClientError, HttpRequest, HttpResponse, Url};
-use obzenflow_core::BindingEvidenceError;
-use obzenflow_runtime::effects::{EffectPortResolutionError, LocatedSystem, SystemName};
+use obzenflow_runtime::effects::EffectPortResolutionError;
 use obzenflow_runtime::queries::{QueryContext, QueryError};
+use obzenflow_runtime::systems::SystemConfig;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,14 +24,12 @@ pub struct HttpApi {
     measurements: Mutex<HashMap<String, HttpPullMeasurements>>,
 }
 
-impl SystemName for HttpApi {
-    const NAME: &'static str = "http-api";
-}
-
 impl HttpApi {
-    pub fn json(base: Url) -> Result<JsonEndpoint, BindingEvidenceError> {
-        let location = HttpEndpoint::from_url(&base)?;
-        Ok(JsonEndpoint { base, location })
+    /// `json` configures a JSON endpoint below `base`. At the first live read, the port
+    /// checks that `base` is an `http` or `https` URL with a host and no query or
+    /// fragment.
+    pub fn json(base: Url) -> JsonEndpoint {
+        JsonEndpoint { base }
     }
 
     fn with_client(base: Url, client: Arc<dyn HttpClient>) -> Self {
@@ -42,8 +40,7 @@ impl HttpApi {
         }
     }
 
-    /// `get_json` reads the JSON document at `path` below the base URL. A failure
-    /// carries the diagnostic that the reading source reports. A refused or
+    /// `get_json` reads the JSON document at `path` below the base URL. A refused or
     /// unreadable reply ends the read. After a timeout, a rate limit or a server
     /// failure, the source can read again.
     pub async fn get_json<T: DeserializeOwned>(
@@ -75,7 +72,7 @@ impl HttpApi {
         let mut stages = self
             .measurements
             .lock()
-            .expect("HTTP measurement lock poisoned");
+            .expect("the lock of the HTTP measurements is poisoned");
         if !stages.contains_key(ctx.stage_key()) {
             stages.insert(ctx.stage_key().to_owned(), HttpPullMeasurements::default());
         }
@@ -151,22 +148,114 @@ fn rejected(response: &HttpResponse) -> QueryError {
 /// on the first live call.
 pub struct JsonEndpoint {
     base: Url,
-    location: HttpEndpoint,
 }
 
-impl LocatedSystem for JsonEndpoint {
+impl SystemConfig for JsonEndpoint {
     type System = HttpApi;
 
-    fn location(&self) -> SystemLocation {
-        SystemLocation::Json {
-            endpoint: self.location.clone(),
+    fn resolve(&self) -> Result<HttpApi, EffectPortResolutionError> {
+        let base = &self.base;
+        if !matches!(base.scheme(), "http" | "https")
+            || base.host().is_none()
+            || base.query().is_some()
+            || base.fragment().is_some()
+        {
+            return Err(EffectPortResolutionError::ClientConstructionFailed);
+        }
+        let client = default_http_client()
+            .map_err(|_| EffectPortResolutionError::ClientConstructionFailed)?;
+        Ok(HttpApi::with_client(base.clone(), client))
+    }
+}
+
+impl JsonEndpoint {
+    /// `list_detail` configures the endpoint to answer [`ListDetail`]. `list` is the
+    /// path of the JSON array of item IDs below the base URL. `detail` returns the path
+    /// of one item from its ID. The system skips an item whose document is `null`.
+    pub fn list_detail(
+        self,
+        list: impl Into<String>,
+        detail: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> impl SystemConfig<System: ListDetail> {
+        list_detail::ListDetailEndpoint {
+            endpoint: self,
+            list: list.into(),
+            detail: Arc::new(detail),
+        }
+    }
+}
+
+mod list_detail {
+    use super::{HttpApi, JsonEndpoint};
+    use async_trait::async_trait;
+    use obzenflow_adapters::sources::{ListDetail, ListDetailRead, ListDetailStep};
+    use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
+    use obzenflow_core::event::SourceDiagnosticReason;
+    use obzenflow_runtime::effects::EffectPortResolutionError;
+    use obzenflow_runtime::queries::{FiniteRead, QueryContext, QueryError};
+    use obzenflow_runtime::systems::SystemConfig;
+    use serde_json::Value;
+    use std::sync::Arc;
+
+    type DetailPath = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
+    pub struct ListDetailEndpoint {
+        pub(super) endpoint: JsonEndpoint,
+        pub(super) list: String,
+        pub(super) detail: DetailPath,
+    }
+
+    impl SystemConfig for ListDetailEndpoint {
+        type System = ListDetailApi;
+
+        fn resolve(&self) -> Result<ListDetailApi, EffectPortResolutionError> {
+            Ok(ListDetailApi {
+                api: self.endpoint.resolve()?,
+                list: self.list.clone(),
+                detail: Arc::clone(&self.detail),
+            })
         }
     }
 
-    fn build(&self) -> Result<HttpApi, EffectPortResolutionError> {
-        let client = default_http_client()
-            .map_err(|_| EffectPortResolutionError::ClientConstructionFailed)?;
-        Ok(HttpApi::with_client(self.base.clone(), client))
+    pub struct ListDetailApi {
+        api: HttpApi,
+        list: String,
+        detail: DetailPath,
+    }
+
+    #[async_trait]
+    impl ListDetail for ListDetailApi {
+        async fn read(
+            &self,
+            from: &ListDetailRead,
+            ctx: &QueryContext,
+        ) -> Result<FiniteRead<Value, ListDetailRead>, QueryError> {
+            match from.step() {
+                ListDetailStep::List { .. } => {
+                    let ids: Vec<Value> = self.api.get_json(&self.list, ctx).await?;
+                    let ids = ids
+                        .into_iter()
+                        .map(|id| match id {
+                            Value::String(id) => Ok(id),
+                            Value::Number(id) => Ok(id.to_string()),
+                            _ => Err(QueryError::terminal(
+                                SourcePollErrorKind::Deserialization,
+                                SourceDiagnosticReason::MalformedInput,
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    from.list_reply(ids)
+                }
+                ListDetailStep::Detail { id } => {
+                    let item: Option<Value> = self.api.get_json(&(self.detail)(id), ctx).await?;
+                    if item.is_none() {
+                        tracing::info!(id = %id, "the API has no item at this ID. The source skips the item.");
+                    }
+                    from.detail_reply(item)
+                }
+                ListDetailStep::EndOfInput => Ok(FiniteRead::EndOfInput),
+            }
+        }
     }
 }
 

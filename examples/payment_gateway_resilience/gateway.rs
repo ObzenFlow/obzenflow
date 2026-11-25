@@ -184,7 +184,6 @@ impl SimulatedProcessor {
     }
 }
 
-#[obzenflow::system("simulated-processor")]
 #[async_trait]
 impl PaymentGatewayPort for SimulatedProcessor {
     async fn authorize(
@@ -230,7 +229,6 @@ pub struct SlowAnswerProcessor {
     processor: SimulatedProcessor,
 }
 
-#[obzenflow::system("simulated-processor")]
 #[async_trait]
 impl PaymentGatewayPort for SlowAnswerProcessor {
     async fn authorize(

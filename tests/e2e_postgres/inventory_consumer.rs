@@ -10,11 +10,13 @@
 use crate::postgres_support;
 
 use async_trait::async_trait;
+use obzenflow::commands::perform;
 use obzenflow::effects::postgres::{
     self, default_postgres_client, PostgresClient, PostgresStatement,
 };
-use obzenflow::effects::{perform, EffectError, Port};
+use obzenflow::effects::EffectError;
 use obzenflow::stages::sources;
+use obzenflow::systems::Port;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -46,7 +48,6 @@ struct PostgresInventory {
     insert: PostgresStatement,
 }
 
-#[obzenflow::system("inventory-postgres")]
 #[async_trait]
 impl InventoryStorePort for PostgresInventory {
     async fn store(&self, level: &InventoryLevelChanged) -> Result<(), EffectError> {
@@ -59,7 +60,7 @@ impl InventoryStorePort for PostgresInventory {
                     .bind(level.replenishment_due);
             })
             .await
-            .map_err(postgres::unsent::<Self>)?;
+            .map_err(postgres::unsent)?;
         Ok(())
     }
 }

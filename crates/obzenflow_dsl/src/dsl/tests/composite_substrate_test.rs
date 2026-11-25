@@ -11,11 +11,11 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use obzenflow_core::TypedPayload;
-    use obzenflow_runtime::effects::{
-        AnswersEffect, EffectDeclaration, EffectError, EffectName, Port,
-    };
+    use obzenflow_runtime::commands::AnswersEffect;
+    use obzenflow_runtime::effects::{EffectDeclaration, EffectError, EffectName};
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::TransformHandler;
+    use obzenflow_runtime::systems::Port;
     use obzenflow_topology::EdgeKind;
     use serde::{Deserialize, Serialize};
 
@@ -64,7 +64,7 @@ mod tests {
     #[derive(Clone, Debug, Serialize)]
     struct FixtureRequest;
 
-    #[obzenflow_runtime::effects::port(system = "fixture")]
+    #[obzenflow_runtime::effects::port]
     impl FixturePort {
         #[effect(type = "test.fixture_effect", exactly_once)]
         fn fixture(&self, _: &FixtureRequest) -> Result<MidP, EffectError> {

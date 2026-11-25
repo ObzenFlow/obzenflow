@@ -216,7 +216,6 @@ fn continuation_text(continued: Option<&SourceContinuation>) -> String {
 fn guarantee_label(guarantee: ReattachGuarantee) -> &'static str {
     match guarantee {
         ReattachGuarantee::SenderRedelivers => "sender redelivers",
-        ReattachGuarantee::LatestState => "latest state",
         ReattachGuarantee::AtMostOnce => "at most once",
     }
 }
@@ -373,7 +372,6 @@ mod tests {
         );
         for (guarantee, label) in [
             (ReattachGuarantee::SenderRedelivers, "sender redelivers"),
-            (ReattachGuarantee::LatestState, "latest state"),
             (ReattachGuarantee::AtMostOnce, "at most once"),
         ] {
             assert_eq!(

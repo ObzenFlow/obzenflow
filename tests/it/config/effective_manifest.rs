@@ -69,7 +69,7 @@ struct Authorize;
 #[derive(Clone, Debug, Serialize)]
 struct Refund;
 
-#[obzenflow::port(system = "payments")]
+#[obzenflow::port]
 impl PaymentService {
     #[effect(type = "payments.authorize", exactly_once)]
     fn authorize(&self, _: &Authorize) -> Result<PaymentEffectFact, EffectError> {

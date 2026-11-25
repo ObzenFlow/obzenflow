@@ -16,13 +16,16 @@ use obzenflow_core::{
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{perform, EffectCursor, EffectError, Effects, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::{EffectCursor, EffectError, Effects};
+use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::runtime_config::RETRY_MAX_ATTEMPTS_KEY;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -49,7 +52,6 @@ struct CompInputs {
     calls: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::system("comp-inputs")]
 #[async_trait]
 impl CompFeed for CompInputs {
     async fn read(
@@ -68,11 +70,11 @@ impl CompFeed for CompInputs {
     }
 }
 
-struct CompSource(obzenflow::queries::QueryPort<dyn CompFeed>);
+struct CompSource(Port<dyn CompFeed>);
 
 impl CompSource {
     fn new(calls: Arc<AtomicUsize>) -> Self {
-        Self(obzenflow::queries::QueryPort::to(CompInputs { calls }))
+        Self(Port::to(CompInputs { calls }))
     }
 }
 
@@ -151,7 +153,7 @@ struct RetryOnce {
     value: u64,
 }
 
-#[obzenflow::port(system = "flaky-service")]
+#[obzenflow::port]
 impl FlakyService {
     #[effect(type = "cb_composition.retry_once", exactly_once)]
     fn retry_once(&self, request: &RetryOnce) -> Result<CompEffectValue, EffectError> {
@@ -229,7 +231,6 @@ struct CollectSink {
     outputs: Arc<Mutex<Vec<CompOutput>>>,
 }
 
-#[obzenflow_runtime::effects::system("composition-collector")]
 impl CollectOutputPort for CollectSink {
     fn collect(&self, output: &CompOutput) -> Result<(), EffectError> {
         self.outputs

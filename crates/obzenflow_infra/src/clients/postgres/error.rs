@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_runtime::effects::{EffectError, SystemName};
+use obzenflow_runtime::effects::EffectError;
 
 /// Why a statement didn't complete.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -29,12 +29,13 @@ pub enum PostgresClientError {
     Unencodable(String),
 }
 
-/// The effect error for a statement that failed. A connection that never
-/// opened is the system's retryable refusal, a definite no.
-pub fn unsent<S: SystemName>(error: PostgresClientError) -> EffectError {
+/// `unsent` returns the effect error for a statement that failed. The error of a
+/// connection that never opened is a retryable refusal with `postgres` as its failure
+/// source.
+pub fn unsent(error: PostgresClientError) -> EffectError {
     match error {
         PostgresClientError::Connection(message) => {
-            EffectError::unavailable(S::NAME, "connect_failed", message)
+            EffectError::unavailable("postgres", "connect_failed", message)
         }
         PostgresClientError::Timeout(message) => EffectError::Timeout(message),
         PostgresClientError::Transport(message) => EffectError::Transport(message),
@@ -47,25 +48,19 @@ pub fn unsent<S: SystemName>(error: PostgresClientError) -> EffectError {
 mod tests {
     use super::*;
 
-    struct Ledger;
-
-    impl SystemName for Ledger {
-        const NAME: &'static str = "ledger";
-    }
-
     #[test]
-    fn refused_connection_names_system() {
+    fn refused_connection_names_transport() {
         assert!(matches!(
-            unsent::<Ledger>(PostgresClientError::Connection("refused".into())),
+            unsent(PostgresClientError::Connection("refused".into())),
             EffectError::DependencyFailed { failure_source, code, .. }
-                if failure_source.as_str() == "ledger" && code.as_str() == "connect_failed"
+                if failure_source.as_str() == "postgres" && code.as_str() == "connect_failed"
         ));
     }
 
     #[test]
     fn unencodable_value_returns_permanent_error() {
         assert!(matches!(
-            unsent::<Ledger>(PostgresClientError::Unencodable("bad".into())),
+            unsent(PostgresClientError::Unencodable("bad".into())),
             EffectError::Permanent(_)
         ));
     }

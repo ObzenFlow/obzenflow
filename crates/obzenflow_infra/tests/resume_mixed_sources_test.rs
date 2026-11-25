@@ -18,10 +18,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_adapters::sinks::CountingSink;
-use obzenflow_adapters::sources::ValuesSource;
-use obzenflow_adapters::sources::{
-    ChannelSource, CsvDecodeError, CsvDecoder, CsvRecord, CsvSource,
-};
+use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, ReattachGuarantee, SourceReattachedFact,
 };
@@ -33,15 +30,19 @@ use obzenflow_core::event::{
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_infra::systems::file::{CsvDecodeError, CsvDecoder, CsvRecord, CsvSource};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{EffectError, Effects, Port};
+use obzenflow_runtime::effects::{EffectError, Effects};
+use obzenflow_runtime::events::{source_channel, SourceReceiver};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::source::ResumeRefusal;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -121,7 +122,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "call-counter")]
+#[obzenflow_runtime::effects::port]
 impl CallCounter {
     #[effect(type = "resume_mixed.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<EffectValue, EffectError> {
@@ -423,7 +424,7 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
     });
     expected_inf.push(MixedRow::Reattached(SourceReattachedFact {
         generation: 1,
-        guarantee: ReattachGuarantee::LatestState,
+        guarantee: ReattachGuarantee::AtMostOnce,
     }));
     expected_inf.extend(tick_rows("i", 105..=106));
     assert_eq!(
@@ -431,10 +432,6 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
         "the infinite source authors its watermark and guarantee between prefix and live tail"
     );
 
-    // The fan-in authors its own single watermark, counting the EOF-exhausted
-    // finite input as vacuously crossed (F17), and goes live. Its journal
-    // also carries the forwarded finite EOF, so the boundary is located and
-    // measured over data rows, not raw indices.
     let merge_rows =
         mixed_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "merge").await);
     let boundary = merge_rows
@@ -601,7 +598,6 @@ struct StallingTicks {
     polls: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::system("stalling-finite")]
 #[async_trait::async_trait]
 impl TickInput for StallingTicks {
     async fn read(
@@ -623,7 +619,7 @@ impl TickInput for StallingTicks {
     }
 }
 
-struct StallingFiniteSource(obzenflow_runtime::queries::QueryPort<dyn TickInput>);
+struct StallingFiniteSource(Port<dyn TickInput>);
 
 impl TypedFiniteSourceHandler for StallingFiniteSource {
     type Output = ChannelTick;
@@ -639,10 +635,7 @@ fn build_stalling_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let finite_handler =
-            StallingFiniteSource(obzenflow_runtime::queries::QueryPort::to(StallingTicks {
-                polls,
-            }));
+        let finite_handler = StallingFiniteSource(Port::to(StallingTicks { polls }));
         let infinite_handler =
             replay_testkit::preloaded_input((101..103).map(|value| ChannelTick {
                 channel: "i".to_string(),
@@ -768,7 +761,7 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
 
 fn build_channel_flow(
     journal_base: PathBuf,
-    ticks: obzenflow_runtime::stages::common::handlers::source::SourceReceiver<ChannelTick>,
+    ticks: SourceReceiver<ChannelTick>,
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
@@ -808,7 +801,7 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
 
-    let (sender, ticks) = obzenflow_runtime::stages::common::handlers::source::source_channel(8);
+    let (sender, ticks) = source_channel(8);
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_channel_flow(journal_base.clone(), ticks, delivered.clone())
         .build(replay_testkit::unsynced_context())
@@ -827,7 +820,7 @@ async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
     drop(sender);
     let recorded_run = replay_testkit::latest_run_dir(&journal_base);
 
-    let (sender, ticks) = obzenflow_runtime::stages::common::handlers::source::source_channel(8);
+    let (sender, ticks) = source_channel(8);
     let delivered = Arc::new(AtomicU64::new(0));
     {
         let _bootstrap = install_bootstrap_config(
@@ -1019,7 +1012,6 @@ async fn resume_csv_run(
 
 #[derive(Clone, Debug, PartialEq)]
 enum SourceRow {
-    Declared,
     Read(u64),
     CatchUp,
     Order(u64),
@@ -1034,11 +1026,10 @@ async fn source_rows(run: &Path) -> Vec<SourceRow> {
             ChainPayload::Fact(order) => {
                 Some(SourceRow::Order(order["id"].as_u64().expect("order id")))
             }
-            ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(_)) => {
-                Some(SourceRow::Declared)
-            }
-            ChainPayload::Execution(ExecutionPayload::SourceInput(record)) => {
-                Some(SourceRow::Read(record.number))
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+                if record.is_query() =>
+            {
+                Some(SourceRow::Read(record.cursor.input_seq.get()))
             }
             ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. }) => {
                 Some(SourceRow::CatchUp)
@@ -1090,10 +1081,12 @@ async fn recorded_prefix(run: &Path) -> u64 {
         (1..ORDERS).contains(&committed),
         "the stop must land inside the input: {rows:?}"
     );
-    let mut expected = vec![SourceRow::Declared];
-    expected.extend(orders(1..=committed));
+    let mut expected = orders(1..=committed).collect::<Vec<_>>();
     expected.push(SourceRow::Eof(EofKind::Truncated));
-    assert_eq!(rows, expected, "the binding precedes every read");
+    assert_eq!(
+        rows, expected,
+        "a truncated EOF follows the committed orders"
+    );
     committed
 }
 
@@ -1110,8 +1103,7 @@ async fn an_interrupted_csv_source_continues_after_its_last_committed_row() -> R
     let (outcome, resumed_run) =
         resume_csv_run(&journal_base, &input, &recorded_run, OrderCsv).await?;
     outcome?;
-    let mut expected = vec![SourceRow::Declared];
-    expected.extend(orders(1..=committed));
+    let mut expected = orders(1..=committed).collect::<Vec<_>>();
     expected.push(SourceRow::CatchUp);
     expected.extend(orders(committed + 1..=ORDERS));
     expected.extend([
@@ -1159,8 +1151,7 @@ async fn changed_decoder_value_decodes_resumed_suffix() -> Result<()> {
     )
     .await?;
     outcome?;
-    let mut expected = vec![SourceRow::Declared];
-    expected.extend(orders(1..=committed));
+    let mut expected = orders(1..=committed).collect::<Vec<_>>();
     expected.push(SourceRow::CatchUp);
     expected.extend(
         (committed + 1..=ORDERS).flat_map(|id| [SourceRow::Read(id), SourceRow::Order(id * 100)]),
@@ -1279,8 +1270,7 @@ async fn changed_csv_input_resume_refused() -> Result<()> {
     let (outcome, resumed_run) =
         resume_csv_run(&journal_base, &input, &recorded_run, OrderCsv).await?;
     assert!(outcome.is_err(), "a refused source fails the resumed run");
-    let mut expected = vec![SourceRow::Declared];
-    expected.extend(orders(1..=committed));
+    let mut expected = orders(1..=committed).collect::<Vec<_>>();
     expected.extend([SourceRow::CatchUp, SourceRow::Read(committed + 1)]);
     assert_eq!(source_rows(&resumed_run).await, expected);
     let refusals: Vec<_> = source_errors(&resumed_run)
@@ -1324,16 +1314,13 @@ async fn unread_csv_source_resume_reads_input() -> Result<()> {
     // The failed process ends, releasing its journal writers (B7).
     drop(handle);
     let failed_run = replay_testkit::latest_run_dir(&journal_base);
-    assert_eq!(
-        source_rows(&failed_run).await,
-        [SourceRow::Declared, SourceRow::Read(1)]
-    );
+    assert_eq!(source_rows(&failed_run).await, [SourceRow::Read(1)]);
 
     write_orders(&input)?;
     let (outcome, resumed_run) =
         resume_csv_run(&journal_base, &input, &failed_run, OrderCsv).await?;
     outcome?;
-    let mut expected = vec![SourceRow::Declared, SourceRow::Read(1), SourceRow::CatchUp];
+    let mut expected = vec![SourceRow::Read(1), SourceRow::CatchUp];
     expected.extend(orders(1..=ORDERS));
     expected.extend([
         SourceRow::Read(ORDERS + 1),

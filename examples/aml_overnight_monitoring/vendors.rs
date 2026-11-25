@@ -7,7 +7,8 @@ use super::case_system::{
 };
 use super::risk_engine::{RiskEnginePort, ScoreRequest, SimulatedRiskEngine};
 use obzenflow::effects::simulated::CallLogError;
-use obzenflow::effects::{EffectPortResolutionError, IdempotencyKey, Keyed, Port};
+use obzenflow::effects::{EffectPortResolutionError, IdempotencyKey, Keyed};
+use obzenflow::systems::Port;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

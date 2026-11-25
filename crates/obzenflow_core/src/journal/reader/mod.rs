@@ -70,5 +70,5 @@ where
 
 pub mod observations;
 pub use observations::{
-    JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
+    JournalObservationReader, ObservationKey, ObservationLookup, PositionedObservation,
 };

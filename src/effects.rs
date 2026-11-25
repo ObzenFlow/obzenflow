@@ -2,28 +2,27 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Replay-safe external operations: the requests systems answer, the ports a
-//! command works through, and the systems the flow builder chooses for them.
+//! This module holds the types of replay-safe external operations, the effect context, its
+//! errors and the `#[command]` and `#[port]` attributes. Ports and systems are in
+//! [`systems`](crate::systems), and `perform` is in [`commands`](crate::commands).
 
-pub use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
-pub use obzenflow_runtime::effects::__facade::{command, port, system};
-pub use obzenflow_runtime::effects::{
-    perform, Command, Keyed, Perform, PerformRequest, Port, SinkRequest, SinkRole, StagePort,
-    SystemName,
-};
+pub use obzenflow_runtime::effects::__facade::{command, port};
+#[doc(hidden)]
+pub use obzenflow_runtime::effects::__queries;
 pub use obzenflow_runtime::effects::{
     BindingAuthorityFault, BindingMismatchKind, EffectAttemptOrdinal, EffectCursor,
     EffectDescriptorHash, EffectInputPosition, EffectLabel, EffectOrdinal, EffectStageKey,
     EffectType, RecordedFlowId,
 };
+#[doc(hidden)]
+pub use obzenflow_runtime::effects::{Command, Port};
 pub use obzenflow_runtime::effects::{
     EffectBinding, EffectCommitHandle, EffectContext, EffectError, EffectFailureCause,
     EffectFailureCode, EffectFailureDetail, EffectFailureKind, EffectFailureSource,
     EffectPortResolutionError, EffectSet, Effects, IdempotencyKey, RetryDisposition,
     StageCompletion,
 };
-#[doc(hidden)]
-pub use obzenflow_runtime::queries as __queries;
+pub use obzenflow_runtime::effects::{Keyed, SinkRequest, SinkRole};
 
 #[doc(hidden)]
 pub use obzenflow_runtime::effects::{

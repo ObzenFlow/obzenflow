@@ -2,7 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! This module controls how the interrupted input of a source continues on resume.
+//! This module holds the portable data of sources, such as the queries that a source
+//! asks and the members that a sender pushes.
+
+mod input;
+mod query;
+
+pub use input::{MemberRecorded, MEMBER_RECORDED_EVENT_TYPE};
+pub use query::{QueryBookmark, QueryError};
 
 use serde_json::{Map, Value};
 
@@ -37,7 +44,6 @@ impl SourceContinuation {
     }
 }
 
-/// Sorted-key JSON, arrays in order: the canonical form hashed by digests.
 pub(crate) fn canonicalize(value: Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -97,7 +103,6 @@ mod tests {
     fn reattach_admits_resume_whatever_its_recorded_completion() {
         for guarantee in [
             ReattachGuarantee::SenderRedelivers,
-            ReattachGuarantee::LatestState,
             ReattachGuarantee::AtMostOnce,
         ] {
             for recorded_eof in [

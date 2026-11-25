@@ -85,7 +85,6 @@ impl<E: crate::supervised_base::with_external_events::ExternalControlEvent + Sen
 }
 
 use crate::backpressure::{BackpressureWriter, StallEpisode};
-use crate::effects::SourceSystem;
 use crate::feed_plan::OutcomeContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
@@ -373,29 +372,6 @@ pub(crate) async fn record_source_stage_fatal(
     )
     .await?;
     Ok(())
-}
-
-pub(crate) fn bind_source_system(
-    source: &SourceSystem,
-) -> obzenflow_core::effect_binding::SystemBinding {
-    source.binding().clone()
-}
-
-pub(crate) async fn commit_source_binding(
-    journal: &Arc<dyn Journal<ChainEvent>>,
-    flow: &FlowContext,
-    binding: &obzenflow_core::effect_binding::SystemBinding,
-) -> Result<crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>, BoxError> {
-    let event = ChainEventFactory::execution_event(
-        WriterId::from(flow.stage_id),
-        ExecutionPayload::SourceBindingDeclared(binding.clone()),
-    )
-    .with_flow_context(flow.clone());
-    Ok(
-        crate::supervised_base::publication::append(journal, event, AppendOptions::default())
-            .await?
-            .into(),
-    )
 }
 
 pub(crate) async fn around_source_boundary<'a>(
@@ -1033,8 +1009,10 @@ mod tests {
             poll_error_summary("accounts", &rejected),
             "Source 'accounts' rejected record 1: invalid value in field initial_balance_cents (line 7, column 5)"
         );
-        let unlocated = SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into());
-        assert!(poll_error_summary("tx", &unlocated).starts_with("Source 'tx' rejected a record: "));
+        let without_record_index =
+            SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into());
+        assert!(poll_error_summary("tx", &without_record_index)
+            .starts_with("Source 'tx' rejected a record: "));
         let retried = SourceError::Timeout(SourceDiagnosticReason::TimedOut.into());
         assert_eq!(
             poll_error_summary("feed", &retried),

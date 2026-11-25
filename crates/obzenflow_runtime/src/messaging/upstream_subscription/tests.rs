@@ -2420,6 +2420,8 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
             output: json!({"ok": true}),
         },
         origin: None,
+        call: obzenflow_core::event::payloads::effect_payload::CallKind::Command,
+        request: None,
     };
 
     upstream_journal

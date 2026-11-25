@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::config::{DigestOutput, HnDigestPostgresConfig, HnRunInputs, Stories};
-use super::decoder::{HnStories, StoriesPort};
+use super::decoder::decode_item;
 use super::domain::{FormattedStory, HnStory};
 use super::scripted::ScriptedStories;
 use super::util::truncate_chars;
@@ -12,19 +12,21 @@ use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk,
     EstimateSource, Partials, Prompt, SystemPrompt, UserPrompt,
 };
+use obzenflow::commands::perform;
 use obzenflow::effects::postgres::{
     self, default_postgres_client, PostgresClient, PostgresStatement,
 };
-use obzenflow::effects::{perform, EffectError, EffectPortResolutionError, Port};
+use obzenflow::effects::{EffectError, EffectPortResolutionError};
 use obzenflow::error::HandlerError;
-use obzenflow::flow::FlowBuildError;
 use obzenflow::flow::{ai, flow, sink, source, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry};
-use obzenflow::queries::QueryPort;
+use obzenflow::queries::query;
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sources::HttpApi;
+use obzenflow::stages::sources::{ListDetail, ListDetailRead};
 use obzenflow::stages::transforms;
+use obzenflow::systems::http::HttpApi;
+use obzenflow::systems::{Port, SystemConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -34,9 +36,9 @@ pub(crate) const HN_SOURCE_BREAKER_FAILURES: u32 = 3;
 pub(crate) const HN_SOURCE_BREAKER_COOLDOWN_SECS: u64 = 2;
 const HN_AI_BREAKER_FAILURES: u32 = 5;
 const HN_DIGEST_TABLE: &str = "hn_digest_summaries";
-const HN_DIGEST_INSERT: &str = "(source_system, ai_provider, ai_model, \
+const HN_DIGEST_INSERT: &str = "(ai_provider, ai_model, \
 token_estimator, interests, story_ids, output_markdown) \
-VALUES ($1, $2, $3, $4, $5, $6, $7)";
+VALUES ($1, $2, $3, $4, $5, $6)";
 const SYSTEM_PROMPT: &str = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +52,6 @@ impl TypedPayload for HnDigestGroupSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnDigestSummary {
-    source_system: String,
     ai_provider: String,
     ai_model: String,
     token_estimator: EstimateSource,
@@ -66,19 +67,18 @@ struct HnDigestSummary {
 
 impl TypedPayload for HnDigestSummary {
     const EVENT_TYPE: &'static str = "hn.digest_summary";
-    const SCHEMA_VERSION: u32 = 3;
+    const SCHEMA_VERSION: u32 = 4;
 }
 
 #[obzenflow::port]
 #[async_trait]
 trait DigestOutputPort {
-    #[effect(type = "hn.digest.publish", at_least_once, records = reply, schema_version = 3)]
+    #[effect(type = "hn.digest.publish", at_least_once, records = reply, schema_version = 4)]
     async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError>;
 }
 
 struct ConsoleDigest;
 
-#[obzenflow::system("hn-digest-console")]
 #[async_trait]
 impl DigestOutputPort for ConsoleDigest {
     async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError> {
@@ -108,7 +108,6 @@ fn postgres_unavailable(error: impl std::fmt::Display) -> EffectPortResolutionEr
     EffectPortResolutionError::ClientConstructionFailed
 }
 
-#[obzenflow::system("hn-digest-postgres")]
 #[async_trait]
 impl DigestOutputPort for PostgresDigest {
     async fn publish(&self, digest: &HnDigestSummary) -> Result<(), EffectError> {
@@ -125,7 +124,6 @@ impl DigestOutputPort for PostgresDigest {
                     .collect::<Vec<_>>();
 
                 bindings
-                    .bind(&digest.source_system)
                     .bind(&digest.ai_provider)
                     .bind(&digest.ai_model)
                     .bind(token_estimator)
@@ -134,7 +132,7 @@ impl DigestOutputPort for PostgresDigest {
                     .bind(&digest.output_markdown);
             })
             .await
-            .map_err(postgres::unsent::<Self>)?;
+            .map_err(postgres::unsent)?;
         Ok(())
     }
 }
@@ -149,7 +147,6 @@ fn digest_output(output: DigestOutput) -> Port<dyn DigestOutputPort> {
 #[derive(Clone)]
 struct HnDigest {
     interests: Option<String>,
-    source_system: String,
 }
 
 impl AiRole<Chunk<FormattedStory>> for HnDigest {
@@ -212,7 +209,6 @@ impl HnDigest {
     ) -> HnDigestSummary {
         let (stories, group_summaries) = input.into_parts();
         HnDigestSummary {
-            source_system: self.source_system.clone(),
             ai_provider: reply.observability.provider.to_string(),
             ai_model: reply.observability.model.clone(),
             token_estimator: reply
@@ -320,23 +316,18 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         } = inputs;
         let HnFlowOptions { journal_base } = options;
 
-        let stories_port: QueryPort<dyn StoriesPort> = match stories {
-            Stories::Scripted => QueryPort::deferred(|| Ok(ScriptedStories)),
+        let stories_port: Port<dyn ListDetail> = match stories {
+            Stories::Scripted => Port::deferred(|| Ok(ScriptedStories)),
             Stories::HackerNews => HttpApi::json(base_url)
-                .and_then(QueryPort::located)
-                .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?,
+                .list_detail("v0/topstories.json", |id| format!("v0/item/{id}.json"))
+                .port(),
         };
-        let source_system = stories_port.binding().to_string();
-        let hn_source = HnStories {
-            port: stories_port,
-            max_stories,
-            poll_timeout: Duration::from_secs(poll_timeout_secs),
-        };
+        let hn_source = query(ListDetailRead::first(max_stories))
+            .decode(decode_item)
+            .poll_timeout(Duration::from_secs(poll_timeout_secs))
+            .through(stories_port);
 
-        let roles = HnDigest {
-            interests,
-            source_system,
-        };
+        let roles = HnDigest { interests };
         let digest = ai::map(roles.clone())
             .chunks(max_stories_per_group)
             .reduce(roles)
@@ -382,7 +373,6 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
 
     out.push_str("HN AI Digest — Summary\n");
     out.push_str("======================\n");
-    out.push_str(&format!("source_system: {}\n", summary.source_system));
     out.push_str(&format!("ai_provider: {}\n", summary.ai_provider));
     out.push_str(&format!("ai_model: {}\n", summary.ai_model));
     out.push_str(&format!("token_estimator: {:?}\n", summary.token_estimator));

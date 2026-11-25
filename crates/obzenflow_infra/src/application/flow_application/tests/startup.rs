@@ -3,10 +3,11 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::web::endpoints::event_ingestion::{IngestionConfig, IngressDecoder};
+use crate::web::endpoints::event_ingestion::IngestionConfig;
 use obzenflow_core::event::payloads::system_payload::{
     PipelineLifecycleEvent as PipelineFact, SystemPayload as SystemFact,
 };
+use obzenflow_runtime::events::IngressDecoder;
 
 #[derive(Clone, Debug)]
 struct IdleIngress;
@@ -198,7 +199,7 @@ enabled = false
     let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
     let hook_observed = observed.clone();
     let definition = FlowDefinition::new(move |context| async move {
-        let source = counting_source(source_calls);
+        let source = FiniteInput::new(false, source_calls);
         let sink = noop_sink();
         let handle = flow! {
             name: "auth_admission_no_automatic_run",
@@ -283,7 +284,7 @@ enabled = false
     let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
     let hook_observed = observed.clone();
     let definition = FlowDefinition::new(move |context| async move {
-        let source = counting_source(source_calls);
+        let source = FiniteInput::new(false, source_calls);
         let sink = noop_sink();
         let handle = flow! {
             name: "bind_admission_no_automatic_run",

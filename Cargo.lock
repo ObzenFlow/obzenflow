@@ -1679,16 +1679,13 @@ dependencies = [
 name = "obzenflow_adapters"
 version = "0.4.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
- "csv",
  "http",
  "obzenflow-topology",
  "obzenflow_core",
  "obzenflow_runtime",
  "ring",
- "saphyr-parser",
  "serde",
  "serde_json",
  "tempfile",
@@ -1783,6 +1780,7 @@ dependencies = [
  "console-api",
  "console-subscriber",
  "crc32fast",
+ "csv",
  "futures",
  "headers",
  "humantime",
@@ -1800,6 +1798,7 @@ dependencies = [
  "rig-core",
  "ring",
  "rustls-native-certs",
+ "saphyr-parser",
  "serde",
  "serde_json",
  "sqlx",

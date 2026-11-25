@@ -183,8 +183,8 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 ///
 /// A single output fact may be named directly. For a multi-fact arrow, list
 /// the facts with [`obzenflow_core::outcome!`]. The handler is a
-/// [`Command`](crate::effects::Command), which allows every effect the ports it
-/// works through declare.
+/// [`Command`](crate::commands::Command) and allows every effect that its ports
+/// declare.
 ///
 /// ```ignore
 /// # use async_trait::async_trait;
@@ -227,7 +227,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
             `Input` must match the arrow input, and `Output` mirrors the arrow"
 )]
 #[async_trait]
-pub trait EffectfulTransformHandler: crate::effects::Command + Send + Sync {
+pub trait EffectfulTransformHandler: crate::commands::Command + Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: obzenflow_core::EffectfulOutcome;
 

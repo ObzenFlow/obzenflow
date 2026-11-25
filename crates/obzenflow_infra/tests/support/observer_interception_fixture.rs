@@ -11,9 +11,11 @@ use obzenflow_adapters::middleware::{
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
@@ -21,6 +23,7 @@ use obzenflow_runtime::stages::observer::{
     EffectObserver, EffectObserverContext, ObserverResult, StageLifecycleObserver,
     StageLifecycleObserverContext,
 };
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -133,7 +136,6 @@ struct Orders {
     reads: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::system("orders")]
 #[async_trait]
 impl OrderInput for Orders {
     async fn read(
@@ -154,7 +156,7 @@ impl OrderInput for Orders {
     }
 }
 
-struct OrderSource(obzenflow_runtime::queries::QueryPort<dyn OrderInput>);
+struct OrderSource(Port<dyn OrderInput>);
 
 impl TypedFiniteSourceHandler for OrderSource {
     type Output = OrderAccepted;
@@ -173,7 +175,7 @@ struct AuthoriseShippingRequest {
     order_id: u64,
 }
 
-#[obzenflow_runtime::effects::port(system = "shipping-desk")]
+#[obzenflow_runtime::effects::port]
 impl ShippingDesk {
     #[effect(type = "shipping.authorise", exactly_once)]
     fn authorise(
@@ -231,7 +233,7 @@ struct ShippingHandoff {
     writes: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::port(system = "shipping-handoff")]
+#[obzenflow_runtime::effects::port]
 impl ShippingHandoff {
     #[effect(type = "shipping.hand_off", at_least_once, records = reply)]
     fn hand_off(&self, request: &HandOffRequest) -> Result<(), EffectError> {
@@ -316,7 +318,7 @@ pub(crate) fn build_flow(
     probe: Probe,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let orders = OrderSource(obzenflow_runtime::queries::QueryPort::to(Orders {
+        let orders = OrderSource(Port::to(Orders {
             reads: probe.source_polls.clone(),
         }));
         let shipping_handoff = perform(|order: &ShippingReady| HandOffRequest {

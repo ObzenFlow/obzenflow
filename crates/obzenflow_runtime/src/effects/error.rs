@@ -5,6 +5,7 @@
 use super::binding::EffectPortSlotLabel;
 use super::*;
 use obzenflow_core::event::status::processing_status::ErrorKind;
+use obzenflow_core::EffectBindingIdentity;
 
 #[derive(Debug, Clone, Error)]
 pub enum EffectError {
@@ -194,20 +195,23 @@ pub enum DriftBinding {
     Model,
     /// A named binding the stage's handler holds.
     Named,
+    /// `Portless` means that the effect records no binding, for example a call
+    /// through the port of a system. A replay compares no binding for it.
+    Portless,
 }
 
 impl DriftBinding {
     fn noun(self) -> &'static str {
         match self {
             Self::Model => "model",
-            Self::Named => "binding",
+            Self::Named | Self::Portless => "binding",
         }
     }
 
     fn request_changed(self) -> &'static str {
         match self {
             Self::Model => "the request differs from the recording (prompt or parameters changed)",
-            Self::Named => "the request differs from the recording",
+            Self::Named | Self::Portless => "the request differs from the recording",
         }
     }
 }
@@ -225,6 +229,12 @@ impl DescriptorDrift {
         recorded: &EffectDescriptor,
         binding: DriftBinding,
     ) -> Self {
+        let binding = match (&offered.binding, &recorded.binding) {
+            (EffectBindingIdentity::Portless, EffectBindingIdentity::Portless) => {
+                DriftBinding::Portless
+            }
+            _ => binding,
+        };
         let mut differs = Vec::new();
         if offered.effect_type != recorded.effect_type
             || offered.label != recorded.label
@@ -271,7 +281,11 @@ impl std::fmt::Display for DescriptorDrift {
             ),
         ]
         .into_iter()
-        .filter(|(component, _)| !self.differs.contains(component))
+        .filter(|(component, _)| {
+            !self.differs.contains(component)
+                && !(*component == DescriptorComponent::Binding
+                    && self.binding == DriftBinding::Portless)
+        })
         .map(|(_, name)| name)
         .collect::<Vec<_>>();
         f.write_str(&changed.join("; "))?;

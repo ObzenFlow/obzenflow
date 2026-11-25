@@ -80,8 +80,8 @@ pub enum ExecutionPayload {
     Backpressure(BackpressureFact),
     SourceRecordRejected(SourceRecordRejectedFact),
     SourcePollFailed(SourcePollFailedFact),
-    SourceInput(Box<crate::query::SourceInputRecord>),
-    SourceBindingDeclared(crate::effect_binding::SystemBinding),
+    #[serde(rename = "source_input")]
+    MemberRecorded(Box<crate::source::MemberRecorded>),
     SourceReattached(SourceReattachedFact),
     AiChunkingPlanned(AiChunkingPlannedFact),
     AccumulatorProgress {
@@ -540,8 +540,6 @@ pub enum ReattachGuarantee {
     /// The sender redelivers what was never acknowledged; only hosted ingress,
     /// which acknowledges after commit, records it.
     SenderRedelivers,
-    /// Each observation supersedes the last; re-seen rows are expected.
-    LatestState,
     /// No input is admitted twice. Input not committed at the interruption, and
     /// input that arrived while no reader was attached, may be lost.
     AtMostOnce,
@@ -592,8 +590,7 @@ impl ExecutionPayload {
             Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourceRecordRejected(_) => vocabulary::source::RECORD_REJECTED,
             Self::SourcePollFailed(_) => vocabulary::source::POLL_FAILED,
-            Self::SourceInput(record) => record.input.event_type(),
-            Self::SourceBindingDeclared(_) => vocabulary::source::BINDING_DECLARED,
+            Self::MemberRecorded(_) => crate::source::MEMBER_RECORDED_EVENT_TYPE,
             Self::SourceReattached(_) => vocabulary::source::REATTACHED,
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
             Self::AccumulatorProgress { .. } => "stateful.accumulation_progress",
@@ -618,7 +615,7 @@ impl ExecutionPayload {
         match self {
             Self::StageFatalRecorded(_)
             | Self::StageProcessingFailed(_)
-            | Self::SourceInput(_)
+            | Self::MemberRecorded(_)
             | Self::EffectRecord(_)
             | Self::EffectAttemptStarted(_)
             | Self::EffectRecoveryAbandoned(_) => true,
@@ -634,7 +631,6 @@ impl ExecutionPayload {
             | Self::Backpressure(_)
             | Self::SourceRecordRejected(_)
             | Self::SourcePollFailed(_)
-            | Self::SourceBindingDeclared(_)
             | Self::SourceReattached(_)
             | Self::AiChunkingPlanned(_)
             | Self::AccumulatorProgress { .. }

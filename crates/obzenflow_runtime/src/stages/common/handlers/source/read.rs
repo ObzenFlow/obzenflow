@@ -3,18 +3,21 @@
 // https://obzenflow.dev
 
 use super::{SourceContinuation, SourceError};
-use crate::effects::{EffectError, EffectsCore, SourceSystem};
-use crate::queries::{ask, QueryPort, QueryRequest};
+use crate::commands::{AnswersEffect, StageEffectsError};
+use crate::effects::{EffectDeclaration, EffectError, EffectsCore};
+use crate::queries::{FiniteRead, QueryCall, QueryRequest};
+use crate::systems::Port;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::{
     ReattachGuarantee, SourcePollContinuation, SourcePollErrorKind,
 };
 use obzenflow_core::event::{EffectFailureDetail, SourceDiagnosticReason, SourceReadFailure};
 use obzenflow_core::WriterId;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::time::Duration;
 
 pub(crate) async fn read_stage(
     resources: &crate::stages::StageResources,
@@ -68,22 +71,6 @@ pub(crate) async fn read_stage(
     }))
 }
 
-/// `FiniteRead` is the recorded reply to one finite read. It holds records and the
-/// argument of the next read, or the end of the input.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum FiniteRead<Record, Next> {
-    Batch { records: Vec<Record>, next: Next },
-    EndOfInput,
-}
-
-/// `ContinuousRead` is the recorded reply to one continuous read. It holds the records
-/// that the read took and the argument of the next read.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContinuousRead<Record, Next> {
-    pub records: Vec<Record>,
-    pub next: Next,
-}
-
 /// `Finite` marks a source read whose input ends.
 pub enum Finite {}
 
@@ -97,26 +84,16 @@ mod sealed {
 }
 
 /// `ReadLifetime` is the lifetime of a source read, [`Finite`] or [`Continuous`]. The
-/// reply type of the port method sets it, and the handler role must agree with it.
+/// handler role must agree with it.
 pub trait ReadLifetime: sealed::Lifetime + Send + Sync + 'static {}
 
 impl ReadLifetime for Finite {}
 
 impl ReadLifetime for Continuous {}
 
-/// Each system behind a continuous source port implements `InputReadiness`. Make it
-/// a supertrait of the port trait, so that every system behind the port supplies it.
-/// The framework waits for `ready` before each live read, and the wait is not a read.
-#[async_trait]
-pub trait InputReadiness: Send + Sync {
-    /// `ready` resolves when the system holds input for the next read. It takes
-    /// nothing from the system. An error ends the live reads of the stage.
-    async fn ready(&self) -> Result<(), SourceError>;
-}
-
 /// `SourceRead` is the read that a source handler declares through its bound port.
-/// The framework performs each read and keeps the argument of the next read from the
-/// recorded reply. `L` is the lifetime of the read.
+/// The framework asks each query and keeps the request of the next read from the
+/// recorded answer. `L` is the lifetime of the read.
 pub struct SourceRead<Output, L: ReadLifetime = Finite> {
     reads: Box<dyn Reads<Output>>,
     continuation: SourceContinuation,
@@ -124,9 +101,9 @@ pub struct SourceRead<Output, L: ReadLifetime = Finite> {
 }
 
 impl<Output: Send + Sync + 'static> SourceRead<Output, Finite> {
-    /// `SourceRead::finite` makes a finite read. Each reply gives the argument of the next
-    /// read or ends the input.
-    pub fn finite<R, Record, F>(port: QueryPort<R::Port>, first: R, output: F) -> Self
+    /// `SourceRead::finite` makes a finite read. Each answer gives the request of the
+    /// next read or ends the input.
+    pub fn finite<R, Record, F>(port: Port<R::Port>, first: R, output: F) -> Self
     where
         R: QueryRequest<Answer = FiniteRead<Record, R>>,
         Record: Send + Sync + 'static,
@@ -147,7 +124,7 @@ impl<Output: Send + Sync + 'static> SourceRead<Output, Finite> {
 
     /// Maps a supplier's page and its metadata into source records and the next request.
     pub fn pages<R, Record, M, Split, F>(
-        port: QueryPort<R::Port>,
+        port: Port<R::Port>,
         first: R,
         page: Split,
         output: F,
@@ -184,41 +161,13 @@ impl<Output: Send + Sync + 'static> SourceRead<Output, Finite> {
     }
 }
 
-impl<Output: Send + Sync + 'static> SourceRead<Output, Continuous> {
-    /// `SourceRead::continuous` makes a continuous read. Before each live read, the
-    /// framework waits until the system behind the port is ready. A resumed run
-    /// continues the live reads and can read the latest state of the system again.
-    pub fn continuous<R, Record, F>(port: QueryPort<R::Port>, first: R, output: F) -> Self
-    where
-        R: QueryRequest<Answer = ContinuousRead<Record, R>>,
-        R::Port: InputReadiness,
-        Record: Send + Sync + 'static,
-        F: Fn(Record) -> Result<Output, SourceError> + Send + Sync + 'static,
-    {
-        let continuation = SourceContinuation::Reattach {
-            guarantee: ReattachGuarantee::LatestState,
-        };
-        Self {
-            reads: Box::new(ContinuousReads {
-                port,
-                system: OnceLock::new(),
-                next: first,
-                pending: VecDeque::new(),
-                output,
-            }),
-            continuation,
-            lifetime: PhantomData,
-        }
-    }
-}
-
 impl<Output: Send + Sync + 'static, L: ReadLifetime> SourceRead<Output, L> {
     pub(crate) fn continuation(&self) -> SourceContinuation {
         self.continuation
     }
 
-    pub(crate) fn source_system(&self) -> SourceSystem {
-        self.reads.source_system()
+    pub(crate) fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError> {
+        self.reads.declaration()
     }
 
     pub(crate) fn into_driven(self) -> DrivenRead<Output> {
@@ -239,16 +188,20 @@ impl<Output: Send + Sync + 'static> DrivenRead<Output> {
         self.reads.is_continuous()
     }
 
-    pub(crate) async fn ready(&self, effects: &mut EffectsCore) -> Result<(), NotReady> {
-        self.reads.ready(effects).await
+    pub(crate) async fn ready(&self) -> Result<(), SourceError> {
+        self.reads.ready().await
     }
 
     pub(crate) fn next_output(&mut self) -> Option<Result<Output, SourceError>> {
         self.reads.next_output()
     }
 
-    pub(crate) async fn read(&mut self, effects: &mut EffectsCore) -> Result<ReadEnd, EffectError> {
-        self.reads.read(effects).await
+    pub(crate) async fn read(
+        &mut self,
+        effects: &mut EffectsCore,
+        deadline: Option<Duration>,
+    ) -> Result<ReadEnd, EffectError> {
+        self.reads.read(effects, deadline).await
     }
 }
 
@@ -257,25 +210,24 @@ pub(crate) enum ReadEnd {
     EndOfInput,
 }
 
-pub(crate) enum NotReady {
-    Source(SourceError),
-    Effect(EffectError),
-}
-
 #[async_trait]
 trait Reads<Output>: Send + Sync {
-    fn source_system(&self) -> SourceSystem;
+    fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError>;
     fn is_continuous(&self) -> bool;
     fn has_pending(&self) -> bool;
-    async fn ready(&self, _effects: &mut EffectsCore) -> Result<(), NotReady> {
+    async fn ready(&self) -> Result<(), SourceError> {
         Ok(())
     }
     fn next_output(&mut self) -> Option<Result<Output, SourceError>>;
-    async fn read(&mut self, effects: &mut EffectsCore) -> Result<ReadEnd, EffectError>;
+    async fn read(
+        &mut self,
+        effects: &mut EffectsCore,
+        deadline: Option<Duration>,
+    ) -> Result<ReadEnd, EffectError>;
 }
 
 struct FiniteReads<R: QueryRequest, Record, M, Split, F> {
-    port: QueryPort<R::Port>,
+    port: Port<R::Port>,
     next: Option<R>,
     metadata: Option<M>,
     pending: VecDeque<Record>,
@@ -296,15 +248,18 @@ where
         + 'static,
     F: Fn(&M, Record) -> Result<Output, SourceError> + Send + Sync + 'static,
 {
-    fn source_system(&self) -> SourceSystem {
-        self.port.system.clone()
+    fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError> {
+        <Port<R::Port> as AnswersEffect<QueryCall<R>>>::declaration(&self.port).map(Some)
     }
+
     fn is_continuous(&self) -> bool {
         false
     }
+
     fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
+
     fn next_output(&mut self) -> Option<Result<Output, SourceError>> {
         let record = self.pending.pop_front()?;
         Some((self.output)(
@@ -314,12 +269,17 @@ where
             record,
         ))
     }
-    async fn read(&mut self, stage: &mut EffectsCore) -> Result<ReadEnd, EffectError> {
-        let Some(argument) = self.next.as_ref() else {
+
+    async fn read(
+        &mut self,
+        effects: &mut EffectsCore,
+        deadline: Option<Duration>,
+    ) -> Result<ReadEnd, EffectError> {
+        let Some(request) = self.next.as_ref() else {
             return Ok(ReadEnd::EndOfInput);
         };
-        let answer = ask(stage, &self.port, argument).await?;
-        match (self.page)(argument, answer)? {
+        let answer = effects.query(request.clone(), deadline).await?;
+        match (self.page)(request, answer)? {
             Some((metadata, records, next)) => {
                 self.next = Some(next);
                 self.metadata = Some(metadata);
@@ -334,78 +294,20 @@ where
     }
 }
 
-struct ContinuousReads<R: QueryRequest, Record, F> {
-    port: QueryPort<R::Port>,
-    system: OnceLock<Arc<R::Port>>,
-    next: R,
-    pending: VecDeque<Record>,
-    output: F,
-}
-
-#[async_trait]
-impl<R, Record, Output, F> Reads<Output> for ContinuousReads<R, Record, F>
-where
-    R: QueryRequest<Answer = ContinuousRead<Record, R>> + Clone + Send + Sync + 'static,
-    R::Port: InputReadiness,
-    Record: Send + Sync + 'static,
-    Output: Send + Sync + 'static,
-    F: Fn(Record) -> Result<Output, SourceError> + Send + Sync + 'static,
-{
-    fn source_system(&self) -> SourceSystem {
-        self.port.system.clone()
-    }
-
-    fn is_continuous(&self) -> bool {
-        true
-    }
-
-    fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
-    async fn ready(&self, effects: &mut EffectsCore) -> Result<(), NotReady> {
-        let system = match self.system.get() {
-            Some(system) => system,
-            None => {
-                let resolved = self
-                    .port
-                    .system
-                    .resolve_query(effects.source_registry())
-                    .map_err(NotReady::Effect)?
-                    .map_err(|error| NotReady::Source(reported(*error.failure)))?;
-                self.system.get_or_init(|| resolved)
-            }
-        };
-        system.ready().await.map_err(NotReady::Source)
-    }
-
-    fn next_output(&mut self) -> Option<Result<Output, SourceError>> {
-        self.pending.pop_front().map(&self.output)
-    }
-
-    async fn read(&mut self, effects: &mut EffectsCore) -> Result<ReadEnd, EffectError> {
-        let ContinuousRead { records, next } = ask(effects, &self.port, &self.next).await?;
-        self.pending.extend(records);
-        self.next = next;
-        Ok(ReadEnd::Batch)
-    }
-}
-
 pub(crate) fn recording_ends(
     context: &crate::effects::EffectInvocationContext,
     number: u64,
-    ordinal: obzenflow_core::event::payloads::effect_payload::EffectOrdinal,
 ) -> bool {
-    use obzenflow_core::event::payloads::effect_payload::EffectCursor;
+    use obzenflow_core::event::payloads::effect_payload::{EffectCursor, EffectOrdinal};
     let execution = &context.stage.runtime_execution;
     execution.archive_for_io().is_some()
         && execution.resume_control().is_none()
         && context.stage.effect_history.as_ref().is_none_or(|history| {
-            !history.source_inputs.contains_key(&EffectCursor::new(
+            !history.holds_read(&EffectCursor::new(
                 history.recorded_flow_id().clone(),
                 context.stage.stage_key.clone(),
                 number,
-                ordinal,
+                EffectOrdinal::new(0),
             ))
         })
 }
@@ -415,8 +317,7 @@ pub(crate) fn recording_ends_before(
     number: u64,
     fact: &obzenflow_core::EventId,
 ) -> bool {
-    use obzenflow_core::event::payloads::effect_payload::EffectOrdinal;
-    recording_ends(context, number + 1, EffectOrdinal::new(0))
+    recording_ends(context, number + 1)
         && context
             .stage
             .effect_history
@@ -518,13 +419,10 @@ fn reported(failure: SourceReadFailure) -> SourceError {
 
 impl<T: Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> SourceRead<T, Continuous> {
     /// Receive sender-initiated values from a bounded in-process channel.
-    pub fn channel(receiver: Arc<super::SourceReceiver<T>>) -> Self {
-        let evidence =
-            obzenflow_core::SystemBindingEvidence::named("channel").expect("valid channel binding");
+    pub fn channel(receiver: Arc<crate::events::SourceReceiver<T>>) -> Self {
         Self {
             reads: Box::new(ChannelEvents {
                 receiver,
-                system: SourceSystem::event(evidence),
                 pending: None,
             }),
             continuation: SourceContinuation::Reattach {
@@ -536,8 +434,7 @@ impl<T: Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> SourceR
 }
 
 struct ChannelEvents<T> {
-    receiver: Arc<super::SourceReceiver<T>>,
-    system: SourceSystem,
+    receiver: Arc<crate::events::SourceReceiver<T>>,
     pending: Option<T>,
 }
 
@@ -545,43 +442,43 @@ struct ChannelEvents<T> {
 impl<T: Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> Reads<T>
     for ChannelEvents<T>
 {
-    fn source_system(&self) -> SourceSystem {
-        self.system.clone()
+    fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError> {
+        Ok(None)
     }
+
     fn is_continuous(&self) -> bool {
         true
     }
+
     fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
-    async fn ready(&self, _: &mut EffectsCore) -> Result<(), NotReady> {
-        self.receiver.ready().await.map_err(|_| {
-            NotReady::Source(SourceError::Other(
-                SourceDiagnosticReason::InputClosed.into(),
-            ))
-        })
+
+    async fn ready(&self) -> Result<(), SourceError> {
+        self.receiver
+            .ready()
+            .await
+            .map_err(|_| SourceError::Other(SourceDiagnosticReason::InputClosed.into()))
     }
+
     fn next_output(&mut self) -> Option<Result<T, SourceError>> {
         self.pending.take().map(Ok)
     }
-    async fn read(&mut self, stage: &mut EffectsCore) -> Result<ReadEnd, EffectError> {
-        use obzenflow_core::query::SourceInput;
-        let input = stage
-            .source_input(
-                |input| matches!(input, SourceInput::IngressMember { .. }),
-                || async {
-                    let item = self.receiver.take(1).pop().ok_or_else(|| {
+
+    async fn read(
+        &mut self,
+        effects: &mut EffectsCore,
+        _deadline: Option<Duration>,
+    ) -> Result<ReadEnd, EffectError> {
+        let member = effects
+            .record_member(|| async {
+                let item =
+                    self.receiver.take(1).pop().ok_or_else(|| {
                         EffectError::Execution("ready channel held no value".into())
                     })?;
-                    let member = serde_json::to_value(item)
-                        .map_err(|e| EffectError::Serialization(e.to_string()))?;
-                    Ok(SourceInput::IngressMember { member })
-                },
-            )
+                serde_json::to_value(item).map_err(|e| EffectError::Serialization(e.to_string()))
+            })
             .await?;
-        let SourceInput::IngressMember { member } = input else {
-            unreachable!("channel received query answer")
-        };
         self.pending = Some(
             serde_json::from_value(member)
                 .map_err(|e| EffectError::Serialization(e.to_string()))?,

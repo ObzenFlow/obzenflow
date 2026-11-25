@@ -7,13 +7,15 @@
 
 use obzenflow_benchmarks::numbers::{NextNumber, NumberFeed, Numbers};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{perform, EffectError, Perform, Port};
+use obzenflow_runtime::commands::{perform, Perform};
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,7 +42,7 @@ impl TypedPayload for Event {
 }
 
 pub struct Source {
-    port: obzenflow_runtime::queries::QueryPort<dyn NumberFeed>,
+    port: Port<dyn NumberFeed>,
     origin: Instant,
 }
 
@@ -77,7 +79,7 @@ pub struct LatencyRecorder {
     delivered: Delivered,
 }
 
-#[obzenflow_runtime::effects::port(system = "latency-recorder")]
+#[obzenflow_runtime::effects::port]
 impl LatencyRecorder {
     #[effect(type = "bench.latency.record", at_least_once, records = reply)]
     fn record(&self, event: &Event) -> Result<(), EffectError> {

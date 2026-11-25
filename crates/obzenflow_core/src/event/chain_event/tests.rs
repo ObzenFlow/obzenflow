@@ -98,6 +98,8 @@ fn framework_effect_data_is_not_source_replayable() {
         descriptor: EffectDescriptor::new("test.effect", "test", 1, "v1", "input"),
         outcome: EffectOutcomePayload::Succeeded { output: json!({}) },
         origin: None,
+        call: crate::event::payloads::effect_payload::CallKind::Command,
+        request: None,
     };
     let event = ChainEventFactory::execution_event(
         writer_id,

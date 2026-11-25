@@ -151,7 +151,7 @@ fn join_phase_wire_names_and_fields_match_the_approved_spellings() {
 #[test]
 fn reattachment_wire_names_and_values_match_the_approved_spellings() {
     let stage = StageId::new();
-    for guarantee in ["sender_redelivers", "latest_state", "at_most_once"] {
+    for guarantee in ["sender_redelivers", "at_most_once"] {
         let wire =
             json!({"execution_type":"source_reattached", "generation":1, "guarantee":guarantee});
         let payload: ExecutionPayload = serde_json::from_value(wire.clone()).unwrap();
@@ -164,7 +164,7 @@ fn reattachment_wire_names_and_values_match_the_approved_spellings() {
     }
     for invalid in [
         json!({"execution_type":"source_reattached", "generation":1, "guarantee":"at_least_once"}),
-        json!({"execution_type":"source_reattached", "generation":1, "guarantee":"latest_state", "stage":"tx"}),
+        json!({"execution_type":"source_reattached", "generation":1, "guarantee":"sender_redelivers", "stage":"tx"}),
     ] {
         assert!(serde_json::from_value::<ExecutionPayload>(invalid).is_err());
     }

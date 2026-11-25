@@ -86,7 +86,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow::port(system = "call-counter")]
+#[obzenflow::port]
 impl CallCounter {
     #[effect(type = "envelope.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<EnvelopeEffectValue, EffectError> {

@@ -13,7 +13,6 @@ mod tests {
     use obzenflow_core::OneFactOutcome;
     use obzenflow_core::{outcome, ChainEvent, StageId, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
-    use obzenflow_runtime::effects::SystemName;
     use obzenflow_runtime::effects::{Effects, StageCompletion};
     use obzenflow_runtime::feed_plan::{
         payload_key_from_type_hint, FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed,
@@ -22,9 +21,9 @@ mod tests {
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
 
-    use obzenflow_runtime::stages::common::handlers::source::{
-        source_channel, Continuous, ContinuousRead, FiniteRead, InputReadiness, SourceRead,
-    };
+    use obzenflow_runtime::events::source_channel;
+    use obzenflow_runtime::queries::FiniteRead;
+    use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead};
     use obzenflow_runtime::stages::common::handlers::{
         EffectfulTransformHandler, HostedSource, JoinReferenceView, StatefulEmission,
         TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
@@ -32,11 +31,14 @@ mod tests {
         TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::stages::source::SourceContinuation;
+    use obzenflow_runtime::systems::Port;
     use obzenflow_runtime::typing::TransformTyping;
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
+    use serde::de::DeserializeOwned;
     use serde::{Deserialize, Serialize};
     use std::any::type_name;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use crate::dsl::error::{EdgeTypingMismatchKind, FlowBuildError};
     use crate::dsl::stage_descriptor::StageDescriptor;
@@ -119,39 +121,18 @@ mod tests {
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct NextInput;
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    struct NextLiveInput;
-
     #[obzenflow_runtime::effects::port]
     #[async_trait]
-    trait ExactInput: InputReadiness {
+    trait ExactInput {
         #[query(type = "stage_contracts.input.read")]
         async fn read(
             &self,
             from: &NextInput,
             ctx: &obzenflow_runtime::queries::QueryContext,
         ) -> Result<FiniteRead<InputEvent, NextInput>, obzenflow_runtime::queries::QueryError>;
-
-        #[query(type = "stage_contracts.input.take")]
-        async fn take(
-            &self,
-            from: &NextLiveInput,
-            ctx: &obzenflow_runtime::queries::QueryContext,
-        ) -> Result<ContinuousRead<InputEvent, NextLiveInput>, obzenflow_runtime::queries::QueryError>;
     }
 
     struct NoInput;
-
-    impl SystemName for NoInput {
-        const NAME: &'static str = "no-input";
-    }
-
-    #[async_trait]
-    impl InputReadiness for NoInput {
-        async fn ready(&self) -> Result<(), obzenflow_runtime::stages::SourceError> {
-            std::future::pending().await
-        }
-    }
 
     #[async_trait]
     impl ExactInput for NoInput {
@@ -163,38 +144,19 @@ mod tests {
         {
             Ok(FiniteRead::EndOfInput)
         }
-
-        async fn take(
-            &self,
-            _from: &NextLiveInput,
-            _ctx: &obzenflow_runtime::queries::QueryContext,
-        ) -> Result<ContinuousRead<InputEvent, NextLiveInput>, obzenflow_runtime::queries::QueryError>
-        {
-            Ok(ContinuousRead {
-                records: Vec::new(),
-                next: NextLiveInput,
-            })
-        }
     }
 
     fn finite_read<O: OneFactOutcome + Send + Sync + 'static>(
         output: fn(InputEvent) -> O,
     ) -> SourceRead<O> {
-        SourceRead::finite(
-            obzenflow_runtime::queries::QueryPort::to(NoInput),
-            NextInput,
-            move |event| Ok(output(event)),
-        )
+        SourceRead::finite(Port::to(NoInput), NextInput, move |event| Ok(output(event)))
     }
 
-    fn live_read<O: OneFactOutcome + Send + Sync + 'static>(
-        output: fn(InputEvent) -> O,
-    ) -> SourceRead<O, Continuous> {
-        SourceRead::continuous(
-            obzenflow_runtime::queries::QueryPort::to(NoInput),
-            NextLiveInput,
-            move |event| Ok(output(event)),
-        )
+    fn live_read<O>() -> SourceRead<O, Continuous>
+    where
+        O: OneFactOutcome + Serialize + DeserializeOwned + Send + Sync + 'static,
+    {
+        SourceRead::channel(Arc::new(source_channel::<O>(1).1))
     }
 
     fn live_input<T: TypedPayload + Send + Sync + 'static>(
@@ -246,7 +208,7 @@ mod tests {
         type Output = InputEvent;
 
         fn read(&self) -> SourceRead<InputEvent, Continuous> {
-            live_read(exact_event)
+            live_read()
         }
     }
 
@@ -256,7 +218,7 @@ mod tests {
         type Output = InputEvent;
 
         fn read(&self) -> SourceRead<InputEvent, Continuous> {
-            live_read(exact_event)
+            live_read()
         }
     }
 
@@ -277,26 +239,6 @@ mod tests {
 
         fn read(&self) -> SourceRead<Self::Output> {
             finite_read(either_event)
-        }
-    }
-
-    struct InfiniteMultiExactSource;
-
-    impl TypedInfiniteSourceHandler for InfiniteMultiExactSource {
-        type Output = outcome![InputEvent | AlternateEvent];
-
-        fn read(&self) -> SourceRead<Self::Output, Continuous> {
-            live_read(either_event)
-        }
-    }
-
-    struct AsyncInfiniteMultiExactSource;
-
-    impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteMultiExactSource {
-        type Output = outcome![InputEvent | AlternateEvent];
-
-        fn read(&self) -> SourceRead<Self::Output, Continuous> {
-            live_read(either_event)
         }
     }
 
@@ -588,7 +530,7 @@ mod tests {
             ),
         ];
         let reattach = Some(SourceContinuation::Reattach {
-            guarantee: ReattachGuarantee::LatestState,
+            guarantee: ReattachGuarantee::AtMostOnce,
         });
         assert_eq!(
             read.map(|descriptor| descriptor.source_continuation()),
@@ -621,17 +563,6 @@ mod tests {
         let transform =
             crate::transform!(name: "transform", InputEvent -> OutputEvent => ExactTransform);
         assert_eq!(transform.source_continuation(), None);
-    }
-
-    #[test]
-    fn placeholder_source_system_returns_placeholder() {
-        let placeholder = crate::source!(name: "source", InputEvent => placeholder!());
-        assert_eq!(
-            placeholder
-                .source_system()
-                .map(|system| system.name().to_owned()),
-            Some("placeholder".to_owned())
-        );
     }
 
     #[test]
@@ -804,7 +735,6 @@ mod tests {
 
     struct Verdicts;
 
-    #[obzenflow_runtime::effects::system("verdicts")]
     impl VerdictPort for Verdicts {
         fn verdict(
             &self,
@@ -819,8 +749,8 @@ mod tests {
 
     #[test]
     fn perform_list_answer_equals_row() {
-        let verdict = obzenflow_runtime::effects::perform(VerdictRequest::for_input)
-            .through(obzenflow_runtime::effects::Port::to(Verdicts));
+        let verdict = obzenflow_runtime::commands::perform(VerdictRequest::for_input)
+            .through(Port::to(Verdicts));
         let stage = crate::effectful_transform!(
             name: "verdict",
             InputEvent -> { OutputEvent, AlternateEvent } => verdict);
@@ -871,8 +801,6 @@ mod tests {
     fn source_output_set_lowers_to_contract() {
         let multi_exact = MultiExactSource;
         let async_multi_exact = AsyncMultiExactSource;
-        let infinite_multi_exact = InfiniteMultiExactSource;
-        let async_infinite_multi_exact = AsyncInfiniteMultiExactSource;
         let source = crate::source!(
             name: "multi_output_source",
             { InputEvent, AlternateEvent } => multi_exact
@@ -892,31 +820,6 @@ mod tests {
         assert_eq!(async_source_meta.output_type, exact::<InputEvent>());
         assert_output_contract(
             async_source_meta,
-            vec![exact::<InputEvent>(), exact::<AlternateEvent>()],
-        );
-
-        let infinite_source = crate::source!(
-            name: "multi_output_infinite_source",
-            { InputEvent, AlternateEvent } => infinite_multi_exact
-        );
-        let infinite_source_meta = infinite_source.typing_metadata().unwrap();
-        assert_eq!(infinite_source_meta.output_type, exact::<InputEvent>());
-        assert_output_contract(
-            infinite_source_meta,
-            vec![exact::<InputEvent>(), exact::<AlternateEvent>()],
-        );
-
-        let async_infinite_source = crate::source!(
-            name: "multi_output_async_infinite_source",
-            { InputEvent, AlternateEvent } => async_infinite_multi_exact
-        );
-        let async_infinite_source_meta = async_infinite_source.typing_metadata().unwrap();
-        assert_eq!(
-            async_infinite_source_meta.output_type,
-            exact::<InputEvent>()
-        );
-        assert_output_contract(
-            async_infinite_source_meta,
             vec![exact::<InputEvent>(), exact::<AlternateEvent>()],
         );
     }

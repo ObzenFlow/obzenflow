@@ -199,8 +199,6 @@ async fn run_until_delivered_with_observer(
     Ok(())
 }
 
-/// The same flow shape on memory journals (FLOWIP-120u: an unlocated run may
-/// consume a located archive as input).
 fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let source_handler =
@@ -301,10 +299,6 @@ async fn memory_replay_from_disk_archive_is_ephemeral() -> Result<()> {
     Ok(())
 }
 
-/// FLOWIP-120u F13: resume requires a located current run. An ephemeral
-/// continuation is unreachable (nothing to name later) and its live effects
-/// would re-execute on the next resume of the original archive, so the build
-/// refuses the combination loudly.
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_resume_from_disk_archive_is_refused_at_build() -> Result<()> {
     const RECORDED: u64 = 4;

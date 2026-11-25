@@ -157,7 +157,6 @@ fn opened(
     Ok(request.opened(answer.case_number))
 }
 
-#[obzenflow::system("simulated-case-system")]
 #[async_trait]
 impl CaseSystemPort for SimulatedCaseSystem {
     async fn open(
@@ -170,7 +169,6 @@ impl CaseSystemPort for SimulatedCaseSystem {
     }
 }
 
-#[obzenflow::system("case-system-unreadable-replies")]
 #[async_trait]
 impl CaseSystemPort for UnreadableCaseSystem {
     async fn open(

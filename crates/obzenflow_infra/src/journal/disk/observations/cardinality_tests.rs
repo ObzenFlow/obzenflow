@@ -63,15 +63,15 @@ fn assert_observation(
 ) {
     let ObservationLookup::Ready {
         committed_len: actual_len,
-        observation: Some(located),
+        observation: Some(positioned),
     } = lookup
     else {
         panic!("expected complete coverage and an observation, got {lookup:?}");
     };
     assert_eq!(actual_len, committed_len);
-    assert_eq!(located.position, position);
+    assert_eq!(positioned.position, position);
     assert_eq!(
-        serde_json::to_value(located.observation).unwrap(),
+        serde_json::to_value(positioned.observation).unwrap(),
         serde_json::to_value(expected.envelope.observability.as_ref().unwrap()).unwrap()
     );
 }

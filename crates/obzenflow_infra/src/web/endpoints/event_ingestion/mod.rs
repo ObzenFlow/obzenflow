@@ -41,14 +41,13 @@ pub use validation::{
     validate_submission, SchemaValidator, TypedValidator, ValidationConfig, ValidationError,
 };
 
-pub use obzenflow_adapters::sources::http::{
-    HostedSource, IngressDecodeError, IngressDecoder, IngressRecord,
-};
+pub use obzenflow_adapters::sources::http::HostedSource;
 use obzenflow_core::ingress::{
     HostedIngressBindingSlot, IngressAttemptContext, IngressRequestId, OUTCOME_UNKNOWN_RETRY_AFTER,
 };
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::events::{HostedSubmission, IngressDecoder, SourceReceiver};
 use obzenflow_runtime::execution::SourceExecutionPhases;
 use obzenflow_runtime::prelude::FlowHandle;
 use settlement::EvidenceState;
@@ -274,7 +273,8 @@ where
     /// It does not start a runtime execution. One source stage reads the submissions.
     ///
     /// ```compile_fail,E0382
-    /// use obzenflow_infra::web::endpoints::event_ingestion::{Ingress, IngressDecoder};
+    /// use obzenflow_infra::web::endpoints::event_ingestion::Ingress;
+    /// use obzenflow_runtime::events::IngressDecoder;
     ///
     /// fn transfer_twice<D: IngressDecoder>(ingress: Ingress<D>) {
     ///     let (source, handle) = ingress.into_parts();
@@ -321,7 +321,8 @@ where
     /// submissions.
     ///
     /// ```compile_fail,E0382
-    /// use obzenflow_infra::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder};
+    /// use obzenflow_infra::web::endpoints::event_ingestion::HttpIngress;
+    /// use obzenflow_runtime::events::IngressDecoder;
     ///
     /// fn transfer_twice<D: IngressDecoder>(ingress: HttpIngress<D>) {
     ///     let (source, http) = ingress.into_parts();
@@ -367,12 +368,8 @@ where
     hosted_ingress(decoder, config, HostedSource::ingress)
 }
 
-type HostedSystem<T> = fn(
-    obzenflow_runtime::stages::common::handlers::source::SourceReceiver<
-        obzenflow_runtime::stages::HostedSubmission<T>,
-    >,
-    HostedIngressBindingSlot,
-) -> HostedSource<T>;
+type HostedSystem<T> =
+    fn(SourceReceiver<HostedSubmission<T>>, HostedIngressBindingSlot) -> HostedSource<T>;
 
 fn hosted_ingress<D>(
     decoder: D,

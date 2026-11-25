@@ -165,13 +165,17 @@ struct PendingPort {
 
 /// The one port recipe a system shares across every effect it answers, so
 /// each run resolves it at most once.
-pub(super) struct SystemPort {
+pub(crate) struct SystemPort {
     coordinate: BindingCoordinate,
     recipe: PortRecipe,
 }
 
 impl SystemPort {
-    pub(super) fn eager<P>(port: Arc<P>) -> Self
+    pub(crate) fn ordinal(&self) -> u64 {
+        self.coordinate.ordinal()
+    }
+
+    pub(crate) fn eager<P>(port: Arc<P>) -> Self
     where
         P: ?Sized + Send + Sync + 'static,
     {
@@ -185,17 +189,19 @@ impl SystemPort {
         }
     }
 
-    pub(super) fn grouped<P, R, S, F>(resolver: F) -> Self
+    pub(crate) fn grouped<P, R, S, F>(resolver: F) -> Self
     where
         P: ?Sized + Send + Sync + 'static,
         R: super::SinkRequest<Port = P>,
         S: super::SinkGroupSystem<R>,
-        super::PortImpl<S>: super::ServesPort<P, S>,
+        crate::systems::PortImpl<S>: crate::systems::ServesPort<P, S>,
         F: Fn() -> Result<S, EffectPortResolutionError> + Send + Sync + 'static,
     {
         let erased: ErasedResolver = Arc::new(move || {
             let system = Arc::new(resolver()?);
-            let port = <super::PortImpl<S> as super::ServesPort<P, S>>::coerce(system.clone());
+            let port = <crate::systems::PortImpl<S> as crate::systems::ServesPort<P, S>>::coerce(
+                system.clone(),
+            );
             let group: Arc<dyn super::SinkGroupSystem<R>> = system;
             Ok(ErasedResolvedEffectPort {
                 port: Arc::new(port),
@@ -209,7 +215,7 @@ impl SystemPort {
         }
     }
 
-    pub(super) fn deferred<P>(resolver: EffectPortResolver<P>) -> Self
+    pub(crate) fn deferred<P>(resolver: EffectPortResolver<P>) -> Self
     where
         P: ?Sized + Send + Sync + 'static,
     {
@@ -225,76 +231,6 @@ impl SystemPort {
             coordinate: BindingCoordinate::mint(),
             recipe: PortRecipe::Deferred(erased),
         }
-    }
-}
-
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct SourceSystem {
-    binding: obzenflow_core::effect_binding::SystemBinding,
-    system: Option<Arc<SystemPort>>,
-}
-
-impl SourceSystem {
-    pub(crate) fn event(evidence: obzenflow_core::SystemBindingEvidence) -> Self {
-        Self {
-            binding: evidence.binding().clone(),
-            system: None,
-        }
-    }
-
-    pub(crate) fn query<P: ?Sized + Send + Sync + 'static>(
-        evidence: obzenflow_core::SystemBindingEvidence,
-        resolve: impl Fn() -> Result<Arc<P>, crate::queries::QueryError> + Send + Sync + 'static,
-    ) -> Self {
-        let recipe = SystemPort::deferred(Arc::new(move || Ok(Arc::new(resolve()))));
-        Self {
-            binding: evidence.binding().clone(),
-            system: Some(Arc::new(recipe)),
-        }
-    }
-
-    pub(crate) fn resolve_query<P: ?Sized + Send + Sync + 'static>(
-        &self,
-        registry: &EffectPortRegistry,
-    ) -> Result<Result<Arc<P>, crate::queries::QueryError>, super::EffectError> {
-        let system = self.system.as_ref().ok_or_else(|| {
-            super::EffectError::ReplayArchive(format!(
-                "source {} has no query supplier",
-                self.name()
-            ))
-        })?;
-        let entry = registry.resolve_at(system.coordinate).map_err(|fault| {
-            super::EffectError::ReplayArchive(format!("source binding {}: {fault:?}", self.name()))
-        })?;
-        let result = entry
-            .port
-            .downcast_ref::<Arc<Result<Arc<P>, crate::queries::QueryError>>>()
-            .ok_or_else(|| {
-                super::EffectError::ReplayArchive(format!(
-                    "source binding {} has a different port type",
-                    self.name()
-                ))
-            })?;
-        Ok(result.as_ref().clone())
-    }
-
-    pub fn name(&self) -> &str {
-        self.binding.name()
-    }
-
-    pub fn binding(&self) -> &obzenflow_core::effect_binding::SystemBinding {
-        &self.binding
-    }
-}
-
-impl std::fmt::Debug for SourceSystem {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SourceSystem")
-            .field("system", &self.binding)
-            .field("recipe", &"<not disclosed>")
-            .finish()
     }
 }
 
@@ -372,7 +308,7 @@ impl<E: BoundEffect> EffectRegistrationBuilder<E> {
         }
     }
 
-    pub(super) fn bind_system<P>(
+    pub(crate) fn bind_system<P>(
         mut self,
         slot: EffectPortSlot<P>,
         port: &Arc<SystemPort>,
@@ -858,13 +794,6 @@ impl EffectPortRegistry {
                 .as_ref()
                 .cloned()
                 .map_err(|error| PortResolutionFault::Resolver(*error)),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn install_source_system(&mut self, source: &SourceSystem) {
-        if let Some(system) = &source.system {
-            Arc::make_mut(&mut self.recipes).insert(system.coordinate, system.recipe.clone());
         }
     }
 }

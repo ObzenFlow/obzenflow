@@ -907,7 +907,8 @@ impl fmt::Debug for StageObserverBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effects::{AnswersEffect, EffectError, EffectName, Port};
+    use crate::commands::AnswersEffect;
+    use crate::effects::{EffectError, EffectName, Port};
     use crate::messaging::upstream_subscription::StageInputPosition;
     use crate::stages::observer::EffectObserverOutcome;
     use obzenflow_core::event::context::StageType;
@@ -1084,7 +1085,7 @@ mod tests {
     #[derive(Clone, Debug, serde::Serialize)]
     struct DeclaredRequestB;
 
-    #[crate::effects::port(system = "fixture")]
+    #[crate::effects::port]
     impl FixturePort {
         #[effect(type = "effect.a", exactly_once)]
         fn declared_a(&self, _: &DeclaredRequestA) -> Result<FixtureFact, EffectError> {

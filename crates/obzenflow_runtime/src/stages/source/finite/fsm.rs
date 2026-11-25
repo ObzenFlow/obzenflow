@@ -860,7 +860,7 @@ pub(crate) mod tests {
     }
 
     struct TestJournalReader<T: JournalEvent> {
-        events: Vec<JournalRecord<T::Payload>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
         pos: usize,
     }
 
@@ -910,6 +910,44 @@ pub(crate) mod tests {
             Ok(env)
         }
 
+        async fn storage_append_group(
+            &self,
+            group_id: &str,
+            events: Vec<T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+            let size = u32::try_from(events.len()).map_err(|_| JournalError::Implementation {
+                message: format!("test group '{group_id}' exceeds u32 member capacity"),
+                source: "test group too large".into(),
+            })?;
+            let events = events
+                .into_iter()
+                .enumerate()
+                .map(|(index, event)| options.capture.prepare(index, event))
+                .collect::<Vec<_>>();
+            let mut guard = self.events.lock().unwrap();
+            let mut prepared = guard.clone();
+            let mut written = Vec::new();
+            for (index, event) in events.into_iter().enumerate() {
+                let mut record = crate::testing::causal_fixture::commit_member(
+                    self.id,
+                    event,
+                    options.frontier.member(index)?,
+                    &prepared,
+                )?;
+                record.envelope.provenance.journal.journal_group_id = Some(group_id.to_string());
+                record.envelope.provenance.journal.journal_group_member =
+                    Some(obzenflow_core::event::provenance::JournalGroupMember {
+                        index: index as u32,
+                        size,
+                    });
+                prepared.push(record.clone());
+                written.push(record);
+            }
+            *guard = prepared;
+            Ok(written)
+        }
+
         async fn storage_read_all_unordered(
             &self,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -929,9 +967,8 @@ pub(crate) mod tests {
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            let guard = self.events.lock().unwrap();
             Ok(Box::new(TestJournalReader {
-                events: guard.clone(),
+                events: Arc::clone(&self.events),
                 pos: position as usize,
             }))
         }
@@ -955,13 +992,11 @@ pub(crate) mod tests {
         async fn storage_next(
             &mut self,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
-            if self.pos >= self.events.len() {
-                Ok(None)
-            } else {
-                let env = self.events.get(self.pos).cloned();
+            let env = self.events.lock().unwrap().get(self.pos).cloned();
+            if env.is_some() {
                 self.pos += 1;
-                Ok(env)
             }
+            Ok(env)
         }
 
         fn storage_position(&self) -> u64 {
@@ -969,7 +1004,7 @@ pub(crate) mod tests {
         }
 
         fn storage_is_at_end(&self) -> bool {
-            self.pos >= self.events.len()
+            self.pos >= self.events.lock().unwrap().len()
         }
     }
 
@@ -983,10 +1018,6 @@ pub(crate) mod tests {
     impl crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler for DummySource {
         fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
 
-        fn poll_timeout(&self) -> Option<std::time::Duration> {
-            None
-        }
-
         async fn next_invocation(
             &mut self,
         ) -> crate::stages::common::handlers::source::ErasedSourceInvocation {
@@ -999,10 +1030,6 @@ pub(crate) mod tests {
     #[async_trait]
     impl crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler for DummySource {
         fn install_read_context(&mut self, _context: crate::effects::EffectInvocationContext) {}
-
-        fn poll_timeout(&self) -> Option<std::time::Duration> {
-            None
-        }
 
         async fn next_invocation(
             &mut self,
@@ -1075,7 +1102,7 @@ pub(crate) mod tests {
                         replay_completion: Default::default(),
                         source_boundary: None,
                         pending_failure: None,
-                        system: obzenflow_core::SystemBindingEvidence::named("projection").unwrap().binding().clone(),
+                        registered: Default::default(),
                         $($extra: $value,)*
                     };
                     let build_fsm = |initial_state| {

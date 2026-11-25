@@ -38,7 +38,7 @@ struct Tick {
 impl TypedPayload for Tick {
     const EVENT_TYPE: &'static str = "validation_benchmark.tick";
 }
-struct Ticks(obzenflow_runtime::queries::QueryPort<dyn crate::numbers::NumberFeed>);
+struct Ticks(obzenflow_runtime::systems::Port<dyn crate::numbers::NumberFeed>);
 
 impl TypedFiniteSourceHandler for Ticks {
     type Output = Tick;
@@ -167,8 +167,9 @@ impl Archive {
                 matches!(
                     &row.record,
                     RunRecordData::Chain(record) if matches!(
-                        record.payload,
-                        ChainPayload::Execution(ExecutionPayload::SourceInput(_))
+                        &record.payload,
+                        ChainPayload::Execution(ExecutionPayload::EffectRecord(effect))
+                            if effect.is_query()
                     )
                 ) && row
                     .journal

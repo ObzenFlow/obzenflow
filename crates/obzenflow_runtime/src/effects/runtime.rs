@@ -2,15 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+mod member_journal;
 mod sink_group;
-mod source_journal;
 use super::boundary::PhysicalCallOutcome;
 use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
 use super::*;
 use crate::execution::{ExecutionPosition, UnrecordedEffect};
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use obzenflow_core::event::payloads::effect_payload::{
-    CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
+    CallKind, CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
 };
 use obzenflow_core::MiddlewareExecutionScope;
 pub(super) use sink_group::SinkGroup;
@@ -23,6 +23,36 @@ type ExecutedOutcomeSlot<O> = Arc<Mutex<Option<(O, PreparedEffectSuccess)>>>;
 /// result and the outcome committed through the handle, if any.
 type TransactionalSettleSlot<O> =
     Arc<Mutex<Option<(Result<(), EffectError>, Option<PreparedEffectOutcome<O>>)>>>;
+
+fn is_repeated_query_failure(error: &EffectError) -> bool {
+    matches!(
+        error.failure_detail(),
+        Some(EffectFailureDetail::SourceRead(failure))
+            if failure.continuation
+                == obzenflow_core::event::payloads::execution_payload::SourcePollContinuation::Recoverable
+    )
+}
+
+fn is_query_failure(error: &EffectError) -> bool {
+    matches!(
+        error.failure_detail(),
+        Some(EffectFailureDetail::SourceRead(_))
+    )
+}
+
+fn last_query_attempt(history: &EffectCursorHistory) -> Result<Option<EffectRecord>, EffectError> {
+    let Some(rows) = history.progress_batches.values().next_back() else {
+        return Ok(None);
+    };
+    for event in rows {
+        if let Some(record) = effect_record_from_event(event)? {
+            if record.is_query() {
+                return Ok(Some(record));
+            }
+        }
+    }
+    Ok(None)
+}
 
 fn is_affine(safety: EffectSafety) -> bool {
     matches!(
@@ -411,6 +441,9 @@ pub(crate) struct EffectsCore {
     /// The idempotency key each live keyed call of this invocation sends,
     /// stamped onto the rows recorded at its cursor.
     call_keys: HashMap<EffectCursor, IdempotencyKey>,
+    query_request: Option<Value>,
+    committed_query_waits: u32,
+    answer: Option<crate::messaging::DeliveredRecord<ChainPayload>>,
 }
 
 impl EffectsCore {
@@ -427,6 +460,40 @@ impl EffectsCore {
             drained_facts: 0,
             halt: None,
             call_keys: HashMap::new(),
+            query_request: None,
+            committed_query_waits: 0,
+            answer: None,
+        }
+    }
+
+    pub(crate) fn adopt_answer_as_parent(&mut self) {
+        if let Some(answer) = self.answer.take() {
+            self.ctx.parent = answer;
+        }
+    }
+
+    pub(crate) async fn query<R: crate::queries::QueryRequest>(
+        &mut self,
+        request: R,
+        deadline: Option<Duration>,
+    ) -> Result<R::Answer, EffectError> {
+        let projection = self.project_named_effect::<crate::queries::QueryCall<R>>()?;
+        Box::pin(self.perform(crate::queries::QueryCall::new(
+            request, deadline, projection,
+        )))
+        .await
+    }
+
+    fn record_attempt(&self) -> Option<EffectAttemptOrdinal> {
+        self.query_request
+            .as_ref()
+            .map(|_| EffectAttemptOrdinal::new(self.committed_query_waits.saturating_add(1)))
+    }
+
+    fn call_kind(&self) -> CallKind {
+        match self.query_request {
+            Some(_) => CallKind::Query,
+            None => CallKind::Command,
         }
     }
 
@@ -509,6 +576,16 @@ impl EffectsCore {
                 position: self.ctx.input_seq,
                 generation: None,
             })
+    }
+
+    fn starts_journeys(&self) -> bool {
+        self.ctx.stage.flow_context.as_ref().is_some_and(|flow| {
+            matches!(
+                flow.stage_type,
+                obzenflow_core::event::context::StageType::FiniteSource
+                    | obzenflow_core::event::context::StageType::InfiniteSource
+            )
+        })
     }
 
     fn rejects_in_replay(&self) -> bool {
@@ -645,11 +722,6 @@ impl EffectsCore {
     #[cfg(test)]
     pub(crate) fn next_effect_ordinal_for_test(&self) -> EffectOrdinal {
         self.next_effect_ordinal
-    }
-
-    pub(crate) fn starting_at(mut self, ordinal: EffectOrdinal) -> Self {
-        self.next_effect_ordinal = ordinal;
-        self
     }
 
     /// Evidence of every user fact committed by this invocation, in commit
@@ -1201,7 +1273,7 @@ impl EffectsCore {
 
         let recorded_flow_id = self.namespace();
         let output_ordinal = self.reserve_output_ordinal()?;
-        let parent = self.ctx.parent.view().as_ref();
+        let parent = self.ctx.parent.event_provenance();
         let mut event = stamp_output_event(
             fact.into_derived_event(self.ctx.stage.writer_id, parent, self.ctx.stage.lineage),
             parent,
@@ -1210,6 +1282,9 @@ impl EffectsCore {
             self.ctx.input_seq,
             output_ordinal,
         );
+        if self.starts_journeys() {
+            event.correlation = None;
+        }
         let plan = self.take_action(super::RecordedAction::Fact {
             id: event.id,
             event_type: obzenflow_core::EventType::from(event_type),
@@ -1233,7 +1308,7 @@ impl EffectsCore {
         };
         if matches!(lineage, Some(RowLineage::Reproduced(_))) {
             if let Some(history) = &self.ctx.stage.effect_history {
-                event.envelope.observability = history.source_observations.get(&event.id).cloned();
+                event.envelope.observability = history.fact_observations.get(&event.id).cloned();
             }
             self.reauthor_recorded_crossing(super::ActionRow::Fact(event.id))
                 .await?;
@@ -1251,6 +1326,8 @@ impl EffectsCore {
     where
         E: Effect,
     {
+        self.query_request = effect.recorded_request();
+        self.committed_query_waits = 0;
         let declaration = self.authorise_call(&effect)?;
         let result = Box::pin(self.perform_authorised(effect, declaration.clone())).await;
         self.check_binding_result::<E, _>(&declaration, result)
@@ -1375,6 +1452,28 @@ impl EffectsCore {
         }
 
         let selection = selected.select();
+        if plan == ActionPlan::Reproduce
+            && self.query_request.is_some()
+            && matches!(selection, EffectHistorySelection::Miss)
+        {
+            if let Some(record) = self.history_shape(last_query_attempt(&selected))? {
+                if record.descriptor_hash != descriptor_hash {
+                    return Err(self.refuse_descriptor(
+                        &cursor,
+                        &descriptor_hash,
+                        &record.descriptor_hash,
+                        descriptor_drift::<E>(&descriptor, Some(&record.descriptor)),
+                    ));
+                }
+                for (wait, rows) in &selected.progress_batches {
+                    self.commit_replayed_progress_group(&cursor, *wait, rows.clone(), &selected)
+                        .await?;
+                }
+                return self
+                    .recorded_outcome(E::OutcomeSemantics::decode_success(&[&record]))
+                    .map(SelectedCall::Reproduced);
+            }
+        }
         if let Some(refusal) = action_plan_mismatch(plan, &selection, &cursor) {
             return Err(self.refuse(refusal));
         }
@@ -1430,6 +1529,41 @@ impl EffectsCore {
                 {
                     return output_result.map(SelectedCall::Reproduced);
                 }
+                if let (ActionPlan::Reproduce, Err(error), [record]) =
+                    (plan, &output_result, records.as_slice())
+                {
+                    if self.query_request.is_some() && is_query_failure(error) {
+                        for (wait, rows) in &selected.progress_batches {
+                            self.commit_replayed_progress_group(
+                                &cursor,
+                                *wait,
+                                rows.clone(),
+                                &selected,
+                            )
+                            .await?;
+                        }
+                        let attempt = selected.terminal_attempt.flatten().unwrap_or_else(|| {
+                            EffectAttemptOrdinal::new(
+                                u32::try_from(selected.progress_batches.len())
+                                    .unwrap_or(u32::MAX)
+                                    .saturating_add(1),
+                            )
+                        });
+                        self.reauthor_recorded_crossing(super::ActionRow::Effect {
+                            cursor: cursor.clone(),
+                            attempt: Some(attempt),
+                        })
+                        .await?;
+                        self.commit_query_attempt_group(
+                            record.clone(),
+                            attempt,
+                            Duration::ZERO,
+                            RowLineage::Reproduced(None),
+                        )
+                        .await?;
+                        return output_result.map(SelectedCall::Reproduced);
+                    }
+                }
                 let materialization =
                     self.history_shape(effect_record_group_materialization(&record_refs))?;
                 if selected.attempts.is_empty()
@@ -1442,6 +1576,15 @@ impl EffectsCore {
                     // inventing an atomic cut the archive never proved.
                     if let Some(key) = &selected.idempotency_key {
                         self.call_keys.insert(cursor.clone(), key.clone());
+                    }
+                    for (wait, rows) in &selected.progress_batches {
+                        self.commit_replayed_progress_group(
+                            &cursor,
+                            *wait,
+                            rows.clone(),
+                            &selected,
+                        )
+                        .await?;
                     }
                     self.append_replayed_records(
                         cursor.clone(),
@@ -1684,6 +1827,7 @@ impl EffectsCore {
         let Some(boundary) = self.ctx.effect_boundary.clone() else {
             // Unguarded path: execute directly and record the outcome.
             let mut effect_ctx = binding_context;
+            self.committed_query_waits = committed_waits;
             return match Self::execute_into_success(effect, &mut effect_ctx).await {
                 Ok((output, success)) => {
                     self.append_success(
@@ -1702,14 +1846,25 @@ impl EffectsCore {
                 }
                 Err(failure) => {
                     let (err, observation) = *failure;
-                    self.append_failed_record(
-                        cursor,
-                        descriptor_hash,
-                        descriptor,
-                        observation,
-                        &err,
-                    )
-                    .await?;
+                    if self.query_request.is_some() && is_repeated_query_failure(&err) {
+                        self.commit_query_attempt(
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            observation,
+                            &err,
+                        )
+                        .await?;
+                    } else {
+                        self.append_failed_record(
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            observation,
+                            &err,
+                        )
+                        .await?;
+                    }
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
                         crate::stages::observer::EffectObserverOutcome::Failed,
@@ -2128,7 +2283,10 @@ impl EffectsCore {
         }
     }
 
-    async fn commit_framework_event(&self, event: ChainEvent) -> Result<(), EffectError> {
+    async fn commit_framework_event(
+        &self,
+        event: ChainEvent,
+    ) -> Result<crate::messaging::DeliveredRecord<ChainPayload>, EffectError> {
         let cursor = event
             .effect_provenance
             .as_ref()
@@ -2143,7 +2301,7 @@ impl EffectsCore {
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
-        if let Err(error) = crate::supervised_base::publication::with_snapshot(
+        match crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
             committer.commit_prebuilt_with_intent(
                 event,
@@ -2154,16 +2312,18 @@ impl EffectsCore {
         )
         .await
         {
-            if let Some(cursor) = cursor {
-                self.ctx
-                    .stage
-                    .runtime_execution
-                    .effect_cursor_coordinator()
-                    .poison(cursor);
+            Ok(record) => Ok(record.into()),
+            Err(error) => {
+                if let Some(cursor) = cursor {
+                    self.ctx
+                        .stage
+                        .runtime_execution
+                        .effect_cursor_coordinator()
+                        .poison(cursor);
+                }
+                Err(EffectError::Journal(error.to_string()))
             }
-            return Err(EffectError::Journal(error.to_string()));
         }
-        Ok(())
     }
 
     async fn append_affine_success(
@@ -2185,6 +2345,8 @@ impl EffectsCore {
                     descriptor,
                     outcome: EffectOutcomePayload::Succeeded { output },
                     origin: None,
+                    call: CallKind::Command,
+                    request: None,
                 };
                 let mut event = build_effect_record_event(
                     self.ctx.stage.writer_id,
@@ -2262,7 +2424,7 @@ impl EffectsCore {
     }
 
     async fn append_affine_failed_record(
-        &self,
+        &mut self,
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
@@ -2298,6 +2460,8 @@ impl EffectsCore {
                 detail: error.failure_detail(),
             },
             origin: None,
+            call: CallKind::Command,
+            request: None,
         };
         let mut event = build_effect_record_event(
             self.ctx.stage.writer_id,
@@ -2328,7 +2492,7 @@ impl EffectsCore {
     }
 
     async fn record_recovery_abandonment<T>(
-        &self,
+        &mut self,
         abandonment: RecoveryAbandonment,
     ) -> Result<T, EffectError> {
         let RecoveryAbandonment {
@@ -2370,6 +2534,8 @@ impl EffectsCore {
                 detail: None,
             },
             origin: None,
+            call: CallKind::Command,
+            request: None,
         };
         let record_event = build_effect_record_event(
             self.ctx.stage.writer_id,
@@ -2439,10 +2605,115 @@ impl EffectsCore {
                     detail: err.failure_detail(),
                 },
                 origin: None,
+                call: self.call_kind(),
+                request: self.query_request.clone(),
             },
             RowLineage::Live,
         )
         .await
+    }
+
+    async fn commit_query_attempt(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        observation: EffectObservation,
+        err: &EffectError,
+    ) -> Result<(), EffectError> {
+        err.ensure_recordable_failure()?;
+        let attempt = self.record_attempt().ok_or_else(|| {
+            EffectError::Execution("a query attempt has no query request".to_string())
+        })?;
+        let record = EffectRecord {
+            observation,
+            cursor,
+            descriptor_hash,
+            descriptor,
+            outcome: EffectOutcomePayload::Failed {
+                error_type: err.error_type(),
+                error_message: err.error_message(),
+                retry: err.retry_disposition(),
+                cause: err.failure_cause(),
+                detail: err.failure_detail(),
+            },
+            origin: None,
+            call: self.call_kind(),
+            request: self.query_request.clone(),
+        };
+        let delay = err.retry_after().unwrap_or_default();
+        self.commit_query_attempt_group(record, attempt, delay, RowLineage::Live)
+            .await
+    }
+
+    async fn commit_query_attempt_group(
+        &mut self,
+        record: EffectRecord,
+        attempt: EffectAttemptOrdinal,
+        delay: Duration,
+        lineage: RowLineage<'_>,
+    ) -> Result<(), EffectError> {
+        let observer_scope = match lineage {
+            RowLineage::Live => MiddlewareExecutionScope::LiveEffectBoundary,
+            RowLineage::Reproduced(_) => MiddlewareExecutionScope::StrictReplayHandler,
+        };
+        let cursor = record.cursor.clone();
+        let mut event = build_effect_record_event(
+            self.ctx.stage.writer_id,
+            &self.ctx.parent,
+            record,
+            self.ctx.stage.lineage,
+        )?;
+        if let Some(provenance) = event.effect_provenance.as_mut() {
+            provenance.attempt = Some(attempt);
+        }
+        self.mark_lineage(&mut event, lineage);
+        let mut scheduled = ChainEventFactory::retry_scheduled(
+            self.ctx.stage.writer_id,
+            cursor.clone(),
+            attempt.get().saturating_add(1),
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            obzenflow_core::event::provenance::causality_context::CausalInput::of(
+                self.ctx.parent.view(),
+            ),
+        );
+        self.mark_lineage(&mut scheduled, RowLineage::Live);
+        let entries = vec![
+            AtomicCommitEntry {
+                event,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::NonDataStageFact,
+            },
+            AtomicCommitEntry {
+                event: scheduled,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::FrameworkObservability,
+            },
+        ];
+        let group_id = effect_recovery_progress_group_id(&cursor, attempt.get());
+        let committer = OutputCommitter {
+            data_journal: &self.ctx.stage.data_journal,
+            flow_context: self.ctx.stage.flow_context.as_ref(),
+            instrumentation: self.ctx.stage.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.stage.heartbeat_state.as_ref(),
+            output_contract: None,
+            backpressure_writer: Some(&self.ctx.backpressure_writer),
+            observer_scope,
+        };
+        if let Err(error) = crate::supervised_base::publication::with_snapshot(
+            self.causal.clone(),
+            committer.commit_atomic_group(group_id.as_str(), entries, Some(&self.ctx.parent)),
+        )
+        .await
+        {
+            self.ctx
+                .stage
+                .runtime_execution
+                .effect_cursor_coordinator()
+                .poison(cursor);
+            return Err(EffectError::Journal(error.to_string()));
+        }
+        Ok(())
     }
 
     async fn append_failed_record_with_control_events(
@@ -2468,6 +2739,8 @@ impl EffectsCore {
                 detail: err.failure_detail(),
             },
             origin: None,
+            call: self.call_kind(),
+            request: self.query_request.clone(),
         };
         let mut event = build_effect_record_event(
             self.ctx.stage.writer_id,
@@ -2517,6 +2790,8 @@ impl EffectsCore {
                 detail: None,
             },
             origin: None,
+            call: CallKind::Command,
+            request: None,
         };
         let mut event = build_effect_record_event(
             self.ctx.stage.writer_id,
@@ -2681,6 +2956,8 @@ impl EffectsCore {
                 descriptor,
                 outcome: EffectOutcomePayload::Succeeded { output },
                 origin: None,
+                call: CallKind::Command,
+                request: None,
             },
             RowLineage::Live,
         )
@@ -2920,7 +3197,7 @@ impl EffectsCore {
     }
 
     async fn commit_deferred_transactional_outcome<T>(
-        &self,
+        &mut self,
         cursor: &EffectCursor,
         outcome: &PreparedEffectOutcome<T>,
         control_events: Vec<ChainEvent>,
@@ -3201,16 +3478,30 @@ impl EffectsCore {
     }
 
     async fn append_record(
-        &self,
+        &mut self,
         record: EffectRecord,
         lineage: RowLineage<'_>,
     ) -> Result<(), EffectError> {
+        let query_attempt = record.is_query().then(|| match lineage {
+            RowLineage::Live => self.record_attempt(),
+            RowLineage::Reproduced(_) => self
+                .ctx
+                .stage
+                .effect_history
+                .as_ref()
+                .and_then(|history| history.terminal_attempt(&record.cursor)),
+        });
         let mut event = build_effect_record_event(
             self.ctx.stage.writer_id,
             &self.ctx.parent,
             record,
             self.ctx.stage.lineage,
         )?;
+        if let Some(attempt) = query_attempt {
+            if let Some(provenance) = event.effect_provenance.as_mut() {
+                provenance.attempt = attempt;
+            }
+        }
         self.stamp_idempotency_key(&mut event);
         self.mark_lineage(&mut event, lineage);
         if let Some(buffer) = &self.sink_outcomes {
@@ -3224,7 +3515,7 @@ impl EffectsCore {
                 });
             return Ok(());
         }
-        crate::supervised_base::publication::with_snapshot(
+        let committed = crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
             append_effect_record(
                 &self.ctx.stage.data_journal,
@@ -3234,7 +3525,11 @@ impl EffectsCore {
                 &self.ctx.backpressure_writer,
             ),
         )
-        .await
+        .await?;
+        if query_attempt.is_some() {
+            self.answer = Some(committed.into());
+        }
+        Ok(())
     }
 
     async fn append_success(
@@ -3266,6 +3561,8 @@ impl EffectsCore {
                         descriptor,
                         outcome: EffectOutcomePayload::Succeeded { output },
                         origin: None,
+                        call: self.call_kind(),
+                        request: self.query_request.clone(),
                     },
                     RowLineage::Live,
                 )
@@ -3303,6 +3600,8 @@ impl EffectsCore {
                     descriptor,
                     outcome: EffectOutcomePayload::Succeeded { output },
                     origin: None,
+                    call: self.call_kind(),
+                    request: self.query_request.clone(),
                 };
                 let mut event = build_effect_record_event(
                     self.ctx.stage.writer_id,
@@ -3441,7 +3740,7 @@ impl EffectsCore {
     }
 
     async fn commit_terminal_group(
-        &self,
+        &mut self,
         cursor: &EffectCursor,
         outcome_entries: Vec<AtomicCommitEntry>,
         control_events: Vec<ChainEvent>,
@@ -3474,20 +3773,34 @@ impl EffectsCore {
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
-        if let Err(error) = crate::supervised_base::publication::with_snapshot(
+        match crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
             committer.commit_atomic_group(group_id.as_str(), entries, Some(&self.ctx.parent)),
         )
         .await
         {
-            self.ctx
-                .stage
-                .runtime_execution
-                .effect_cursor_coordinator()
-                .poison(cursor.clone());
-            return Err(EffectError::Journal(error.to_string()));
+            Ok(committed) => {
+                if let Some(answer) = committed.into_iter().find(|record| {
+                    matches!(
+                        &record.payload,
+                        ChainPayload::Execution(
+                            obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(effect)
+                        ) if effect.is_query()
+                    )
+                }) {
+                    self.answer = Some(answer.into());
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.ctx
+                    .stage
+                    .runtime_execution
+                    .effect_cursor_coordinator()
+                    .poison(cursor.clone());
+                Err(EffectError::Journal(error.to_string()))
+            }
         }
-        Ok(())
     }
 
     async fn commit_escape_control_group(
@@ -3551,25 +3864,45 @@ impl EffectsCore {
         rows: Vec<ChainEvent>,
         history: &EffectCursorHistory,
     ) -> Result<(), EffectError> {
-        if rows.iter().any(ChainEvent::consumes_data_credit) {
+        let group_id = effect_recovery_progress_group_id(cursor, wait);
+        if rows.iter().any(|event| {
+            event.consumes_data_credit()
+                && !super::history::is_query_attempt(Some(group_id.as_str()), &event.payload)
+        }) {
             return Err(self.refuse(ReconstructionRefusal::HistoryShape(
                 EffectError::EffectProvenanceMismatch(format!(
                     "recovery progress for cursor {cursor:?} contains Data"
                 )),
             )));
         }
+        let query_attempt = rows
+            .iter()
+            .find(|event| super::history::is_query_attempt(Some(group_id.as_str()), &event.payload))
+            .and_then(|event| event.effect_provenance.as_ref())
+            .and_then(|provenance| provenance.attempt);
+        if let Some(attempt) = query_attempt {
+            self.reauthor_recorded_crossing(super::ActionRow::Effect {
+                cursor: cursor.clone(),
+                attempt: Some(attempt),
+            })
+            .await?;
+        }
         let entries = rows
             .into_iter()
             .map(|mut event| {
                 self.mark_lineage(&mut event, RowLineage::Reproduced(Some(history)));
+                let intent = if event.consumes_data_credit() {
+                    StageAppendIntent::NonDataStageFact
+                } else {
+                    StageAppendIntent::FrameworkObservability
+                };
                 AtomicCommitEntry {
                     event,
                     options: CommitOptions::default(),
-                    intent: StageAppendIntent::FrameworkObservability,
+                    intent,
                 }
             })
             .collect();
-        let group_id = effect_recovery_progress_group_id(cursor, wait);
         let committer = OutputCommitter {
             data_journal: &self.ctx.stage.data_journal,
             flow_context: self.ctx.stage.flow_context.as_ref(),
@@ -3793,9 +4126,15 @@ impl EffectsCore {
         descriptor: EffectDescriptor,
         materialization: EffectRecordMaterialization,
     ) -> Result<(), EffectError> {
+        let attempt = self
+            .ctx
+            .stage
+            .effect_history
+            .as_ref()
+            .and_then(|history| history.terminal_attempt(&cursor));
         self.reauthor_recorded_crossing(super::ActionRow::Effect {
             cursor: cursor.clone(),
-            attempt: None,
+            attempt,
         })
         .await?;
         match materialization {

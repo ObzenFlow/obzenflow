@@ -12,8 +12,10 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::stages::common::HandlerError;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -102,7 +104,6 @@ struct RecordStore {
     calls: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::system("record-store")]
 impl RecordStorePort for RecordStore {
     fn store(&self, _: &StoreRecord) -> Result<(), EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);

@@ -33,7 +33,6 @@ struct Held {
     release: Arc<Semaphore>,
 }
 
-#[obzenflow_runtime::effects::system("held")]
 #[async_trait]
 impl HeldInput for Held {
     async fn read(
@@ -58,7 +57,7 @@ impl HeldInput for Held {
     }
 }
 
-struct HeldSource(obzenflow_runtime::queries::QueryPort<dyn HeldInput>);
+struct HeldSource(Port<dyn HeldInput>);
 
 impl TypedFiniteSourceHandler for HeldSource {
     type Output = IdlePayload;
@@ -149,7 +148,7 @@ enabled = true
     let (signal_tx, signal_rx) = oneshot::channel();
     let application = tokio::spawn(FlowApplication::launch(
         FlowDefinition::materialize(move |_| {
-            let source = HeldSource(obzenflow_runtime::queries::QueryPort::to(Held {
+            let source = HeldSource(Port::to(Held {
                 release: held.clone(),
             }));
             let sink = noop_sink();

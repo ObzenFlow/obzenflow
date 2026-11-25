@@ -9,9 +9,7 @@
 
 use obzenflow_core::event::schema::{EmptySet, WithMember};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{
-    port, system, Command, DeclaredEffectSet, EffectError, Port, SinkRole,
-};
+use obzenflow_runtime::effects::{port, Command, DeclaredEffectSet, EffectError, Port, SinkRole};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::Serialize;
 use serde_json::Value;
@@ -39,7 +37,6 @@ struct Recorder {
     arrived: Arc<Notify>,
 }
 
-#[system("recording")]
 impl RecordingPort for Recorder {
     fn record(&self, input: &RecordedInput) -> Result<(), EffectError> {
         self.rows
@@ -110,21 +107,14 @@ pub struct RecordingSink<T> {
 }
 
 impl<T: TypedPayload + Send + Sync + 'static> RecordingSink<T> {
-    /// A sink whose port is named after `T`. A flow with two recording sinks
-    /// of the same input names the second with [`Self::named`].
+    /// `new` returns a sink and the [`Recorded`] that gives a test the inputs of the sink.
     pub fn new() -> (Self, Recorded<T>) {
-        let type_name = std::any::type_name::<T>();
-        Self::named(type_name.rsplit("::").next().unwrap_or(type_name))
-    }
-
-    pub fn named(name: &str) -> (Self, Recorded<T>) {
         let rows = Arc::new(Mutex::new(Vec::new()));
         let arrived = Arc::new(Notify::new());
         let port = Port::to(Recorder {
             rows: rows.clone(),
             arrived: arrived.clone(),
-        })
-        .instance(name);
+        });
         (
             Self {
                 port,
@@ -206,7 +196,6 @@ impl CallCounter for AtomicU64 {
 
 struct Counter(Arc<dyn CallCounter>);
 
-#[system("counting")]
 impl CountingPort for Counter {
     fn count(&self, _: &Counted) -> Result<(), EffectError> {
         self.0.add_one();
@@ -222,16 +211,10 @@ pub struct CountingSink<T> {
 }
 
 impl<T> CountingSink<T> {
-    /// A sink whose port is named after `T`. A flow with two counting sinks of
-    /// the same input names the second with [`Self::named`].
+    /// `new` returns a sink that adds one to `counter` for each call that it makes.
     pub fn new(counter: Arc<impl CallCounter>) -> Self {
-        let type_name = std::any::type_name::<T>();
-        Self::named(type_name.rsplit("::").next().unwrap_or(type_name), counter)
-    }
-
-    pub fn named(name: &str, counter: Arc<impl CallCounter>) -> Self {
         Self {
-            port: Port::to(Counter(counter)).instance(name),
+            port: Port::to(Counter(counter)),
             _input: PhantomData,
         }
     }

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::domain::{EmailSent, LocatedParcel, ParcelStatus, SmsSent};
+use super::domain::{DepotFound, EmailSent, ParcelStatus, SmsSent};
 use super::services::{CustomerMessaging, EmailNotice, SmsNotice};
 use async_trait::async_trait;
 use obzenflow::effects::{Effects, StageCompletion};
@@ -16,12 +16,12 @@ pub struct NotifyCustomer;
 
 #[async_trait]
 impl EffectfulTransformHandler for NotifyCustomer {
-    type Input = LocatedParcel;
+    type Input = DepotFound;
     type Output = outcome![EmailSent | SmsSent];
 
     async fn process(
         &self,
-        parcel: LocatedParcel,
+        parcel: DepotFound,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.call(EmailNotice::for_parcel(&parcel)).await?;

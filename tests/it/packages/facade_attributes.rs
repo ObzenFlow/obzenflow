@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow::effects::{Command, Port};
+use obzenflow::commands::Command;
+use obzenflow::systems::Port;
 
 #[obzenflow::port]
 trait ReadPort {}
@@ -13,10 +14,8 @@ trait WritePort {}
 struct Reader;
 struct Writer;
 
-#[obzenflow::effects::system("reader")]
 impl ReadPort for Reader {}
 
-#[obzenflow::system("writer")]
 impl WritePort for Writer {}
 
 #[obzenflow::command(through = ReadPort)]
@@ -29,6 +28,5 @@ struct Write;
 fn commands_through_facade_exports_bind_systems() {
     let read = Read::through(Port::to(Reader));
     let write = Write::through(Port::to(Writer));
-    assert_eq!(read.ports().0.system_name(), "reader");
-    assert_eq!(write.ports().0.system_name(), "writer");
+    let _ports = (read.ports(), write.ports());
 }

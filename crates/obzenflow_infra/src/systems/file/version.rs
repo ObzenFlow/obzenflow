@@ -2,23 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Kernel-maintained file versions (FLOWIP-134i B10).
-//!
-//! A position indexes one version of a file's bytes. File connectors pin the
-//! open file's version in their input identity and re-check it on the same
-//! open file before publishing anything read from it, so an append, an edit,
-//! a truncation, an `mv` replacement or an edit that restores the
-//! modification time fails closed instead of misplacing a position.
-
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_runtime::stages::source::SourceError;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 
-/// One `fstat` of an open file. On Unix the change time, which users cannot
-/// set, moves on every content or metadata change; other platforms fall back
-/// to the modification and creation times and are unsupported for stability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileVersion {
     inode: u64,
@@ -35,7 +24,6 @@ impl FileVersion {
         Ok(Self::from_metadata(&metadata))
     }
 
-    /// Fail the read when the open file is no longer the pinned version.
     pub(crate) fn verify(&self, file: &File) -> Result<(), SourceError> {
         if Self::of(file)? == *self {
             Ok(())
@@ -76,7 +64,6 @@ impl FileVersion {
     }
 }
 
-/// The source failure for an input that changed while it was read.
 pub(crate) fn input_changed() -> SourceError {
     SourceError::Terminal {
         kind: SourcePollErrorKind::Transport,
@@ -115,9 +102,6 @@ mod tests {
         assert_ne!(FileVersion::of(&reopened).unwrap(), pinned);
     }
 
-    /// FLOWIP-134i B10: an edit that keeps the size, a truncation, and an edit
-    /// that restores the modification time all change the version; the change
-    /// time cannot be restored.
     #[test]
     fn in_place_edits_and_truncation_change_the_version_whatever_the_mtime() {
         let dir = tempfile::tempdir().unwrap();

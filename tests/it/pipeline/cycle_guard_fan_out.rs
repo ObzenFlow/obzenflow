@@ -9,9 +9,11 @@ use obzenflow_core::Outcomes;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the cycle-guard fan-out test. The JSON shape
@@ -203,7 +205,6 @@ struct DoneCounter {
     done_count: Arc<AtomicU64>,
 }
 
-#[obzenflow_runtime::effects::system("done-counter")]
 impl DoneCounterPort for DoneCounter {
     fn count(&self, seed: &SeedKind) -> Result<(), EffectError> {
         if seed.kind == "done" {

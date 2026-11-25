@@ -2,22 +2,25 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::command::{Command, Port, PortEffects};
-use super::{CallRequest, DeclaredEffectSet, Effects, StageCompletion};
+use super::command::{Command, PortEffects};
+use super::request::CallRequest;
+use crate::effects::{DeclaredEffectSet, Effects, StageCompletion};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
+use crate::systems::Port;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::{EffectOutcome, EmptySet, FactsOf, WithMember};
 use obzenflow_core::TypedPayload;
 use std::marker::PhantomData;
 
-/// The command for a stage that performs one request per input. `f` builds the
-/// request from the stage's input, [`PerformRequest::through`] supplies the port
-/// the request names, and the request's outcome facts are the stage's output.
+/// `perform` starts a command that performs one request for each input and emits the outcome
+/// facts of that request. [`PerformRequest::through`] gives the command its port.
 ///
 /// ```
 /// # use obzenflow_core::event::schema::TypedPayload;
-/// # use obzenflow_runtime::effects::{perform, EffectError, Port};
+/// # use obzenflow_runtime::commands::perform;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # use obzenflow_runtime::systems::Port;
 /// # use serde::{Deserialize, Serialize};
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Invoice;
@@ -36,7 +39,6 @@ use std::marker::PhantomData;
 /// #     fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError>;
 /// # }
 /// # struct Scripted;
-/// # #[obzenflow_runtime::effects::system("scripted")]
 /// # impl PaymentGatewayPort for Scripted {
 /// #     fn charge(&self, _: &ChargeRequest) -> Result<Paid, EffectError> { Ok(Paid) }
 /// # }
@@ -46,7 +48,7 @@ use std::marker::PhantomData;
 /// A function that builds no request does not compile:
 ///
 /// ```compile_fail,E0277
-/// # use obzenflow_runtime::effects::perform;
+/// # use obzenflow_runtime::commands::perform;
 /// # #[derive(Clone, Debug)]
 /// # struct Invoice;
 /// fn same_invoice(invoice: &Invoice) -> Invoice {
@@ -55,9 +57,6 @@ use std::marker::PhantomData;
 ///
 /// let charge = perform(same_invoice);
 /// ```
-///
-/// A command that does more than this, emits a fact of its own or holds state is
-/// a struct under `#[obzenflow::command]`.
 pub fn perform<F, In, R>(request: F) -> PerformRequest<F, In, R>
 where
     F: for<'input> Fn(&'input In) -> R,
@@ -69,21 +68,21 @@ where
     }
 }
 
-/// What `perform` builds and what `through` turns into a command. It is not a
-/// command until it has its port.
+/// `PerformRequest` is the value that `perform` returns. It is not a [`Command`] until
+/// [`PerformRequest::through`] gives it a port.
 pub struct PerformRequest<F, In, R> {
     request: F,
     performed: PhantomData<fn(In) -> R>,
 }
 
 impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
-    /// `through` gives the request its port and returns the command. Only the port of a
-    /// `#[obzenflow::port]` trait answers a request:
+    /// `through` gives the request its port and returns the command. Only a port that
+    /// `#[obzenflow::port]` marks answers a request:
     ///
     /// ```
-    /// # use obzenflow_runtime::effects::{
-    /// #     perform, CallRequest, DomainFacts, EffectContext, EffectError, Idempotent, Port,
-    /// # };
+    /// # use obzenflow_runtime::commands::{perform, CallRequest};
+    /// # use obzenflow_runtime::effects::{DomainFacts, EffectContext, EffectError, Idempotent};
+    /// # use obzenflow_runtime::systems::Port;
     /// # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     /// # struct Ticket;
     /// # impl obzenflow_core::TypedPayload for Ticket {
@@ -92,7 +91,6 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     /// #[obzenflow_runtime::effects::port]
     /// trait TicketDesk {}
     /// struct Desk;
-    /// #[obzenflow_runtime::effects::system("desk")]
     /// impl TicketDesk for Desk {}
     ///
     /// # #[derive(Debug, Clone, serde::Serialize)]
@@ -110,6 +108,41 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     /// # }
     /// let read = perform(|_: &Ticket| Read).through(Port::to(Desk));
     /// ```
+    ///
+    /// A `perform` line that builds the request of a `#[query]` method does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// # use obzenflow_runtime::commands::perform;
+    /// # use obzenflow_runtime::queries::{FiniteRead, QueryContext, QueryError};
+    /// # use obzenflow_runtime::systems::Port;
+    /// # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    /// # struct Ticket;
+    /// # impl obzenflow_core::TypedPayload for Ticket {
+    /// #     const EVENT_TYPE: &'static str = "doc.ticket";
+    /// # }
+    /// #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    /// struct NextTicket;
+    ///
+    /// #[obzenflow_runtime::effects::port]
+    /// #[async_trait::async_trait]
+    /// trait TicketFeed: Send + Sync {
+    ///     #[query(type = "doc.tickets.read")]
+    ///     async fn read(&self, from: &NextTicket, ctx: &QueryContext)
+    ///         -> Result<FiniteRead<Ticket, NextTicket>, QueryError>;
+    /// }
+    ///
+    /// struct Feed;
+    ///
+    /// #[async_trait::async_trait]
+    /// impl TicketFeed for Feed {
+    ///     async fn read(&self, _: &NextTicket, _: &QueryContext)
+    ///         -> Result<FiniteRead<Ticket, NextTicket>, QueryError> {
+    ///         Ok(FiniteRead::EndOfInput)
+    ///     }
+    /// }
+    ///
+    /// let read = perform(|_: &Ticket| NextTicket).through(Port::to(Feed));
+    /// ```
     pub fn through(self, port: Port<R::Port>) -> Perform<F, In, R>
     where
         R::Port: PortEffects,
@@ -122,10 +155,9 @@ impl<F, In, R: CallRequest> PerformRequest<F, In, R> {
     }
 }
 
-/// A request a function given to `perform` builds.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "`perform` takes a function from the stage's input to a request, one a port's `#[effect]` method takes; this function returns `{Self}`, which no port method takes",
+    message = "`perform` takes a function that builds the request of an `#[effect]` method from the input of the stage. This function returns `{Self}`, and no port method takes `{Self}`",
     label = "this function does not build a request"
 )]
 pub trait PerformedRequest: CallRequest {}
@@ -133,8 +165,8 @@ pub trait PerformedRequest: CallRequest {}
 #[diagnostic::do_not_recommend]
 impl<R: CallRequest> PerformedRequest for R {}
 
-/// The command `perform(f).through(port)` builds: one input, one request, and
-/// the request's outcome facts as the stage's output.
+/// `Perform` is the command that `perform(f).through(port)` returns. It performs one
+/// request for each input and emits the outcome facts of that request.
 pub struct Perform<F, In, R: CallRequest> {
     request: F,
     port: Port<R::Port>,
@@ -191,11 +223,11 @@ where
     }
 }
 
-impl<F, In, R> super::sink::SinkRole<In> for Perform<F, In, R>
+impl<F, In, R> crate::effects::SinkRole<In> for Perform<F, In, R>
 where
     F: for<'input> Fn(&'input In) -> R + Send + Sync + 'static,
     In: 'static,
-    R: super::sink::SinkRequest,
+    R: crate::effects::SinkRequest,
 {
     type Request = R;
 
@@ -206,8 +238,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::{effectful_transform_effects, EffectError, EffectSafety, EffectSet};
     use super::*;
+    use crate::commands::effectful_transform_effects;
+    use crate::effects::{EffectError, EffectSafety, EffectSet};
     use obzenflow_core::Outcome;
     use serde::{Deserialize, Serialize};
 
@@ -262,7 +295,6 @@ mod tests {
 
     struct Scripted;
 
-    #[crate::effects::system("scripted")]
     impl GatewayPort for Scripted {
         fn charge(&self, request: &ChargeRequest) -> Result<Paid, EffectError> {
             Ok(Paid {
@@ -336,7 +368,6 @@ mod tests {
         let charge = perform(ChargeRequest::for_invoice).through(Port::to(Scripted));
         let debug = format!("{charge:?}");
         assert!(debug.contains("ChargeRequest"), "{debug}");
-        assert!(debug.contains("\"scripted\""), "{debug}");
-        assert!(debug.contains("<not disclosed>"), "{debug}");
+        assert!(!debug.contains("Scripted"), "{debug}");
     }
 }

@@ -64,6 +64,8 @@ pub(super) fn effect_record_from_event(
                     outcome_fact_count,
                 },
                 origin: provenance.origin.clone(),
+                call: CallKind::Command,
+                request: None,
             };
             validate_domain_effect_record_provenance(&record, provenance)?;
             Ok(Some(record))

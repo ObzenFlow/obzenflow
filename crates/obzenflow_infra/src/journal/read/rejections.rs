@@ -10,7 +10,7 @@ use obzenflow_core::journal::read::{
     JournalPosition, RunIdentity, RunJournal, RunJournalKind, RunRecord, RunRecordData,
 };
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The run, journal and position that hold a record.
@@ -37,7 +37,6 @@ impl RecordedAt {
 #[derive(Default)]
 pub(super) struct Repeats {
     runs: Vec<SourceJournals>,
-    inputs: BTreeMap<String, BTreeSet<String>>,
     ordered: BTreeMap<JournalId, bool>,
     cursors: BTreeMap<(String, usize, usize), RowCursor>,
 }
@@ -69,7 +68,7 @@ impl Repeats {
                 None => return Ok(None),
             }
         };
-        if newer == 0 || self.inputs(&source).await?.len() != 1 {
+        if newer == 0 {
             return Ok(None);
         }
         self.cursors
@@ -93,25 +92,6 @@ impl Repeats {
             }
         }
         Ok(None)
-    }
-
-    async fn inputs(&mut self, source: &str) -> Result<&BTreeSet<String>, JournalReadError> {
-        if !self.inputs.contains_key(source) {
-            let mut bound = BTreeSet::new();
-            for run in &self.runs {
-                let Some((journal, path)) = run.data.get(source) else {
-                    continue;
-                };
-                let mut cursor = JournalCursor::new(run.run.clone(), journal.clone(), path.clone());
-                while let Some(record) = cursor.next().await? {
-                    if let Some(binding) = declared_binding(&record) {
-                        bound.insert(binding);
-                    }
-                }
-            }
-            self.inputs.insert(source.to_owned(), bound);
-        }
-        Ok(&self.inputs[source])
     }
 
     async fn ordered(
@@ -181,22 +161,6 @@ fn source_key(record: &RunRecord) -> Option<&str> {
         .as_ref()
         .filter(|stage| stage.stage_type.is_source())
         .map(|stage| stage.key.as_str())
-}
-
-fn declared_binding(record: &RunRecord) -> Option<String> {
-    if record.journal.kind != RunJournalKind::Data {
-        return None;
-    }
-    source_key(record)?;
-    let RunRecordData::Chain(row) = &record.record else {
-        return None;
-    };
-    match &row.payload {
-        ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(binding)) => {
-            Some(binding.to_string())
-        }
-        _ => None,
-    }
 }
 
 fn rejected_row(record: &RunRecord) -> Option<(String, u64)> {

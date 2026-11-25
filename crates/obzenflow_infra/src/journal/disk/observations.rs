@@ -16,7 +16,8 @@ use crate::journal::observation_index::{
 use async_trait::async_trait;
 use obzenflow_core::event::{JournalEvent, JournalRecord};
 use obzenflow_core::journal::{
-    JournalError, JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
+    JournalError, JournalObservationReader, ObservationKey, ObservationLookup,
+    PositionedObservation,
 };
 use obzenflow_core::WriterId;
 use std::collections::{HashMap, VecDeque};
@@ -341,7 +342,7 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         &self,
         key: Option<ObservationKey>,
         observer: WriterId,
-    ) -> Result<ObservationLookup<Vec<LocatedObservation>>, JournalError> {
+    ) -> Result<ObservationLookup<Vec<PositionedObservation>>, JournalError> {
         let this = self.clone();
         // Wait asynchronously, before occupying a blocking worker. The worker
         // owns this guard even if its caller cancels the lookup.
@@ -377,7 +378,7 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         state: &mut State,
         key: Option<ObservationKey>,
         observer: WriterId,
-    ) -> Result<ObservationLookup<Vec<LocatedObservation>>, JournalError> {
+    ) -> Result<ObservationLookup<Vec<PositionedObservation>>, JournalError> {
         let confirmed_end = self.confirmed_end();
         let confirmed = confirmed_end.is_some();
         let end = match confirmed_end {
@@ -547,7 +548,7 @@ impl<T: JournalEvent> JournalObservationReader for DiskObservationReader<T> {
     async fn latest_observations(
         &self,
         observer: WriterId,
-    ) -> Result<ObservationLookup<Vec<LocatedObservation>>, JournalError> {
+    ) -> Result<ObservationLookup<Vec<PositionedObservation>>, JournalError> {
         self.lookup(None, observer).await
     }
 }
@@ -1327,7 +1328,7 @@ mod tests {
     async fn ready(
         reader: &dyn JournalObservationReader,
         key: &ObservationKey,
-    ) -> LocatedObservation {
+    ) -> PositionedObservation {
         match reader.latest_observation(key).await.unwrap() {
             ObservationLookup::Ready {
                 observation: Some(observation),

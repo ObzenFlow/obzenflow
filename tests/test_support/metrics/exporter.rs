@@ -20,12 +20,14 @@ use obzenflow_dsl::{sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 #[cfg(feature = "test-support")]
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Port};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::systems::Port;
 use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +39,8 @@ struct MetricEvent {
 impl TypedPayload for MetricEvent {
     const EVENT_TYPE: &'static str = "metric.sample";
 }
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::queries::FiniteRead;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::time::{sleep, Duration};
@@ -64,7 +67,6 @@ struct ErrorAfterFirst {
     failed: std::sync::atomic::AtomicBool,
 }
 
-#[obzenflow_runtime::effects::system("error-after-first")]
 #[async_trait]
 impl MetricInput for ErrorAfterFirst {
     async fn read(
@@ -88,11 +90,11 @@ impl MetricInput for ErrorAfterFirst {
     }
 }
 
-struct ErrorAfterFirstSource(obzenflow::queries::QueryPort<dyn MetricInput>);
+struct ErrorAfterFirstSource(Port<dyn MetricInput>);
 
 impl ErrorAfterFirstSource {
     fn new() -> Self {
-        Self(obzenflow::queries::QueryPort::to(ErrorAfterFirst {
+        Self(Port::to(ErrorAfterFirst {
             failed: std::sync::atomic::AtomicBool::new(false),
         }))
     }
@@ -147,7 +149,6 @@ struct Sleeper {
     sleep_per_event: Duration,
 }
 
-#[obzenflow_runtime::effects::system("sleeper")]
 #[async_trait]
 impl SleepingPort for Sleeper {
     async fn settle(&self, _: &Settle) -> Result<(), EffectError> {

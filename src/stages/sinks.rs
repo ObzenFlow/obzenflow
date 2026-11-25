@@ -11,7 +11,9 @@
 //! system, and a resume makes only the calls the recording didn't settle.
 //!
 //! ```
-//! use obzenflow::effects::{perform, EffectError, Port};
+//! use obzenflow::commands::perform;
+//! use obzenflow::effects::EffectError;
+//! use obzenflow::systems::Port;
 //! # use obzenflow::schema::TypedPayload;
 //! # use serde::{Deserialize, Serialize};
 //! # #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -31,7 +33,6 @@
 //!
 //! struct Warehouse;
 //!
-//! #[obzenflow::system("warehouse")]
 //! impl DispatchPort for Warehouse {
 //!     fn dispatch(&self, request: &Dispatch) -> Result<(), EffectError> {
 //!         println!("dispatching {}", request.order_id);
@@ -76,9 +77,11 @@
 )]
 
 pub use obzenflow_adapters::sinks::{
-    Appended, ConsoleFormatError, ConsoleOutput, ConsolePort, ConsoleSink, ConsoleTablePort,
-    CsvProjection, CsvRegisterPort, CsvRow, CsvSink, CsvSinkBuilder, DebugFormatter, DiscardPort,
-    DiscardSink, Discarded, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
-    SnapshotTableFormatter, TableConsoleSink, TableFormatter, TableRow, TracingLevel,
-    TracingOutput, TracingPort, TracingSink,
+    ConsoleFormatError, ConsoleOutput, ConsolePort, ConsoleSink, ConsoleTablePort, DebugFormatter,
+    DiscardPort, DiscardSink, Discarded, Formatter, JsonFormatter, JsonPrettyFormatter,
+    OutputDestination, SnapshotTableFormatter, TableConsoleSink, TableFormatter, TableRow,
+    TracingLevel, TracingOutput, TracingPort, TracingSink,
+};
+pub use obzenflow_infra::systems::file::register::{
+    Appended, CsvProjection, CsvRegisterPort, CsvRow, CsvSink, CsvSinkBuilder,
 };

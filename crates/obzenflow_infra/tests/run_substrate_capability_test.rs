@@ -521,7 +521,7 @@ async fn configured_journal_root_refuses_a_provider_that_does_not_honour_it() {
     assert!(
         matches!(
             &failure.error,
-            obzenflow_dsl::FlowBuildError::JournalRootUnused { located: None, .. }
+            obzenflow_dsl::FlowBuildError::JournalRootUnused { run_path: None, .. }
         ),
         "{failure}"
     );
@@ -556,7 +556,7 @@ async fn configured_journal_root_refuses_a_provider_that_does_not_honour_it() {
     assert!(
         matches!(
             &failure.error,
-            obzenflow_dsl::FlowBuildError::JournalRootUnused { located: Some(path), .. }
+            obzenflow_dsl::FlowBuildError::JournalRootUnused { run_path: Some(path), .. }
                 if path.starts_with(elsewhere.path())
         ),
         "{failure}"

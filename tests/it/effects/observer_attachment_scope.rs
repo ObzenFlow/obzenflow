@@ -15,7 +15,8 @@ use obzenflow_adapters::middleware::{
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{perform, EffectError, Effects, Port, StageCompletion};
+use obzenflow_runtime::commands::perform;
+use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
@@ -23,6 +24,7 @@ use obzenflow_runtime::stages::observer::{
     EffectObserver, EffectObserverContext, HandlerObserver, HandlerObserverContext,
     StageLifecycleObserver, StageLifecycleObserverContext,
 };
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -63,7 +65,7 @@ struct RequestA;
 #[derive(Clone, Debug, Serialize)]
 struct RequestB;
 
-#[obzenflow::port(system = "scope")]
+#[obzenflow::port]
 impl ScopeService {
     #[effect(type = "effect_observer_scope.a", exactly_once)]
     fn a(&self, _: &RequestA) -> Result<EffectReply, EffectError> {
@@ -126,7 +128,7 @@ struct CountDeliveries {
     deliveries: Arc<AtomicUsize>,
 }
 
-#[obzenflow_runtime::effects::port(system = "scope-delivery-counter")]
+#[obzenflow_runtime::effects::port]
 impl CountDeliveries {
     #[effect(type = "effect_observer_scope.deliver", at_least_once, records = reply)]
     fn deliver(&self, _: &Delivered) -> Result<(), EffectError> {

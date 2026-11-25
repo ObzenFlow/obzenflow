@@ -6,7 +6,7 @@ use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::ingress::EventSubmission;
 use obzenflow_core::EventType;
-use obzenflow_runtime::stages::{IngressDecodeError, IngressRecord};
+use obzenflow_runtime::events::{IngressDecodeError, IngressRecord};
 use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
 use std::sync::Arc;

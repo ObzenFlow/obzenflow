@@ -2,15 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::domain::{self, EmailSent, LocatedParcel, ParcelUpdate, SmsSent};
+use super::domain::{self, DepotFound, EmailSent, ParcelUpdate, SmsSent};
 use super::handlers::NotifyCustomer;
 use super::services::{DepotLookup, EmailNotice, SimulatedDepots, SimulatedMessaging, SmsNotice};
-use obzenflow::effects::{perform, Port};
+use obzenflow::commands::perform;
 use obzenflow::flow::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry, MiddlewareFactory};
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
+use obzenflow::systems::Port;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -56,12 +57,12 @@ pub fn build_flow() -> FlowDefinition {
             stages: {
                 carrier_updates = source!(ParcelUpdate with { carrier_limiter } => updates);
                 locate_parcel = effectful_transform!(
-                    ParcelUpdate -> LocatedParcel
+                    ParcelUpdate -> DepotFound
                     with { lookup_limiter, lookup_breaker, lookup_retry }
                     => locate
                 );
                 notify_customer = effectful_transform!(
-                    LocatedParcel -> { EmailSent, SmsSent }
+                    DepotFound -> { EmailSent, SmsSent }
                     with { email_limiter, email_breaker, email_retry, sms_limiter }
                     => notify
                 );

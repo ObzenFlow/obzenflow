@@ -265,6 +265,15 @@ impl Folded {
                     .push(frontier);
             }
         }
+        let attempt_row = super::history::is_query_attempt(
+            record
+                .envelope
+                .provenance
+                .journal
+                .journal_group_id
+                .as_deref(),
+            &record.payload,
+        );
         if let Some(group_id) = &record.envelope.provenance.journal.journal_group_id {
             let frontier = CausalFrontier::from_record(&record).map_err(journal_failure)?;
             self.join_group(
@@ -274,6 +283,9 @@ impl Folded {
                 record.authored(),
                 &frontier,
             )?;
+        }
+        if attempt_row {
+            return Ok(());
         }
         let event = record.into_authored();
         if EffectAttemptStarted::matches_event_type(&event.event_type()) {
@@ -474,7 +486,10 @@ impl Folded {
         if let Claim::Ignore = self.claim(&cursor, true)? {
             return Ok(());
         }
-        if group.events.iter().any(ChainEvent::consumes_data_credit) {
+        if group.events.iter().any(|event| {
+            event.consumes_data_credit()
+                && !super::history::is_query_attempt(Some(group_id), &event.payload)
+        }) {
             return Err(history_failure(format!(
                 "recovery progress '{group_id}' contains Data"
             )));

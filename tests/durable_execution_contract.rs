@@ -43,11 +43,13 @@ use gateway_demo::domain::{
 use gateway_demo::gateway::ProcessorResponse;
 use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
 use obzenflow::application::{verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication};
+use obzenflow::commands::perform;
 use obzenflow::effects::simulated::CallLog;
 use obzenflow::effects::{
-    self, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, StageCompletion,
+    EffectContext, EffectError, Effects, IdempotencyKey, Keyed, StageCompletion,
 };
 use obzenflow::error::HandlerError;
+use obzenflow::events::{source_channel, IngressDecoder, SourceSender};
 use obzenflow::flow::{effectful_transform, flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::journal::read::{
@@ -56,14 +58,15 @@ use obzenflow::journal::read::{
 };
 use obzenflow::journal::EffectOutcomePayload;
 use obzenflow::journal::JournalRecord;
+use obzenflow::queries::FiniteRead;
 use obzenflow::schema::{outcome, TypedPayload};
 use obzenflow::stages::sinks::DiscardSink;
 use obzenflow::stages::sources::{
-    HostedSource, IngressDecoder, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection,
-    YamlSource,
+    HostedSource, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
 };
 use obzenflow::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
 use obzenflow::stages::transforms::EffectfulTransformHandler;
+use obzenflow::systems::{Port, SystemConfig};
 use obzenflow_core::event::payloads::execution_payload::{ReattachGuarantee, SourceReattachedFact};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::EventId;
@@ -298,7 +301,7 @@ struct Gateway {
     release: PathBuf,
 }
 
-#[obzenflow::port(system = "payment-gateway")]
+#[obzenflow::port]
 impl Gateway {
     #[effect(type = "payment.authorize", exactly_once)]
     async fn authorize(
@@ -391,7 +394,7 @@ impl Keyed for AuthorizationRequest {
 #[derive(Clone, Debug)]
 struct Authorize {
     #[port]
-    gateway: effects::Port<Gateway>,
+    gateway: Port<Gateway>,
 }
 
 #[async_trait]
@@ -463,7 +466,7 @@ struct ReceiptFile {
     path: PathBuf,
 }
 
-#[obzenflow::port(system = "receipt-file")]
+#[obzenflow::port]
 impl ReceiptFile {
     #[effect(type = "payment.receipt", at_least_once, records = reply)]
     async fn write_receipt(&self, receipt: &Receipt) -> Result<(), EffectError> {
@@ -517,14 +520,14 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
         release: scenario.release(),
     };
     let authorize = Authorize {
-        gateway: effects::Port::to(gateway),
+        gateway: Port::to(gateway),
     };
-    let receipt_file = effects::perform(held_receipt_for(
+    let receipt_file = perform(held_receipt_for(
         receipt_hold,
         scenario.held_receipts(),
         scenario.release(),
     ))
-    .through(effects::Port::to(ReceiptFile {
+    .through(Port::to(ReceiptFile {
         path: scenario.receipts(),
     }));
     let journals = scenario.journals();
@@ -656,54 +659,44 @@ fn durable_execution_contract_child() {
         Graph::CsvRegister => app.run_blocking(csv_register::build_flow(scenario, plan.hold)),
         Graph::CsvRegisterFanIn => app.run_blocking(csv_register::fan_in_flow(scenario, plan.hold)),
         Graph::SourcePortReplay => app.run_blocking(source_ports::replay_flow(scenario)),
-        Graph::SourcePortReattach => {
-            app.run_blocking(source_ports::reattaching_flow(scenario, plan.fix))
-        }
+        Graph::SourcePortChanged => app
+            .with_config_file(source_ports::ticks_config(scenario))
+            .run_blocking(source_ports::changed_flow(scenario)),
+        Graph::SourcePortLimited => app.run_blocking(source_ports::limited_flow(
+            scenario,
+            Duration::from_millis(50),
+        )),
+        Graph::SourcePortLimitedHeld => app.run_blocking(source_ports::limited_flow(
+            scenario,
+            Duration::from_secs(600),
+        )),
         Graph::SourcePortCsv => app.run_blocking(source_ports::csv_flow(scenario)),
         Graph::SourcePortTickets => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::tickets_input(scenario))
-                    .port()
-                    .unwrap(),
+                source_ports::ticket_store(source_ports::tickets_input(scenario)).port(),
                 plan.hold,
+            )),
+        Graph::SourcePortTicketPages(pages) => app
+            .with_config_file(source_ports::tickets_config(scenario))
+            .run_blocking(source_ports::paged_tickets_flow(
+                scenario,
+                source_ports::ticket_store(source_ports::tickets_input(scenario)).port(),
+                pages,
             )),
         Graph::SourcePortTicketCopy => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::ticket_copy(scenario))
-                    .port()
-                    .unwrap(),
-                plan.hold,
-            )),
-        Graph::SourcePortTicketDelimiter => app
-            .with_config_file(source_ports::tickets_config(scenario))
-            .run_blocking(source_ports::tickets_flow(
-                scenario,
-                source_ports::ticket_store(source_ports::tickets_input(scenario))
-                    .delimiter(b';')
-                    .port()
-                    .unwrap(),
-                plan.hold,
-            )),
-        Graph::SourcePortTicketHeaders => app
-            .with_config_file(source_ports::tickets_config(scenario))
-            .run_blocking(source_ports::tickets_flow(
-                scenario,
-                source_ports::ticket_store(source_ports::tickets_input(scenario))
-                    .headers(source_ports::TICKET_COLUMNS)
-                    .port()
-                    .unwrap(),
+                source_ports::ticket_store(source_ports::ticket_copy(scenario)).port(),
                 plan.hold,
             )),
         Graph::SourcePortTicketFixture(count) => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                obzenflow::queries::QueryPort::located(scripted_tickets::TicketFixture { count })
-                    .unwrap(),
+                scripted_tickets::TicketFixture { count }.port(),
                 plan.hold,
             )),
         Graph::SourcePortOwned => app.run_blocking(source_ports::owned_flow(
@@ -755,13 +748,14 @@ enum Graph {
     CsvRegister,
     CsvRegisterFanIn,
     SourcePortReplay,
-    SourcePortReattach,
+    SourcePortChanged,
+    SourcePortLimited,
+    SourcePortLimitedHeld,
     SourcePortCsv,
+    SourcePortTicketPages(source_ports::TicketPages),
     SourcePortTickets,
     SourcePortTicketFixture(u32),
     SourcePortTicketCopy,
-    SourcePortTicketDelimiter,
-    SourcePortTicketHeaders,
     SourcePortOwned,
     SourcePortOwnedKept,
 }
@@ -1125,6 +1119,25 @@ async fn until(run: &Path, name: &str, holds: impl Fn(&Archive) -> bool) {
     }
 }
 
+async fn kill_at_cut(
+    name: &str,
+    fresh: impl Fn() -> Scenario,
+    holds: impl Fn(&Archive) -> bool,
+) -> (Scenario, PathBuf) {
+    for _ in 0..3 {
+        let scenario = fresh();
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, &holds).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        if holds(&Archive::read(&killed).await) {
+            return (scenario, killed);
+        }
+    }
+    panic!("{name}: three runs passed the cut before the kill landed");
+}
+
 // ---------------------------------------------------------------------------
 // Sender: the test parent's HTTP client. Its ledger survives the server.
 
@@ -1405,15 +1418,12 @@ impl Archive {
     fn read_orders(&self) -> Vec<String> {
         self.rows("web_orders", RunJournalKind::Data)
             .filter_map(|row| {
-                let ChainPayload::Execution(ExecutionPayload::SourceInput(record)) = &row.payload
+                let ChainPayload::Execution(ExecutionPayload::MemberRecorded(record)) =
+                    &row.payload
                 else {
                     return None;
                 };
-                let obzenflow_core::query::SourceInput::IngressMember { member } = &record.input
-                else {
-                    return None;
-                };
-                member["fact"]["payload"]["order_id"]
+                record.member["fact"]["payload"]["order_id"]
                     .as_str()
                     .map(str::to_owned)
             })
@@ -2445,12 +2455,10 @@ async fn durable_execution_contract() {
             .record(&resumed, Ended::Natural)
             .await
             .store_opening();
-        let started = |event: &str| opening.iter().position(|row| row.contains(event));
-        let (declared, read) = (
-            started("runtime.source.binding_declared"),
-            started("query.answered"),
+        assert!(
+            opening.iter().any(|row| row == "query.answered"),
+            "{name}: the resumed source reads before its first order: {opening:?}"
         );
-        assert!(declared.is_some() && declared < read, "{name}: {opening:?}");
         let web_calls_after: Vec<String> = scenario
             .calls()
             .iter()
@@ -2827,7 +2835,7 @@ mod then_live {
     use super::*;
     use obzenflow::flow::{join, merge};
     use obzenflow::middleware::rate_limit;
-    use obzenflow::stages::sources::{source_channel, ChannelSource, SourceSender};
+    use obzenflow::stages::sources::ChannelSource;
     use obzenflow::stages::{joins, merges};
     use obzenflow_core::event::payloads::execution_payload::{JoinPhaseFact, StageLifecycleFact};
     use obzenflow_core::StageKey;
@@ -3009,7 +3017,7 @@ mod then_live {
         entry: Entry,
     }
 
-    #[obzenflow::port(system = "audit-ledger")]
+    #[obzenflow::port]
     impl AuditLedger {
         #[effect(type = "durable_contract.then_live.audit", exactly_once)]
         fn audit(&self, request: &AuditEntry, key: &IdempotencyKey) -> Result<Entry, EffectError> {
@@ -3029,7 +3037,7 @@ mod then_live {
     #[derive(Clone, Debug)]
     struct Vet {
         #[port]
-        ledger: effects::Port<AuditLedger>,
+        ledger: Port<AuditLedger>,
     }
 
     #[async_trait]
@@ -3074,7 +3082,7 @@ mod then_live {
             path: audit_ledger(scenario),
         };
         let vet = Vet {
-            ledger: effects::Port::to(audit),
+            ledger: Port::to(audit),
         };
         FlowDefinition::materialize(move |_runtime_config| {
             let post_entry = joins::inner_then_live(
@@ -3241,14 +3249,8 @@ mod then_live {
     }
 
     async fn row(name: &str, graph: Graph, cut: Cut, generations: (u64, u64)) {
-        let scenario = fresh(name, graph);
-        let child = Child::spawn(&scenario, Vec::new(), None);
-        let killed = child.run().await;
-        until(&killed, name, |archive| cut.holds(archive)).await;
-        child.signal(Signal::Kill);
-        assert!(!child.exit().await.success(), "{name}: the kill lands");
-        let at_kill = Archive::read(&killed).await;
-        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+        let (scenario, killed) =
+            kill_at_cut(name, || fresh(name, graph), |archive| cut.holds(archive)).await;
 
         let child = Child::spawn(&scenario, resume(&killed), None);
         let resumed = child.run().await;
@@ -3394,17 +3396,12 @@ mod then_live {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_join_whose_stream_is_all_batch_resumes_to_a_drained_join() {
         let name = "then_live_batch_stream";
-        let scenario = fresh(name, Graph::ThenLiveBatchStream);
-        let child = Child::spawn(&scenario, Vec::new(), None);
-        let killed = child.run().await;
-        until(&killed, name, |archive| Cut::Enriching.holds(archive)).await;
-        child.signal(Signal::Kill);
-        assert!(!child.exit().await.success(), "{name}: the kill lands");
-        let at_kill = Archive::read(&killed).await;
-        assert!(
-            Cut::Enriching.holds(&at_kill),
-            "{name}: the kill landed while enriching"
-        );
+        let (scenario, killed) = kill_at_cut(
+            name,
+            || fresh(name, Graph::ThenLiveBatchStream),
+            |archive| Cut::Enriching.holds(archive),
+        )
+        .await;
 
         let child = Child::spawn(&scenario, resume(&killed), None);
         let resumed = child.run().await;
@@ -3711,14 +3708,8 @@ mod concat {
     }
 
     async fn row(name: &str, cut: Cut) {
-        let scenario = fresh(name);
-        let child = Child::spawn(&scenario, Vec::new(), None);
-        let killed = child.run().await;
-        until(&killed, name, |archive| cut.holds(archive)).await;
-        child.signal(Signal::Kill);
-        assert!(!child.exit().await.success(), "{name}: the kill lands");
-        let at_kill = Archive::read(&killed).await;
-        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+        let (scenario, killed) =
+            kill_at_cut(name, || fresh(name), |archive| cut.holds(archive)).await;
 
         let resumed = Child::spawn(&scenario, resume(&killed), None)
             .completed()
@@ -3986,14 +3977,12 @@ mod as_of {
     }
 
     async fn row(name: &str, cut: Cut, between: Between) {
-        let scenario = fresh(name, cut.graph());
-        let child = Child::spawn(&scenario, Vec::new(), None);
-        let killed = child.run().await;
-        until(&killed, name, |archive| cut.holds(archive)).await;
-        child.signal(Signal::Kill);
-        assert!(!child.exit().await.success(), "{name}: the kill lands");
-        let at_kill = Archive::read(&killed).await;
-        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+        let (scenario, killed) = kill_at_cut(
+            name,
+            || fresh(name, cut.graph()),
+            |archive| cut.holds(archive),
+        )
+        .await;
         if let Between::CorrectOneRate = between {
             std::fs::write(rates_input(&scenario), CORRECTED).expect("correct one rate");
         }
@@ -4068,7 +4057,6 @@ mod payment_demo {
         release: PathBuf,
     }
 
-    #[obzenflow::system("simulated-processor")]
     #[async_trait]
     impl PaymentGatewayPort for HeldProcessor {
         async fn authorize(
@@ -4084,8 +4072,8 @@ mod payment_demo {
 
     pub(super) fn build_flow(scenario: &Scenario, hold: Option<Hold>) -> FlowDefinition {
         let calls = gateway_calls(scenario);
-        let processor: effects::Port<dyn PaymentGatewayPort> = match hold {
-            Some(Hold::Processor) => effects::Port::to(HeldProcessor {
+        let processor: Port<dyn PaymentGatewayPort> = match hold {
+            Some(Hold::Processor) => Port::to(HeldProcessor {
                 processor: SimulatedProcessor::open(&calls)
                     .expect("the processor's call log opens"),
                 release: scenario.release(),
@@ -4527,7 +4515,7 @@ mod two_effects {
         amount_cents: u64,
     }
 
-    #[obzenflow::port(system = "charge-ledger")]
+    #[obzenflow::port]
     impl ChargeLedger {
         #[effect(type = "durable_contract.two_effects.authorize", exactly_once)]
         fn authorize(
@@ -4587,7 +4575,7 @@ mod two_effects {
     #[derive(Clone, Debug)]
     struct Charge {
         #[port]
-        ledger: effects::Port<ChargeLedger>,
+        ledger: Port<ChargeLedger>,
         hold: Option<String>,
         release: PathBuf,
         fix: bool,
@@ -4641,7 +4629,7 @@ mod two_effects {
             path: ledger(scenario),
         };
         let charge = Charge {
-            ledger: effects::Port::to(charge_ledger),
+            ledger: Port::to(charge_ledger),
             hold: match hold {
                 Some(Hold::BetweenEffects(order)) => Some(order),
                 _ => None,
@@ -5027,7 +5015,7 @@ mod rejected_call {
         order_id: String,
     }
 
-    #[obzenflow::port(system = "quote-desk")]
+    #[obzenflow::port]
     impl QuoteDesk {
         #[effect(type = "durable_contract.rejected_call.quote", exactly_once)]
         fn quote(
@@ -5058,7 +5046,7 @@ mod rejected_call {
     #[derive(Clone, Debug)]
     struct Quote {
         #[port]
-        desk: effects::Port<QuoteDesk>,
+        desk: Port<QuoteDesk>,
     }
 
     #[async_trait]
@@ -5091,7 +5079,7 @@ mod rejected_call {
             .build()
             .expect("the order channel is configured");
         let quote = Quote {
-            desk: effects::Port::to(QuoteDesk {
+            desk: Port::to(QuoteDesk {
                 path: desk_log(scenario),
             }),
         };
@@ -5432,8 +5420,9 @@ mod flash_sale {
         std::fs::write(
             config(&scenario),
             "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 64\n\
-             stall_timeout_ms = 30000\n\n[app.warehouse]\nid = \"warehouse-demo\"\n\
-             reserve_latency_ms = 0\nreservations = \"available\"\nreservation_pace_ms = 300\n",
+             stall_timeout_ms = 30000\n\n[app.allocation]\ncapacity_per_sku = 1\n\n\
+             [app.warehouse]\nreserve_latency_ms = 0\nreservations = \"available\"\n\
+             reservation_pace_ms = 300\n",
         )
         .expect("write the configuration");
         scenario
@@ -5558,22 +5547,22 @@ mod flash_sale {
         let killed = killed_when(&scenario, Vec::new(), name, |archive| {
             archive.eof("allocation_inputs") == Some(EofKind::Natural)
                 && archive.eof("phone_reservations") == Some(EofKind::Natural)
-                && (1..INPUTS).contains(&settled(archive))
+                && (2..INPUTS).contains(&settled(archive))
         })
         .await;
         let recorded = std::fs::read_to_string(config(&scenario)).expect("read the configuration");
         std::fs::write(
             config(&scenario),
-            recorded.replace("warehouse-demo", "warehouse-other"),
+            recorded.replace("capacity_per_sku = 1", "capacity_per_sku = 2"),
         )
-        .expect("change the warehouse id");
+        .expect("raise the capacity");
 
         let child = Child::spawn(&scenario, resume(&killed), None);
         let refused = child.run().await;
         let log = child.log.clone();
         assert!(
             !child.exit().await.success(),
-            "{name}: the changed id refuses the resume"
+            "{name}: the raised capacity refuses the resume"
         );
         let output = read_log(&log);
         let remedy = output
@@ -5589,7 +5578,7 @@ mod flash_sale {
             "{name}: {remedy}"
         );
 
-        std::fs::write(config(&scenario), recorded).expect("restore the warehouse id");
+        std::fs::write(config(&scenario), recorded).expect("restore the capacity");
         let resumed = Child::spawn(&scenario, resume(&refused), None)
             .completed()
             .await;
@@ -5700,7 +5689,7 @@ mod lagging {
         path: PathBuf,
     }
 
-    #[obzenflow::port(system = "written-file")]
+    #[obzenflow::port]
     impl WrittenFile {
         #[effect(type = "durable_contract.lagging.write", at_least_once, records = reply)]
         async fn write(&self, written: &Written) -> Result<(), EffectError> {
@@ -5728,7 +5717,7 @@ mod lagging {
 
     pub(super) fn rate_limited_flow(scenario: &Scenario) -> FlowDefinition {
         let items_input = items(input(scenario, "items.yaml"));
-        let recording = effects::perform(written_for).through(effects::Port::to(WrittenFile {
+        let recording = perform(written_for).through(Port::to(WrittenFile {
             path: written(scenario),
         }));
         let observer = Observed {
@@ -5944,7 +5933,7 @@ mod ai_digest {
         Partials,
     };
     use obzenflow::flow::ai;
-    use obzenflow::stages::sources::{FiniteRead, SourceRead, TypedFiniteSourceHandler};
+    use obzenflow::stages::sources::{SourceRead, TypedFiniteSourceHandler};
     use obzenflow_core::ai::{
         AiMapReduceGroupingEnded, AiMapReduceMapInput, AiMapReduceTaggedPartial,
     };
@@ -6064,7 +6053,6 @@ mod ai_digest {
         release: PathBuf,
     }
 
-    #[obzenflow::system("items")]
     #[async_trait]
     impl ItemsInput for Items {
         async fn read(
@@ -6088,7 +6076,7 @@ mod ai_digest {
         }
     }
 
-    struct ItemRows(obzenflow::queries::QueryPort<dyn ItemsInput>);
+    struct ItemRows(Port<dyn ItemsInput>);
 
     impl TypedFiniteSourceHandler for ItemRows {
         type Output = Item;
@@ -6099,7 +6087,7 @@ mod ai_digest {
     }
 
     pub(super) fn build_flow(scenario: &Scenario, hold: Option<Hold>) -> FlowDefinition {
-        let items = ItemRows(obzenflow::queries::QueryPort::to(Items {
+        let items = ItemRows(Port::to(Items {
             holds_after: match hold {
                 Some(Hold::AiSourceAfter(after)) => Some(after),
                 _ => None,
@@ -6477,7 +6465,7 @@ mod at_most_once {
         release: PathBuf,
     }
 
-    #[obzenflow::port(system = "partner-notices")]
+    #[obzenflow::port]
     impl PartnerNotices {
         #[effect(
             type = "durable_contract.at_most_once.notify",
@@ -6514,7 +6502,7 @@ mod at_most_once {
             .batch_size(1)
             .build()
             .expect("the notice channel is configured");
-        let notify = effects::perform(notice_request).through(effects::Port::to(PartnerNotices {
+        let notify = perform(notice_request).through(Port::to(PartnerNotices {
             log: partner_log(scenario),
             hold: match hold {
                 Some(Hold::PartnerNotice(notice)) => Some(notice),
@@ -7265,17 +7253,15 @@ mod source_ports {
     use obzenflow::effects::EffectPortResolutionError;
     use obzenflow::middleware::rate_limit;
     use obzenflow::stages::sources::{
-        Continuous, ContinuousRead, CsvDecoder, CsvFileSystem, CsvSource, FiniteRead,
-        InputReadiness, SourceDiagnosticReason, SourceError, SourceRead, TypedFiniteSourceHandler,
-        TypedInfiniteSourceHandler, ValuesSource,
+        CsvDecoder, CsvSource, SourceDiagnosticReason, SourceError, SourceRead,
+        TypedFiniteSourceHandler, ValuesSource,
     };
-    use obzenflow_core::effect_binding::{DelimitedHeaders, SystemBinding, SystemLocation};
-    use obzenflow_core::SystemBindingEvidence;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
+    use obzenflow::systems::file::CsvFileSystem;
+    use obzenflow_core::event::payloads::effect_payload::CallKind;
     use support_sla_demo::Ticket;
 
     const TICKS: u64 = 4;
+    const HELD: u64 = 2;
     const ROWS: u64 = 6;
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -7320,7 +7306,6 @@ mod source_ports {
         root: PathBuf,
     }
 
-    #[obzenflow::system("counted-ticks")]
     #[async_trait::async_trait]
     impl TickInput for CountedTicks {
         async fn read(
@@ -7344,7 +7329,7 @@ mod source_ports {
         }
     }
 
-    struct CountedSource(obzenflow::queries::QueryPort<dyn TickInput>);
+    struct CountedSource(Port<dyn TickInput>);
 
     impl TypedFiniteSourceHandler for CountedSource {
         type Output = Tick;
@@ -7356,7 +7341,7 @@ mod source_ports {
 
     pub(super) fn replay_flow(scenario: &Scenario) -> FlowDefinition {
         let root = scenario.root.clone();
-        let counted = obzenflow::queries::QueryPort::deferred(move || {
+        let counted = Port::deferred(move || {
             append_line(&root.join("builds.jsonl"), &1_u64)
                 .map_err(|_| EffectPortResolutionError::ClientConstructionFailed)?;
             Ok(CountedTicks { root: root.clone() })
@@ -7381,107 +7366,159 @@ mod source_ports {
         })
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    struct NextLiveTick;
+    struct ScriptedTicks;
 
-    #[obzenflow::port]
     #[async_trait::async_trait]
-    trait LiveTicks: InputReadiness {
-        #[query(type = "durable_contract.source_ports.ticks.take")]
-        async fn take(
+    impl TickInput for ScriptedTicks {
+        async fn read(
             &self,
-            from: &NextLiveTick,
-            ctx: &obzenflow::queries::QueryContext,
-        ) -> Result<ContinuousRead<Tick, NextLiveTick>, obzenflow::queries::QueryError>;
-    }
-
-    fn next_tick(emitted: &AtomicU64) -> ContinuousRead<Tick, NextLiveTick> {
-        ContinuousRead {
-            records: vec![Tick {
-                n: emitted.fetch_add(1, Ordering::SeqCst) + 1,
-            }],
-            next: NextLiveTick,
-        }
-    }
-
-    async fn ticks_left(emitted: &AtomicU64) -> Result<(), SourceError> {
-        if emitted.load(Ordering::SeqCst) >= TICKS {
-            std::future::pending::<()>().await;
-        }
-        Ok(())
-    }
-
-    struct ScriptedTicks(Arc<AtomicU64>);
-
-    #[async_trait::async_trait]
-    impl InputReadiness for ScriptedTicks {
-        async fn ready(&self) -> Result<(), SourceError> {
-            ticks_left(&self.0).await
-        }
-    }
-
-    #[obzenflow::system("scripted-ticks")]
-    #[async_trait::async_trait]
-    impl LiveTicks for ScriptedTicks {
-        async fn take(
-            &self,
-            _from: &NextLiveTick,
+            from: &NextTick,
             _ctx: &obzenflow::queries::QueryContext,
-        ) -> Result<ContinuousRead<Tick, NextLiveTick>, obzenflow::queries::QueryError> {
-            Ok(next_tick(&self.0))
+        ) -> Result<FiniteRead<Tick, NextTick>, obzenflow::queries::QueryError> {
+            if from.0 >= HELD {
+                std::future::pending::<()>().await;
+            }
+            Ok(FiniteRead::Batch {
+                records: vec![Tick { n: from.0 + 1 }],
+                next: NextTick(from.0 + 1),
+            })
         }
     }
 
-    struct ReplacementTicks(Arc<AtomicU64>);
-
-    #[async_trait::async_trait]
-    impl InputReadiness for ReplacementTicks {
-        async fn ready(&self) -> Result<(), SourceError> {
-            ticks_left(&self.0).await
-        }
+    struct ReplacementTicks {
+        root: PathBuf,
     }
 
-    #[obzenflow::system("replacement-ticks")]
     #[async_trait::async_trait]
-    impl LiveTicks for ReplacementTicks {
-        async fn take(
+    impl TickInput for ReplacementTicks {
+        async fn read(
             &self,
-            _from: &NextLiveTick,
+            from: &NextTick,
             _ctx: &obzenflow::queries::QueryContext,
-        ) -> Result<ContinuousRead<Tick, NextLiveTick>, obzenflow::queries::QueryError> {
-            Ok(next_tick(&self.0))
+        ) -> Result<FiniteRead<Tick, NextTick>, obzenflow::queries::QueryError> {
+            note(&self.root, "replacement", from.0 + 1).map_err(|_| {
+                obzenflow::queries::QueryError::terminal(
+                    obzenflow::queries::SourcePollErrorKind::Validation,
+                    obzenflow::queries::SourceDiagnosticReason::InvalidValue,
+                )
+            })?;
+            if from.0 >= TICKS {
+                return Ok(FiniteRead::EndOfInput);
+            }
+            Ok(FiniteRead::Batch {
+                records: vec![Tick { n: from.0 + 1 }],
+                next: NextTick(from.0 + 1),
+            })
         }
     }
 
-    struct ReattachingTicks {
-        port: obzenflow::queries::QueryPort<dyn LiveTicks>,
+    struct LimitedTicks {
+        root: PathBuf,
+        retry_after: Duration,
     }
 
-    impl TypedInfiniteSourceHandler for ReattachingTicks {
-        type Output = Tick;
-
-        fn read(&self) -> SourceRead<Tick, Continuous> {
-            SourceRead::continuous(self.port.clone(), NextLiveTick, Ok)
+    #[async_trait::async_trait]
+    impl TickInput for LimitedTicks {
+        async fn read(
+            &self,
+            from: &NextTick,
+            _ctx: &obzenflow::queries::QueryContext,
+        ) -> Result<FiniteRead<Tick, NextTick>, obzenflow::queries::QueryError> {
+            let noted = |what: &str| {
+                note(&self.root, what, from.0 + 1).map_err(|_| {
+                    obzenflow::queries::QueryError::terminal(
+                        obzenflow::queries::SourcePollErrorKind::Validation,
+                        obzenflow::queries::SourceDiagnosticReason::InvalidValue,
+                    )
+                })
+            };
+            noted("polls")?;
+            if from.0 == 1 && read_lines::<u64>(&self.root.join("limited.jsonl")).is_empty() {
+                noted("limited")?;
+                return Err(obzenflow::queries::QueryError::recoverable(
+                    obzenflow::queries::SourcePollErrorKind::Transport,
+                    obzenflow::queries::SourceDiagnosticReason::RateLimited,
+                )
+                .with_retry_after(self.retry_after));
+            }
+            if from.0 >= TICKS {
+                return Ok(FiniteRead::EndOfInput);
+            }
+            Ok(FiniteRead::Batch {
+                records: vec![Tick { n: from.0 + 1 }],
+                next: NextTick(from.0 + 1),
+            })
         }
     }
 
-    pub(super) fn reattaching_flow(scenario: &Scenario, replaced: bool) -> FlowDefinition {
-        let emitted = Arc::new(AtomicU64::new(0));
-        let port: obzenflow::queries::QueryPort<dyn LiveTicks> = if replaced {
-            obzenflow::queries::QueryPort::to(ReplacementTicks(emitted.clone()))
-        } else {
-            obzenflow::queries::QueryPort::to(ScriptedTicks(emitted.clone()))
-        };
-        let reattaching = ReattachingTicks { port };
+    pub(super) fn limited_flow(scenario: &Scenario, retry_after: Duration) -> FlowDefinition {
+        let limited = obzenflow::queries::query(NextTick(0)).through(Port::to(LimitedTicks {
+            root: scenario.root.clone(),
+            retry_after,
+        }));
         let journals = scenario.journals();
         FlowDefinition::materialize(move |_runtime_config| {
             let discard = DiscardSink::<Tick>::new();
             Ok(flow! {
-                name: "durable_execution_contract_source_port_reattach",
+                name: "durable_execution_contract_source_port_limited",
                 journals: disk_journals(journals),
 
                 stages: {
-                    ticks = source!(Tick => reattaching);
+                    ticks = source!(Tick => limited);
+                    discard = sink!(Tick => discard);
+                },
+
+                topology: {
+                    ticks |> discard;
+                }
+            })
+        })
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum TickSystem {
+        Scripted,
+        Replacement,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct TickSettings {
+        ticks: TickSystem,
+    }
+
+    pub(super) fn ticks_config(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("ticks.toml")
+    }
+
+    fn bind_ticks(scenario: &Scenario, system: &str) {
+        std::fs::write(
+            ticks_config(scenario),
+            format!("[app]\nticks = \"{system}\"\n"),
+        )
+        .expect("write the configuration");
+    }
+
+    pub(super) fn changed_flow(scenario: &Scenario) -> FlowDefinition {
+        let root = scenario.root.clone();
+        let journals = scenario.journals();
+        FlowDefinition::materialize_with(move |_runtime_config, settings: TickSettings| {
+            let port: Port<dyn TickInput> = match settings.ticks {
+                TickSystem::Scripted => Port::to(ScriptedTicks),
+                TickSystem::Replacement => Port::deferred(move || {
+                    append_line(&root.join("replacement_builds.jsonl"), &1_u64)
+                        .map_err(|_| EffectPortResolutionError::ClientConstructionFailed)?;
+                    Ok(ReplacementTicks { root: root.clone() })
+                }),
+            };
+            let held = obzenflow::queries::query(NextTick(0)).through(port);
+            let discard = DiscardSink::<Tick>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_source_port_changed",
+                journals: disk_journals(journals),
+
+                stages: {
+                    ticks = source!(Tick => held);
                     discard = sink!(Tick => discard);
                 },
 
@@ -7611,30 +7648,26 @@ mod source_ports {
         (run, committed)
     }
 
-    fn declared_bindings(archive: &Archive, stage: &str) -> Vec<SystemBinding> {
-        archive
-            .rows(stage, RunJournalKind::Data)
+    fn registered(archive: &Archive, stage: &str) -> bool {
+        archive.rows(stage, RunJournalKind::Data).any(|row| {
+            matches!(
+                &row.payload,
+                ChainPayload::Execution(ExecutionPayload::SupervisorRegistered { .. })
+            )
+        })
+    }
+
+    fn input_refusals(archive: &Archive, stage: &str) -> Vec<SourceDiagnosticReason> {
+        [RunJournalKind::Data, RunJournalKind::Error]
+            .into_iter()
+            .flat_map(|kind| archive.rows(stage, kind).collect::<Vec<_>>())
             .filter_map(|row| match &row.payload {
-                ChainPayload::Execution(ExecutionPayload::SourceBindingDeclared(binding)) => {
-                    Some(binding.clone())
+                ChainPayload::Execution(ExecutionPayload::SourcePollFailed(fact)) => {
+                    Some(fact.diagnostic.reason())
                 }
                 _ => None,
             })
             .collect()
-    }
-
-    fn csv_binding(scenario: &Scenario) -> SystemBinding {
-        SystemBindingEvidence::located(
-            "file-system",
-            SystemLocation::Delimited {
-                path: rows_input(scenario),
-                delimiter: ',',
-                headers: DelimitedHeaders::FirstRow,
-            },
-        )
-        .expect("the tick file fits binding evidence")
-        .binding()
-        .clone()
     }
 
     fn live_reads(archive: &Archive, stage: &str) -> u64 {
@@ -7645,13 +7678,6 @@ mod source_ports {
                     && row.envelope.provenance.event.replay_context.is_none()
             })
             .count() as u64
-    }
-
-    fn in_memory_binding() -> SystemBinding {
-        SystemBindingEvidence::named("in-memory")
-            .expect("the system name fits binding evidence")
-            .binding()
-            .clone()
     }
 
     fn recorded_reads(archive: &Archive, stage: &str) -> u64 {
@@ -7675,13 +7701,6 @@ mod source_ports {
         );
         let archive = Archive::read(&live).await;
         assert_eq!(ticks(&archive, "ticks"), [1, 2, 3, 4]);
-        assert_eq!(
-            declared_bindings(&archive, "ticks")
-                .iter()
-                .map(|binding| binding.name().to_owned())
-                .collect::<Vec<_>>(),
-            ["counted-ticks"]
-        );
 
         let replayed = Child::spawn(&scenario, replay(&live), None)
             .completed()
@@ -7697,39 +7716,356 @@ mod source_ports {
         assert_eq!(code, Some(0), "{name}: {report}");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn source_changed_binding_refused() {
-        let name = "source_system_changed";
-        let scenario = Scenario::for_graph(name, Graph::SourcePortReattach);
-        let child = Child::spawn(&scenario, Vec::new(), None);
+    async fn interrupted_ticks(scenario: &Scenario, name: &str) -> PathBuf {
+        bind_ticks(scenario, "scripted");
+        let child = Child::spawn(scenario, Vec::new(), None);
         let run = child.run().await;
         until(&run, name, |archive| {
-            ticks(archive, "ticks").len() == TICKS as usize
+            ticks(archive, "ticks").len() == HELD as usize
         })
         .await;
         child.signal(Signal::Kill);
         assert!(!child.exit().await.success(), "{name}: the kill lands");
-        assert_eq!(
-            declared_bindings(&Archive::read(&run).await, "ticks")
-                .iter()
-                .map(|binding| binding.name().to_owned())
-                .collect::<Vec<_>>(),
-            ["scripted-ticks"]
-        );
+        run
+    }
 
-        let existing_runs = scenario.runs();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replay_swapped_system_resolves_nothing() {
+        let name = "source_port_replay_swapped";
+        let scenario = Scenario::for_graph(name, Graph::SourcePortChanged);
+        let run = interrupted_ticks(&scenario, name).await;
+        bind_ticks(&scenario, "replacement");
+
         let mut replay_args = replay(&run);
         replay_args.push("--allow-incomplete-archive".into());
-        for (verb, arguments) in [("replay", replay_args), ("resume", resume(&run))] {
-            let child = Child::spawn_with(&scenario, arguments, None, true);
-            let log = child.log.clone();
-            assert!(!child.exit().await.success());
-            let message = std::fs::read_to_string(log).expect("read refusal");
-            for expected in [verb, "ticks", "scripted-ticks", "replacement-ticks"] {
-                assert!(message.contains(expected), "{message}");
-            }
-            assert_eq!(scenario.runs(), existing_runs, "{verb} created a run");
+        let child = Child::spawn(&scenario, replay_args, None);
+        let log = child.log.clone();
+        let replayed = child.completed().await;
+        assert_eq!(
+            ticks(&Archive::read(&replayed).await, "ticks"),
+            [1, 2],
+            "{name}: the replay publishes the recorded ticks"
+        );
+        assert_eq!(
+            noted(&scenario, "replacement_builds"),
+            0,
+            "{name}: the replay resolves no system"
+        );
+        let output = read_log(&log);
+        let differs = output
+            .lines()
+            .find(|line| line.starts_with("Configuration differs from "))
+            .unwrap_or_else(|| panic!("{name}: the replay names the changed key: {output}"));
+        assert!(differs.ends_with(": app.ticks"), "{name}: {differs}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resume_swapped_system_continues_live() {
+        let name = "source_port_resume_swapped";
+        let scenario = Scenario::for_graph(name, Graph::SourcePortChanged);
+        let run = interrupted_ticks(&scenario, name).await;
+        bind_ticks(&scenario, "replacement");
+
+        let resumed = Child::spawn(&scenario, resume(&run), None)
+            .completed()
+            .await;
+        assert_eq!(
+            ticks(&Archive::read(&resumed).await, "ticks"),
+            [1, 2, 3, 4],
+            "{name}: every tick publishes once"
+        );
+        assert_eq!(
+            read_lines::<u64>(&scenario.root.join("replacement.jsonl")),
+            [HELD + 1, HELD + 2, TICKS + 1],
+            "{name}: the new system answers only the reads after the recorded ones"
+        );
+    }
+
+    type QueryAttempt = (u64, u32, Option<u32>, String);
+
+    fn query_attempts(archive: &Archive, stage: &str) -> Vec<QueryAttempt> {
+        archive
+            .rows(stage, RunJournalKind::Data)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+                    if record.is_query() =>
+                {
+                    Some((
+                        record.cursor.input_seq.get(),
+                        record.cursor.effect_ordinal.get(),
+                        row.envelope
+                            .provenance
+                            .event
+                            .effect_provenance
+                            .as_ref()
+                            .and_then(|provenance| provenance.attempt)
+                            .map(|attempt| attempt.get()),
+                        row.event_type(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retried_read_keeps_one_cursor() {
+        let name = "source_port_retried_read";
+        let scenario = Scenario::for_graph(name, Graph::SourcePortLimited);
+        let live = Child::spawn(&scenario, Vec::new(), None).completed().await;
+        let archive = Archive::read(&live).await;
+        let second_read: Vec<QueryAttempt> = query_attempts(&archive, "ticks")
+            .into_iter()
+            .filter(|(read, ..)| *read == 2)
+            .collect();
+        assert_eq!(
+            second_read,
+            [
+                (2, 0, Some(1), "query.failed".to_string()),
+                (2, 0, Some(2), "query.answered".to_string()),
+            ],
+            "{name}: the retry keeps the read's cursor and takes the next attempt"
+        );
+        assert_eq!(ticks(&archive, "ticks"), [1, 2, 3, 4]);
+        let polls = noted(&scenario, "polls");
+        assert_eq!(
+            polls,
+            TICKS as usize + 2,
+            "{name}: every read and one retry"
+        );
+
+        let replayed = Child::spawn(&scenario, replay(&live), None)
+            .completed()
+            .await;
+        assert_eq!(
+            noted(&scenario, "polls"),
+            polls,
+            "{name}: the strict replay asks no supplier"
+        );
+        assert_eq!(
+            ticks(&Archive::read(&replayed).await, "ticks"),
+            [1, 2, 3, 4]
+        );
+        let (code, report) = verify_exit(&live, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopped_retry_resumes_next_attempt() {
+        let name = "source_port_stopped_retry";
+        let held = Scenario::for_graph(name, Graph::SourcePortLimitedHeld);
+        let child = Child::spawn(&held, Vec::new(), None);
+        let run = child.run().await;
+        until(&run, name, |archive| {
+            query_attempts(archive, "ticks")
+                .iter()
+                .any(|(read, .., event)| *read == 2 && event == "query.failed")
+        })
+        .await;
+        child.signal(Signal::Term);
+        assert!(
+            child.exit().await.success(),
+            "{name}: a stop during the retry wait exits cleanly"
+        );
+
+        let limited = Scenario {
+            graph: Graph::SourcePortLimited,
+            ..held.clone()
+        };
+        let resumed = Child::spawn(&limited, resume(&run), None).completed().await;
+        let archive = Archive::read(&resumed).await;
+        let second_read: Vec<QueryAttempt> = query_attempts(&archive, "ticks")
+            .into_iter()
+            .filter(|(read, ..)| *read == 2)
+            .collect();
+        assert_eq!(
+            second_read,
+            [
+                (2, 0, Some(1), "query.failed".to_string()),
+                (2, 0, Some(2), "query.answered".to_string()),
+            ],
+            "{name}: the resume copies the failed attempt and takes the next one"
+        );
+        assert_eq!(ticks(&archive, "ticks"), [1, 2, 3, 4]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pulled_fact_parent_names_answer() {
+        let name = "source_port_fact_parent";
+        let scenario = Scenario::for_graph(name, Graph::SourcePortLimited);
+        let run = Child::spawn(&scenario, Vec::new(), None).completed().await;
+        let archive = Archive::read(&run).await;
+        let answers: BTreeMap<u64, EventId> = archive
+            .rows("ticks", RunJournalKind::Data)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+                    if row.event_type() == "query.answered" =>
+                {
+                    Some((record.cursor.input_seq.get(), *row.id()))
+                }
+                _ => None,
+            })
+            .collect();
+        let facts: Vec<(u64, Option<EventId>)> = archive
+            .facts::<Tick>("ticks")
+            .map(|(row, tick)| {
+                (
+                    tick.n,
+                    row.envelope
+                        .provenance
+                        .event
+                        .causality
+                        .parent_ids
+                        .first()
+                        .copied(),
+                )
+            })
+            .collect();
+        assert_eq!(facts.len(), TICKS as usize);
+        for (n, parent) in facts {
+            assert_eq!(
+                parent,
+                answers.get(&n).copied(),
+                "{name}: tick {n} names the answer of its read"
+            );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn source_read_record_matches_call() {
+        let name = "source_port_record_path";
+        let scenario = fresh_tickets(name);
+        let run = Child::spawn(&scenario, Vec::new(), None).completed().await;
+        let archive = Archive::read(&run).await;
+        let record = |stage: &str, read: bool| {
+            archive
+                .rows(stage, RunJournalKind::Data)
+                .find_map(|row| match &row.payload {
+                    ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+                        if record.is_query() == read =>
+                    {
+                        Some(record.as_ref().clone())
+                    }
+                    _ => None,
+                })
+                .expect("the stage records its call")
+        };
+        let read = record("tickets", true);
+        let call = record("desk", false);
+        assert_eq!(read.call, CallKind::Query, "{name}: the read is a query");
+        assert_eq!(
+            call.call,
+            CallKind::Command,
+            "{name}: the call is a command"
+        );
+        assert!(
+            read.request.is_some(),
+            "{name}: the read records its request"
+        );
+        assert!(
+            call.request.is_none(),
+            "{name}: the call records no request"
+        );
+
+        let listing = show(&run, &["--include-runtime", "--jsonl"]);
+        let answered = listing
+            .lines()
+            .find(|line| line.contains("query.answered"))
+            .unwrap_or_else(|| panic!("{name}: show lists the read: {listing}"));
+        for field in ["\"request\"", "\"outcome\""] {
+            assert!(answered.contains(field), "{name}: {field} in {answered}");
+        }
+        let default_view = show(&run, &["--include-runtime"]);
+        assert!(
+            default_view.contains("\"request\""),
+            "{name}: the default view prints the read's request: {default_view}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wider_page_resume_publishes_once() {
+        let name = "source_port_wider_pages";
+        let scenario = fresh_tickets(name);
+        let run = interrupted_tickets(&scenario, name).await;
+        let wider = Scenario {
+            graph: Graph::SourcePortTicketPages(TicketPages {
+                chunk: 2 * BATCH,
+                skip_rows: 0,
+            }),
+            ..scenario.clone()
+        };
+        let resumed = Child::spawn(&wider, resume(&run), None).completed().await;
+        assert_eq!(
+            ticket_ids(&Archive::read(&resumed).await),
+            fixture_ids(TICKETS),
+            "{name}: every ticket publishes once"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn skipped_rows_resume_refused() {
+        let name = "source_port_skipped_rows";
+        let scenario = fresh_tickets(name);
+        let run = interrupted_tickets(&scenario, name).await;
+        let skipping = Scenario {
+            graph: Graph::SourcePortTicketPages(TicketPages {
+                chunk: BATCH,
+                skip_rows: 1,
+            }),
+            ..scenario.clone()
+        };
+        let child = Child::spawn(&skipping, resume(&run), None);
+        let log = child.log.clone();
+        assert!(
+            !child.exit().await.success(),
+            "{name}: the resume is refused"
+        );
+        let message = read_log(&log);
+        for expected in ["tickets", "the request differs from the recording"] {
+            assert!(message.contains(expected), "{expected}: {message}");
+        }
+    }
+
+    fn rejecting_rows(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::SourcePortCsv);
+        let rows: String = (1..=ROWS)
+            .map(|n| match n {
+                2 => "x\n".to_string(),
+                n => format!("{n}\n"),
+            })
+            .collect();
+        std::fs::write(rows_input(&scenario), format!("n\n{rows}")).expect("write the ticks");
+        scenario
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_row_resume_matches_uninterrupted() {
+        let name = "source_port_rejected_resume";
+        let uninterrupted = rejecting_rows(&format!("{name}_uninterrupted"));
+        let baseline = Child::spawn(&uninterrupted, Vec::new(), None)
+            .completed()
+            .await;
+        let expected = ticks(&Archive::read(&baseline).await, "rows");
+        assert_eq!(
+            expected,
+            [1, 3, 4, 5, 6],
+            "{name}: the rejected row is skipped"
+        );
+
+        let scenario = rejecting_rows(name);
+        let (run, committed) = interrupted_rows(&scenario, name).await;
+        assert!(
+            committed.contains(&3),
+            "{name}: the rejection precedes the kill"
+        );
+        let resumed = Child::spawn(&scenario, resume(&run), None)
+            .completed()
+            .await;
+        assert_eq!(
+            ticks(&Archive::read(&resumed).await, "rows"),
+            expected,
+            "{name}: the resumed rows match the uninterrupted run"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7737,12 +8073,6 @@ mod source_ports {
         let name = "source_port_csv_resume";
         let scenario = fresh_rows(name);
         let (run, committed) = interrupted_rows(&scenario, name).await;
-        let interrupted = Archive::read(&run).await;
-        assert_eq!(
-            declared_bindings(&interrupted, "rows"),
-            [csv_binding(&scenario)],
-            "{name}: the run declares its file before its first read"
-        );
 
         let resumed = Child::spawn(&scenario, resume(&run), None)
             .completed()
@@ -7753,11 +8083,6 @@ mod source_ports {
             ticks(&archive, "rows"),
             every_row,
             "{name}: the copied and live rows read the file once"
-        );
-        assert_eq!(
-            declared_bindings(&archive, "rows"),
-            [csv_binding(&scenario)],
-            "{name}: the resume keeps the declared binding"
         );
 
         let uninterrupted = fresh_rows(&format!("{name}_uninterrupted"));
@@ -7801,20 +8126,9 @@ mod source_ports {
             "{name}: only recorded reads publish, and no fact from the changed file commits"
         );
         assert_eq!(
-            declared_bindings(&archive, "rows"),
-            [csv_binding(&scenario)]
+            input_refusals(&archive, "rows"),
+            [SourceDiagnosticReason::InputChanged]
         );
-        let refusals: Vec<SourceDiagnosticReason> = [RunJournalKind::Data, RunJournalKind::Error]
-            .into_iter()
-            .flat_map(|kind| archive.rows("rows", kind).collect::<Vec<_>>())
-            .filter_map(|row| match &row.payload {
-                ChainPayload::Execution(ExecutionPayload::SourcePollFailed(fact)) => {
-                    Some(fact.diagnostic.reason())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(refusals, [SourceDiagnosticReason::InputChanged]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7823,7 +8137,6 @@ mod source_ports {
         let scenario = Scenario::for_graph(name, Graph::SourcePortOwned);
         let live = Child::spawn(&scenario, Vec::new(), None).completed().await;
         let recorded = Archive::read(&live).await;
-        assert_eq!(declared_bindings(&recorded, "items"), [in_memory_binding()]);
         assert_eq!(
             live_reads(&recorded, "items"),
             2,
@@ -7919,7 +8232,7 @@ mod source_ports {
         root: PathBuf,
     }
 
-    #[obzenflow::port(system = "ticket-desk")]
+    #[obzenflow::port]
     impl TicketDesk {
         #[effect(
             type = "durable_contract.source_ports.tickets.deliver",
@@ -7942,29 +8255,50 @@ mod source_ports {
         }
     }
 
-    pub(super) const TICKET_COLUMNS: [&str; 5] = [
-        "ticket_id",
-        "customer_id",
-        "created_at",
-        "priority",
-        "category",
-    ];
-
     pub(super) fn ticket_store(input: PathBuf) -> CsvFileSystem {
         CsvFileSystem::at(input)
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) struct TicketPages {
+        chunk: u64,
+        skip_rows: usize,
+    }
+
+    const RECORDED_PAGES: TicketPages = TicketPages {
+        chunk: BATCH,
+        skip_rows: 0,
+    };
+
     pub(super) fn tickets_flow(
         scenario: &Scenario,
-        ticket_store: obzenflow::queries::QueryPort<dyn obzenflow::stages::sources::CsvFile>,
+        ticket_store: Port<dyn obzenflow::stages::sources::CsvFile>,
+        hold: Option<Hold>,
+    ) -> FlowDefinition {
+        paged_flow(scenario, ticket_store, RECORDED_PAGES, hold)
+    }
+
+    pub(super) fn paged_tickets_flow(
+        scenario: &Scenario,
+        ticket_store: Port<dyn obzenflow::stages::sources::CsvFile>,
+        pages: TicketPages,
+    ) -> FlowDefinition {
+        paged_flow(scenario, ticket_store, pages, None)
+    }
+
+    fn paged_flow(
+        scenario: &Scenario,
+        ticket_store: Port<dyn obzenflow::stages::sources::CsvFile>,
+        pages: TicketPages,
         hold: Option<Hold>,
     ) -> FlowDefinition {
         let tickets = CsvSource::builder(TicketCsv)
-            .chunk_size(BATCH as usize)
+            .chunk_size(pages.chunk as usize)
+            .skip_rows(pages.skip_rows)
             .through(ticket_store)
             .build()
             .expect("the ticket file is configured");
-        let desk = effects::perform(delivery_for).through(effects::Port::to(TicketDesk {
+        let desk = perform(delivery_for).through(Port::to(TicketDesk {
             hold: match hold {
                 Some(Hold::Ticket(ticket)) => Some(ticket),
                 _ => None,
@@ -8004,10 +8338,10 @@ mod source_ports {
         archive
             .rows("tickets", RunJournalKind::Data)
             .filter_map(|row| match &row.payload {
-                ChainPayload::Execution(ExecutionPayload::SourceInput(input))
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
                     if row.event_type() == "query.answered" =>
                 {
-                    Some((input.number, row))
+                    Some((record.cursor.input_seq.get(), row))
                 }
                 _ => None,
             })
@@ -8056,27 +8390,6 @@ mod source_ports {
                 expected
             );
             assert_eq!(ticket_reads(&archive).len(), 5);
-        }
-        let interrupted = interrupted_tickets(&fixture, "csv_supplier_binding").await;
-        let changed = Scenario {
-            graph: Graph::SourcePortTicketFixture(99),
-            ..fixture.clone()
-        };
-        let runs = fixture.runs();
-        for args in [replay(&interrupted), resume(&interrupted)] {
-            let mut args = args;
-            args.push("--allow-incomplete-archive".into());
-            let child = Child::spawn(&changed, args, None);
-            let log = child.log.clone();
-            assert!(!child.exit().await.success());
-            let message = read_log(&log);
-            assert!(
-                message.contains("scripted-tickets")
-                    && message.contains("100")
-                    && message.contains("99"),
-                "{message}"
-            );
-            assert_eq!(fixture.runs(), runs);
         }
     }
 
@@ -8162,7 +8475,7 @@ mod source_ports {
         let second_read = rows
             .iter()
             .position(|row| {
-                matches!(&row.payload, ChainPayload::Execution(ExecutionPayload::SourceInput(input)) if input.number == 2)
+                matches!(&row.payload, ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) if record.is_query() && record.cursor.input_seq.get() == 2)
             })
             .expect("the second read");
         assert!(
@@ -8275,127 +8588,62 @@ mod source_ports {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn ticket_format_change_refused() {
-        let name = "source_port_ticket_format";
-        let recorded = fresh_tickets(name);
-        let run = interrupted_tickets(&recorded, name).await;
-        for (graph, configured) in [
-            (Graph::SourcePortTicketDelimiter, "text delimited by ';'"),
-            (
-                Graph::SourcePortTicketHeaders,
-                "CSV with the columns 'ticket_id'",
-            ),
-        ] {
-            let changed = Scenario {
-                graph,
-                ..recorded.clone()
-            };
-            let existing_runs = recorded.runs();
-            let mut replay_args = replay(&run);
-            replay_args.push("--allow-incomplete-archive".into());
-            for (verb, arguments) in [("replay", replay_args), ("resume", resume(&run))] {
-                let child = Child::spawn(&changed, arguments, None);
-                let log = child.log.clone();
-                assert!(!child.exit().await.success(), "{verb}: {configured}");
-                let message = std::fs::read_to_string(log).expect("read refusal");
-                for expected in [verb, "'tickets'", "(CSV)", configured] {
-                    assert!(message.contains(expected), "{expected}: {message}");
-                }
-                assert_eq!(recorded.runs(), existing_runs, "{verb} created a run");
-                assert!(
-                    !run.join("run_continuation.json").exists(),
-                    "{verb} claimed {}",
-                    run.display()
-                );
-            }
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn ticket_copy_elsewhere_refused() {
+    async fn ticket_copy_resume_fails_input_changed() {
         let name = "source_port_ticket_copy";
         let recorded = fresh_tickets(name);
         let read = interrupted_tickets(&recorded, name).await;
+        let copy = Scenario {
+            graph: Graph::SourcePortTicketCopy,
+            ..recorded.clone()
+        };
 
-        let declared_name = format!("{name}_declared");
-        let declared = fresh_tickets(&declared_name);
-        std::fs::remove_file(tickets_input(&declared)).expect("remove the tickets");
-        mkfifo(&tickets_input(&declared));
-        let child = Child::spawn(&declared, Vec::new(), None);
-        let unread = child.run().await;
-        until(&unread, &declared_name, |archive| {
-            !declared_bindings(archive, "tickets").is_empty()
-        })
-        .await;
-        child.signal(Signal::Kill);
-        assert!(!child.exit().await.success(), "{name}: the kill lands");
-        let archive = Archive::read(&unread).await;
+        let child = Child::spawn(&copy, resume(&read), None);
+        let failed = child.run().await;
         assert!(
-            ticket_reads(&archive).is_empty(),
-            "{name}: the first read holds only its binding declaration"
+            !child.exit().await.success(),
+            "{name}: the copy fails the resume"
         );
-
-        for (scenario, run) in [(&recorded, &read), (&declared, &unread)] {
-            let copy = Scenario {
-                graph: Graph::SourcePortTicketCopy,
-                ..scenario.clone()
-            };
-            let existing_runs = scenario.runs();
-            let mut replay_args = replay(run);
-            replay_args.push("--allow-incomplete-archive".into());
-            for (verb, arguments) in [("replay", replay_args), ("resume", resume(run))] {
-                let child = Child::spawn(&copy, arguments, None);
-                let log = child.log.clone();
-                assert!(!child.exit().await.success());
-                let message = std::fs::read_to_string(log).expect("read refusal");
-                let original = tickets_input(scenario).display().to_string();
-                let moved = ticket_copy(scenario).display().to_string();
-                for expected in [verb, "'tickets'", &original, &moved] {
-                    assert!(message.contains(expected), "{expected}: {message}");
-                }
-                assert_eq!(scenario.runs(), existing_runs, "{verb} created a run");
-                assert!(
-                    !run.join("run_continuation.json").exists(),
-                    "{verb} claimed {}",
-                    run.display()
-                );
-            }
-        }
-
-        let committed = ticket_ids(&Archive::read(&read).await);
-        let mut replay_args = replay(&read);
-        replay_args.push("--allow-incomplete-archive".into());
-        let replayed = Child::spawn(&recorded, replay_args, None).completed().await;
         assert_eq!(
-            ticket_ids(&Archive::read(&replayed).await),
-            committed,
-            "{name}: the original file replays its recorded tickets"
+            input_refusals(&Archive::read(&failed).await, "tickets"),
+            [SourceDiagnosticReason::InputChanged],
+            "{name}: the first live read finds another file"
         );
 
-        std::fs::remove_file(tickets_input(&declared)).expect("remove the held input");
-        std::fs::copy(TICKET_FIXTURE, tickets_input(&declared)).expect("restore the tickets");
-        let resumed = Child::spawn(&declared, resume(&unread), None)
+        let resumed = Child::spawn(&recorded, resume(&failed), None)
             .completed()
             .await;
-        let archive = Archive::read(&resumed).await;
         assert_eq!(
-            ticket_ids(&archive),
+            ticket_ids(&Archive::read(&resumed).await),
             fixture_ids(TICKETS),
-            "{name}: the original file resumes from its first read"
+            "{name}: the original file publishes every ticket once"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unread_source_resume_reads_configured_file() {
+        let name = "source_port_unread_resume";
+        let scenario = fresh_tickets(name);
+        std::fs::remove_file(tickets_input(&scenario)).expect("remove the tickets");
+        mkfifo(&tickets_input(&scenario));
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let unread = child.run().await;
+        until(&unread, name, |archive| registered(archive, "tickets")).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        assert!(
+            ticket_reads(&Archive::read(&unread).await).is_empty(),
+            "{name}: the kill lands before a read records"
+        );
+
+        let copy = Scenario {
+            graph: Graph::SourcePortTicketCopy,
+            ..scenario.clone()
+        };
+        let resumed = Child::spawn(&copy, resume(&unread), None).completed().await;
         assert_eq!(
-            declared_bindings(&archive, "tickets"),
-            [SystemBindingEvidence::located(
-                "file-system",
-                SystemLocation::Delimited {
-                    path: tickets_input(&declared),
-                    delimiter: ',',
-                    headers: DelimitedHeaders::FirstRow,
-                }
-            )
-            .expect("the ticket file fits binding evidence")
-            .binding()
-            .clone()]
+            ticket_ids(&Archive::read(&resumed).await),
+            fixture_ids(TICKETS),
+            "{name}: the resume reads the configured file from its beginning"
         );
     }
 }

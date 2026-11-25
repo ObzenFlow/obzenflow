@@ -5,6 +5,7 @@
 use super::identity::OutputPosition;
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
+use crate::commands::AnswersEffect;
 use crate::id_conversions::StageIdExt;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::observer::{
@@ -1715,7 +1716,7 @@ struct TransactionalCountingPort {
 
 fn transactional_ledger<T>(port: Arc<T>) -> Port<dyn TransactionalLedger>
 where
-    T: TransactionalLedger + SystemName + 'static,
+    T: TransactionalLedger + 'static,
 {
     Port::to(port)
 }
@@ -1755,7 +1756,6 @@ fn registry_with_binding<E: NamedEffect>(binding: &EffectBinding<E>) -> EffectPo
     EffectPortRegistry::collect_from_declarations([&declaration]).unwrap()
 }
 
-#[crate::effects::system("tx")]
 #[async_trait]
 impl TransactionalLedger for TransactionalCountingPort {
     async fn write(
@@ -1781,7 +1781,6 @@ struct DivergentTransactionalPort {
     calls: Arc<AtomicUsize>,
 }
 
-#[crate::effects::system("tx")]
 #[async_trait]
 impl TransactionalLedger for DivergentTransactionalPort {
     async fn write(
@@ -1807,7 +1806,6 @@ struct CommittedFailureTransactionalPort {
     calls: Arc<AtomicUsize>,
 }
 
-#[crate::effects::system("tx")]
 #[async_trait]
 impl TransactionalLedger for CommittedFailureTransactionalPort {
     async fn write(
@@ -2071,13 +2069,6 @@ impl obzenflow_core::journal::archive::ReplayArchive for ScopeMatrixArchive {
         unreachable!("the execution-scope fixture records no source journals")
     }
 
-    fn recorded_source_binding(
-        &self,
-        _stage_key: &str,
-    ) -> Option<obzenflow_core::effect_binding::SystemBinding> {
-        unreachable!("the execution-scope fixture records no source journals")
-    }
-
     fn archive_path(&self) -> &Path {
         Path::new("scope-matrix-archive")
     }
@@ -2152,6 +2143,8 @@ fn lineage_histories_join_per_cursor_and_refuse_conflicting_terminals() {
             output: json!({ "value": value }),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
     let ancestor = EffectHistory::from_records("archived_flow", vec![record(1, 10), record(2, 20)])
         .expect("ancestor history indexes");
@@ -2193,6 +2186,8 @@ fn a_torn_run_without_effects_keeps_its_ancestors_root() {
             output: json!({ "value": 10 }),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
     let ancestor = EffectHistory::from_records("root_flow", vec![record.clone()])
         .expect("ancestor history indexes");
@@ -2252,6 +2247,8 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
             output: json!({"value": 10}),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
     let completed_history = Arc::new(
         EffectHistory::from_records("archived_flow", vec![completed_record])
@@ -3899,6 +3896,8 @@ fn effect_history_uses_record_root_over_archive_fallback() {
             output: json!({ "value": 10 }),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
 
     let history = EffectHistory::from_records("replay_flow".to_string(), vec![record])
@@ -3926,6 +3925,8 @@ fn effect_history_rejects_mixed_record_roots() {
             output: json!({ "value": 10 }),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
     let second = EffectRecord {
         observation:
@@ -3937,6 +3938,8 @@ fn effect_history_rejects_mixed_record_roots() {
             output: json!({ "value": 11 }),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
 
     let err = EffectHistory::from_records("replay_flow".to_string(), vec![first, second])
@@ -4910,6 +4913,8 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
                 outcome_fact_count: OutcomeFactCount::new(3),
             },
             origin: None,
+            call: CallKind::Command,
+            request: None,
         },
         EffectRecord {
             observation:
@@ -4928,6 +4933,8 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
                 outcome_fact_count: OutcomeFactCount::new(3),
             },
             origin: None,
+            call: CallKind::Command,
+            request: None,
         },
     ];
 
@@ -4961,6 +4968,8 @@ fn incomplete_outcome_group_torn_tail_is_dropped_as_absent() {
             outcome_fact_count: OutcomeFactCount::new(3),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
 
     let history = EffectHistory::from_records("flow".to_string(), vec![fact(0), fact(1)])
@@ -4986,6 +4995,7 @@ fn archive_records_leave_recorded_actions_to_the_journal_scan() {
                 output: json!({ "input": input }),
             },
             origin: None,
+            call: CallKind::Command, request: None,
         })
         .collect();
 
@@ -5017,6 +5027,8 @@ fn a_test_history_records_one_action_per_committed_cursor_in_record_order() {
             outcome_fact_count: OutcomeFactCount::new(count),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
     let mut records = Vec::new();
     let mut expected = Vec::new();
@@ -5087,6 +5099,8 @@ fn incomplete_outcome_group_on_completed_archive_fails_loud() {
             outcome_fact_count: OutcomeFactCount::new(3),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
 
     let err =
@@ -5121,6 +5135,8 @@ fn interleaved_incomplete_groups_all_drop_on_interrupted_archive() {
             outcome_fact_count: OutcomeFactCount::new(count),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
 
     // Journal order interleaves the groups, each missing its top ordinal(s):
@@ -6747,6 +6763,8 @@ fn effect_record_decode_rejects_reserved_event_without_provenance() {
             output: json!(2_u64),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
     let application_fact = ChainEventFactory::data_event(
         WriterId::from(stage_id),
@@ -8566,6 +8584,8 @@ async fn stale_recorded_effect_fails_loud_when_key_dropped() {
             output: json!({ "value": 10 }),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     };
     let history = Arc::new(
         EffectHistory::from_records("archived_flow".to_string(), vec![record])
@@ -9035,6 +9055,8 @@ fn archived_counting_record(input_seq: u64) -> EffectRecord {
             output: json!({ "value": input_seq }),
         },
         origin: None,
+        call: CallKind::Command,
+        request: None,
     }
 }
 

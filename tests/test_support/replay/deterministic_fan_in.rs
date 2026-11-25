@@ -17,13 +17,15 @@ use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectError, Effects, Port};
+use obzenflow_runtime::effects::{EffectError, Effects};
+use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
     TypedTransformHandler,
 };
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -51,7 +53,6 @@ struct ChannelFixture {
     delay_ms: u64,
 }
 
-#[obzenflow_runtime::effects::system("channel-fixture")]
 #[async_trait]
 impl ChannelInput for ChannelFixture {
     async fn read(
@@ -87,7 +88,7 @@ impl ChannelInput for ChannelFixture {
     }
 }
 
-struct ChannelSource(obzenflow::queries::QueryPort<dyn ChannelInput>);
+struct ChannelSource(Port<dyn ChannelInput>);
 
 impl ChannelSource {
     fn with_jitter(channel: &'static str, count: usize, jitter_ms: u64) -> Self {
@@ -99,7 +100,7 @@ impl ChannelSource {
     }
 
     fn fixture(channel: &'static str, count: usize, jitter_ms: u64, delay_ms: u64) -> Self {
-        Self(obzenflow::queries::QueryPort::to(ChannelFixture {
+        Self(Port::to(ChannelFixture {
             channel,
             count,
             jitter_ms,
@@ -213,7 +214,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow::port(system = "call-counter")]
+#[obzenflow::port]
 impl CallCounter {
     #[effect(type = "fan_in.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<FanInEffectValue, EffectError> {

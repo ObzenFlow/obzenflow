@@ -72,7 +72,6 @@ struct DelayedTwoEvents {
     finish_gate: Arc<tokio::sync::Notify>,
 }
 
-#[obzenflow_runtime::effects::system("delayed-two-events")]
 #[async_trait]
 impl ProbeInput for DelayedTwoEvents {
     async fn read(
@@ -100,7 +99,7 @@ impl ProbeInput for DelayedTwoEvents {
     }
 }
 
-struct DelayedTwoEventSource(obzenflow_runtime::queries::QueryPort<dyn ProbeInput>);
+struct DelayedTwoEventSource(obzenflow_runtime::systems::Port<dyn ProbeInput>);
 
 impl TypedFiniteSourceHandler for DelayedTwoEventSource {
     type Output = ProbeEvent;
@@ -212,11 +211,10 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let numbers_handler = DelayedTwoEventSource(obzenflow_runtime::queries::QueryPort::to(
-            DelayedTwoEvents {
+        let numbers_handler =
+            DelayedTwoEventSource(obzenflow_runtime::systems::Port::to(DelayedTwoEvents {
                 finish_gate: source_finish_gate,
-            },
-        ));
+            }));
         let slow_handler = SlowTransform::new();
         let fast_handler = FastTransform::new();
         let slow_sink_handler = NoopSink::<SlowProbeEvent>::new();
@@ -379,5 +377,6 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
 }
 
 use crate::liveness_observations;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::queries::FiniteRead;
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;

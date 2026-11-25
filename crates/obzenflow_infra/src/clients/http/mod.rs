@@ -10,9 +10,6 @@
 use obzenflow_core::http_client::HttpClient;
 use std::sync::Arc;
 
-mod api;
-pub use api::{HttpApi, JsonEndpoint};
-
 #[cfg(feature = "reqwest-client")]
 mod reqwest_client;
 

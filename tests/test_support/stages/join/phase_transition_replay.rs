@@ -119,7 +119,7 @@ struct Counting {
     value: u64,
 }
 
-#[obzenflow::port(system = "call-counter")]
+#[obzenflow::port]
 impl CallCounter {
     #[effect(type = "join_replay.counting", exactly_once)]
     fn count(&self, request: &Counting) -> Result<JoinEffectValue, EffectError> {

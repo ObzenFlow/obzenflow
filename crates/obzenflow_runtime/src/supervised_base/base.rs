@@ -122,6 +122,30 @@ pub(crate) fn register_stage(
     })
 }
 
+pub(crate) fn register_source_stage(
+    journal: std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::ChainEvent>>,
+    context: obzenflow_core::event::provenance::FlowContext,
+    descriptor: SupervisorDescriptor,
+    registered: std::sync::Arc<
+        std::sync::OnceLock<crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>>,
+    >,
+) -> Registration {
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+    use obzenflow_core::event::ChainEventFactory;
+    Box::pin(async move {
+        let event = ChainEventFactory::execution_event(
+            context.stage_id.into(),
+            ExecutionPayload::SupervisorRegistered { descriptor },
+        )
+        .with_flow_context(context);
+        let record = super::publication::append(&journal, event, Default::default()).await?;
+        registered
+            .set(record.into())
+            .map_err(|_| std::io::Error::other("the source stage registered twice"))?;
+        Ok(())
+    })
+}
+
 pub(crate) fn register_system(
     journal: std::sync::Arc<dyn obzenflow_core::Journal<SystemEvent>>,
     writer: WriterId,

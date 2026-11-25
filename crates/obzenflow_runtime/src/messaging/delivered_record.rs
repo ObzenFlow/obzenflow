@@ -5,7 +5,7 @@
 //! A dispatch view paired with the unchanged journal evidence it came from.
 
 use obzenflow_core::event::payloads::JournalPayload;
-use obzenflow_core::event::provenance::CompositeActivationContext;
+use obzenflow_core::event::provenance::{ChainEventProvenance, CompositeActivationContext};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::EventDescriptor;
 use std::ops::Deref;
@@ -84,6 +84,13 @@ impl DeliveredRecord<ChainPayload> {
         match self.view.get() {
             Some(event) => event.composite_activations(),
             None => self.record.composite_activations(),
+        }
+    }
+
+    pub(crate) fn event_provenance(&self) -> &ChainEventProvenance {
+        match self.view.get() {
+            Some(event) => &event.envelope.provenance.event,
+            None => &self.record.envelope.provenance.event,
         }
     }
 }

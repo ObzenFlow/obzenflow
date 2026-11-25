@@ -72,7 +72,7 @@ impl<T> SourceSender<T> {
         self.tx().capacity()
     }
 
-    /// `is_closed` tells whether the receiver is gone.
+    /// `is_closed` returns `true` if the receiver is gone.
     pub fn is_closed(&self) -> bool {
         self.tx().is_closed()
     }
@@ -120,7 +120,7 @@ pub struct SourceReceiver<T> {
     arrivals: Arc<Notify>,
 }
 
-/// `SourceClosed` tells that a source channel is empty and every sender is gone.
+/// `SourceClosed` shows that a source channel is empty and every sender is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceClosed;
 
@@ -163,7 +163,7 @@ impl<T> SourceReceiver<T> {
         self.rx.lock().unwrap_or_else(PoisonError::into_inner).len()
     }
 
-    /// `is_empty` tells whether the channel holds no items now.
+    /// `is_empty` returns `true` if the channel holds no items now.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

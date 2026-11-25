@@ -57,7 +57,7 @@
 //! **Sinks** are where a flow's results leave it. A sink is an effect. Its row
 //! takes a command that sends one request per input through a port, and the
 //! port method's `#[effect]` states the guarantee. Build the command with
-//! [`crate::effects::perform`], or use a ready-made destination from
+//! [`crate::commands::perform`], or use a ready-made destination from
 //! [`crate::stages::sinks`]. Replay makes no call to a sink's system, and a
 //! resume makes only the calls its recording didn't settle.
 //!
@@ -210,6 +210,10 @@
 //! - [`schema`] defines typed payloads and outcome lists.
 //! - [`flow`] defines flows, stage declarations, and construction settings.
 //! - [`stages`] groups sources, transforms, stateful handlers, joins, and sinks.
+//! - [`commands`] performs requests through ports, from effectful stages and sinks.
+//! - [`queries`] asks a source's reads through ports.
+//! - [`events`] decodes the input that a sender pushes, and holds the source channel.
+//! - [`systems`] binds systems to ports.
 //! - [`effects`] describes replay-safe external operations.
 //! - [`middleware`] provides live-I/O policies and passive observers.
 //! - [`application`] configures and runs the application, including ingress.
@@ -219,18 +223,21 @@
 
 pub mod ai;
 pub mod application;
+pub mod commands;
 pub mod effects;
-pub use obzenflow_runtime::queries;
 pub mod env;
 pub mod error;
+pub mod events;
 pub mod flow;
 pub mod journal;
 pub mod middleware;
 pub mod prelude;
+pub mod queries;
 pub mod schema;
 pub mod stages;
+pub mod systems;
 
 #[cfg(feature = "test-support")]
 pub mod testing;
 
-pub use effects::{command, port, system};
+pub use effects::{command, port};

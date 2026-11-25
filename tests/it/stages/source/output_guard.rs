@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[test]
 fn public_source_construction_keeps_output_on_the_decoder_value() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let csv = fs::read_to_string(root.join("crates/obzenflow_adapters/src/sources/csv.rs"))
+    let csv = fs::read_to_string(root.join("crates/obzenflow_infra/src/systems/file/csv.rs"))
         .expect("read CSV source");
     let ingress = fs::read_to_string(
         root.join("crates/obzenflow_infra/src/web/endpoints/event_ingestion/mod.rs"),
@@ -24,7 +24,7 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
     let yaml_example =
         fs::read_to_string(root.join("examples/http_ingestion_piggy_bank_demo/flow.rs"))
             .expect("read YAML example");
-    let yaml = fs::read_to_string(root.join("crates/obzenflow_adapters/src/sources/yaml/mod.rs"))
+    let yaml = fs::read_to_string(root.join("crates/obzenflow_infra/src/systems/file/yaml/mod.rs"))
         .expect("read YAML source");
 
     assert!(csv.contains("pub trait CsvDecoder"));

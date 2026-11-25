@@ -3,13 +3,15 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use obzenflow::commands::perform;
 use obzenflow::effects::postgres::{
     self, default_postgres_client, PostgresBindings, PostgresClient, PostgresClientError,
     PostgresConnection, PostgresStatement, PostgresTransport,
 };
-use obzenflow::effects::{perform, EffectError, Port};
+use obzenflow::effects::EffectError;
 use obzenflow::flow::sink;
 use obzenflow::schema::TypedPayload;
+use obzenflow::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -36,7 +38,6 @@ struct ConsumerPayments {
     insert: PostgresStatement,
 }
 
-#[obzenflow::system("consumer-payments")]
 #[async_trait]
 impl ConsumerPaymentPort for ConsumerPayments {
     async fn store(&self, payment: &ConsumerPayment) -> Result<(), EffectError> {
@@ -45,7 +46,7 @@ impl ConsumerPaymentPort for ConsumerPayments {
                 bindings.bind(payment.id).bind(payment.installment);
             })
             .await
-            .map_err(postgres::unsent::<Self>)?;
+            .map_err(postgres::unsent)?;
         Ok(())
     }
 }

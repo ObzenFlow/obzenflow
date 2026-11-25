@@ -31,8 +31,8 @@ pub use config::{JournalConfig, ObservabilityPolicy};
 pub use journal_error::JournalError;
 pub use journal_trait::Journal;
 pub use reader::{
-    JournalObservationReader, JournalReader, JournalStorageReader, LocatedObservation,
-    ObservationKey, ObservationLookup,
+    JournalObservationReader, JournalReader, JournalStorageReader, ObservationKey,
+    ObservationLookup, PositionedObservation,
 };
 pub use storage::JournalStorage;
 

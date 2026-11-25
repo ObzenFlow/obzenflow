@@ -413,8 +413,8 @@ impl RunSnapshot {
     ) -> Result<Vec<EarlierRun>, JournalReadError> {
         self.state.list_earlier_runs(runs).await
     }
-    /// The first record of the row `record` rejects again: the oldest listed
-    /// earlier run's, while its source pinned one input across those runs.
+    /// `repeat_of` returns the first record of the row that `record` rejects again. That
+    /// record is from the oldest of the listed earlier runs.
     pub async fn repeat_of(
         &mut self,
         record: &RunRecord,
@@ -461,8 +461,8 @@ impl RunTail {
             None => TailRead::Pending,
         })
     }
-    /// The first record of the row `record` rejects again: the oldest listed
-    /// earlier run's, while its source pinned one input across those runs.
+    /// `repeat_of` returns the first record of the row that `record` rejects again. That
+    /// record is from the oldest of the listed earlier runs.
     pub async fn repeat_of(
         &mut self,
         record: &RunRecord,

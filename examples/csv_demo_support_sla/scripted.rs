@@ -3,10 +3,12 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow::queries::{QueryBinding, QueryBookmark, QueryContext, QueryError};
+use obzenflow::effects::EffectPortResolutionError;
+use obzenflow::queries::{QueryBookmark, QueryContext, QueryError};
 use obzenflow::stages::sources::{
     CsvFile, CsvLine, CsvPage, CsvRead, SourceDiagnosticReason, SourcePollErrorKind,
 };
+use obzenflow::systems::SystemConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -18,20 +20,14 @@ pub struct ScriptedTickets {
     count: u32,
 }
 
-impl QueryBinding for TicketFixture {
+impl SystemConfig for TicketFixture {
     type System = ScriptedTickets;
-    type Evidence = TicketFixture;
 
-    fn evidence(&self) -> TicketFixture {
-        self.clone()
-    }
-
-    fn resolve(&self) -> Result<ScriptedTickets, QueryError> {
+    fn resolve(&self) -> Result<ScriptedTickets, EffectPortResolutionError> {
         Ok(ScriptedTickets { count: self.count })
     }
 }
 
-#[obzenflow::system("scripted-tickets")]
 #[async_trait]
 impl CsvFile for ScriptedTickets {
     async fn read(&self, from: &CsvRead, _: &QueryContext) -> Result<CsvPage, QueryError> {

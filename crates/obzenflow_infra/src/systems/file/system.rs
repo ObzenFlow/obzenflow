@@ -3,22 +3,18 @@
 // https://obzenflow.dev
 
 use super::csv::CsvPosition;
-use super::file_version::FileVersion;
+use super::version::FileVersion;
 use super::yaml::{read_yaml_page, YamlPage, YamlRead};
-use crate::sinks::blocking::blocking_io;
 use async_trait::async_trait;
 use csv::{ReaderBuilder, StringRecord};
-use obzenflow_core::effect_binding::{DelimitedHeaders, SystemLocation};
+use obzenflow_adapters::sinks::blocking::blocking_io;
 use obzenflow_core::event::payloads::execution_payload::{
     SourcePollContinuation, SourcePollErrorKind,
 };
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceReadFailure};
-use obzenflow_core::BindingEvidenceError;
-use obzenflow_runtime::effects::{
-    EffectError, EffectPortResolutionError, LocatedSystem, SystemName,
-};
-use obzenflow_runtime::queries::{QueryBookmark, QueryContext, QueryError, QueryPort};
-use obzenflow_runtime::stages::common::handlers::source::FiniteRead;
+use obzenflow_runtime::effects::{EffectError, EffectPortResolutionError};
+use obzenflow_runtime::queries::{FiniteRead, QueryBookmark, QueryContext, QueryError};
+use obzenflow_runtime::systems::{Port, SystemConfig};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
@@ -37,19 +33,13 @@ enum FileFormat {
     Yaml,
 }
 
-impl SystemName for FileSystem {
-    const NAME: &'static str = "file-system";
-}
-
 #[derive(Clone)]
 pub(crate) struct CsvFormat {
     pub(crate) delimiter: u8,
     pub(crate) headers: Option<Vec<String>>,
 }
 
-/// `CsvFileSystem` configures the `file-system` system to read a CSV or TSV file.
-/// The binding of its port records the path, the delimiter and where the column
-/// names come from, and the system reads with the same configuration.
+/// `CsvFileSystem` configures a [`FileSystem`] to read a CSV or TSV file at a path.
 #[derive(Clone)]
 pub struct CsvFileSystem {
     path: PathBuf,
@@ -57,8 +47,8 @@ pub struct CsvFileSystem {
 }
 
 impl CsvFileSystem {
-    /// `CsvFileSystem::at` reads the CSV file at `path`. The first row of the file
-    /// names the columns.
+    /// `CsvFileSystem::at` configures the system for the CSV file at `path`. By default,
+    /// the first row of the file names the columns.
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -85,9 +75,10 @@ impl CsvFileSystem {
         self
     }
 
-    /// `port` returns a port whose system reads this file when a live read needs it.
-    pub fn port(self) -> Result<QueryPort<dyn CsvFile>, BindingEvidenceError> {
-        QueryPort::located(self)
+    /// `port` returns a cold port for this file. Its system reads the file only
+    /// during a live read.
+    pub fn port(self) -> Port<dyn CsvFile> {
+        SystemConfig::port(self)
     }
 
     pub(crate) fn new(path: PathBuf, format: CsvFormat) -> Self {
@@ -95,21 +86,10 @@ impl CsvFileSystem {
     }
 }
 
-impl LocatedSystem for CsvFileSystem {
+impl SystemConfig for CsvFileSystem {
     type System = FileSystem;
 
-    fn location(&self) -> SystemLocation {
-        SystemLocation::Delimited {
-            path: self.path.clone(),
-            delimiter: char::from(self.format.delimiter),
-            headers: match &self.format.headers {
-                None => DelimitedHeaders::FirstRow,
-                Some(headers) => DelimitedHeaders::Given(headers.clone()),
-            },
-        }
-    }
-
-    fn build(&self) -> Result<FileSystem, EffectPortResolutionError> {
+    fn resolve(&self) -> Result<FileSystem, EffectPortResolutionError> {
         Ok(FileSystem {
             path: self.path.clone(),
             format: FileFormat::Csv(self.format.clone()),
@@ -117,6 +97,7 @@ impl LocatedSystem for CsvFileSystem {
     }
 }
 
+/// `YamlFileSystem` configures a [`FileSystem`] to read a YAML file at a path.
 #[derive(Clone)]
 pub struct YamlFileSystem {
     path: PathBuf,
@@ -126,21 +107,18 @@ impl YamlFileSystem {
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
-    pub fn port(self) -> Result<QueryPort<dyn YamlFile>, BindingEvidenceError> {
-        QueryPort::located(self)
+
+    /// `port` returns a cold port for this file. Its system reads the file only
+    /// during a live read.
+    pub fn port(self) -> Port<dyn YamlFile> {
+        SystemConfig::port(self)
     }
 }
 
-impl LocatedSystem for YamlFileSystem {
+impl SystemConfig for YamlFileSystem {
     type System = FileSystem;
 
-    fn location(&self) -> SystemLocation {
-        SystemLocation::Yaml {
-            path: self.path.clone(),
-        }
-    }
-
-    fn build(&self) -> Result<FileSystem, EffectPortResolutionError> {
+    fn resolve(&self) -> Result<FileSystem, EffectPortResolutionError> {
         Ok(FileSystem {
             path: self.path.clone(),
             format: FileFormat::Yaml,
@@ -175,8 +153,11 @@ pub trait CsvFile: Send + Sync {
     async fn read(&self, from: &CsvRead, ctx: &QueryContext) -> Result<CsvPage, QueryError>;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// `CsvRead` is the request of one CSV read. A replay and a resume compare it
+/// without `limit`, so a build can read pages of another size.
+#[derive(Clone, Debug, Serialize)]
 pub struct CsvRead {
+    #[serde(skip_serializing)]
     pub limit: NonZeroUsize,
     pub skip_rows: usize,
     pub columns: Option<Vec<String>>,
@@ -193,9 +174,6 @@ pub enum CsvPage {
     EndOfInput,
 }
 
-/// `FileCsvRead` is the argument of one CSV read. It holds the read settings and, after
-/// the first read, the position, columns and file version that the previous reply
-/// recorded.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FileCsvRead {
     chunk: usize,
@@ -211,6 +189,7 @@ struct CsvAt {
     headers: Vec<String>,
     selected: Option<Vec<usize>>,
     width: usize,
+    delimiter: u8,
 }
 
 #[cfg(test)]
@@ -321,7 +300,7 @@ fn read_failure(
 ) -> EffectError {
     EffectError::SourceRead {
         error: Box::new(EffectError::Transport(format!(
-            "the file at '{}' cannot be read",
+            "the source cannot read the file at '{}'",
             path.display()
         ))),
         failure: Box::new(SourceReadFailure {
@@ -392,10 +371,11 @@ fn read_open_csv(
             next: from.clone(),
         })
     };
+    let delimiter = from.at.as_ref().map_or(format.delimiter, |at| at.delimiter);
     let mut reader = ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
-        .delimiter(format.delimiter)
+        .delimiter(delimiter)
         .from_reader(file);
     let mut at = match from.at.clone() {
         Some(at) => {
@@ -467,6 +447,7 @@ fn read_open_csv(
                 headers,
                 selected,
                 width,
+                delimiter,
             }
         }
     };
@@ -648,6 +629,21 @@ mod tests {
     }
 
     #[test]
+    fn continued_read_keeps_recorded_delimiter() {
+        let input = file("name;city\nAda;London\nGrace;Arlington\n");
+        let path = input.path().to_path_buf();
+        let semicolon = CsvFormat {
+            delimiter: b';',
+            headers: None,
+        };
+        let (first, next) =
+            batch(read_csv(&path, &semicolon, FileCsvRead::first(1, 0, None)).unwrap());
+        assert_eq!(first, [["Ada", "London"]]);
+        let (rest, _) = batch(read_csv(&path, &csv(), next).unwrap());
+        assert_eq!(rest, [["Grace", "Arlington"]]);
+    }
+
+    #[test]
     fn csv_given_headers_keeps_first_row() {
         let input = file("Ada,London\n");
         let format = CsvFormat {
@@ -786,6 +782,7 @@ mod tests {
             headers: vec!["a".into(), "b".into()],
             selected: None,
             width: 2,
+            delimiter: b',',
         };
         let path = PathBuf::from("/data/rows.csv");
         let mut reader = ReaderBuilder::new()

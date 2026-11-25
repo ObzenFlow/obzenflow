@@ -15,7 +15,6 @@ use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
-use crate::stages::source::supervision::bind_source_system;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, SupervisorBuilder, SupervisorTaskBuilder,
@@ -125,7 +124,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
             data_journal: self.resources.data_journal.clone(),
             flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
-            system: bind_source_system(&self.source.system),
+            registered: Default::default(),
             idle_backoff: IdleBackoff::exponential_with_cap(Duration::from_millis(1), idle_cap),
             pending_idle_delay: None,
             external_events: event_receiver.into(),

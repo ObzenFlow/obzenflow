@@ -6,9 +6,7 @@
 
 use super::ports::PendingRegistrationPackage;
 use super::Effect;
-use obzenflow_core::{
-    BindingEvidenceDigest, BoundedBindingEvidence, EffectBindingIdentity, SystemBindingEvidence,
-};
+use obzenflow_core::{BindingEvidenceDigest, BoundedBindingEvidence, EffectBindingIdentity};
 use ring::digest::{digest, SHA256};
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
@@ -21,14 +19,29 @@ const BINDING_EVIDENCE_DOMAIN: &[u8] = b"obzenflow.binding-evidence:v1";
 pub trait EffectBindingEvidence: Clone + Eq + Send + Sync + 'static {
     const SCHEMA_VERSION: u32;
 
+    #[doc(hidden)]
+    const DESCRIPTOR: DescriptorEvidence = DescriptorEvidence::Digest;
+
     fn canonical_bytes(&self) -> BoundedBindingEvidence;
 }
 
-impl EffectBindingEvidence for SystemBindingEvidence {
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescriptorEvidence {
+    Digest,
+    Omitted,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SystemPortEvidence;
+
+impl EffectBindingEvidence for SystemPortEvidence {
     const SCHEMA_VERSION: u32 = 1;
+    const DESCRIPTOR: DescriptorEvidence = DescriptorEvidence::Omitted;
 
     fn canonical_bytes(&self) -> BoundedBindingEvidence {
-        SystemBindingEvidence::canonical_bytes(self).clone()
+        BoundedBindingEvidence::try_new(Vec::new()).expect("empty evidence fits the bound")
     }
 }
 
@@ -69,10 +82,6 @@ impl LogicalEffectBindingName {
             return Err(BindingIdentifierError::InvalidLogicalBindingName);
         }
         Ok(Self(value))
-    }
-
-    pub(super) fn of_system(name: &'static str) -> Self {
-        Self(name.to_owned())
     }
 
     pub fn as_str(&self) -> &str {
@@ -154,22 +163,6 @@ fn is_binding_name(value: &str) -> bool {
         && bytes[1..].iter().all(
             |byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-'),
         )
-}
-
-pub(super) const fn is_system_name(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.is_empty() || bytes.len() > 64 || !bytes[0].is_ascii_alphanumeric() {
-        return false;
-    }
-    let mut index = 1;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if !byte.is_ascii_alphanumeric() && !matches!(byte, b'.' | b'_' | b'-') {
-            return false;
-        }
-        index += 1;
-    }
-    true
 }
 
 const fn is_public_identifier_const(value: &str) -> bool {
@@ -375,6 +368,10 @@ impl BindingCoordinate {
     pub(super) fn mint() -> Self {
         static NEXT_COORDINATE: AtomicU64 = AtomicU64::new(1);
         Self(NEXT_COORDINATE.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(super) fn ordinal(self) -> u64 {
+        self.0
     }
 }
 
@@ -669,6 +666,9 @@ where
 pub(crate) fn binding_identity<E: BoundEffect>(
     evidence: &E::BindingEvidence,
 ) -> EffectBindingIdentity {
+    if let DescriptorEvidence::Omitted = <E::BindingEvidence as EffectBindingEvidence>::DESCRIPTOR {
+        return EffectBindingIdentity::Portless;
+    }
     let mut framed = Vec::new();
     push_frame(&mut framed, BINDING_EVIDENCE_DOMAIN);
     push_frame(&mut framed, E::EFFECT_TYPE.as_bytes());
@@ -704,33 +704,6 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn is_system_name_false_for_invalid() {
-        for name in [
-            "",
-            "simulated risk engine",
-            "-leading-hyphen",
-            "https://user:secret@vendor.example",
-            &"s".repeat(65),
-        ] {
-            assert!(!is_system_name(name), "{name}");
-        }
-    }
-
-    #[test]
-    fn system_names_subset_of_binding_names() {
-        for name in [
-            "simulated-risk-engine",
-            "risk_engine",
-            "ledger.v2",
-            "0ledger",
-            &"s".repeat(64),
-        ] {
-            assert!(is_system_name(name), "{name}");
-            assert!(LogicalEffectBindingName::new(name).is_ok(), "{name}");
-        }
-    }
 
     #[test]
     fn public_identifier_grammar_is_closed_and_bounded() {

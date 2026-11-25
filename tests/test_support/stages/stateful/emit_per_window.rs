@@ -13,8 +13,9 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::{FiniteRead, SourceRead};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
@@ -50,7 +51,6 @@ struct DelayedSequence {
     per_event_delay: Duration,
 }
 
-#[obzenflow_runtime::effects::system("delayed-sequence")]
 #[async_trait::async_trait]
 impl WindowFeed for DelayedSequence {
     async fn read(
@@ -69,11 +69,11 @@ impl WindowFeed for DelayedSequence {
     }
 }
 
-struct DelayedSequenceSource(obzenflow::queries::QueryPort<dyn WindowFeed>);
+struct DelayedSequenceSource(obzenflow::systems::Port<dyn WindowFeed>);
 
 impl DelayedSequenceSource {
     fn new(max: u64, per_event_delay: Duration) -> Self {
-        Self(obzenflow::queries::QueryPort::to(DelayedSequence {
+        Self(obzenflow::systems::Port::to(DelayedSequence {
             max,
             per_event_delay,
         }))

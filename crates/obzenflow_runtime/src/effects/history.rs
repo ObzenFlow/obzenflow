@@ -215,11 +215,9 @@ pub trait EffectHistoryStore: Send + Sync {
 
 #[derive(Clone, Debug)]
 pub struct EffectHistory {
-    pub(crate) source_inputs: HashMap<EffectCursor, ChainEvent>,
-    pub(super) source_observations:
+    pub(crate) members: HashMap<EffectCursor, ChainEvent>,
+    pub(super) fact_observations:
         HashMap<EventId, obzenflow_core::event::observability::ObservabilityContext>,
-    pub(crate) source_origin:
-        Option<Arc<obzenflow_core::event::JournalRecord<obzenflow_core::event::ChainPayload>>>,
     causal: Arc<HashMap<EffectCursor, CausalFrontier>>,
     recorded_flow_id: RecordedFlowId,
     records: Arc<Vec<EffectRecord>>,
@@ -274,19 +272,21 @@ impl EffectCursorHistory {
     }
 }
 
-pub(super) fn source_cursor(
-    input: &obzenflow_core::query::SourceInputRecord,
-) -> Result<EffectCursor, EffectError> {
-    let ordinal = input
-        .attempt
-        .checked_sub(1)
-        .ok_or_else(|| EffectError::ReplayArchive("source input attempt zero".into()))?;
-    Ok(EffectCursor::new(
-        input.recorded_flow_id.clone(),
-        input.stage_key.clone(),
-        input.number,
-        EffectOrdinal::new(ordinal),
-    ))
+pub(super) fn member_cursor(member: &obzenflow_core::source::MemberRecorded) -> EffectCursor {
+    EffectCursor::new(
+        member.recorded_flow_id.clone(),
+        member.stage_key.clone(),
+        member.number.get(),
+        EffectOrdinal::new(0),
+    )
+}
+
+pub(crate) fn is_query_attempt(group_id: Option<&str>, payload: &ChainPayload) -> bool {
+    group_id.is_some_and(|group| group.starts_with(EFFECT_RECOVERY_PROGRESS_GROUP_PREFIX))
+        && matches!(
+            payload,
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) if record.is_query()
+        )
 }
 
 impl EffectHistory {
@@ -372,24 +372,23 @@ impl EffectHistory {
             self.recorded_flow_id.clone()
         };
         let mut history = Self::from_cursor_histories(recorded_flow_id, histories);
-        history.source_inputs = self.source_inputs;
-        for (cursor, row) in &newer.source_inputs {
+        history.members = self.members;
+        for (cursor, row) in &newer.members {
             if history
-                .source_inputs
+                .members
                 .get(cursor)
                 .is_some_and(|prior| prior.payload != row.payload || prior.id != row.id)
             {
                 return Err(EffectError::ReplayArchive(format!(
-                    "source input {cursor:?} differs between archives"
+                    "the member at {cursor:?} differs between archives"
                 )));
             }
-            history.source_inputs.insert(cursor.clone(), row.clone());
+            history.members.insert(cursor.clone(), row.clone());
         }
-        history.source_observations = self.source_observations;
+        history.fact_observations = self.fact_observations;
         history
-            .source_observations
-            .extend(newer.source_observations.clone());
-        history.source_origin = self.source_origin.or_else(|| newer.source_origin.clone());
+            .fact_observations
+            .extend(newer.fact_observations.clone());
         let actions = actions.with_in_doubt(|cursor| !history.index.contains_key(cursor));
         history.actions = Arc::new(actions);
         Ok(history)
@@ -400,10 +399,26 @@ impl EffectHistory {
     }
 
     fn holds_evidence(&self) -> bool {
-        !(self.source_inputs.is_empty()
+        !(self.members.is_empty()
             && self.index.is_empty()
             && self.attempts.is_empty()
             && self.abandonments.is_empty())
+    }
+
+    pub(crate) fn holds_read(&self, cursor: &EffectCursor) -> bool {
+        self.index.contains_key(cursor)
+            || self.members.contains_key(cursor)
+            || self
+                .grouped_events
+                .contains_key(effect_recovery_progress_group_id(cursor, 1).as_str())
+    }
+
+    fn holds_query_attempt(&self, cursor: &EffectCursor) -> bool {
+        let group = effect_recovery_progress_group_id(cursor, 1);
+        self.grouped_events.get(group.as_str()).is_some_and(|rows| {
+            rows.iter()
+                .any(|(_, _, event)| is_query_attempt(Some(group.as_str()), &event.payload))
+        })
     }
 
     /// Index validated cursor histories, as one run's history would be.
@@ -473,9 +488,8 @@ impl EffectHistory {
             }
         }
         Self {
-            source_inputs: HashMap::new(),
-            source_observations: HashMap::new(),
-            source_origin: None,
+            members: HashMap::new(),
+            fact_observations: HashMap::new(),
             causal: Arc::new(causal),
             recorded_flow_id,
             records: Arc::new(records),
@@ -497,9 +511,8 @@ impl EffectHistory {
         pass_through: Option<&EventDescriptor>,
     ) -> Result<Self, EffectError> {
         let mut reader = archive.open_effect_history(stage_key).await?;
-        let mut source_inputs = HashMap::new();
-        let mut source_observations = HashMap::new();
-        let mut source_origin = None;
+        let mut members = HashMap::new();
+        let mut fact_observations = HashMap::new();
         let mut causal = HashMap::<EffectCursor, CausalFrontier>::new();
         let mut records = Vec::new();
         let mut attempts: HashMap<EffectCursor, Vec<EffectAttemptStarted>> = HashMap::new();
@@ -518,41 +531,41 @@ impl EffectHistory {
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
-            if source_origin.is_none()
-                && matches!(
-                    envelope.payload,
-                    obzenflow_core::event::ChainPayload::Execution(
-                        ExecutionPayload::SourceBindingDeclared(_)
-                    )
-                )
-            {
-                source_origin = Some(Arc::new(envelope.clone()));
-            }
-            if source_origin.is_some()
-                && matches!(
-                    envelope.payload,
-                    obzenflow_core::event::ChainPayload::Fact(_)
-                )
-            {
+            if matches!(
+                envelope.payload,
+                obzenflow_core::event::ChainPayload::Fact(_)
+            ) {
                 if let Some(packet) = &envelope.envelope.observability {
-                    source_observations.insert(*envelope.id(), packet.clone());
+                    fact_observations.insert(*envelope.id(), packet.clone());
                 }
             }
             let event = envelope.authored();
             actions.observe(&event)?;
-            if let ChainPayload::Execution(ExecutionPayload::SourceInput(input)) = &event.payload {
-                let cursor = source_cursor(input)?;
-                if input.stage_key != stage_key
+            if let ChainPayload::Execution(ExecutionPayload::MemberRecorded(member)) =
+                &event.payload
+            {
+                if member.stage_key != stage_key
                     || archive
                         .recorded_flow_id()
-                        .is_some_and(|namespace| input.recorded_flow_id != namespace)
-                    || source_inputs.insert(cursor, event.clone()).is_some()
+                        .is_some_and(|namespace| member.recorded_flow_id != namespace)
+                    || members
+                        .insert(member_cursor(member), event.clone())
+                        .is_some()
                 {
                     return Err(EffectError::ReplayArchive(format!(
-                        "invalid or duplicate source input at stage {stage_key}"
+                        "the archive holds an invalid or duplicate member at stage {stage_key}"
                     )));
                 }
             }
+            let attempt_row = is_query_attempt(
+                envelope
+                    .envelope
+                    .provenance
+                    .journal
+                    .journal_group_id
+                    .as_deref(),
+                &event.payload,
+            );
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
                 causal
                     .entry(effect.cursor.clone())
@@ -620,6 +633,9 @@ impl EffectHistory {
                         "effect cursor has more than one recovery-abandonment terminal".to_string(),
                     ));
                 }
+                continue;
+            }
+            if attempt_row {
                 continue;
             }
             if let Some(record) = effect_record_from_event(&event)? {
@@ -714,9 +730,8 @@ impl EffectHistory {
                     .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
             }
         }
-        history.source_inputs = source_inputs;
-        history.source_observations = source_observations;
-        history.source_origin = source_origin;
+        history.members = members;
+        history.fact_observations = fact_observations;
         history.causal = Arc::new(causal);
         history.attempts = Arc::new(attempts);
         history.abandonments = Arc::new(abandonments);
@@ -731,7 +746,8 @@ impl EffectHistory {
                 history.index.contains_key(cursor)
                     || history.attempts.contains_key(cursor)
                     || history.abandonments.contains_key(cursor)
-                    || history.source_inputs.contains_key(cursor)
+                    || history.members.contains_key(cursor)
+                    || history.holds_query_attempt(cursor)
             },
             |cursor| !history.index.contains_key(cursor),
         );
@@ -867,9 +883,8 @@ impl EffectHistory {
         let terminal_attempts = index.keys().cloned().map(|cursor| (cursor, None)).collect();
 
         Ok(Self {
-            source_inputs: HashMap::new(),
-            source_observations: HashMap::new(),
-            source_origin: None,
+            members: HashMap::new(),
+            fact_observations: HashMap::new(),
             causal: Arc::new(HashMap::new()),
             recorded_flow_id,
             records: Arc::new(records),
@@ -963,6 +978,10 @@ impl EffectHistory {
                 self.abandonment(cursor)
                     .map(|abandoned| &abandoned.descriptor_hash)
             })
+    }
+
+    pub(crate) fn terminal_attempt(&self, cursor: &EffectCursor) -> Option<EffectAttemptOrdinal> {
+        self.terminal_attempts.get(cursor).copied().flatten()
     }
 
     pub(crate) fn cursor_history(&self, cursor: &EffectCursor) -> EffectCursorHistory {
@@ -1125,6 +1144,17 @@ pub(crate) async fn current_cursor_history(
             }
             continue;
         }
+        if is_query_attempt(
+            envelope
+                .envelope
+                .provenance
+                .journal
+                .journal_group_id
+                .as_deref(),
+            &envelope.payload,
+        ) {
+            continue;
+        }
         if let Some(record) = effect_record_from_event(&envelope.authored())? {
             if &record.cursor == cursor {
                 let provenance = envelope
@@ -1216,11 +1246,24 @@ pub(crate) async fn current_cursor_history(
     Ok(history)
 }
 
+fn retried_read_failure(older: &EffectCursorHistory, newer: &EffectCursorHistory) -> bool {
+    let [record] = older.records.as_slice() else {
+        return false;
+    };
+    record.is_query()
+        && matches!(record.outcome, EffectOutcomePayload::Failed { .. })
+        && older
+            .terminal_attempt
+            .flatten()
+            .is_some_and(|attempt| newer.progress_batches.contains_key(&attempt.get()))
+}
+
 pub(crate) fn merge_cursor_histories(
     cursor: &EffectCursor,
     archived: EffectCursorHistory,
     current: EffectCursorHistory,
 ) -> Result<EffectCursorHistory, EffectError> {
+    let retried = retried_read_failure(&archived, &current);
     let idempotency_key = current.idempotency_key.or(archived.idempotency_key);
     let mut causal = archived.causal;
     causal
@@ -1253,6 +1296,7 @@ pub(crate) fn merge_cursor_histories(
     }
 
     let records = match (archived.records.is_empty(), current.records.is_empty()) {
+        _ if retried => current.records.clone(),
         (true, _) => current.records.clone(),
         (_, true) => archived.records.clone(),
         (false, false) if archived.records == current.records => current.records.clone(),
@@ -1262,7 +1306,7 @@ pub(crate) fn merge_cursor_histories(
             )));
         }
     };
-    let terminal_attempt = if current.terminal_attempt.is_some() {
+    let terminal_attempt = if retried || current.terminal_attempt.is_some() {
         current.terminal_attempt
     } else {
         archived.terminal_attempt
@@ -1590,8 +1634,9 @@ pub(super) fn validate_cursor_history(
                 "effect cursor {cursor:?} has abandonment beside a non-abandonment terminal"
             )));
         }
-        let expected_attempt = history.highest_attempt();
-        if history.terminal_attempt != Some(expected_attempt) {
+        let query =
+            history.attempts.is_empty() && history.records.iter().all(EffectRecord::is_query);
+        if !query && history.terminal_attempt != Some(history.highest_attempt()) {
             return Err(EffectError::EffectProvenanceMismatch(format!(
                 "effect cursor {cursor:?} terminal attempt does not match its highest Start"
             )));
@@ -1845,6 +1890,9 @@ fn validate_attempt_grammar(
         }
         if !attempts.contains_key(cursor)
             && terminal_attempts.get(cursor).is_some_and(Option::is_some)
+            && !terminals[cursor]
+                .iter()
+                .all(|position| records[*position].is_query())
         {
             return Err(EffectError::EffectProvenanceMismatch(format!(
                 "effect cursor {cursor:?} has a terminal attempt without a Start"
@@ -1971,10 +2019,9 @@ fn validate_progress_group(
     events: &[(usize, Option<JournalGroupMember>, ChainEvent)],
     grouped_events: &GroupedJournalEvents,
 ) -> Result<(), EffectError> {
-    if events
-        .iter()
-        .any(|(_, _, event)| event.consumes_data_credit())
-    {
+    if events.iter().any(|(_, _, event)| {
+        event.consumes_data_credit() && !is_query_attempt(Some(group_id), &event.payload)
+    }) {
         return Err(EffectError::EffectProvenanceMismatch(format!(
             "recovery progress '{group_id}' contains Data"
         )));
@@ -2096,6 +2143,8 @@ mod tests {
                 detail: None,
             },
             origin: None,
+            call: CallKind::Command,
+            request: None,
         }
     }
 

@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::command::Command;
-use super::{CallRequest, DeclaredEffectSet, Effects, RecordedReply, StageCompletion};
+use super::{DeclaredEffectSet, Effects, RecordedReply, StageCompletion};
+use crate::commands::{CallRequest, Command};
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
 use async_trait::async_trait;

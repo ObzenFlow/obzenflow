@@ -704,8 +704,8 @@ mod tests {
     #[test]
     fn replay_rejection_counts_as_difference() {
         use obzenflow_core::event::payloads::effect_payload::{
-            EffectFailureCause, EffectFailureCode, EffectFailureSource, EffectObservation,
-            EffectOutcomePayload, EffectRecord, RetryDisposition,
+            CallKind, EffectFailureCause, EffectFailureCode, EffectFailureSource,
+            EffectObservation, EffectOutcomePayload, EffectRecord, RetryDisposition,
         };
         use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
         let sink_call = |outcome| {
@@ -718,6 +718,8 @@ mod tests {
                     descriptor: EffectDescriptor::new("sink.record", "record", 1, "1", "input"),
                     outcome,
                     origin: None,
+                    call: CallKind::Command,
+                    request: None,
                 })),
             )
         };

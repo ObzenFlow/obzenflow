@@ -18,7 +18,7 @@ use obzenflow_core::ingress::{
     InvalidIngressRequestId,
 };
 use obzenflow_core::web::{EndpointError, ManagedResponse, Request};
-use obzenflow_runtime::stages::IngressDecoder;
+use obzenflow_runtime::events::IngressDecoder;
 use tokio::time::Instant;
 
 const IDEMPOTENCY_KEY: &str = "Idempotency-Key";

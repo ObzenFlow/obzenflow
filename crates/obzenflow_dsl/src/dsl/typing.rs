@@ -20,9 +20,11 @@ use obzenflow_runtime::__private::{
     AdmitSource, AdmittedSource, JoinBinding, TypedJoinHandlerAdapter,
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
 };
+use obzenflow_runtime::commands::{
+    effectful_transform_effects, Command, DeclareEffects, EveryPortAnswers, PortList,
+};
 use obzenflow_runtime::effects::{
-    effectful_transform_effects, Command, DeclareEffects, DeclaredEffectSet, Effects,
-    EveryPortAnswers, PortList, SinkHandler, SinkRole, StageCompletion,
+    DeclaredEffectSet, Effects, SinkHandler, SinkRole, StageCompletion,
 };
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, OutcomeContract,
@@ -1550,10 +1552,6 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.source_continuation()
     }
 
-    fn source_system(&self) -> Option<obzenflow_runtime::effects::SourceSystem> {
-        self.inner.source_system()
-    }
-
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
         self.inner.effect_declarations()
     }
@@ -1973,15 +1971,6 @@ pub(crate) fn flow_evidence_with_cycle(
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
 ) -> obzenflow_core::journal::archive_actions::FlowEvidence {
     cycle_members.sort();
-    let systems = descriptors
-        .values()
-        .filter_map(|descriptor| {
-            Some((
-                descriptor.name().to_owned(),
-                descriptor.source_system()?.binding().clone(),
-            ))
-        })
-        .collect();
     let mut sources = Vec::new();
     for descriptor in descriptors.values() {
         if let Some(continuation) = descriptor.source_continuation() {
@@ -1991,7 +1980,6 @@ pub(crate) fn flow_evidence_with_cycle(
     sources.sort_by(|(left, _), (right, _)| left.cmp(right));
     obzenflow_core::journal::archive_actions::FlowEvidence {
         cycle_members,
-        systems,
         sources,
     }
 }
@@ -2767,10 +2755,6 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn source_continuation(&self) -> Option<SourceContinuation> {
         self.inner.source_continuation()
-    }
-
-    fn source_system(&self) -> Option<obzenflow_runtime::effects::SourceSystem> {
-        self.inner.source_system()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {

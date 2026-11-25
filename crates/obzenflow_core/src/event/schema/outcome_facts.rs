@@ -6,6 +6,7 @@
 
 use crate::config::LineagePolicy;
 use crate::event::chain_event::{ChainEvent, ChainPayload};
+use crate::event::provenance::ChainEventProvenance;
 use crate::event::schema::typed_payload::TypedPayload;
 use crate::event::types::EventType;
 use crate::event::ChainEventFactory;
@@ -78,7 +79,7 @@ impl TypedFact {
     pub fn into_derived_event(
         self,
         writer_id: WriterId,
-        parent: &ChainEvent,
+        parent: &ChainEventProvenance,
         lineage: LineagePolicy,
     ) -> ChainEvent {
         ChainEventFactory::derived_event(
