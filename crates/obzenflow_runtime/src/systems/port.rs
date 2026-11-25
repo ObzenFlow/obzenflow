@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_system_binds_query_and_effect() {
+    fn shared_system_binds_both_ports() {
         let system = Arc::new(Ledger);
         let feed: Port<dyn EntryFeed> = Port::to(Arc::clone(&system));
         let ledger: Port<dyn EntryLedger> = Port::to(Arc::clone(&system));
