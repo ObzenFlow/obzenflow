@@ -79,6 +79,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
@@ -2305,9 +2306,10 @@ async fn durable_execution_contract() {
     assert!(
         refusal.contains(&format!(
             "cannot replay {torn}: it has no terminal record, so it was interrupted.\nResume it \
-             with --resume-from {torn}, or pass --allow-incomplete-archive to replay its \
+             with --resume-from {operand}, or pass --allow-incomplete-archive to replay its \
              recorded prefix.",
-            torn = torn.display()
+            torn = torn.display(),
+            operand = obzenflow_core::journal::archive_actions::shell_path(&torn)
         )),
         "S5: the replay refusal names the resume: {refusal}"
     );
@@ -2336,9 +2338,79 @@ async fn durable_execution_contract() {
         "{refusal}"
     );
 
-    strict_replay(&mut after_rebuild, &rebuilt_head).await;
+    let refused = Child::spawn(&s5, replay(&killed_copy), None);
+    let log = refused.log.clone();
+    assert_eq!(refused.exit().await.code(), Some(2));
+    let refusal = read_log(&log);
+    let word = refusal
+        .lines()
+        .find_map(|line| line.strip_prefix("Replay it with --replay-from "))
+        .and_then(|command| command.strip_suffix('.'))
+        .unwrap_or_else(|| panic!("The refusal must name the replay command: {refusal}"));
+    let parsed = std::process::Command::new("sh")
+        .args(["-c", &format!(r"printf '%s\0' {word}")])
+        .output()
+        .unwrap();
+    assert!(parsed.status.success(), "{parsed:?}");
+    let operand = std::ffi::OsStr::from_bytes(parsed.stdout.strip_suffix(&[0]).unwrap());
+    assert_eq!(Path::new(operand), rebuilt_head);
+    strict_replay(&mut after_rebuild, Path::new(operand)).await;
     after_rebuild.check(Some(&reference));
     after_rebuild.report();
+
+    std::fs::rename(&rebuilt_head, s5.root.join("saved-head")).unwrap();
+    let missing = format!(
+        "The continuation claim in {torn} names {head}, but the directory {head} is missing.\n\
+         Restore {head} to check whether this history can resume.",
+        torn = torn.display(),
+        head = rebuilt_head.display()
+    );
+    for flagged in [false, true] {
+        let mut args = replay(&killed_copy);
+        if flagged {
+            args.push("--allow-incomplete-archive".into());
+        }
+        let child = Child::spawn(&s5, args, None);
+        let log = child.log.clone();
+        let replay_run = if flagged {
+            Some(child.run().await)
+        } else {
+            None
+        };
+        assert_eq!(child.exit().await.code(), Some(2));
+        let output = read_log(&log);
+        let primary = if let Some(run) = replay_run {
+            let archive = Archive::read(&run).await;
+            let fatal = archive
+                .rows("authorize_payment", RunJournalKind::Error)
+                .find_map(|row| match &row.payload {
+                    ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) => {
+                        Some(fatal)
+                    }
+                    _ => None,
+                })
+                .expect("the effect recorded its stop");
+            assert_eq!(
+                fatal.reason,
+                obzenflow_core::event::StageFatalReason::RecordingEnded
+            );
+            format!(
+                "stage '{}' reached the end of its recording at input {}",
+                fatal.stage_key,
+                fatal.input_position.expect("the effect recorded an input")
+            )
+        } else {
+            format!(
+                "cannot replay {}: it has no terminal record",
+                killed_copy.display()
+            )
+        };
+        assert!(
+            output.contains(&primary) && output.contains(&missing),
+            "{output}"
+        );
+        assert!(!output.contains("--resume-from "), "{output}");
+    }
 
     for (name, killed) in [("S8", false), ("S8b", true)] {
         let scenario = Scenario::fresh(&name.to_lowercase());
@@ -4306,7 +4378,7 @@ mod payment_demo {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_run_stopped_before_its_feeds_finish_offers_only_replay() {
+    async fn resume_unfinished_payment_feeds_refused() {
         let name = "payment_early_stop";
         let scenario = Scenario::for_graph(name, Graph::PaymentDemo);
         let early = |archive: &Archive| {

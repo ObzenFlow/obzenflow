@@ -152,53 +152,60 @@ pub struct FlowConfig {
     #[arg(long)]
     pub control_plane_hmac_replay_window_secs: Option<u64>,
 
-    /// Replay a recorded run from its archive.
-    ///
-    /// A completed or cancelled run replays as recorded; an interrupted or
-    /// failed run replays its recorded prefix with --allow-incomplete-archive.
-    ///
-    /// The path must be the exact run directory containing `run_manifest.json`.
-    ///
-    /// See Archive admission below.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Replay a recorded run from its archive",
+        long_help = "Replay a recorded run from its archive.\n\n\
+            A completed or cancelled run replays as recorded; an interrupted or failed run \
+            replays its recorded prefix with --allow-incomplete-archive.\n\n\
+            The path must be the exact run directory containing `run_manifest.json`.\n\n\
+            See Archive admission below."
+    )]
     pub replay_from: Option<PathBuf>,
 
-    /// Resume a recorded run: catch up on its archive with effects suppressed,
-    /// then continue live from the last fact it committed.
-    ///
-    /// Resume with a build and configuration that act the same on the inputs
-    /// the run settled; a stage that departs from its archive refuses the
-    /// resume. Check a changed build first with `--replay-from <run> --verify`
-    /// against a recording that ended completed or cancelled.
-    ///
-    /// The path must be the exact run directory containing `run_manifest.json`.
-    /// Mutually exclusive with `--replay-from`.
-    ///
-    /// See Archive admission below.
-    #[arg(long, conflicts_with = "replay_from")]
+    #[arg(
+        long,
+        conflicts_with = "replay_from",
+        help = "Resume a recorded run: catch up on its archive with effects suppressed, then \
+            continue live from the last fact it committed",
+        long_help = "Resume a recorded run: catch up on its archive with effects suppressed, \
+            then continue live from the last fact it committed.\n\n\
+            Resume with a build and configuration that act the same on the inputs the run \
+            settled; a stage that departs from its archive refuses the resume. Check a changed \
+            build first with `--replay-from <run> --verify` against a recording that ended \
+            completed or cancelled.\n\n\
+            The path must be the exact run directory containing `run_manifest.json`. Mutually \
+            exclusive with `--replay-from`.\n\n\
+            See Archive admission below."
+    )]
     pub resume_from: Option<PathBuf>,
 
-    /// Admit an interrupted or failed run to --replay-from, and a failed run to
-    /// --resume-from.
-    ///
-    /// Verify refuses such a run, so its output is for inspection, not
-    /// comparison. A run whose system.log is missing opens as interrupted; a
-    /// damaged one is refused.
-    ///
-    /// See Archive admission below.
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Admit an interrupted or failed run to --replay-from, and a failed run to \
+            --resume-from",
+        long_help = "Admit an interrupted or failed run to --replay-from, and a failed run to \
+            --resume-from.\n\n\
+            Verify refuses such a run, so its output is for inspection, not comparison. The flag \
+            opens a missing system.log as interrupted. A torn final append leaves the committed \
+            prefix readable. Damage followed by a valid frame is refused.\n\n\
+            See Archive admission below."
+    )]
     pub allow_incomplete_archive: bool,
 
-    /// Verify the replay output against the source archive after completion.
-    ///
-    /// Requires `--replay-from`. The source archive must remain present through
-    /// completion; on a fully certified match the run prints "output matched the
-    /// original run, 0 differences" and exits 0. The source archive and the
-    /// replay must both end completed or cancelled, and a replay admitted with
-    /// --allow-incomplete-archive is refused. The run exits non-zero on every
-    /// other outcome. Run `obzenflow verify --baseline <archive> --candidate
-    /// <replay>` to get an exit code for each verdict.
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Verify the replay output against the source archive after completion",
+        long_help = "Verify the replay output against the source archive after completion.\n\n\
+            Requires `--replay-from`. The source archive must remain present through completion; \
+            on a fully certified match the run prints \"output matched the original run, 0 \
+            differences\" and exits 0. The source archive and the replay must both end completed \
+            or cancelled, and a replay admitted with --allow-incomplete-archive is refused. The \
+            run exits non-zero on every other outcome. Run `obzenflow verify --baseline \
+            <archive> --candidate <replay>` to get an exit code for each verdict."
+    )]
     pub verify: bool,
 
     /// Behaviour when the pipeline reaches a terminal state under --server:
@@ -2608,15 +2615,12 @@ resume_from = "/tmp/recorded"
         );
         for text in [
             "Replay a recorded run from its archive.",
-            "A completed or cancelled run replays as recorded; an interrupted or failed run \
-             replays its recorded prefix with --allow-incomplete-archive.",
             "Resume a recorded run: catch up on its archive with effects suppressed, then \
              continue live from the last fact it committed.",
             "against a recording that ended completed or cancelled.",
-            "Admit an interrupted or failed run to --replay-from, and a failed run to \
-             --resume-from.",
-            "Verify refuses such a run, so its output is for inspection, not comparison. A run \
-             whose system.log is missing opens as interrupted; a damaged one is refused.",
+            "Verify refuses such a run, so its output is for inspection, not comparison. The flag \
+             opens a missing system.log as interrupted. A torn final append leaves the committed \
+             prefix readable. Damage followed by a valid frame is refused.",
             "The run exits non-zero on every other outcome. Run `obzenflow verify --baseline \
              <archive> --candidate <replay>` to get an exit code for each verdict.",
         ] {
@@ -2629,12 +2633,92 @@ resume_from = "/tmp/recorded"
             "Replay a recorded run from its archive\n",
             "Resume a recorded run: catch up on its archive with effects suppressed, then \
              continue live from the last fact it committed\n",
-            "Admit an interrupted or failed run to --replay-from, and a failed run to \
-             --resume-from\n",
             "Verify the replay output against the source archive after completion\n",
         ] {
             assert!(short.contains(summary), "missing {summary:?} in {short}");
         }
+    }
+
+    #[test]
+    fn help_archive_claims_match_decisions() {
+        use clap::CommandFactory;
+        use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+        use obzenflow_core::journal::archive_actions::{
+            decide, ArchiveEvidence, ArchiveOverrides, FailureEvidence, FlowEvidence,
+            SourceEvidence,
+        };
+        use obzenflow_core::journal::ArchiveStatus;
+
+        let flow = FlowEvidence::default();
+        let admission_groups = |verb: ReplayVerb| {
+            let mut plain = Vec::new();
+            let mut flag_only = Vec::new();
+            for (word, status) in [
+                ("completed", ArchiveStatus::Completed),
+                ("cancelled", ArchiveStatus::Cancelled),
+                ("interrupted", ArchiveStatus::Unknown),
+                ("failed", ArchiveStatus::Failed),
+            ] {
+                let archive = ArchiveEvidence {
+                    status,
+                    live_writer: false,
+                    sources: vec![SourceEvidence {
+                        stage_key: "orders".into(),
+                        finite: true,
+                        recorded_eof: Some(EofKind::Natural),
+                    }],
+                    failure: FailureEvidence::Other,
+                    resume: None,
+                };
+                let admits = |allow_incomplete_archive| {
+                    decide(
+                        verb,
+                        Path::new("R1"),
+                        &archive,
+                        &flow,
+                        ArchiveOverrides {
+                            allow_incomplete_archive,
+                        },
+                    )
+                    .is_ok()
+                };
+                match (admits(false), admits(true)) {
+                    (true, true) => plain.push(word),
+                    (false, true) => flag_only.push(word),
+                    (false, false) => {}
+                    (true, false) => panic!(
+                        "{word}: --{}-from R1 --allow-incomplete-archive refused a plain admission",
+                        verb.word()
+                    ),
+                }
+            }
+            (plain.join(" or "), flag_only.join(" or "))
+        };
+        let (as_recorded, prefix) = admission_groups(ReplayVerb::Replay);
+        let (_, resume_with_flag) = admission_groups(ReplayVerb::Resume);
+        let replay_detail = format!(
+            "A {as_recorded} run replays as recorded; an {prefix} run \
+            replays its recorded prefix with --allow-incomplete-archive."
+        );
+        let flag_summary = format!(
+            "Admit an {prefix} run to --replay-from, and a {resume_with_flag} \
+            run to --resume-from"
+        );
+        let mut command = FlowConfig::command();
+        let long = command.render_long_help().to_string();
+        let short = command.render_help().to_string();
+        assert!(
+            long.contains(&replay_detail),
+            "expected {replay_detail:?} in {long}"
+        );
+        assert!(
+            long.contains(&format!("{flag_summary}.")),
+            "expected {flag_summary:?} in {long}"
+        );
+        assert!(
+            short.contains(&format!("{flag_summary}\n")),
+            "expected {flag_summary:?} in {short}"
+        );
     }
 
     #[test]

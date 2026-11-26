@@ -140,17 +140,28 @@ struct InspectArgs {
 struct VerifyArgs {
     #[command(subcommand)]
     check: Option<VerifyCheck>,
-    /// The run directory the candidate is compared to.
-    #[arg(long, required = true, value_name = "PATH")]
+    #[arg(
+        long,
+        required = true,
+        value_name = "PATH",
+        help = "The run directory the candidate is compared to"
+    )]
     baseline: Option<PathBuf>,
-    /// The run directory under test.
-    #[arg(long, required = true, value_name = "PATH")]
+    #[arg(
+        long,
+        required = true,
+        value_name = "PATH",
+        help = "The run directory under test"
+    )]
     candidate: Option<PathBuf>,
-    /// Write the comparison report here.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", help = "Write the comparison report here")]
     report_path: Option<PathBuf>,
-    /// How many divergences to list.
-    #[arg(long, default_value_t = 5, value_name = "N")]
+    #[arg(
+        long,
+        default_value_t = 5,
+        value_name = "N",
+        help = "Maximum divergence details to save per journal in the report"
+    )]
     max_divergences: usize,
 }
 

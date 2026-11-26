@@ -210,11 +210,17 @@ fn verify_long_help_lists_exit_codes() {
         .find_subcommand_mut("verify")
         .expect("verify subcommand");
     let long = verify.render_long_help().to_string();
-    for text in [
-        "For runs, exit codes are 0 certified match, 1 divergence, 2 certified region matched \
+    assert!(
+        long.contains(
+            "For runs, exit codes are 0 certified match, 1 divergence, 2 certified region matched \
          with uncertified stages and 3 refused. For call logs, 0 every log passes, 1 a log \
          breaks a rule, 2 a log is uncertified and 3 refused. Any other failure exits 4, and so \
-         does a wrong or missing argument.",
+         does a wrong or missing argument."
+        ),
+        "{long}"
+    );
+    let short = verify.render_help().to_string();
+    for text in [
         "--baseline <PATH>",
         "The run directory the candidate is compared to",
         "--candidate <PATH>",
@@ -222,9 +228,10 @@ fn verify_long_help_lists_exit_codes() {
         "--report-path <PATH>",
         "Write the comparison report here",
         "--max-divergences <N>",
-        "How many divergences to list",
+        "Maximum divergence details to save per journal in the report",
         "[default: 5]",
     ] {
         assert!(long.contains(text), "missing {text:?} in {long}");
+        assert!(short.contains(text), "missing {text:?} in {short}");
     }
 }

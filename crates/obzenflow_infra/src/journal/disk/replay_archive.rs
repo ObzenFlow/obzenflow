@@ -26,7 +26,7 @@ use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::archive_actions::{ArchiveEvidence, ReplayVerb, ResumeEvidence};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -191,16 +191,48 @@ impl DiskReplayArchive {
         Ok(archive.evidence())
     }
 
-    /// `resume_evidence` returns what a plain resume of `run` reads, and the
-    /// run that admission names for that resume. It does not probe liveness or
-    /// continuation claims.
+    /// `resume_evidence` reads the current head and its evidence for a plain resume.
     pub async fn resume_evidence(run: &Path) -> Result<ResumeEvidence, ReplayError> {
-        let (continued, _) = Self::resolve_replayed_run(run.to_path_buf())?;
-        let archive = Self::written_run_evidence(continued.clone(), ReplayVerb::Resume).await?;
-        Ok(ResumeEvidence {
-            run: admission_run(run, &continued),
-            archive,
-        })
+        use super::continuation::{has_live_writer, read_claim, takeover, Takeover};
+
+        let mut next = Self::resolve_replayed_run(run.to_path_buf())?;
+        let mut visited = HashSet::new();
+        let mut continued_from = None;
+        loop {
+            let (path, manifest) = next;
+            if !visited.insert(path.clone()) {
+                return Err(ReplayError::Parse {
+                    message: format!(
+                        "The resume history of {} returns to {}.",
+                        run.display(),
+                        path.display()
+                    ),
+                });
+            }
+            if let Some(claim) = read_claim(&path)? {
+                next = claim.open(&path)?;
+                continued_from = Some(path);
+                continue;
+            }
+            let live_writer = has_live_writer(&path, &manifest)?;
+            if let (false, Some(resume)) = (live_writer, &manifest.resume) {
+                if takeover(&path, &manifest, &resume.resumed_from)? != Takeover::Held {
+                    next = Self::resolve_replayed_run(resume.resumed_from.clone())?;
+                    continued_from = None;
+                    continue;
+                }
+            }
+            let head =
+                Self::open_manifest(path, manifest, false, live_writer, ScanPurpose::Recovery)
+                    .await?
+                    .with_ancestors(ScanPurpose::Recovery)
+                    .await?;
+            return Ok(ResumeEvidence {
+                run: head.archive_path.clone(),
+                continued_from,
+                archive: head.evidence(),
+            });
+        }
     }
 
     pub(crate) async fn footer_evidence(run: &Path) -> [Option<ArchiveEvidence>; 2] {
@@ -254,17 +286,18 @@ impl DiskReplayArchive {
         })?;
 
         let manifest_path = archive_path.join(RUN_MANIFEST_FILENAME);
-        if !manifest_path.exists() {
-            return Err(ReplayError::MissingManifest {
-                path: manifest_path,
-            });
-        }
-
-        let manifest_body =
-            std::fs::read_to_string(&manifest_path).map_err(|e| ReplayError::Io {
-                message: format!("Failed to read run manifest: {}", manifest_path.display()),
-                source: e,
-            })?;
+        let manifest_body = std::fs::read_to_string(&manifest_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ReplayError::MissingManifest {
+                    path: manifest_path.clone(),
+                }
+            } else {
+                ReplayError::Io {
+                    message: format!("Failed to read run manifest: {}", manifest_path.display()),
+                    source: error,
+                }
+            }
+        })?;
         // FLOWIP-095j: gate on the version from the raw JSON before typed
         // deserialization. Required fields added in newer journal schemas would
         // otherwise turn an old archive into a confusing missing-field parse error
@@ -476,40 +509,47 @@ impl DiskReplayArchive {
         let mut ancestors: Vec<Arc<Self>> = Vec::new();
         let mut parent = self.unfinished_parent();
         while let Some(ancestor) = parent {
-            if ancestor == self.archive_path || ancestors.iter().any(|a| a.archive_path == ancestor)
-            {
+            let unreadable = |error| ReplayError::AncestorUnreadable {
+                archive: self.archive_path.clone(),
+                ancestor: ancestor.clone(),
+                source: Box::new(error),
+            };
+            let (path, manifest) =
+                Self::read_manifest(ancestor.clone()).map_err(|error| match error {
+                    ReplayError::Io { ref source, .. }
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        ReplayError::AncestorMissing {
+                            archive: self.archive_path.clone(),
+                            ancestor: ancestor.clone(),
+                        }
+                    }
+                    error => unreadable(error),
+                })?;
+            if path == self.archive_path || ancestors.iter().any(|a| a.archive_path == path) {
                 return Err(ReplayError::Parse {
                     message: format!(
                         "the resume lineage of {} returns to {}",
                         self.archive_path.display(),
-                        ancestor.display()
+                        path.display()
                     ),
                 });
             }
-            if !ancestor.exists() {
-                return Err(ReplayError::AncestorMissing {
-                    archive: self.archive_path.clone(),
-                    ancestor,
-                });
-            }
-            let opened = Self::open_replay(
-                ancestor.clone(),
+            let opened = Self::open_manifest(
+                path,
+                manifest,
                 self.allow_incomplete_archive,
-                Liveness::Stopped,
+                false,
                 purpose,
             )
             .await
             .map_err(|error| match error {
                 ReplayError::MissingSystemLog { path } => ReplayError::AncestorMissingSystemLog {
                     archive: self.archive_path.clone(),
-                    ancestor,
+                    ancestor: ancestor.clone(),
                     system_log: path,
                 },
-                error => ReplayError::AncestorUnreadable {
-                    archive: self.archive_path.clone(),
-                    ancestor,
-                    source: Box::new(error),
-                },
+                error => unreadable(error),
             })?;
             parent = opened.unfinished_parent();
             ancestors.push(Arc::new(opened));
@@ -526,22 +566,27 @@ impl DiskReplayArchive {
         let (mut path, mut manifest) = Self::read_manifest(archive_path)?;
         let mut visited = vec![path.clone()];
         while let Some(replayed) = replayed_run(&manifest) {
-            if visited.contains(&replayed) {
+            (path, manifest) =
+                Self::read_manifest(replayed.clone()).map_err(|error| match error {
+                    ReplayError::Io { ref source, .. }
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        ReplayError::ReplayedRunMissing {
+                            replay: path,
+                            replayed,
+                        }
+                    }
+                    error => error,
+                })?;
+            if visited.contains(&path) {
                 return Err(ReplayError::Parse {
                     message: format!(
                         "the replays from {} return to {}",
                         visited[0].display(),
-                        replayed.display()
+                        path.display()
                     ),
                 });
             }
-            if !replayed.exists() {
-                return Err(ReplayError::ReplayedRunMissing {
-                    replay: path,
-                    replayed,
-                });
-            }
-            (path, manifest) = Self::read_manifest(replayed)?;
             visited.push(path.clone());
         }
         Ok((path, manifest))
@@ -1309,15 +1354,14 @@ pub(crate) struct SystemLogScan {
 }
 
 pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError> {
-    if !path.exists() {
-        return Err(ReplayError::MissingSystemLog {
+    let file = File::open(path).map_err(|source| match source.kind() {
+        std::io::ErrorKind::NotFound => ReplayError::MissingSystemLog {
             path: path.to_path_buf(),
-        });
-    }
-
-    let file = File::open(path).map_err(|e| ReplayError::Io {
-        message: format!("Failed to open system.log at {}", path.display()),
-        source: e,
+        },
+        _ => ReplayError::Io {
+            message: format!("Failed to open system.log at {}", path.display()),
+            source,
+        },
     })?;
     let mut reader = BufReader::new(file);
     let mut buf = Vec::new();

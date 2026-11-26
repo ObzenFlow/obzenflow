@@ -112,12 +112,41 @@ pub(crate) fn history_head(run: &Path) -> Result<PathBuf, ReplayError> {
     Ok(head)
 }
 
-/// The run whose resume finishes `run`'s work: the head of the history of
-/// the run it reproduces (B7, B13).
-pub(crate) fn run_to_resume(run: &Path) -> Result<PathBuf, ReplayError> {
-    let continued =
-        super::replay_archive::DiskReplayArchive::resolve_replayed_run(run.to_path_buf())?.0;
-    history_head(&continued)
+impl ContinuedBy {
+    pub(super) fn open(&self, parent: &Path) -> Result<(PathBuf, RunManifest), ReplayError> {
+        let (run, manifest) =
+            super::replay_archive::DiskReplayArchive::read_manifest(self.location.clone())
+                .map_err(|error| match error {
+                    ReplayError::Io { ref source, .. } if source.kind() == ErrorKind::NotFound => {
+                        ReplayError::ContinuationMissing {
+                            parent: parent.to_path_buf(),
+                            successor: self.location.clone(),
+                        }
+                    }
+                    error => error,
+                })?;
+        if manifest.flow_id != self.run_id.to_string() {
+            return Err(ReplayError::Parse {
+                message: format!(
+                    "The continuation claim in {} names {}, but {} contains {}.",
+                    parent.display(),
+                    self.run_id,
+                    run.display(),
+                    manifest.flow_id
+                ),
+            });
+        }
+        if manifest.resume.is_none() {
+            return Err(ReplayError::Parse {
+                message: format!(
+                    "The continuation claim in {} names {}, whose manifest records no resume.",
+                    parent.display(),
+                    run.display()
+                ),
+            });
+        }
+        Ok((run, manifest))
+    }
 }
 
 /// Publish `run`'s claim for `successor`, complete or absent: staged and

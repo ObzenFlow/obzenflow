@@ -62,7 +62,7 @@ pub enum ReplayError {
         message: String,
     },
 
-    #[error("Replay archive I/O error: {message}")]
+    #[error("Replay archive I/O error: {message}: {source}")]
     Io {
         message: String,
         #[source]
@@ -155,6 +155,14 @@ pub enum ReplayError {
         .head.display()
     )]
     AlreadyContinued { archive: PathBuf, head: PathBuf },
+
+    #[error(
+        "The continuation claim in {parent} names {successor}, but the directory {successor} is missing.\n\
+         Restore {successor} to check whether this history can resume.",
+        parent = .parent.display(),
+        successor = .successor.display()
+    )]
+    ContinuationMissing { parent: PathBuf, successor: PathBuf },
 
     /// A resumed run whose parent carries no claim never took it over (B12).
     #[error(

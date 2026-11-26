@@ -2,10 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::journal::archive_actions::{ArchiveRefusal, ReplayVerb};
+use obzenflow_core::journal::archive::ReplayError;
+use obzenflow_core::journal::archive_actions::{
+    shell_path, ArchiveRefusal, ReplayVerb, ResumeAdvice,
+};
 use std::error::Error;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Errors that can occur in the FlowApplication framework
 #[derive(Debug)]
@@ -42,7 +45,7 @@ pub enum ApplicationError {
         replayed: PathBuf,
         stage_key: String,
         input_position: Option<u64>,
-        resume: Result<PathBuf, ArchiveRefusal>,
+        resume: Option<Box<Result<ResumeAdvice, ReplayError>>>,
     },
 
     /// A resume refused before any work, naming the run to act on
@@ -82,9 +85,19 @@ impl fmt::Display for ApplicationError {
                     write!(f, " at input {input}")?;
                 }
                 f.write_str(", and a replay never executes an effect.\n")?;
-                match resume {
-                    Ok(run) => write!(f, "Resume {} to finish this run's work.", run.display()),
-                    Err(refusal) => write!(f, "{refusal}"),
+                match resume.as_deref() {
+                    Some(Ok(advice)) => match &advice.admission {
+                        Ok(()) => write!(
+                            f,
+                            "Resume {} to finish this run's work.",
+                            advice.run.display()
+                        ),
+                        Err(refusal) => write!(f, "{refusal}"),
+                    },
+                    Some(Err(error)) => f.write_str(&resume_read_error(replayed, error)),
+                    None => f.write_str(
+                        "Cannot check whether this history can resume without the flow definition.",
+                    ),
                 }
             }
             Self::ResumeRefused(refusal) | Self::ReplayRefused(refusal) => f.write_str(refusal),
@@ -123,6 +136,20 @@ impl From<std::io::Error> for ApplicationError {
 
 impl From<&ArchiveRefusal> for ApplicationError {
     fn from(refusal: &ArchiveRefusal) -> Self {
+        Self::archive_refusal(refusal, None)
+    }
+}
+
+impl ApplicationError {
+    pub(super) fn archive_refusal(
+        refusal: &ArchiveRefusal,
+        read_error: Option<&ReplayError>,
+    ) -> Self {
+        if let (ArchiveRefusal::Interrupted { run, resume: None }, Some(error)) =
+            (refusal, read_error)
+        {
+            return Self::ReplayRefused(format!("{refusal}\n{}", resume_read_error(run, error)));
+        }
         let message = match refusal {
             ArchiveRefusal::Cycle {
                 verb: ReplayVerb::Replay,
@@ -132,7 +159,7 @@ impl From<&ArchiveRefusal> for ApplicationError {
                 "--replay-from does not support cyclic topologies; cycle members: {}\nTo read \
                  this run without replaying it, run: obzenflow show {}",
                 members.join(", "),
-                run.display()
+                shell_path(run)
             ),
             ArchiveRefusal::Cycle {
                 verb: ReplayVerb::Resume,
@@ -149,6 +176,38 @@ impl From<&ArchiveRefusal> for ApplicationError {
             ReplayVerb::Replay => Self::ReplayRefused(message),
             ReplayVerb::Resume => Self::ResumeRefused(message),
         }
+    }
+}
+
+fn resume_read_error(run: &Path, error: &ReplayError) -> String {
+    match error {
+        ReplayError::ContinuationMissing { .. } => error.to_string(),
+        ReplayError::ReplayedRunMissing { replay, replayed } => format!(
+            "{} replays {}, but that directory is missing.\nRestore {} to check whether this history can resume.",
+            replay.display(), replayed.display(), replayed.display()
+        ),
+        ReplayError::MissingSystemLog { path }
+        | ReplayError::AncestorMissingSystemLog { system_log: path, .. } => format!(
+            "The system journal {} is missing.\nRestore it to check whether this history can resume.",
+            path.display()
+        ),
+        ReplayError::AncestorMissing { ancestor, .. } => format!(
+            "The ancestor {} is missing.\nRestore it to check whether this history can resume.", ancestor.display()
+        ),
+        ReplayError::AncestorUnreadable { ancestor, source, .. } => format!(
+            "Cannot read the ancestor {}.\n{}", ancestor.display(), resume_read_error(ancestor, source)
+        ),
+        ReplayError::AncestorDisagrees { archive, ancestor, stage_key } => format!(
+            "Source '{stage_key}' in {} disagrees with {}.\nRestore the ancestor to check whether this history can resume.",
+            archive.display(), ancestor.display()
+        ),
+        ReplayError::NamespaceDisagrees { archive, ancestor } => format!(
+            "{archive} and its ancestor {ancestor} record different identity namespaces.\n\
+             Restore {ancestor} to check whether this history can resume.",
+            archive = archive.display(), ancestor = ancestor.display()
+        ),
+        ReplayError::Io { message, source } => format!("Cannot check the resume target for {}. {message}: {source}", run.display()),
+        other => format!("Cannot check the resume target for {}. {other}", run.display()),
     }
 }
 
@@ -195,19 +254,40 @@ mod tests {
     }
 
     #[test]
+    fn replay_missing_original_names_directory() {
+        let run = PathBuf::from("runs/replay");
+        let error = ReplayError::ReplayedRunMissing {
+            replay: run.clone(),
+            replayed: PathBuf::from("runs/original"),
+        };
+        let refusal = ArchiveRefusal::Interrupted { run, resume: None };
+        assert_eq!(
+            ApplicationError::archive_refusal(&refusal, Some(&error)).to_string(),
+            "cannot replay runs/replay: it has no terminal record, so it was interrupted.\n\
+             Pass --allow-incomplete-archive to replay its recorded prefix.\n\
+             runs/replay replays runs/original, but that directory is missing.\n\
+             Restore runs/original to check whether this history can resume."
+        );
+    }
+
+    #[test]
     fn replay_stop_refused_resume_prints_refusal() {
         use obzenflow_core::source::ResumeRefusal;
         let error = ApplicationError::ReplayRecordingEnded {
             replayed: PathBuf::from("runs/r1"),
             stage_key: "authorize_payment".to_string(),
             input_position: Some(3),
-            resume: Err(ArchiveRefusal::Sources {
+            resume: Some(Box::new(Ok(ResumeAdvice {
                 run: PathBuf::from("/runs/r1"),
-                refusals: vec![
-                    ("store_orders".to_string(), ResumeRefusal::UnfinishedInput),
-                    ("web_orders".to_string(), ResumeRefusal::UnfinishedInput),
-                ],
-            }),
+                continued_from: None,
+                admission: Err(ArchiveRefusal::Sources {
+                    run: PathBuf::from("/runs/r1"),
+                    refusals: vec![
+                        ("store_orders".to_string(), ResumeRefusal::UnfinishedInput),
+                        ("web_orders".to_string(), ResumeRefusal::UnfinishedInput),
+                    ],
+                }),
+            }))),
         };
         assert_eq!(
             error.to_string(),

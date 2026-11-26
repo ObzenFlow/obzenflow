@@ -301,7 +301,7 @@ async fn open_fails_when_manifest_missing() {
 }
 
 #[tokio::test]
-async fn open_fails_when_system_log_missing_unless_allowed() {
+async fn archive_missing_system_log_requires_flag() {
     let dir = tempdir().unwrap();
     write_manifest(dir.path());
 
@@ -839,6 +839,7 @@ async fn write_claimed_resume(
     parent_facts: &[ChainEvent],
     caught_up: usize,
     parent_ending: Option<PipelineLifecycleEvent>,
+    resume_ending: Option<PipelineLifecycleEvent>,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     const RESUMED_ID: &str = "flow_01H00000000000000000000001";
     let (parent, resumed) = (base.join("r0"), base.join("r1"));
@@ -846,7 +847,7 @@ async fn write_claimed_resume(
     std::fs::create_dir_all(&resumed).unwrap();
     write_run(&parent, FLOW_ID, None, parent_facts, parent_ending).await;
     let parent = std::fs::canonicalize(&parent).unwrap();
-    write_stopped_run(
+    write_run(
         &resumed,
         RESUMED_ID,
         Some(
@@ -857,6 +858,7 @@ async fn write_claimed_resume(
             },
         ),
         &parent_facts[..caught_up],
+        resume_ending,
     )
     .await;
     let resumed = std::fs::canonicalize(&resumed).unwrap();
@@ -1043,7 +1045,7 @@ async fn admission_merged_ancestor_tail_recorded() {
 async fn resume_with_damaged_ancestor_log_refused() {
     let base = tempdir().unwrap();
     let (parent, resumed) =
-        write_claimed_resume(base.path(), &[source_fact(1)], 1, Some(cancelled())).await;
+        write_claimed_resume(base.path(), &[source_fact(1)], 1, Some(cancelled()), None).await;
     flip_first_record_byte(&parent.join("system.log"));
 
     for allow_incomplete_archive in [false, true] {
@@ -1065,7 +1067,8 @@ async fn resume_with_damaged_ancestor_log_refused() {
 #[tokio::test]
 async fn resume_with_missing_ancestor_log_refused() {
     let base = tempdir().unwrap();
-    let (parent, resumed) = write_claimed_resume(base.path(), &[source_fact(1)], 1, None).await;
+    let (parent, resumed) =
+        write_claimed_resume(base.path(), &[source_fact(1)], 1, None, None).await;
     let system_log = parent.join("system.log");
     std::fs::remove_file(&system_log).unwrap();
 
@@ -1093,7 +1096,8 @@ async fn resume_with_missing_ancestor_log_refused() {
 #[tokio::test]
 async fn missing_ancestor_log_with_flag_resumes() {
     let base = tempdir().unwrap();
-    let (parent, resumed) = write_claimed_resume(base.path(), &[source_fact(1)], 1, None).await;
+    let (parent, resumed) =
+        write_claimed_resume(base.path(), &[source_fact(1)], 1, None, None).await;
     std::fs::remove_file(parent.join("system.log")).unwrap();
 
     let head = DiskReplayArchive::open_for_resume(resumed, true)
@@ -1105,15 +1109,54 @@ async fn missing_ancestor_log_with_flag_resumes() {
     assert_eq!(ancestors[0].archive_status(), ArchiveStatus::Unknown);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn archive_looped_system_log_reports_io() {
+    use obzenflow_infra::verify::{render_verdict, verify_run_dirs, VerifyOptions};
+
+    let base = tempdir().unwrap();
+    let (parent, resumed) =
+        write_claimed_resume(base.path(), &[source_fact(1)], 1, None, None).await;
+    let log = parent.join("system.log");
+    std::fs::remove_file(&log).unwrap();
+    std::os::unix::fs::symlink("system.log", &log).unwrap();
+    let cause = std::fs::File::open(&log).unwrap_err();
+
+    for allow_incomplete in [true, false] {
+        let Err(error) =
+            DiskReplayArchive::open_for_resume(resumed.clone(), allow_incomplete).await
+        else {
+            panic!(
+                "resume accepted an unreadable ancestor with allow_incomplete={allow_incomplete}"
+            );
+        };
+        assert!(
+            matches!(&error, ReplayError::AncestorUnreadable { ancestor, source, .. }
+            if ancestor == &parent && matches!(source.as_ref(), ReplayError::Io { source, .. }
+                if source.raw_os_error() == cause.raw_os_error())),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains(&log.display().to_string()), "{message}");
+        assert!(message.contains(&cause.to_string()), "{message}");
+    }
+
+    let verdict = verify_run_dirs(&parent, &resumed, &VerifyOptions::default()).unwrap();
+    let message = render_verdict(&verdict);
+    assert_eq!(verdict.exit_code(), 3);
+    assert!(message.contains(&log.display().to_string()), "{message}");
+    assert!(message.contains(&cause.to_string()), "{message}");
+}
+
 #[tokio::test]
 async fn torn_resume_evidence_merges_ancestor() {
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;
     use obzenflow_core::journal::archive_actions::{
-        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb, ResumeAdvice,
     };
     let base = tempdir().unwrap();
     let parent_facts = [source_fact(1), source_fact(2), source_eof()];
-    let (_, torn) = write_claimed_resume(base.path(), &parent_facts, 1, None).await;
+    let (_, torn) = write_claimed_resume(base.path(), &parent_facts, 1, None, None).await;
     let flow = FlowEvidence {
         cycle_members: Vec::new(),
         sources: vec![(
@@ -1143,9 +1186,143 @@ async fn torn_resume_evidence_merges_ancestor() {
         ),
         Err(ArchiveRefusal::Interrupted {
             run: torn.clone(),
-            resume: None
+            resume: Some(Box::new(ResumeAdvice {
+                run: torn.clone(),
+                continued_from: None,
+                admission: Ok(()),
+            })),
         })
     );
+}
+
+#[tokio::test]
+async fn replay_completed_head_offers_replay() {
+    use obzenflow_core::journal::archive_actions::{
+        decide, shell_path, ArchiveOverrides, FlowEvidence, ReplayVerb,
+    };
+    let base = tempdir().unwrap();
+    let facts = [source_fact(1), source_eof()];
+    let (parent, head) = write_claimed_resume(
+        &base.path().join("Pat's Runs"),
+        &facts,
+        facts.len(),
+        None,
+        Some(completed()),
+    )
+    .await;
+    let before = (archive_bytes(&parent), archive_bytes(&head));
+    let mut archive = DiskReplayArchive::open(parent.clone(), false)
+        .await
+        .unwrap()
+        .evidence();
+    archive.resume = Some(Box::new(
+        DiskReplayArchive::resume_evidence(&parent).await.unwrap(),
+    ));
+    let refusal = decide(
+        ReplayVerb::Replay,
+        &parent,
+        &archive,
+        &FlowEvidence::default(),
+        ArchiveOverrides::default(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal.to_string(), format!(
+        "cannot replay {parent}: it has no terminal record, so it was interrupted.\n\
+         Pass --allow-incomplete-archive to replay the recorded prefix of {parent}.\n\
+         {head} continued {parent}.\n\
+         cannot resume {head}: it completed naturally and every source is finite, so there is no work left to continue.\n\
+         Replay it with --replay-from {operand}.",
+        parent = parent.display(), head = head.display(), operand = shell_path(&head)
+    ));
+    assert_eq!((archive_bytes(&parent), archive_bytes(&head)), before);
+}
+
+#[tokio::test]
+async fn resume_missing_successor_names_directory() {
+    let base = tempdir().unwrap();
+    let (parent, head) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    std::fs::rename(&head, base.path().join("saved")).unwrap();
+    assert!(matches!(DiskReplayArchive::resume_evidence(&parent).await,
+        Err(ReplayError::ContinuationMissing { parent: from, successor }) if from == parent && successor == head
+    ));
+}
+
+#[tokio::test]
+async fn resume_mismatched_claim_reports_identity() {
+    let base = tempdir().unwrap();
+    let (parent, head) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    std::fs::rename(&head, base.path().join("saved")).unwrap();
+    std::fs::create_dir(&head).unwrap();
+    write_stopped_run(&head, FLOW_ID, None, &[]).await;
+    let error = DiskReplayArchive::resume_evidence(&parent)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ReplayError::Parse { message } if message == format!(
+            "The continuation claim in {} names flow_01H00000000000000000000001, but {} contains {FLOW_ID}.", parent.display(), head.display()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn resume_locked_head_reports_writer() {
+    use obzenflow_core::journal::archive_actions::{ArchiveRefusal, FlowEvidence, ReplayVerb};
+    let base = tempdir().unwrap();
+    let (parent, head) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    let writer = std::fs::File::open(head.join(SOURCE_LOG)).unwrap();
+    writer.try_lock().unwrap();
+    std::fs::remove_file(head.join("system.log")).unwrap();
+    let target = DiskReplayArchive::resume_evidence(&parent).await.unwrap();
+    assert_eq!(
+        target.judge(&FlowEvidence::default()).admission,
+        Err(ArchiveRefusal::StillRunning {
+            verb: ReplayVerb::Resume,
+            run: head
+        })
+    );
+}
+
+#[tokio::test]
+async fn resume_unclaimed_child_selects_parent() {
+    let base = tempdir().unwrap();
+    let (parent, child) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    std::fs::remove_file(parent.join("run_continuation.json")).unwrap();
+    let target = DiskReplayArchive::resume_evidence(&child).await.unwrap();
+    assert_eq!(target.run, parent);
+    assert_eq!(target.continued_from, None);
+}
+
+#[tokio::test]
+async fn replay_aliased_cycle_refused() {
+    let base = tempdir().unwrap();
+    let replay = base.path().join("replay");
+    std::fs::create_dir(&replay).unwrap();
+    write_stopped_run(&replay, FLOW_ID, None, &[]).await;
+    record_replay_of(&replay, &replay.join("..").join("replay"));
+    let error = DiskReplayArchive::resume_evidence(&replay)
+        .await
+        .unwrap_err();
+    let replay = std::fs::canonicalize(replay).unwrap();
+    assert!(matches!(error, ReplayError::Parse { message }
+        if message == format!("the replays from {0} return to {0}", replay.display())));
+}
+
+#[tokio::test]
+async fn resume_aliased_ancestor_refuses_cycle() {
+    use obzenflow_core::journal::archive::manifest::RunManifestResumeConfig;
+    let base = tempdir().unwrap();
+    let (parent, head) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    let path = parent.join(RUN_MANIFEST_FILENAME);
+    let mut manifest: RunManifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest.resume = Some(RunManifestResumeConfig {
+        resumed_from: parent.join("..").join("r0"),
+        resume_generation: 1,
+        merged_from: Vec::new(),
+    });
+    std::fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let error = DiskReplayArchive::resume_evidence(&head).await.unwrap_err();
+    assert!(matches!(error, ReplayError::Parse { message }
+        if message == format!("the resume lineage of {} returns to {}", head.display(), parent.display())));
 }
 
 #[tokio::test]
@@ -1191,9 +1368,10 @@ async fn linked_resume_names_replayed_run() {
             "cannot replay {replay}: it has no terminal record, so it was interrupted.\nPass \
              --allow-incomplete-archive to replay its recorded prefix.\ncannot resume \
              {original}: it completed naturally and every source is finite, so there is no work \
-             left to continue.\nReplay it with --replay-from {original}.",
+             left to continue.\nReplay it with --replay-from {operand}.",
             replay = replay.display(),
-            original = original.display()
+            original = original.display(),
+            operand = obzenflow_core::journal::archive_actions::shell_path(&original)
         )
     );
 }

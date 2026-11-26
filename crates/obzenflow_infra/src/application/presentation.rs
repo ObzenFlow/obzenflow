@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::run_mode::RunMode;
+use obzenflow_core::journal::archive_actions::shell_path;
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use std::fmt::Display;
 use std::io::IsTerminal;
@@ -421,6 +422,7 @@ impl RunPresentationOutcome {
         offers: ArchiveOffers,
     ) -> String {
         let mut lines = Vec::new();
+        let operand = shell_path(location.path());
         match mode {
             RunMode::Replay(ctx) => {
                 lines.push(format!(
@@ -433,11 +435,11 @@ impl RunPresentationOutcome {
                 if !ctx.verify {
                     lines.push(format!(
                         "Verify it against the source archive: re-run with --replay-from {} --verify",
-                        ctx.archive_path.display()
+                        shell_path(&ctx.archive_path)
                     ));
                 }
                 if offers.replay {
-                    lines.push(format!("Replay this replay with: --replay-from {location}"));
+                    lines.push(format!("Replay this replay with: --replay-from {operand}"));
                 }
             }
             RunMode::Resume(ctx) => {
@@ -448,22 +450,22 @@ impl RunPresentationOutcome {
                 lines.push("Recorded facts were caught up with effects suppressed, then the run continued live from the last fact the recorded run committed.".to_string());
                 lines.push(format!("Journal: {location}"));
                 if offers.replay {
-                    lines.push(format!("Replay this run with: --replay-from {location}"));
+                    lines.push(format!("Replay this run with: --replay-from {operand}"));
                 }
                 if offers.resume {
-                    lines.push(format!("Resume it again with: --resume-from {location}"));
+                    lines.push(format!("Resume it again with: --resume-from {operand}"));
                 }
             }
             _ => {
                 lines.push(format!("{flow_name} {verb}. Journal: {location}"));
                 if offers.replay {
                     lines.push(format!(
-                        "To verify with a bounded replay, add: --replay-from {location}"
+                        "To verify with a bounded replay, add: --replay-from {operand}"
                     ));
                 }
                 if offers.resume {
                     lines.push(format!(
-                        "To continue this run live from where it left off, add: --resume-from {location}"
+                        "To continue this run live from where it left off, add: --resume-from {operand}"
                     ));
                 }
                 if offers.replay || offers.resume {
@@ -1003,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn default_footer_announces_resume() {
+    fn footer_resume_names_commit_boundary() {
         let resume_mode = RunMode::Resume(super::super::run_mode::ReplayRunContext {
             archive_path: PathBuf::from("tmp/archive"),
             archive_flow_id: Some("flow_01SOURCE".to_string()),
@@ -1066,7 +1068,7 @@ mod tests {
     /// FLOWIP-120n: the resume announcement rides the banner even when the
     /// application banner does not branch on mode.
     #[test]
-    fn banner_announces_resume_catch_up_then_live() {
+    fn banner_resume_names_commit_boundary() {
         let resume_mode = RunMode::Resume(super::super::run_mode::ReplayRunContext {
             archive_path: PathBuf::from("tmp/archive"),
             archive_flow_id: Some("flow_01SOURCE".to_string()),

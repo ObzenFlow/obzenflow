@@ -30,6 +30,7 @@ use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetric
 use crate::web::RuntimeInstanceId;
 use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
+use obzenflow_core::journal::archive_actions::shell_path;
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::web::HttpEndpoint;
@@ -701,6 +702,7 @@ impl FlowApplication {
             // bootstrap snapshot carries it; the build consumes it without the
             // factory opening anything. A bad archive fails here, before any
             // journal is created.
+            let mut resume_read_error = None;
             let bootstrap_config = {
                 let mut bootstrap_config = config.bootstrap_config();
                 if config.server.enabled || config.replay.is_some() {
@@ -776,10 +778,19 @@ impl FlowApplication {
                         Err(ArchiveRefusal::Interrupted { .. })
                     );
                     if refused_as_interrupted {
-                        evidence.resume = DiskReplayArchive::resume_evidence(&replay.archive_path)
-                            .await
-                            .ok()
-                            .map(Box::new);
+                        match DiskReplayArchive::resume_evidence(archive.archive_path()).await {
+                            Ok(mut target) => {
+                                if target.run == archive.archive_path() {
+                                    target.run = replay.archive_path.clone();
+                                }
+                                if target.continued_from.as_deref() == Some(archive.archive_path())
+                                {
+                                    target.continued_from = Some(replay.archive_path.clone());
+                                }
+                                evidence.resume = Some(Box::new(target));
+                            }
+                            Err(error) => resume_read_error = Some(error),
+                        }
                     }
                     bootstrap_config.archive_evidence = Some(evidence);
                     bootstrap_config.replay_archive = Some(Arc::new(archive));
@@ -832,7 +843,7 @@ impl FlowApplication {
                     // directory exists to point at.
                     let error = match &failure.error {
                         obzenflow_dsl::FlowBuildError::ArchiveVerbRefused(refusal) => {
-                            ApplicationError::from(refusal)
+                            ApplicationError::archive_refusal(refusal, resume_read_error.as_ref())
                         }
                         obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
                             ApplicationError::ResumeRefused(failure.error.to_string())
@@ -891,7 +902,10 @@ impl FlowApplication {
 
             let print_replay_hint = |locator: &CurrentRunLocator| {
                 println!("FlowApplication complete!");
-                println!("To replay, add: --replay-from {locator}");
+                println!(
+                    "To replay, add: --replay-from {}",
+                    shell_path(locator.path())
+                );
                 println!("(Source settings are ignored during replay)");
             };
 
@@ -1180,15 +1194,11 @@ impl FlowApplication {
             (Err(err), flow_name, run_state, built_flow) => {
                 let err = match (&run_mode, run_state.as_ref().and_then(|s| s.locator())) {
                     (super::run_mode::RunMode::Replay(ctx), Some(locator)) => {
-                        let flow_evidence = built_flow
-                            .as_ref()
-                            .map(|flow| flow.archive_flow_evidence().clone())
-                            .unwrap_or_default();
                         super::replay_stop::refine_replay_failure(
                             err,
                             &ctx.archive_path,
                             locator.path(),
-                            &flow_evidence,
+                            built_flow.as_ref().map(|flow| flow.archive_flow_evidence()),
                         )
                         .await
                     }
@@ -1305,8 +1315,8 @@ impl FlowApplication {
             return skip(format!(
                 "verification skipped: source archive unavailable ({})\nrestore the source archive, then run obzenflow verify --baseline {} --candidate {}",
                 baseline.display(),
-                baseline.display(),
-                candidate.display()
+                shell_path(&baseline),
+                shell_path(&candidate)
             ));
         }
 

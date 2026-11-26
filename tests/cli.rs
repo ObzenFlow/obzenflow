@@ -1738,7 +1738,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
 }
 
 #[test]
-fn cli_version_commands_and_admission_errors_are_public() {
+fn cli_informational_requests_exit_zero() {
     let output = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
         .arg("--version")
         .output()

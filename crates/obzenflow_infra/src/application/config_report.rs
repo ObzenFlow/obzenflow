@@ -9,7 +9,8 @@ use crate::journal::read::{
     LogicVersionChange, RunConfigChanges,
 };
 use obzenflow_core::journal::archive_actions::{
-    decide, ArchiveEvidence, ArchiveOverrides, FailureEvidence, FlowEvidence, ReplayVerb,
+    decide, shell_path, ArchiveEvidence, ArchiveOverrides, FailureEvidence, FlowEvidence,
+    ReplayVerb,
 };
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_runtime::pipeline::FlowHandle;
@@ -114,13 +115,7 @@ pub(super) async fn resume_remedy(
     let evidence = DiskReplayArchive::written_run_evidence(run.to_path_buf(), ReplayVerb::Resume)
         .await
         .ok()?;
-    remedy_line(
-        &evidence,
-        flow.archive_flow_evidence(),
-        &resumed_from,
-        run,
-        &locator.to_string(),
-    )
+    remedy_line(&evidence, flow.archive_flow_evidence(), &resumed_from, run)
 }
 
 fn remedy_line(
@@ -128,7 +123,6 @@ fn remedy_line(
     flow: &FlowEvidence,
     resumed_from: &Path,
     run: &Path,
-    shown: &str,
 ) -> Option<String> {
     let admitted = evidence.failure == FailureEvidence::DepartedFromArchive
         && decide(
@@ -141,8 +135,9 @@ fn remedy_line(
         .is_ok();
     admitted.then(|| {
         format!(
-            "To continue this run, restore what {} recorded, then add: --resume-from {shown}",
-            resumed_from.display()
+            "To continue this run, restore what {} recorded, then add: --resume-from {}",
+            resumed_from.display(),
+            shell_path(run)
         )
     })
 }
@@ -288,8 +283,7 @@ mod tests {
                 evidence,
                 flow,
                 Path::new("/runs/killed"),
-                Path::new("/runs/refused"),
-                "runs/refused",
+                Path::new("runs/refused"),
             )
         };
         let flow = FlowEvidence::default();
