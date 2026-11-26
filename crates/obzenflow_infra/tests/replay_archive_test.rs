@@ -836,21 +836,15 @@ fn record_replay_of(dir: &Path, original: &Path) {
 
 async fn write_claimed_resume(
     base: &Path,
+    parent_facts: &[ChainEvent],
+    caught_up: usize,
     parent_ending: Option<PipelineLifecycleEvent>,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     const RESUMED_ID: &str = "flow_01H00000000000000000000001";
     let (parent, resumed) = (base.join("r0"), base.join("r1"));
-    let fact = source_fact(1);
     std::fs::create_dir_all(&parent).unwrap();
     std::fs::create_dir_all(&resumed).unwrap();
-    write_run(
-        &parent,
-        FLOW_ID,
-        None,
-        std::slice::from_ref(&fact),
-        parent_ending,
-    )
-    .await;
+    write_run(&parent, FLOW_ID, None, parent_facts, parent_ending).await;
     let parent = std::fs::canonicalize(&parent).unwrap();
     write_stopped_run(
         &resumed,
@@ -862,7 +856,7 @@ async fn write_claimed_resume(
                 merged_from: Vec::new(),
             },
         ),
-        std::slice::from_ref(&fact),
+        &parent_facts[..caught_up],
     )
     .await;
     let resumed = std::fs::canonicalize(&resumed).unwrap();
@@ -1048,7 +1042,8 @@ async fn admission_merged_ancestor_tail_recorded() {
 #[tokio::test]
 async fn resume_with_damaged_ancestor_log_refused() {
     let base = tempdir().unwrap();
-    let (parent, resumed) = write_claimed_resume(base.path(), Some(cancelled())).await;
+    let (parent, resumed) =
+        write_claimed_resume(base.path(), &[source_fact(1)], 1, Some(cancelled())).await;
     flip_first_record_byte(&parent.join("system.log"));
 
     for allow_incomplete_archive in [false, true] {
@@ -1070,7 +1065,7 @@ async fn resume_with_damaged_ancestor_log_refused() {
 #[tokio::test]
 async fn resume_with_missing_ancestor_log_refused() {
     let base = tempdir().unwrap();
-    let (parent, resumed) = write_claimed_resume(base.path(), None).await;
+    let (parent, resumed) = write_claimed_resume(base.path(), &[source_fact(1)], 1, None).await;
     let system_log = parent.join("system.log");
     std::fs::remove_file(&system_log).unwrap();
 
@@ -1098,7 +1093,7 @@ async fn resume_with_missing_ancestor_log_refused() {
 #[tokio::test]
 async fn missing_ancestor_log_with_flag_resumes() {
     let base = tempdir().unwrap();
-    let (parent, resumed) = write_claimed_resume(base.path(), None).await;
+    let (parent, resumed) = write_claimed_resume(base.path(), &[source_fact(1)], 1, None).await;
     std::fs::remove_file(parent.join("system.log")).unwrap();
 
     let head = DiskReplayArchive::open_for_resume(resumed, true)
@@ -1108,6 +1103,49 @@ async fn missing_ancestor_log_with_flag_resumes() {
     assert_eq!(ancestors.len(), 1);
     assert_eq!(ancestors[0].archive_path(), parent);
     assert_eq!(ancestors[0].archive_status(), ArchiveStatus::Unknown);
+}
+
+#[tokio::test]
+async fn torn_resume_evidence_merges_ancestor() {
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+    use obzenflow_core::journal::archive_actions::{
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+    };
+    let base = tempdir().unwrap();
+    let parent_facts = [source_fact(1), source_fact(2), source_eof()];
+    let (_, torn) = write_claimed_resume(base.path(), &parent_facts, 1, None).await;
+    let flow = FlowEvidence {
+        cycle_members: Vec::new(),
+        sources: vec![(
+            "returns".to_string(),
+            obzenflow_core::source::SourceContinuation::Refuse,
+        )],
+    };
+
+    let mut evidence = DiskReplayArchive::open(torn.clone(), false)
+        .await
+        .unwrap()
+        .evidence();
+    assert_eq!(evidence.sources[0].recorded_eof, None);
+    let resume = DiskReplayArchive::resume_evidence(&torn).await.unwrap();
+    assert_eq!(
+        resume.archive.sources[0].recorded_eof,
+        Some(EofKind::Natural)
+    );
+    evidence.resume = Some(Box::new(resume));
+    assert_eq!(
+        decide(
+            ReplayVerb::Replay,
+            &torn,
+            &evidence,
+            &flow,
+            ArchiveOverrides::default()
+        ),
+        Err(ArchiveRefusal::Interrupted {
+            run: torn.clone(),
+            resume: None
+        })
+    );
 }
 
 #[tokio::test]
