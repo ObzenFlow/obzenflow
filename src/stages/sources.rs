@@ -12,16 +12,16 @@
 //! A `source!` row takes a source handler. A handler that pulls its input
 //! declares one query through a bound port. The source stage asks each query,
 //! and the system behind the port does the physical I/O. A handler that receives
-//! pushed input records each admitted event. The journal records each answer or
-//! event. A replay uses only those records.
+//! pushed input takes each event from the system behind its event port. The journal
+//! records each answer or event. A replay uses only those records.
 //!
 //! | Input | Handler |
 //! |---|---|
 //! | Values in this process | [`ValuesSource::new`] |
-//! | Source channel | [`ChannelSource::new`] |
+//! | Source channel | `subscribe(decoder).through(Port::to(receiver))` |
 //! | CSV or TSV file | [`CsvSource::builder`] |
 //! | YAML document | [`YamlSource::builder`] |
-//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` |
+//! | Hosted HTTP ingress | `subscribe(decoder).through(Port::to(hosted.http(config)?))` |
 //! | HTTP API | `query(ListDetailRead::first(n)).through(port)` |
 //!
 //! An application writes a pull source as one line, `query(first).through(port)`.
@@ -36,8 +36,15 @@
 //!
 //! A source handler with state of its own implements [`TypedFiniteSourceHandler`]
 //! or [`TypedAsyncFiniteSourceHandler`]. Its `read` returns a [`SourceRead`] that
-//! [`SourceRead::finite`] builds. A source of pushed events is a [`ChannelSource`]
-//! or the hosted HTTP ingress.
+//! [`SourceRead::finite`] builds.
+//!
+//! An application writes a push source as one line, `subscribe(decoder).through(port)`.
+//! `port` is the event port of the system that holds the events. `decoder` maps each
+//! event to the output.
+//!
+//! A push source handler with state of its own implements
+//! [`TypedInfiniteSourceHandler`] or [`TypedAsyncInfiniteSourceHandler`]. Its `read`
+//! returns a [`SourceRead`] that [`SourceRead::events`] builds.
 //!
 //! ## In-process sources
 //!
@@ -46,10 +53,10 @@
 //! process holds the values, so ObzenFlow refuses to resume a run that did not
 //! read all of them.
 //!
-//! A [`ChannelSource`] receives the values that a sender puts on a channel from
-//! [`source_channel`](crate::events::source_channel). The stage records each value
-//! before it publishes it. A closed channel is a source error. Use topology fan-out
-//! for more than one consumer.
+//! The line `subscribe(decoder).through(Port::to(receiver))` reads the values that a
+//! sender puts on a [`source_channel`](crate::events::source_channel). The stage records
+//! each value before it decodes it. A closed channel is a source error. Use topology
+//! fan-out for more than one consumer.
 //! Values that are still in the channel when a run stops are lost, so a resumed
 //! run continues its live reads with [`ReattachGuarantee::AtMostOnce`].
 //!
@@ -164,21 +171,23 @@
 //!
 //! ## Hosted ingress sources
 //!
-//! A hosted ingress source receives admitted push submissions and asks the
-//! application for an [`IngressDecoder`](crate::events::IngressDecoder) that
-//! names the event each body becomes. The default `decode` deserializes the
-//! record with serde. Override it for a record-local rule. A decode error
-//! refuses that submission. The journalled refusal names the field.
+//! A hosted ingress endpoint runs the [`IngressDecoder`](crate::events::IngressDecoder)
+//! of its `subscribe` line on each push submission at admission. The decoder names the
+//! event that each body becomes. The default `decode` deserializes the record with
+//! serde. Override it for a record-local rule. The endpoint refuses a submission when
+//! `decode` returns an error. The journalled refusal names the field.
 //!
-//! Register the decoder through `FlowApplication::builder().http_ingress(decoder,
-//! config)`, or through `.ingress` for another transport. Each call returns the
-//! [`HostedSource`] handler for a `source!` stage. The journal records each
-//! admitted submission before its row commits. For custom hosting, compose the
-//! bundles with
-//! [`crate::application::ingress::ingress_source`] or
-//! [`crate::application::ingress::http_ingress`]. Hosted ingress acknowledges a
-//! submission only after its row commits, so a resumed run reattaches it live
-//! and records that the sender redelivers what was never acknowledged.
+//! `FlowApplication::builder().hosted_ingress()` returns the
+//! [`HostedIngress`](crate::application::HostedIngress) of the application. Give it to
+//! the factory of the flow. In the factory, each call to `hosted.http(config)` registers
+//! an endpoint and returns its event system. The line
+//! `subscribe(decoder).through(Port::to(events))` reads that event system. For an
+//! application-owned protocol, `.ingress` returns the event system of an
+//! [`ingress_source`](crate::application::ingress::ingress_source).
+//!
+//! The journal records each admitted submission before its row commits. Hosted
+//! ingress acknowledges a submission only after its row commits. A resumed run
+//! reattaches the ingress live with [`ReattachGuarantee::SenderRedelivers`].
 //!
 //! ## HTTP sources
 //!
@@ -204,8 +213,8 @@ pub use obzenflow_infra::systems::file::csv::{
 /// These items are the CSV and YAML ports of the file system and their read types.
 pub use obzenflow_infra::systems::file::{CsvFile, CsvLine, CsvPage, CsvRead, YamlFile};
 
-/// These items are the in-process sources, which own values or a source channel.
-pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
+/// `ValuesSource` is the in-process source that owns its values.
+pub use obzenflow_adapters::sources::ValuesSource;
 
 /// These items are the list-and-detail port of a pull source, its request and the
 /// step that a request asks for.
@@ -216,9 +225,6 @@ pub use obzenflow_infra::systems::file::yaml::{
     YamlDecodeError, YamlDecoder, YamlLine, YamlNode, YamlPage, YamlRead, YamlRecord,
     YamlSelection, YamlSource, YamlSourceBuilder,
 };
-
-/// `HostedSource` is the source handler for hosted ingress.
-pub use obzenflow_adapters::sources::HostedSource;
 
 /// HTTP primitives re-exported from `obzenflow_core` for building requests.
 pub use obzenflow_core::http_client::{

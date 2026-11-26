@@ -8,18 +8,16 @@ use super::contract::{
 };
 use super::settlement::{Settlement, SettlementMember};
 use super::validation::{validate_submission, ValidationConfig};
+use obzenflow_core::event::schema::TypedFact;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SystemPayload};
 use obzenflow_core::ingress::{
     EdgeShedReason, EventSubmission, HostedIngressBindingSlot, IngressAdmissionDecision,
     IngressAdmissionOutcome, IngressAttemptContext, IngressAttemptSeq, IngressBoundaryMiddleware,
-    IngressContentDigest, IngressContext, IngressKey, IngressOriginal, IngressRefusalReason,
-    IngressRequestId, IngressRequestIdentity,
+    IngressContentDigest, IngressContext, IngressFactDecoder, IngressKey, IngressOriginal,
+    IngressRefusalReason, IngressRequestId, IngressRequestIdentity,
 };
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::events::{
-    prove_journal_form, source_channel, HostedSubmission, IngressDecodeError, IngressDecoder,
-    IngressRecord, SourceReceiver, SourceSender,
-};
+use obzenflow_runtime::events::{source_channel, Arrival, SourceReceiver, SourceSender};
 use obzenflow_runtime::execution::{SourceExecutionPhase, SourceExecutionPhases};
 use obzenflow_runtime::pipeline::PipelineState;
 use std::fmt;
@@ -227,44 +225,51 @@ impl MemberRefusal {
         }
     }
 
-    fn decode(error: IngressDecodeError) -> Self {
-        let diagnostic = error.into_diagnostic();
+    fn decode(diagnostic: SourceDiagnostic) -> Self {
         let message = diagnostic_message(&diagnostic);
         Self::new(diagnostic, message)
     }
+
+    fn unrepresentable() -> Self {
+        let reason = SourceDiagnosticReason::UnrepresentableValue;
+        Self::new(SourceDiagnostic::new(reason), reason.phrase().to_string())
+    }
+
+    fn event_type(decoder: &dyn IngressFactDecoder, actual: &str) -> Self {
+        let error = super::validation::ValidationError::EventTypeMismatch {
+            expected: decoder.event_type().to_string(),
+            actual: actual.to_string(),
+        };
+        Self::new(error.diagnostic(), error.to_message())
+    }
 }
 
-/// A decoded, proven value and the identity committed with its row.
-pub(crate) struct AdmittedValue<T> {
-    value: T,
+pub(crate) struct AdmittedFact {
+    fact: TypedFact,
     request: Option<IngressRequestIdentity>,
 }
 
-/// Admit one protocol submission: event type, configured validator, the
-/// application decoder exactly once, then the journal-form proof (B4).
-pub(crate) fn admit_submission<D: IngressDecoder>(
-    decoder: &D,
+pub(crate) fn admit_submission(
+    decoder: &dyn IngressFactDecoder,
     validation: Option<&ValidationConfig>,
     submission: &EventSubmission,
     request_id: Option<&IngressRequestId>,
-) -> Result<AdmittedValue<D::Output>, MemberRefusal> {
-    if !D::Output::matches_event_type(submission.event_type.as_str()) {
-        let error = super::validation::ValidationError::EventTypeMismatch {
-            expected: D::Output::EVENT_TYPE.to_string(),
-            actual: submission.event_type.to_string(),
-        };
-        return Err(MemberRefusal::new(error.diagnostic(), error.to_message()));
+) -> Result<AdmittedFact, MemberRefusal> {
+    if !decoder.accepts(submission.event_type.as_str()) {
+        return Err(MemberRefusal::event_type(
+            decoder,
+            submission.event_type.as_str(),
+        ));
     }
     if let Some(validation) = validation {
         validate_submission(submission, validation)
             .map_err(|error| MemberRefusal::new(error.diagnostic(), error.to_message()))?;
     }
-    let value = decoder
-        .decode(IngressRecord::new(&submission.data))
-        .and_then(prove_journal_form)
+    let fact = decoder
+        .decode(&submission.data)
         .map_err(MemberRefusal::decode)?;
-    Ok(AdmittedValue {
-        value,
+    Ok(AdmittedFact {
+        fact,
         request: request_id.map(|id| IngressRequestIdentity {
             id: id.clone(),
             digest: IngressContentDigest::of_submission(
@@ -275,17 +280,18 @@ pub(crate) fn admit_submission<D: IngressDecoder>(
     })
 }
 
-/// Admit one typed in-process value: digest its serde form, then prove it.
 pub(crate) fn admit_typed<T: TypedPayload>(
+    decoder: &dyn IngressFactDecoder,
     value: T,
     request_id: Option<&IngressRequestId>,
-) -> Result<AdmittedValue<T>, MemberRefusal> {
+) -> Result<AdmittedFact, MemberRefusal> {
+    if !decoder.accepts(T::EVENT_TYPE) {
+        return Err(MemberRefusal::event_type(decoder, T::EVENT_TYPE));
+    }
     let request = match request_id {
         Some(id) => {
-            let form = serde_json::to_value(&value).map_err(|_| {
-                let reason = SourceDiagnosticReason::UnrepresentableValue;
-                MemberRefusal::new(SourceDiagnostic::new(reason), reason.phrase().to_string())
-            })?;
+            let form =
+                serde_json::to_value(&value).map_err(|_| MemberRefusal::unrepresentable())?;
             Some(IngressRequestIdentity {
                 id: id.clone(),
                 digest: IngressContentDigest::of_typed(form),
@@ -293,16 +299,19 @@ pub(crate) fn admit_typed<T: TypedPayload>(
         }
         None => None,
     };
-    let value = prove_journal_form(value).map_err(MemberRefusal::decode)?;
-    Ok(AdmittedValue { value, request })
+    let body = value
+        .into_chain_payload()
+        .and_then(|payload| payload.contract_body())
+        .map_err(|_| MemberRefusal::unrepresentable())?;
+    let fact = decoder.decode(&body).map_err(MemberRefusal::decode)?;
+    Ok(AdmittedFact { fact, request })
 }
 
 /// One request's admitted members, ready for the edge and the queue.
-pub(crate) struct AdmittedRequest<T> {
+pub(crate) struct AdmittedRequest {
     pub attempt: IngressAttemptContext,
     pub request_id: Option<IngressRequestId>,
-    /// `(position in the request, batch index, value)`.
-    pub members: Vec<(usize, Option<usize>, AdmittedValue<T>)>,
+    pub members: Vec<(usize, Option<usize>, AdmittedFact)>,
 }
 
 /// Why the edge refused a whole request after admission.
@@ -357,21 +366,19 @@ impl EdgeRefusal {
 }
 
 /// Shared state between ingestion endpoints and the in-process handle.
-pub struct IngestionState<T> {
-    tx: SourceSender<HostedSubmission<T>>,
+pub struct IngestionState {
+    tx: SourceSender<Arrival>,
     ready: Arc<AtomicBool>,
     source_phases: Arc<OnceLock<SourceExecutionPhases>>,
     buffer_capacity: usize,
     pub(crate) config: IngestionConfig,
-    /// FLOWIP-115d: the hosted-ingress binding slot, shared with this surface's
-    /// source half. The DSL fills it during source-stage materialization.
     ingress_slot: HostedIngressBindingSlot,
     /// Monotonic per-hosted-ingress submission-attempt sequence.
     attempt_seq: Arc<AtomicU64>,
     evidence: EvidenceRecorder,
 }
 
-impl<T> Clone for IngestionState<T> {
+impl Clone for IngestionState {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
@@ -386,8 +393,8 @@ impl<T> Clone for IngestionState<T> {
     }
 }
 
-impl<T> IngestionState<T> {
-    pub fn new(mut config: IngestionConfig) -> (Self, SourceReceiver<HostedSubmission<T>>) {
+impl IngestionState {
+    pub fn new(mut config: IngestionConfig) -> (Self, SourceReceiver<Arrival>) {
         config.base_path = normalize_base_path(&config.base_path);
         let ingress_key = resolve_ingress_key(config.ingress_key.clone(), &config.base_path);
         let buffer_capacity = config.buffer_capacity;
@@ -411,7 +418,8 @@ impl<T> IngestionState<T> {
         (state, rx)
     }
 
-    /// FLOWIP-115d: the hosted-ingress binding slot, shared with the source half.
+    /// `ingress_slot` returns the slot that this ingress shares with the source stage
+    /// that reads it.
     pub fn ingress_slot(&self) -> HostedIngressBindingSlot {
         self.ingress_slot.clone()
     }
@@ -420,6 +428,10 @@ impl<T> IngestionState<T> {
     /// derived from the base path).
     pub fn ingress_key(&self) -> &IngressKey {
         self.ingress_slot.ingress_key()
+    }
+
+    pub(crate) fn decoder(&self) -> Option<Arc<dyn IngressFactDecoder>> {
+        self.ingress_slot.decoder().cloned()
     }
 
     /// The composed ingress admission boundary, once the DSL has filled the slot.
@@ -569,11 +581,8 @@ impl<T> IngestionState<T> {
     /// with its receipt. The settlement then waits for each member's commit.
     pub(crate) async fn enqueue(
         &self,
-        request: AdmittedRequest<T>,
-    ) -> Result<Settlement, EdgeRefusal>
-    where
-        T: Send + 'static,
-    {
+        request: AdmittedRequest,
+    ) -> Result<Settlement, EdgeRefusal> {
         let AdmittedRequest {
             attempt,
             request_id,
@@ -658,7 +667,7 @@ impl<T> IngestionState<T> {
                 attempt_seq: attempt.attempt_seq,
                 request: admitted.request,
             };
-            permit.send(HostedSubmission::new(admitted.value, context, receipt));
+            permit.send(Arrival::admitted(admitted.fact, context, receipt));
             waiting.push(SettlementMember {
                 position,
                 batch_index,
@@ -753,29 +762,20 @@ mod tests {
     use super::*;
     use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    struct Probe {
-        value: u32,
-    }
-
-    impl TypedPayload for Probe {
-        const EVENT_TYPE: &'static str = "probe";
-    }
-
     fn live_phases() -> SourceExecutionPhases {
         RuntimeExecution::new(RuntimeMode::Live, None).source_phases()
     }
 
     #[test]
     fn unbound_ingress_refuses_live_input() {
-        let (state, _) = IngestionState::<Probe>::new(IngestionConfig::default());
+        let (state, _) = IngestionState::new(IngestionConfig::default());
         state.install_source_phases(live_phases());
         assert!(!state.resume_live());
     }
 
     #[tokio::test]
     async fn watch_pipeline_state_toggles_ready_on_running() {
-        let (state, _) = IngestionState::<Probe>::new(IngestionConfig::default());
+        let (state, _) = IngestionState::new(IngestionConfig::default());
         state
             .ingress_slot()
             .fill(obzenflow_core::ingress::FilledHostedIngress {

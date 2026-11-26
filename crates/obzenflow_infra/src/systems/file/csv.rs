@@ -326,7 +326,7 @@ where
                     delimiter: self.delimiter.unwrap_or(b','),
                     headers: if has_headers { None } else { self.headers },
                 };
-                CsvFileSystem::new(path, format).port()
+                Port::deferred(CsvFileSystem::new(path, format))
             }
         };
         Ok(CsvSource {
@@ -559,16 +559,18 @@ mod tests {
 
     #[test]
     fn through_port_source_needs_no_path() {
-        let store = super::super::system::CsvFileSystem::at("/data/tickets.csv")
-            .delimiter(b';')
-            .port();
+        let store: Port<dyn CsvFile> = Port::deferred(
+            super::super::system::CsvFileSystem::at("/data/tickets.csv").delimiter(b';'),
+        );
         CsvSource::builder(CsvRowDecoder)
             .chunk_size(25)
             .through(store)
             .build()
             .expect("a port supplies the file");
 
-        let other = || super::super::system::CsvFileSystem::at("/data/other.csv").port();
+        let other = || -> Port<dyn CsvFile> {
+            Port::deferred(super::super::system::CsvFileSystem::at("/data/other.csv"))
+        };
         assert!(CsvSource::builder(CsvRowDecoder)
             .path("/data/tickets.csv")
             .through(other())

@@ -6,15 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::num::NonZeroU64;
 
-/// `MEMBER_RECORDED_EVENT_TYPE` is the event type of an admitted member.
-pub const MEMBER_RECORDED_EVENT_TYPE: &str = "runtime.ingress.member_recorded";
-
-/// `MemberRecorded` is one member that a sender pushed and the source admitted. The
-/// source records the member before the fact that it produces.
+/// `EventReceived` is one event that a source took from the system behind its event
+/// port. The source records the event before its fact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MemberRecorded {
+pub struct EventReceived {
     pub recorded_flow_id: String,
     pub stage_key: String,
     pub number: NonZeroU64,
-    pub member: Value,
+    pub event: Value,
 }

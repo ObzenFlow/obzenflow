@@ -9,28 +9,22 @@ use super::IngestionState;
 use async_trait::async_trait;
 use obzenflow_core::ingress::BatchSubmission;
 use obzenflow_core::web::{EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request};
-use obzenflow_runtime::events::IngressDecoder;
 use tokio::time::Instant;
 
-pub struct BatchEventEndpoint<D: IngressDecoder> {
-    state: IngestionState<D::Output>,
-    decoder: D,
+pub struct BatchEventEndpoint {
+    state: IngestionState,
     path: String,
 }
 
-impl<D: IngressDecoder> BatchEventEndpoint<D> {
-    pub fn new(state: IngestionState<D::Output>, decoder: D) -> Self {
+impl BatchEventEndpoint {
+    pub fn new(state: IngestionState) -> Self {
         let path = join_path(&state.config.base_path, "batch");
-        Self {
-            state,
-            decoder,
-            path,
-        }
+        Self { state, path }
     }
 }
 
 #[async_trait]
-impl<D: IngressDecoder> HttpEndpoint for BatchEventEndpoint<D> {
+impl HttpEndpoint for BatchEventEndpoint {
     fn path(&self) -> &str {
         &self.path
     }
@@ -65,7 +59,6 @@ impl<D: IngressDecoder> HttpEndpoint for BatchEventEndpoint<D> {
         }
         process(
             &self.state,
-            &self.decoder,
             arrived,
             attempt_seq,
             request_id,

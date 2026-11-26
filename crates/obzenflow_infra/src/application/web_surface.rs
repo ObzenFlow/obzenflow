@@ -110,9 +110,8 @@ impl WebSurfaceAttachment {
         self
     }
 
-    /// FLOWIP-115d: attach the hosted-ingress binding slot so `FlowApplication`
-    /// can verify it was filled (its source half was placed in flow topology)
-    /// before serving endpoints.
+    /// `with_ingress_slot` attaches the slot of a hosted ingress. If no source stage
+    /// filled the slot, `FlowApplication` fails before it serves the endpoints.
     pub fn with_ingress_slot(mut self, slot: HostedIngressBindingSlot) -> Self {
         self.ingress_slot = Some(slot);
         self

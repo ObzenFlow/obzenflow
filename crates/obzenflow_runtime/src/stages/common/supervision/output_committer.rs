@@ -833,7 +833,7 @@ impl OutputCommitter<'_> {
         matches!(
             event.payload,
             ChainPayload::Execution(
-                ExecutionPayload::MemberRecorded(_)
+                ExecutionPayload::EventReceived(_)
                     | ExecutionPayload::EffectRecord(_)
                     | ExecutionPayload::EffectAttemptStarted(_)
                     | ExecutionPayload::EffectRecoveryAbandoned(_)

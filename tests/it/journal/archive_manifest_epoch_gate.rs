@@ -274,7 +274,32 @@ async fn claimed_hosted_slot_fails_preflight() {
     use obzenflow_adapters::middleware::rate_limit;
     use obzenflow_core::ingress::{FilledHostedIngress, HostedIngressBindingSlot};
     use obzenflow_dsl::source;
-    use obzenflow_runtime::stages::common::handlers::HostedSource;
+    use obzenflow_runtime::events::{subscribe, Arrival, Events, IngressDecoder};
+    use obzenflow_runtime::stages::common::handlers::SourceError;
+
+    #[derive(Clone)]
+    struct InputIngress;
+
+    impl IngressDecoder for InputIngress {
+        type Output = Input;
+    }
+
+    struct HostedInput(HostedIngressBindingSlot);
+
+    #[async_trait::async_trait]
+    impl Events for HostedInput {
+        async fn ready(&self) -> Result<(), SourceError> {
+            std::future::pending().await
+        }
+
+        fn take(&self) -> Option<Arrival> {
+            None
+        }
+
+        fn hosted_ingress(&self) -> Option<HostedIngressBindingSlot> {
+            Some(self.0.clone())
+        }
+    }
 
     for prefilled in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -296,10 +321,8 @@ async fn claimed_hosted_slot_fails_preflight() {
         }
         let shared_slot = slot.clone();
         let definition = FlowDefinition::materialize(move |_| {
-            let (_, first_rx) = obzenflow::events::source_channel(1);
-            let (_, second_rx) = obzenflow::events::source_channel(1);
-            let first = HostedSource::<Input>::ingress(first_rx, shared_slot.clone());
-            let second = HostedSource::<Input>::ingress(second_rx, shared_slot);
+            let first = subscribe(InputIngress).through(Port::to(HostedInput(shared_slot.clone())));
+            let second = subscribe(InputIngress).through(Port::to(HostedInput(shared_slot)));
             Ok(flow! {
                 name: "hosted_slot_ownership_preflight",
                 journals: disk_journals(journal_root),
@@ -322,7 +345,7 @@ async fn claimed_hosted_slot_fails_preflight() {
         if prefilled {
             assert!(
                 matches!(&failure.error,
-                    FlowBuildError::HostedIngressAlreadyBound {
+                    FlowBuildError::HostedIngressReused {
                         ingress_key, stage_name, bound_stage
                     } if ingress_key == "orders" && stage_name == "left" && bound_stage == "previous"
                 ),
@@ -335,7 +358,7 @@ async fn claimed_hosted_slot_fails_preflight() {
         } else {
             assert!(
                 matches!(&failure.error,
-                    FlowBuildError::DuplicateHostedIngressBinding {
+                    FlowBuildError::HostedIngressSubscribedTwice {
                         ingress_key, first_stage, second_stage
                     } if ingress_key == "orders" && first_stage == "left" && second_stage == "right"
                 ),

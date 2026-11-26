@@ -8,8 +8,11 @@
 use super::*;
 use crate::journal::{disk_journals, memory_journals, MemoryJournal};
 use async_trait::async_trait;
+use obzenflow_core::event::schema::TypedFact;
+use obzenflow_core::event::SourceDiagnostic;
 use obzenflow_core::event::{JournalEvent, SourceDiagnosticReason, SystemEvent, SystemPayload};
 use obzenflow_core::id::{JournalId, SystemId};
+use obzenflow_core::ingress::IngressFactDecoder;
 use obzenflow_core::ingress::{
     FilledHostedIngress, IngressAdmissionDecision, IngressAdmissionOutcome,
     IngressBoundaryMiddleware, IngressRefusalReason, IngressTiming,
@@ -23,7 +26,10 @@ use obzenflow_core::{ChainEvent, EventId, JournalRecord, ReaderGeneration, Stage
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_runtime::commands::perform;
 use obzenflow_runtime::effects::EffectError;
-use obzenflow_runtime::events::{HostedSubmission, SourceReceiver};
+use obzenflow_runtime::events::{
+    prove_journal_form, subscribe, Arrival, IngressDecodeError, IngressDecoder, IngressRecord,
+    SourceReceiver, Subscription,
+};
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::pipeline::ingress::IngressEvidenceWriter;
 use obzenflow_runtime::pipeline::PipelineState;
@@ -64,6 +70,59 @@ fn decoder<T>() -> TestIngress<T> {
     TestIngress(PhantomData)
 }
 
+impl<T: TypedPayload + Send + Sync + 'static> IngressFactDecoder for TestIngress<T> {
+    fn event_type(&self) -> &'static str {
+        T::EVENT_TYPE
+    }
+
+    fn accepts(&self, event_type: &str) -> bool {
+        T::matches_event_type(event_type)
+    }
+
+    fn decode(&self, data: &Value) -> Result<TypedFact, SourceDiagnostic> {
+        let unrepresentable =
+            || SourceDiagnostic::new(SourceDiagnosticReason::UnrepresentableValue);
+        let value = IngressRecord::new(data)
+            .deserialize::<T>()
+            .and_then(prove_journal_form)
+            .map_err(IngressDecodeError::into_diagnostic)?;
+        TypedFact::from_payload(value).map_err(|_| unrepresentable())
+    }
+}
+
+fn install<T: TypedPayload + Send + Sync + 'static>(state: &IngestionState) {
+    state
+        .ingress_slot()
+        .install_decoder(Arc::new(decoder::<T>()));
+}
+
+fn single<T: TypedPayload + Send + Sync + 'static>(state: IngestionState) -> SingleEventEndpoint {
+    install::<T>(&state);
+    SingleEventEndpoint::new(state)
+}
+
+fn batch<T: TypedPayload + Send + Sync + 'static>(state: IngestionState) -> BatchEventEndpoint {
+    install::<T>(&state);
+    BatchEventEndpoint::new(state)
+}
+
+fn http_parts<T: TypedPayload + Send + Sync + 'static>(
+    config: IngestionConfig,
+) -> (
+    Subscription<T>,
+    IngressHandle<T>,
+    IngestionState,
+    WebSurfaceAttachment,
+) {
+    let (events, state, surface) = http_endpoint(config);
+    let source = subscribe(decoder::<T>()).through(Port::to(events));
+    let handle = IngressHandle {
+        state: state.clone(),
+        payload: PhantomData,
+    };
+    (source, handle, state, surface)
+}
+
 fn unary(response: ManagedResponse) -> Response {
     match response {
         ManagedResponse::Unary(response) => response,
@@ -93,7 +152,7 @@ fn live_phases() -> SourceExecutionPhases {
 }
 
 /// The readiness watcher keeps the last state after its sender is gone.
-async fn mark_running<T>(state: &IngestionState<T>) {
+async fn mark_running(state: &IngestionState) {
     let (_, running) = tokio::sync::watch::channel(PipelineState::Running);
     state.watch_pipeline_state(running);
     tokio::task::yield_now().await;
@@ -139,8 +198,8 @@ fn refusal_reasons(facts: &[SystemPayload]) -> Vec<(IngressRefusalReason, u64)> 
 /// A hosted edge with no running source: admission and refusals only.
 struct Edge {
     stage_id: StageId,
-    state: IngestionState<Order>,
-    rx: Option<SourceReceiver<HostedSubmission<Order>>>,
+    state: IngestionState,
+    rx: Option<SourceReceiver<Arrival>>,
     journal: Arc<MemoryJournal<SystemEvent>>,
 }
 
@@ -155,6 +214,7 @@ impl Edge {
         phases: SourceExecutionPhases,
     ) -> Self {
         let (state, rx) = IngestionState::new(config);
+        install::<Order>(&state);
         let stage_id = StageId::new();
         state
             .ingress_slot()
@@ -184,12 +244,12 @@ impl Edge {
         mark_running(&self.state).await;
     }
 
-    fn single(&self) -> SingleEventEndpoint<TestIngress<Order>> {
-        SingleEventEndpoint::new(self.state.clone(), decoder())
+    fn single(&self) -> SingleEventEndpoint {
+        SingleEventEndpoint::new(self.state.clone())
     }
 
-    fn batch(&self) -> BatchEventEndpoint<TestIngress<Order>> {
-        BatchEventEndpoint::new(self.state.clone(), decoder())
+    fn batch(&self) -> BatchEventEndpoint {
+        BatchEventEndpoint::new(self.state.clone())
     }
 
     async fn facts(&self) -> Vec<SystemPayload> {
@@ -533,7 +593,7 @@ async fn a_custom_validator_adds_to_the_decoder_and_never_replaces_it() {
 
 #[tokio::test]
 async fn unrepresentable_values_are_refused_at_the_failing_field() {
-    let (state, _) = IngestionState::<Tagged>::new(IngestionConfig::default());
+    let (state, _) = IngestionState::new(IngestionConfig::default());
     state
         .ingress_slot()
         .fill(FilledHostedIngress {
@@ -547,7 +607,7 @@ async fn unrepresentable_values_are_refused_at_the_failing_field() {
     state.install_evidence_writer(IngressEvidenceWriter::for_test(journal.clone()));
     mark_running(&state).await;
 
-    let endpoint = SingleEventEndpoint::new(state, decoder::<Tagged>());
+    let endpoint = single::<Tagged>(state);
     let response = unary(
         endpoint
             .handle(post(
@@ -642,7 +702,7 @@ async fn the_acknowledgement_deadline_answers_unknown() {
 }
 
 struct CountEnqueuedBeforeObservation {
-    receiver: SourceReceiver<HostedSubmission<Order>>,
+    receiver: SourceReceiver<Arrival>,
     observed: Arc<AtomicUsize>,
 }
 
@@ -665,13 +725,74 @@ impl IngressBoundaryMiddleware for CountEnqueuedBeforeObservation {
     }
 }
 
+#[derive(Clone)]
+struct PositiveOrders;
+
+impl IngressDecoder for PositiveOrders {
+    type Output = Order;
+
+    fn decode(&self, record: IngressRecord<'_>) -> Result<Order, IngressDecodeError> {
+        let order: Order = record.deserialize()?;
+        if order.amount_cents == 0 {
+            return Err(IngressDecodeError::invalid_value("amount_cents"));
+        }
+        Ok(order)
+    }
+}
+
+#[tokio::test]
+async fn handle_submission_failing_decoder_refused() {
+    use obzenflow_runtime::stages::common::handlers::TypedAsyncInfiniteSourceHandler;
+
+    let (events, state, _surface) = http_endpoint(IngestionConfig::default());
+    let line = subscribe(PositiveOrders).through(Port::to(events));
+    let _read = line.read();
+    state
+        .ingress_slot()
+        .fill(FilledHostedIngress {
+            stage_id: StageId::new(),
+            stage_key: "orders".into(),
+            boundary: None,
+        })
+        .expect("slot fill succeeds once");
+    state.install_source_phases(live_phases());
+    let journal = evidence_journal();
+    state.install_evidence_writer(IngressEvidenceWriter::for_test(journal.clone()));
+    mark_running(&state).await;
+
+    let outcome = IngressHandle::<Order> {
+        state,
+        payload: PhantomData,
+    }
+    .submit(Order {
+        order_id: "1".into(),
+        amount_cents: 0,
+    })
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            IngressOutcome::Refused {
+                code: IngressErrorCode::ValidationFailed,
+                retry_after: None
+            }
+        ),
+        "{outcome:?}"
+    );
+    let facts = ingress_facts(journal.as_ref()).await;
+    assert_eq!(
+        refusal_reasons(&facts),
+        [(IngressRefusalReason::Validation, 1)]
+    );
+}
+
 /// FLOWIP-115s A3: `AcceptedForEnqueue` follows the send of every member.
 #[tokio::test]
 async fn accepted_observation_follows_enqueue_on_single_batch_and_handle_paths() {
     async fn observed_after(
-        submit: impl FnOnce(IngestionState<Order>) -> futures::future::BoxFuture<'static, ()>,
+        submit: impl FnOnce(IngestionState) -> futures::future::BoxFuture<'static, ()>,
     ) -> usize {
-        let (state, rx) = IngestionState::<Order>::new(IngestionConfig {
+        let (state, rx) = IngestionState::new(IngestionConfig {
             record_ingress_evidence: false,
             ..IngestionConfig::default()
         });
@@ -688,6 +809,7 @@ async fn accepted_observation_follows_enqueue_on_single_batch_and_handle_paths()
             })
             .expect("slot fill succeeds once");
         state.install_source_phases(live_phases());
+        install::<Order>(&state);
         mark_running(&state).await;
         submit(state).await;
         observed.load(Ordering::Acquire)
@@ -695,7 +817,7 @@ async fn accepted_observation_follows_enqueue_on_single_batch_and_handle_paths()
 
     let single = observed_after(|state| {
         Box::pin(async move {
-            SingleEventEndpoint::new(state, decoder::<Order>())
+            single::<Order>(state)
                 .handle(post("/events", order("1", 1), None))
                 .await
                 .expect("single response");
@@ -706,7 +828,7 @@ async fn accepted_observation_follows_enqueue_on_single_batch_and_handle_paths()
 
     let batch = observed_after(|state| {
         Box::pin(async move {
-            BatchEventEndpoint::new(state, decoder::<Order>())
+            batch::<Order>(state)
                 .handle(post(
                     "/batch",
                     json!({"events": [order("1", 1), order("2", 1)]}),
@@ -721,12 +843,15 @@ async fn accepted_observation_follows_enqueue_on_single_batch_and_handle_paths()
 
     let handle = observed_after(|state| {
         Box::pin(async move {
-            let outcome = IngressHandle { state }
-                .submit(Order {
-                    order_id: "1".into(),
-                    amount_cents: 1,
-                })
-                .await;
+            let outcome = IngressHandle::<Order> {
+                state,
+                payload: PhantomData,
+            }
+            .submit(Order {
+                order_id: "1".into(),
+                amount_cents: 1,
+            })
+            .await;
             assert!(matches!(outcome, IngressOutcome::Unknown { .. }));
         })
     })
@@ -792,7 +917,7 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T>
 
 #[tokio::test]
 async fn evidence_failure_answers_listener_unavailable() {
-    let (state, _) = IngestionState::<Order>::new(IngestionConfig::default());
+    let (state, _) = IngestionState::new(IngestionConfig::default());
     state
         .ingress_slot()
         .fill(FilledHostedIngress {
@@ -810,7 +935,7 @@ async fn evidence_failure_answers_listener_unavailable() {
     mark_running(&state).await;
 
     let response = unary(
-        SingleEventEndpoint::new(state, decoder::<Order>())
+        single::<Order>(state)
             .handle(post("/api/ingest/events", order("1", 1), None))
             .await
             .unwrap(),
@@ -964,7 +1089,7 @@ async fn wait_until_ready(health: &dyn HttpEndpoint) {
 }
 
 async fn ingress_flow(
-    source: HostedSource<Order>,
+    source: Subscription<Order>,
     journals_root: Option<PathBuf>,
     hold: Option<Hold>,
 ) -> FlowHandle {
@@ -1023,16 +1148,11 @@ struct Stopped {
 
 impl RunningIngress {
     async fn start(name: &'static str, journals_root: Option<PathBuf>) -> Self {
-        let ingress = http_ingress(
-            decoder::<Order>(),
-            IngestionConfig {
-                base_path: format!("/api/{name}"),
-                ..IngestionConfig::default()
-            },
-        );
-        let submit = ingress.handle();
-        let (source, http) = ingress.into_parts();
-        let (_, mut endpoints, wiring, _) = http.into_surface().into_parts();
+        let (source, submit, _, surface) = http_parts::<Order>(IngestionConfig {
+            base_path: format!("/api/{name}"),
+            ..IngestionConfig::default()
+        });
+        let (_, mut endpoints, wiring, _) = surface.into_parts();
         let events = take_endpoint(&mut endpoints, "/events");
         let batch = take_endpoint(&mut endpoints, "/batch");
         let health = take_endpoint(&mut endpoints, "/health");
@@ -1085,7 +1205,7 @@ impl RunningIngress {
         }
         Stopped {
             facts: ingress_facts(system.as_ref()).await,
-            rows: source_rows(&self.handle, &self.submit.ingress_slot()).await,
+            rows: source_rows(&self.handle, &self.submit.state().ingress_slot()).await,
         }
     }
 }
@@ -1271,17 +1391,12 @@ async fn a_strict_replay_refuses_ingress_throughout() {
         }),
         ..BootstrapConfig::default()
     });
-    let ingress = http_ingress(
-        decoder::<Order>(),
-        IngestionConfig {
-            base_path: "/api/recorded".to_string(),
-            ..IngestionConfig::default()
-        },
-    );
-    let state = ingress.handle().state();
+    let (source, _, state, surface) = http_parts::<Order>(IngestionConfig {
+        base_path: "/api/recorded".to_string(),
+        ..IngestionConfig::default()
+    });
     let slot = state.ingress_slot();
-    let (source, http) = ingress.into_parts();
-    let (_, endpoints, wiring, _) = http.into_surface().into_parts();
+    let (_, endpoints, wiring, _) = surface.into_parts();
     let events = endpoints
         .into_iter()
         .find(|endpoint| endpoint.path().ends_with("/events"))
@@ -1372,15 +1487,11 @@ impl TypedPayload for PlacementPayload {
 async fn duplicate_limiters_resolving_to_hosted_ingress_are_rejected() {
     use obzenflow_adapters::middleware::rate_limit;
 
-    let ingress = http_ingress(
-        decoder::<PlacementPayload>(),
-        IngestionConfig {
-            base_path: "/api/placement-duplicate".to_string(),
-            record_ingress_evidence: false,
-            ..Default::default()
-        },
-    );
-    let (hosted_source, _) = ingress.into_parts();
+    let (hosted_source, _, _, _) = http_parts::<PlacementPayload>(IngestionConfig {
+        base_path: "/api/placement-duplicate".to_string(),
+        record_ingress_evidence: false,
+        ..Default::default()
+    });
     let built = FlowDefinition::materialize(move |_runtime_config| {
         Ok(flow! {
             name: "flowip_115s_duplicate_positions",
@@ -1421,16 +1532,12 @@ async fn duplicate_limiters_resolving_to_hosted_ingress_are_rejected() {
 async fn a_hosted_rate_limiter_refuses_through_a_running_flow() {
     use obzenflow_adapters::middleware::rate_limit;
 
-    let ingress = http_ingress(
-        decoder::<Order>(),
-        IngestionConfig {
-            base_path: "/api/limited".to_string(),
-            ..Default::default()
-        },
-    );
-    let slot = ingress.handle().ingress_slot();
-    let (source, http) = ingress.into_parts();
-    let (_, mut endpoints, wiring, _) = http.into_surface().into_parts();
+    let (source, _, state, surface) = http_parts::<Order>(IngestionConfig {
+        base_path: "/api/limited".to_string(),
+        ..Default::default()
+    });
+    let slot = state.ingress_slot();
+    let (_, mut endpoints, wiring, _) = surface.into_parts();
     let events = take_endpoint(&mut endpoints, "/events");
     let health = take_endpoint(&mut endpoints, "/health");
     let sink = perform(|_: &Order| Discard).through(Port::to(DiscardSink));

@@ -27,9 +27,9 @@ pub use obzenflow_runtime::effects::{Keyed, SinkRequest, SinkRole};
 #[doc(hidden)]
 pub use obzenflow_runtime::effects::{
     __async_trait, assert_port_answer, AtLeastOnce, AtMostOnce, Call, CallRequest, CallSafety,
-    DeclaredEffectSet, DomainFacts, EffectList, FieldsEffects, Idempotent, KeyRule, NarrowedPort,
-    PortAnswer, PortEffects, PortImpl, PortReply, PortServesRequest, RecordedReply, RequestList,
-    RequiresKey, ServesPort, Transactional, WholePort,
+    DeclaredEffectSet, DomainFacts, EffectKind, EffectList, FieldsEffects, Idempotent, KeyRule,
+    NarrowedPort, PortAnswer, PortEffects, PortImpl, PortKind, PortReply, PortServesRequest,
+    QueryKind, RecordedReply, RequestList, RequiresKey, ServesPort, Transactional, WholePort,
 };
 
 /// Building blocks for simulated outside systems: a call log that answers a

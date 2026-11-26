@@ -175,6 +175,31 @@ impl SystemPort {
         self.coordinate.ordinal()
     }
 
+    pub(crate) fn eager_system<P>(&self) -> Option<Arc<P>>
+    where
+        P: ?Sized + Send + Sync + 'static,
+    {
+        match &self.recipe {
+            PortRecipe::Eager(resolved) => resolved.port.downcast_ref::<Arc<P>>().cloned(),
+            PortRecipe::Deferred(_) => None,
+        }
+    }
+
+    pub(crate) fn resolve_system<P>(&self) -> Result<Arc<P>, EffectPortResolutionError>
+    where
+        P: ?Sized + Send + Sync + 'static,
+    {
+        let resolved = match &self.recipe {
+            PortRecipe::Eager(resolved) => resolved.clone(),
+            PortRecipe::Deferred(resolver) => resolver()?,
+        };
+        resolved
+            .port
+            .downcast_ref::<Arc<P>>()
+            .cloned()
+            .ok_or(EffectPortResolutionError::ClientConstructionFailed)
+    }
+
     pub(crate) fn eager<P>(port: Arc<P>) -> Self
     where
         P: ?Sized + Send + Sync + 'static,
@@ -698,26 +723,19 @@ impl EffectPortRegistry {
     #[doc(hidden)]
     pub fn validate_required_registration(
         &self,
+        stage: &str,
         declaration: &EffectDeclaration,
     ) -> Result<(), BindingAuthorityFault> {
         for binding in declaration.bindings() {
-            let logical_name = binding.logical_name();
-
-            if !self.installed_coordinates.contains(&binding.registration) {
-                return Err(BindingAuthorityFault::registration_missing(
-                    declaration.effect_type(),
-                    logical_name.clone(),
-                ));
-            }
-
-            if binding
-                .slots()
-                .iter()
-                .any(|slot| !self.recipes.contains_key(&slot.coordinate))
+            if !self.installed_coordinates.contains(&binding.registration)
+                || binding
+                    .slots()
+                    .iter()
+                    .any(|slot| !self.recipes.contains_key(&slot.coordinate))
             {
                 return Err(BindingAuthorityFault::registration_missing(
                     declaration.effect_type(),
-                    logical_name.clone(),
+                    stage,
                 ));
             }
         }
@@ -1696,7 +1714,7 @@ mod tests {
         let panic_error_debug = format!("{panic_error:?}");
         let fault = BindingAuthorityFault::resolution_failed(
             CanaryBoundEffect::EFFECT_TYPE,
-            panic_binding.logical_name().clone(),
+            "canary",
             "client",
         );
         let fatal = fault.stage_fatal();

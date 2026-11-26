@@ -10,13 +10,13 @@ use obzenflow_core::web::{
 };
 use serde::Serialize;
 
-pub struct IngestionHealthEndpoint<T> {
-    state: IngestionState<T>,
+pub struct IngestionHealthEndpoint {
+    state: IngestionState,
     path: String,
 }
 
-impl<T> IngestionHealthEndpoint<T> {
-    pub fn new(state: IngestionState<T>) -> Self {
+impl IngestionHealthEndpoint {
+    pub fn new(state: IngestionState) -> Self {
         let path = join_path(&state.config.base_path, "health");
         Self { state, path }
     }
@@ -36,7 +36,7 @@ struct IngestionHealthResponse {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> HttpEndpoint for IngestionHealthEndpoint<T> {
+impl HttpEndpoint for IngestionHealthEndpoint {
     fn path(&self) -> &str {
         &self.path
     }

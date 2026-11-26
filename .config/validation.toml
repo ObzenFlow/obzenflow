@@ -328,14 +328,14 @@ rationale = "Admission must fail before binding; only a unique temporary configu
 
 [[prerequisites]]
 binary = "obzenflow_infra"
-test = "application::flow_application::tests::startup::http_ingress_builder_hosts_multiple_sources"
+test = "application::flow_application::tests::startup::hosted_http_two_endpoints_deliver"
 lanes = ["production-features"]
 capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect"]
 rationale = "Application owns its port-zero listener; clients verify ingress or phonebook lifecycle, using a unique temporary configuration."
 
 [[prerequisites]]
 binary = "obzenflow_infra"
-test = "application::flow_application::tests::startup::http_ingress_builder_without_source_fails_startup"
+test = "application::flow_application::tests::startup::hosted_http_unsubscribed_endpoint_fails_startup"
 lanes = ["production-features","test-support"]
 capabilities = ["temp-files"]
 rationale = "Admission must fail before binding; only a unique temporary configuration and journal archive are required."

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod member_journal;
+mod event_journal;
 mod sink_group;
 use super::boundary::PhysicalCallOutcome;
 use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
@@ -693,19 +693,18 @@ impl EffectsCore {
             Err(_) => {
                 let fault = BindingAuthorityFault::binding_mismatch(
                     E::EFFECT_TYPE,
-                    None,
+                    &self.ctx.stage.stage_key,
                     BindingMismatchKind::Mode,
                 );
                 return Err(self.latch_binding_fault(fault));
             }
         };
-        let logical_name = Some(declaration.binding().logical_name().clone());
         match declaration.binding().typed_projection::<E>() {
             Some(projection) => Ok(projection),
             None => {
                 let fault = BindingAuthorityFault::binding_mismatch(
                     E::EFFECT_TYPE,
-                    logical_name,
+                    &self.ctx.stage.stage_key,
                     BindingMismatchKind::Mode,
                 );
                 Err(self.latch_binding_fault(fault))
@@ -1373,7 +1372,7 @@ impl EffectsCore {
             };
             let fault = BindingAuthorityFault::binding_mismatch(
                 E::EFFECT_TYPE,
-                Some(declaration.binding().logical_name().clone()),
+                &self.ctx.stage.stage_key,
                 kind,
             );
             return Err(self.latch_binding_fault(fault));
@@ -3352,13 +3351,13 @@ impl EffectsCore {
             return Some(fault.clone());
         }
 
-        let binding = declaration.binding().logical_name();
+        let stage = self.ctx.stage.stage_key.as_str();
         match error {
             EffectError::EffectTargetInvariantViolation { slot } => {
                 let slot = declaration.binding().declared_slot_label(slot.as_str())?;
                 Some(BindingAuthorityFault::target_invariant_violation(
                     E::EFFECT_TYPE,
-                    binding.clone(),
+                    stage,
                     slot,
                     false,
                 ))
@@ -3371,7 +3370,7 @@ impl EffectsCore {
                     let slot = declaration.binding().declared_slot_label(port)?;
                     Some(BindingAuthorityFault::target_invariant_violation(
                         E::EFFECT_TYPE,
-                        binding.clone(),
+                        stage,
                         slot,
                         true,
                     ))
@@ -3396,13 +3395,13 @@ impl EffectsCore {
                     super::ports::EffectPortViewBuildError::MissingRegistration => {
                         BindingAuthorityFault::registration_missing(
                             declaration.effect_type(),
-                            binding.logical_name().clone(),
+                            &self.ctx.stage.stage_key,
                         )
                     }
                     super::ports::EffectPortViewBuildError::Resolver { slot, .. } => {
                         BindingAuthorityFault::resolution_failed(
                             declaration.effect_type(),
-                            binding.logical_name().clone(),
+                            &self.ctx.stage.stage_key,
                             slot,
                         )
                     }

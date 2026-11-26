@@ -80,8 +80,7 @@ pub enum ExecutionPayload {
     Backpressure(BackpressureFact),
     SourceRecordRejected(SourceRecordRejectedFact),
     SourcePollFailed(SourcePollFailedFact),
-    #[serde(rename = "source_input")]
-    MemberRecorded(Box<crate::source::MemberRecorded>),
+    EventReceived(Box<crate::source::EventReceived>),
     SourceReattached(SourceReattachedFact),
     AiChunkingPlanned(AiChunkingPlannedFact),
     AccumulatorProgress {
@@ -590,7 +589,7 @@ impl ExecutionPayload {
             Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourceRecordRejected(_) => vocabulary::source::RECORD_REJECTED,
             Self::SourcePollFailed(_) => vocabulary::source::POLL_FAILED,
-            Self::MemberRecorded(_) => crate::source::MEMBER_RECORDED_EVENT_TYPE,
+            Self::EventReceived(_) => vocabulary::event::RECEIVED,
             Self::SourceReattached(_) => vocabulary::source::REATTACHED,
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
             Self::AccumulatorProgress { .. } => "stateful.accumulation_progress",
@@ -615,7 +614,7 @@ impl ExecutionPayload {
         match self {
             Self::StageFatalRecorded(_)
             | Self::StageProcessingFailed(_)
-            | Self::MemberRecorded(_)
+            | Self::EventReceived(_)
             | Self::EffectRecord(_)
             | Self::EffectAttemptStarted(_)
             | Self::EffectRecoveryAbandoned(_) => true,

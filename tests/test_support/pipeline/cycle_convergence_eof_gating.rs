@@ -44,7 +44,8 @@ impl TypedPayload for SeedEvent {
 const KIND_SEED: &str = "seed";
 const KIND_ITER: &str = "iter";
 const KIND_DONE: &str = "done";
-use obzenflow::stages::sources::{ChannelSource, ValuesSource};
+use obzenflow::events::subscribe;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use std::collections::{BTreeMap, HashMap};
@@ -560,7 +561,8 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     seed_input
         .try_send(seed(target_iterations))
         .expect("the channel holds the seed");
-    let source = ChannelSource::new(seeds);
+    let source =
+        subscribe(replay_testkit::ChannelIngress::<SeedEvent>::new()).through(Port::to(seeds));
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
     let iter = IterationTransform::new(iter_processed_for_flow, None);
 

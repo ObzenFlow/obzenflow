@@ -4,10 +4,10 @@
 
 use super::*;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-use obzenflow_core::source::MemberRecorded;
+use obzenflow_core::source::EventReceived;
 
 impl EffectsCore {
-    pub(crate) async fn record_member<F, Fut>(
+    pub(crate) async fn record_event<F, Fut>(
         &mut self,
         acquire: F,
     ) -> Result<serde_json::Value, EffectError>
@@ -25,18 +25,18 @@ impl EffectsCore {
             .and_then(|history| history.members.get(&cursor))
             .cloned();
         if let Some(mut event) = recorded {
-            let ChainPayload::Execution(ExecutionPayload::MemberRecorded(record)) = &event.payload
+            let ChainPayload::Execution(ExecutionPayload::EventReceived(record)) = &event.payload
             else {
                 return Err(EffectError::ReplayArchive(
-                    "the member record is not valid".into(),
+                    "the event record is not valid".into(),
                 ));
             };
             if matches!(plan, ActionPlan::Live) {
                 return Err(EffectError::ReplayArchive(format!(
-                    "the member at {cursor:?} does not match the recording"
+                    "the event at {cursor:?} does not match the recording"
                 )));
             }
-            let member = record.member.clone();
+            let member = record.event.clone();
             self.reauthor_recorded_crossing(ActionRow::Member(cursor))
                 .await?;
             self.mark_lineage(&mut event, RowLineage::Reproduced(None));
@@ -48,22 +48,22 @@ impl EffectsCore {
                 && self.ctx.stage.runtime_execution.resume_control().is_none()
         {
             return Err(EffectError::ReplayArchive(format!(
-                "the archive has no member at {cursor:?}"
+                "the archive has no event at {cursor:?}"
             )));
         }
         self.cross_before_live_action().await?;
         let member = acquire().await?;
-        let record = MemberRecorded {
+        let record = EventReceived {
             recorded_flow_id: cursor.recorded_flow_id.to_string(),
             stage_key: self.ctx.stage.stage_key.clone(),
             number: std::num::NonZeroU64::new(self.ctx.input_seq.0).ok_or_else(|| {
-                EffectError::Execution("the input position of the member is zero".into())
+                EffectError::Execution("the input position of the event is zero".into())
             })?,
-            member: member.clone(),
+            event: member.clone(),
         };
         let mut event = ChainEventFactory::execution_event(
             self.ctx.stage.writer_id,
-            ExecutionPayload::MemberRecorded(Box::new(record)),
+            ExecutionPayload::EventReceived(Box::new(record)),
         );
         self.mark_lineage(&mut event, RowLineage::Live);
         self.answer = Some(self.commit_framework_event(event).await?);

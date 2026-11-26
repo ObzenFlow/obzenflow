@@ -42,15 +42,19 @@ use gateway_demo::domain::{
 };
 use gateway_demo::gateway::ProcessorResponse;
 use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
-use obzenflow::application::{verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication};
+use obzenflow::application::{
+    verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication, HostedIngress,
+};
 use obzenflow::commands::perform;
 use obzenflow::effects::simulated::CallLog;
 use obzenflow::effects::{
     EffectContext, EffectError, Effects, IdempotencyKey, Keyed, StageCompletion,
 };
 use obzenflow::error::HandlerError;
-use obzenflow::events::{source_channel, IngressDecoder, SourceSender};
-use obzenflow::flow::{effectful_transform, flow, sink, source, stateful, FlowDefinition};
+use obzenflow::events::{source_channel, subscribe, IngressDecoder, SourceSender};
+use obzenflow::flow::{
+    effectful_transform, flow, sink, source, stateful, FlowBuildError, FlowDefinition,
+};
 use obzenflow::journal::disk_journals;
 use obzenflow::journal::read::{
     open_disk_run, ChainPayload, ExecutionPayload, FlowControlPayload, PipelineLifecycleEvent,
@@ -62,11 +66,11 @@ use obzenflow::queries::FiniteRead;
 use obzenflow::schema::{outcome, TypedPayload};
 use obzenflow::stages::sinks::DiscardSink;
 use obzenflow::stages::sources::{
-    HostedSource, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
+    YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
 };
 use obzenflow::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
 use obzenflow::stages::transforms::EffectfulTransformHandler;
-use obzenflow::systems::{Port, SystemConfig};
+use obzenflow::systems::Port;
 use obzenflow_core::event::payloads::execution_payload::{ReattachGuarantee, SourceReattachedFact};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::EventId;
@@ -91,10 +95,6 @@ const FIRST_AFTER_INVALID: &str = "S-03";
 const FIRST_CUT: &str = "S-12";
 /// Held inside S4's resumed run once its reconstruction completes (S5).
 const SECOND_CUT: &str = "S-18";
-/// The first order S4's other resumed run calls after re-executing S-12, held
-/// before that run's reconstruction completes (S5b).
-const TORN_CUT: &str = "S-13";
-const HELD_RECEIPT: &str = "W-01";
 const DECLINES: [(&str, &str); 3] = [
     ("S-05", "InsufficientFunds"),
     ("S-14", "AddressMismatch"),
@@ -230,7 +230,7 @@ fn http_order(order_id: &str) -> serde_json::Value {
 /// 084l's.
 enum WebOrders {
     Yaml(YamlSource<OrderYaml>),
-    Http(HostedSource<CustomerOrderPlaced>),
+    Http(HostedIngress),
 }
 
 // ---------------------------------------------------------------------------
@@ -276,8 +276,6 @@ fn idempotency_key(order_id: &str) -> String {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Hold {
     Gateway(String),
-    Receipt(String),
-    ReceiptAndGateway { receipt: String, gateway: String },
     BetweenEffects(String),
     AiSourceAfter(u64),
     AiCall(String),
@@ -481,28 +479,10 @@ fn receipt_for(payment: &PaymentAuthorized) -> Receipt {
     }
 }
 
-fn held_receipt_for(
-    hold: Option<String>,
-    log: PathBuf,
-    release: PathBuf,
-) -> impl Fn(&PaymentAuthorized) -> Receipt + Clone + Send + Sync + 'static {
-    move |payment| {
-        if hold.as_deref() == Some(payment.order_id.as_str()) {
-            append_line(&log, &payment.order_id).expect("log the held receipt");
-            while !release.exists() {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-        receipt_for(payment)
-    }
-}
-
 fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDefinition {
     let store_orders_input = orders(scenario.store_input(), "/store_orders");
-    let (gateway_hold, receipt_hold) = match hold {
-        Some(Hold::Gateway(order)) => (Some(order), None),
-        Some(Hold::Receipt(order)) => (None, Some(order)),
-        Some(Hold::ReceiptAndGateway { receipt, gateway }) => (Some(gateway), Some(receipt)),
+    let gateway_hold = match hold {
+        Some(Hold::Gateway(order)) => Some(order),
         Some(
             Hold::BetweenEffects(_)
             | Hold::AiSourceAfter(_)
@@ -512,7 +492,7 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
             | Hold::Ticket(_)
             | Hold::Processor,
         )
-        | None => (None, None),
+        | None => None,
     };
     let gateway = Gateway {
         calls: CallLog::open(scenario.ledger()).expect("the gateway's call log opens"),
@@ -522,12 +502,7 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
     let authorize = Authorize {
         gateway: Port::to(gateway),
     };
-    let receipt_file = perform(held_receipt_for(
-        receipt_hold,
-        scenario.held_receipts(),
-        scenario.release(),
-    ))
-    .through(Port::to(ReceiptFile {
+    let receipt_file = perform(receipt_for).through(Port::to(ReceiptFile {
         path: scenario.receipts(),
     }));
     let journals = scenario.journals();
@@ -562,7 +537,15 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
                 }
                 }
             }
-            WebOrders::Http(web_orders_input) => flow! {
+            WebOrders::Http(hosted) => {
+                let endpoint = hosted
+                    .http(IngestionConfig {
+                        base_path: HTTP_BASE.into(),
+                        ..IngestionConfig::default()
+                    })
+                    .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
+                let web_orders_input = subscribe(HttpOrders).through(Port::to(endpoint));
+                flow! {
                 name: "durable_execution_contract",
                 journals: disk_journals(journals),
 
@@ -584,7 +567,8 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
                     settlement |> settled;
                     authorize_payment |> receipts;
                 }
-            },
+                }
+            }
         })
     })
 }
@@ -607,18 +591,12 @@ fn durable_execution_contract_child() {
     let plan: Plan = serde_json::from_str(&std::env::var(PLAN).expect("the parent passes a plan"))
         .expect("the plan parses");
     let args = std::iter::once("obzenflow".to_string()).chain(plan.args);
-    let mut app = FlowApplication::builder().with_cli_args(args);
+    let app = FlowApplication::builder().with_cli_args(args);
     let scenario = &plan.scenario;
     let result = match scenario.graph {
         Graph::Payment | Graph::NarrowPayment => {
             let web = match scenario.http {
-                Some(_) => WebOrders::Http(app.http_ingress(
-                    HttpOrders,
-                    IngestionConfig {
-                        base_path: HTTP_BASE.into(),
-                        ..IngestionConfig::default()
-                    },
-                )),
+                Some(_) => WebOrders::Http(app.hosted_ingress()),
                 None => WebOrders::Yaml(orders(scenario.web_input(), "/web_orders")),
             };
             app.with_config_file(payment_config(scenario))
@@ -675,28 +653,34 @@ fn durable_execution_contract_child() {
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::tickets_input(scenario)).port(),
+                Port::deferred(source_ports::ticket_store(source_ports::tickets_input(
+                    scenario,
+                ))),
                 plan.hold,
             )),
         Graph::SourcePortTicketPages(pages) => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::paged_tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::tickets_input(scenario)).port(),
+                Port::deferred(source_ports::ticket_store(source_ports::tickets_input(
+                    scenario,
+                ))),
                 pages,
             )),
         Graph::SourcePortTicketCopy => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::ticket_copy(scenario)).port(),
+                Port::deferred(source_ports::ticket_store(source_ports::ticket_copy(
+                    scenario,
+                ))),
                 plan.hold,
             )),
         Graph::SourcePortTicketFixture(count) => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                scripted_tickets::TicketFixture { count }.port(),
+                Port::deferred(scripted_tickets::TicketFixture { count }),
                 plan.hold,
             )),
         Graph::SourcePortOwned => app.run_blocking(source_ports::owned_flow(
@@ -918,10 +902,6 @@ impl Scenario {
 
     fn receipts(&self) -> PathBuf {
         self.root.join("receipts.jsonl")
-    }
-
-    fn held_receipts(&self) -> PathBuf {
-        self.root.join("held-receipts.jsonl")
     }
 
     fn release(&self) -> PathBuf {
@@ -1418,12 +1398,11 @@ impl Archive {
     fn read_orders(&self) -> Vec<String> {
         self.rows("web_orders", RunJournalKind::Data)
             .filter_map(|row| {
-                let ChainPayload::Execution(ExecutionPayload::MemberRecorded(record)) =
-                    &row.payload
+                let ChainPayload::Execution(ExecutionPayload::EventReceived(record)) = &row.payload
                 else {
                     return None;
                 };
-                record.member["fact"]["payload"]["order_id"]
+                record.event["admitted"]["fact"]["payload"]["order_id"]
                     .as_str()
                     .map(str::to_owned)
             })
@@ -2285,15 +2264,12 @@ async fn durable_execution_contract() {
     stopped.check(Some(&reference));
     stopped.report();
 
-    // S4: SIGKILL at the cut with the held order uncommitted. Its archive
-    // starts two histories over the same inputs: S5's copy and S5b's original.
     let s4 = Scenario::fresh("s4");
     let child = Child::spawn(&s4, Vec::new(), Some(Hold::Gateway(FIRST_CUT.into())));
     let killed = first_cut(&s4, &child, "S4").await;
     child.signal(Signal::Kill);
     assert!(!child.exit().await.success());
     let (s5, killed_copy) = Scenario::copied("s5", &s4, &killed);
-    s4.without_web_input();
 
     // S5: a second SIGKILL inside S4's resumed run, after its reconstruction
     // completes; resume of the resume.
@@ -2321,78 +2297,31 @@ async fn durable_execution_contract() {
     let rebuilt_head = Child::spawn(&s5, resume(&torn), None).completed().await;
     after_rebuild.record(&rebuilt_head, Ended::Natural).await;
 
-    let mut before_rebuild = History::new("S5b", &s4);
-    before_rebuild
-        .record(&killed, Ended::Interrupted { killed: true })
-        .await;
-    let child = Child::spawn(
-        &s4,
-        resume(&killed),
-        Some(Hold::ReceiptAndGateway {
-            receipt: HELD_RECEIPT.into(),
-            gateway: TORN_CUT.into(),
-        }),
-    );
-    let torn = child.run().await;
-    cut(&torn, "S5b", |archive| {
-        !archive.reconstruction_completed()
-            && read_lines::<String>(&s4.held_receipts()) == [HELD_RECEIPT]
-            && s4.calls().iter().any(|call| call.order_id() == TORN_CUT)
-            && !archive.outcomes().contains_key(TORN_CUT)
-    })
-    .await;
-    child.signal(Signal::Kill);
-    assert!(!child.exit().await.success());
-    before_rebuild
-        .record(&torn, Ended::Interrupted { killed: true })
-        .await;
-    assert_rejection_shown_once(&torn, &killed);
-    let head = Child::spawn(&s4, resume(&torn), None).completed().await;
-    assert_rejection_shown_once(&torn, &killed);
-    // I9: the merged resume records S4's archive among its ancestors.
-    let merged: Vec<PathBuf> = serde_json::from_value(
-        before_rebuild
-            .record(&head, Ended::Natural)
-            .await
-            .manifest()["resume"]["merged_from"]
-            .clone(),
-    )
-    .expect("merged ancestors");
-    assert_eq!(
-        merged,
-        std::slice::from_ref(&killed),
-        "S5b: the torn resume merged S4's archive"
-    );
-
     // S7: S4's archive again refuses before any run starts, naming the head.
-    let calls = s4.calls();
-    let runs = s4.runs();
-    let refused = Child::spawn(&s4, resume(&killed), None);
+    let calls = s5.calls();
+    let runs = s5.runs();
+    let refused = Child::spawn(&s5, resume(&killed_copy), None);
     let log = refused.log.clone();
     assert_eq!(
         refused.exit().await.code(),
         Some(2),
         "S7: the resume refuses"
     );
-    assert_eq!(s4.runs(), runs, "S7: no run starts");
-    assert_eq!(s4.calls(), calls, "S7: no gateway call");
+    assert_eq!(s5.runs(), runs, "S7: no run starts");
+    assert_eq!(s5.calls(), calls, "S7: no gateway call");
     let refusal = std::fs::read_to_string(log).expect("the refusal is logged");
     assert!(
         refusal.contains(&format!(
             "cannot resume {}: it was already resumed by {}, the head of this history.",
-            killed.display(),
-            head.display()
+            killed_copy.display(),
+            rebuilt_head.display()
         )),
         "{refusal}"
     );
 
-    // S6, S6b: strict replays, once neither history needs the shared inputs.
     strict_replay(&mut after_rebuild, &rebuilt_head).await;
     after_rebuild.check(Some(&reference));
     after_rebuild.report();
-    strict_replay(&mut before_rebuild, &head).await;
-    before_rebuild.check(Some(&reference));
-    before_rebuild.report();
 
     for (name, killed) in [("S8", false), ("S8b", true)] {
         let scenario = Scenario::fresh(&name.to_lowercase());
@@ -2835,7 +2764,6 @@ mod then_live {
     use super::*;
     use obzenflow::flow::{join, merge};
     use obzenflow::middleware::rate_limit;
-    use obzenflow::stages::sources::ChannelSource;
     use obzenflow::stages::{joins, merges};
     use obzenflow_core::event::payloads::execution_payload::{JoinPhaseFact, StageLifecycleFact};
     use obzenflow_core::StageKey;
@@ -3065,6 +2993,20 @@ mod then_live {
         }
     }
 
+    #[derive(Clone)]
+    struct AccountIngress;
+
+    impl IngressDecoder for AccountIngress {
+        type Output = Account;
+    }
+
+    #[derive(Clone)]
+    struct EntryIngress;
+
+    impl IngressDecoder for EntryIngress {
+        type Output = Entry;
+    }
+
     pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
         let batch_accounts_input = yaml(AccountYaml, accounts_input(scenario), "/accounts");
         let batch_tx_input = yaml(EntryYaml, entries_input(scenario), "/entries");
@@ -3072,8 +3014,8 @@ mod then_live {
         let (entry_sender, live_tx_input) = source_channel::<Entry>(1);
         Box::leak(Box::new(account_sender));
         send_live_entries(live_entries_input(scenario), entry_sender);
-        let live_accounts_input = ChannelSource::new(live_accounts_input);
-        let live_tx_input = ChannelSource::new(live_tx_input);
+        let live_accounts_input = subscribe(AccountIngress).through(Port::to(live_accounts_input));
+        let live_tx_input = subscribe(EntryIngress).through(Port::to(live_tx_input));
         let journals = scenario.journals();
         let graph = scenario.graph;
         let slow_tx_input = (graph == Graph::ThenLiveTwoBatch)

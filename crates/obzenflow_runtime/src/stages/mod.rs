@@ -18,10 +18,10 @@ pub mod transform;
 pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
-    EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig, HostedSource,
-    ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision, SignalGate,
-    StatefulEmission, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedStatefulHandler,
+    EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig, ObserverHandler,
+    ProcessingContext, ResourceManaged, SignalDecision, SignalGate, StatefulEmission,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler, TypedStatefulHandler,
 };
 
 pub use common::{CreditWaker, WakeOn};

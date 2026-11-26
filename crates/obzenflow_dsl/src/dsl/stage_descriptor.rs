@@ -645,7 +645,7 @@ fn validate_effect_declarations(
     ) {
         for declaration in declarations {
             effect_ports
-                .validate_required_registration(declaration)
+                .validate_required_registration(stage_name, declaration)
                 .map_err(|fault| {
                     format!("Effectful stage '{stage_name}' cannot materialise: {fault}")
                 })?;
@@ -947,10 +947,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // FLOWIP-115d: a source-backed hosted ingress source (e.g. http_ingress)
-        // exposes its binding slot here; the DSL fills it during this source
-        // stage's materialization with the stage id, replay-stable key, and the
-        // materialized ingress boundary.
         let hosted_ingress_slot = self.hosted_ingress_slot.clone();
 
         let source_binding = build_source_middleware_and_register_policies(
@@ -2651,6 +2647,13 @@ mod tests {
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     struct DemoTransactionalOutput;
 
+    #[derive(Clone)]
+    struct DemoIngress;
+
+    impl obzenflow_runtime::events::IngressDecoder for DemoIngress {
+        type Output = DemoTransactionalOutput;
+    }
+
     impl TypedPayload for DemoTransactionalOutput {
         const EVENT_TYPE: &'static str = "test.transactional_declared_output";
     }
@@ -3016,7 +3019,8 @@ mod tests {
         let mut descriptor = AsyncInfiniteSourceDescriptor::new(
             "source",
             obzenflow_runtime::__private::AdmitSource::<dyn UnifiedAsyncInfiniteSourceHandler>::admit(
-                obzenflow_adapters::sources::ChannelSource::new(receiver),
+                obzenflow_runtime::events::subscribe(DemoIngress)
+                    .through(obzenflow_runtime::systems::Port::to(receiver)),
             ),
         );
         descriptor.source_policies = vec![

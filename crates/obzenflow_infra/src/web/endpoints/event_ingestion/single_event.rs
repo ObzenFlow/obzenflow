@@ -8,28 +8,22 @@ use super::IngestionState;
 use async_trait::async_trait;
 use obzenflow_core::ingress::EventSubmission;
 use obzenflow_core::web::{EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request};
-use obzenflow_runtime::events::IngressDecoder;
 use tokio::time::Instant;
 
-pub struct SingleEventEndpoint<D: IngressDecoder> {
-    state: IngestionState<D::Output>,
-    decoder: D,
+pub struct SingleEventEndpoint {
+    state: IngestionState,
     path: String,
 }
 
-impl<D: IngressDecoder> SingleEventEndpoint<D> {
-    pub fn new(state: IngestionState<D::Output>, decoder: D) -> Self {
+impl SingleEventEndpoint {
+    pub fn new(state: IngestionState) -> Self {
         let path = join_path(&state.config.base_path, "events");
-        Self {
-            state,
-            decoder,
-            path,
-        }
+        Self { state, path }
     }
 }
 
 #[async_trait]
-impl<D: IngressDecoder> HttpEndpoint for SingleEventEndpoint<D> {
+impl HttpEndpoint for SingleEventEndpoint {
     fn path(&self) -> &str {
         &self.path
     }
@@ -53,7 +47,6 @@ impl<D: IngressDecoder> HttpEndpoint for SingleEventEndpoint<D> {
         };
         process(
             &self.state,
-            &self.decoder,
             arrived,
             attempt_seq,
             request_id,

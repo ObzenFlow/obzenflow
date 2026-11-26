@@ -8,7 +8,6 @@ use crate::dsl::stage_descriptor::{StageDescriptor, BINDING_DERIVED_NAME_SENTINE
 use crate::dsl::then_live::{plan, Refusal, ThenLivePlan};
 use crate::dsl::topology::AuthoredConnection;
 use crate::dsl::FlowBuildError;
-use obzenflow_adapters::sources::ChannelSource;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{StageId, TypedPayload};
@@ -194,8 +193,25 @@ fn join(catalog: &str, stream: &str, join: &str) -> AuthoredConnection {
 fn batch_accounts() -> Box<dyn StageDescriptor> {
     crate::source!(Account => placeholder!())
 }
-fn live_input<T: TypedPayload + Send + Sync + 'static>() -> ChannelSource<T> {
-    ChannelSource::new(obzenflow_runtime::events::source_channel(1).1)
+struct Decode<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> Clone for Decode<T> {
+    fn clone(&self) -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<T: TypedPayload + Send + Sync + 'static> obzenflow_runtime::events::IngressDecoder
+    for Decode<T>
+{
+    type Output = T;
+}
+
+fn live_input<T: TypedPayload + Send + Sync + 'static>(
+) -> obzenflow_runtime::events::Subscription<T> {
+    obzenflow_runtime::events::subscribe(Decode::<T>(std::marker::PhantomData)).through(
+        obzenflow_runtime::systems::Port::to(obzenflow_runtime::events::source_channel::<T>(1).1),
+    )
 }
 
 fn live_accounts() -> Box<dyn StageDescriptor> {

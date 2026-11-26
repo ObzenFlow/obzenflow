@@ -18,7 +18,6 @@ use obzenflow_core::ingress::{
     InvalidIngressRequestId,
 };
 use obzenflow_core::web::{EndpointError, ManagedResponse, Request};
-use obzenflow_runtime::events::IngressDecoder;
 use tokio::time::Instant;
 
 const IDEMPOTENCY_KEY: &str = "Idempotency-Key";
@@ -44,8 +43,8 @@ pub(super) fn parse_idempotency_key(
     IngressRequestId::parse(content).map(Some)
 }
 
-pub(super) async fn precheck<T>(
-    state: &IngestionState<T>,
+pub(super) async fn precheck(
+    state: &IngestionState,
     request: &Request,
     attempt_seq: IngressAttemptSeq,
     batch: bool,
@@ -119,20 +118,29 @@ pub(super) fn invalid_body(error: &serde_json::Error) -> Result<ManagedResponse,
 }
 
 /// Admit, queue and settle one request's submissions, then answer per member.
-pub(super) async fn process<D: IngressDecoder>(
-    state: &IngestionState<D::Output>,
-    decoder: &D,
+pub(super) async fn process(
+    state: &IngestionState,
     arrived: Instant,
     attempt_seq: IngressAttemptSeq,
     request_id: Option<IngressRequestId>,
     submissions: Vec<EventSubmission>,
     batch: bool,
 ) -> Result<ManagedResponse, EndpointError> {
+    let Some(decoder) = state.decoder() else {
+        let attempt = IngressAttemptContext {
+            attempt_seq,
+            request_count: 1,
+            event_count: submissions.len() as u64,
+            batch_count: u64::from(batch),
+        };
+        let refusal = state.refuse_not_ready(&attempt, request_id.as_ref()).await;
+        return edge_refusal_response(refusal);
+    };
     let mut refused: Vec<(usize, MemberRefusal)> = Vec::new();
     let mut members = Vec::new();
     for (position, submission) in submissions.iter().enumerate() {
         match admit_submission(
-            decoder,
+            decoder.as_ref(),
             state.config.validation.as_ref(),
             submission,
             request_id.as_ref(),

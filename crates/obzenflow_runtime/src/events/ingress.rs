@@ -3,9 +3,10 @@
 // https://obzenflow.dev
 
 use crate::stages::common::handlers::source::record_de::deserialize_json;
+use obzenflow_core::event::schema::TypedFact;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
-use obzenflow_core::ingress::{IngressContext, IngressReceipt};
-use obzenflow_core::TypedPayload;
+use obzenflow_core::ingress::{IngressFactDecoder, IngressReceipt};
+use obzenflow_core::{OneFactOutcome, TypedPayload};
 use serde::de::DeserializeOwned;
 use std::fmt;
 use tokio::sync::oneshot;
@@ -100,28 +101,39 @@ pub fn prove_journal_form<T: TypedPayload>(value: T) -> Result<T, IngressDecodeE
 /// `IngressReceiptSender` sends the commit receipt of one submitted member.
 pub type IngressReceiptSender = oneshot::Sender<IngressReceipt>;
 
-/// `HostedSubmission` is one admitted member that waits for the stage to read it.
-pub struct HostedSubmission<T> {
-    pub(crate) value: T,
-    pub(crate) context: IngressContext,
-    pub(crate) receipt: IngressReceiptSender,
+fn decode_one<D: IngressDecoder>(
+    decoder: &D,
+    data: &serde_json::Value,
+) -> Result<TypedFact, SourceDiagnostic> {
+    let value = decoder
+        .decode(IngressRecord::new(data))
+        .and_then(prove_journal_form)
+        .map_err(IngressDecodeError::into_diagnostic)?;
+    one_fact(value)
 }
 
-impl<T> HostedSubmission<T> {
-    pub fn new(value: T, context: IngressContext, receipt: IngressReceiptSender) -> Self {
-        Self {
-            value,
-            context,
-            receipt,
-        }
+pub(crate) fn one_fact<T: OneFactOutcome>(value: T) -> Result<TypedFact, SourceDiagnostic> {
+    let unrepresentable = || SourceDiagnostic::new(SourceDiagnosticReason::UnrepresentableValue);
+    let mut facts = value.into_facts().map_err(|_| unrepresentable())?;
+    match (facts.pop(), facts.is_empty()) {
+        (Some(fact), true) => Ok(fact),
+        _ => Err(unrepresentable()),
     }
 }
 
-impl<T> fmt::Debug for HostedSubmission<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HostedSubmission")
-            .field("context", &self.context)
-            .finish_non_exhaustive()
+pub(crate) struct LineDecoder<D>(pub(crate) D);
+
+impl<D: IngressDecoder> IngressFactDecoder for LineDecoder<D> {
+    fn event_type(&self) -> &'static str {
+        D::Output::EVENT_TYPE
+    }
+
+    fn accepts(&self, event_type: &str) -> bool {
+        D::Output::matches_event_type(event_type)
+    }
+
+    fn decode(&self, data: &serde_json::Value) -> Result<TypedFact, SourceDiagnostic> {
+        decode_one(&self.0, data)
     }
 }
 

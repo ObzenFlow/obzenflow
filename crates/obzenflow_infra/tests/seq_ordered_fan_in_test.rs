@@ -5,7 +5,6 @@
 use crate::replay_testkit;
 
 use anyhow::{anyhow, Result};
-use obzenflow_adapters::sources::ChannelSource;
 use obzenflow_adapters::sources::ValuesSource;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord, WriterId};
@@ -13,7 +12,7 @@ use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{flow, join, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::events::{source_channel, SourceReceiver, SourceSender};
+use obzenflow_runtime::events::{source_channel, subscribe, SourceReceiver, SourceSender};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -24,6 +23,7 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::join::JoinReferenceMode;
 use obzenflow_runtime::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -191,8 +191,10 @@ fn live_join_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let accounts_source = ChannelSource::new(accounts_rx);
-        let tx_source = ChannelSource::new(tx_rx);
+        let accounts_source = subscribe(replay_testkit::ChannelIngress::<AccountRow>::new())
+            .through(Port::to(accounts_rx));
+        let tx_source =
+            subscribe(replay_testkit::ChannelIngress::<TxRow>::new()).through(Port::to(tx_rx));
         let post_live = PostEntries {
             mode: JoinReferenceMode::Live,
         };
@@ -251,9 +253,12 @@ fn mixed_fold_flow(
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let accounts_source = ChannelSource::new(accounts_rx);
-        let tx_source = ChannelSource::new(tx_rx);
-        let adjustments_source = ChannelSource::new(adjustments_rx);
+        let accounts_source = subscribe(replay_testkit::ChannelIngress::<AccountRow>::new())
+            .through(Port::to(accounts_rx));
+        let tx_source =
+            subscribe(replay_testkit::ChannelIngress::<TxRow>::new()).through(Port::to(tx_rx));
+        let adjustments_source = subscribe(replay_testkit::ChannelIngress::<PostedRow>::new())
+            .through(Port::to(adjustments_rx));
         let post_live = PostEntries {
             mode: JoinReferenceMode::Live,
         };
@@ -293,8 +298,10 @@ fn hydrating_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let accounts_source = ValuesSource::new(vec![account("acct-1"), account("acct-2")]);
-        let quiet_source = ChannelSource::new(quiet_rx);
-        let active_source = ChannelSource::new(active_rx);
+        let quiet_source =
+            subscribe(replay_testkit::ChannelIngress::<TxRow>::new()).through(Port::to(quiet_rx));
+        let active_source =
+            subscribe(replay_testkit::ChannelIngress::<TxRow>::new()).through(Port::to(active_rx));
         let post_batch = PostEntries {
             mode: JoinReferenceMode::FiniteEof,
         };
@@ -450,7 +457,8 @@ fn end_of_input_flow(
             rows: vec![tx("acct-1", 5), tx("acct-1", 7)],
             release,
         }));
-        let live_source = ChannelSource::new(live_rx);
+        let live_source =
+            subscribe(replay_testkit::ChannelIngress::<Snapshot>::new()).through(Port::to(live_rx));
         let total = StatefulWithEmission::new(BatchTotal, OnEOF);
         let forward = Forward;
         let tally = Tally;

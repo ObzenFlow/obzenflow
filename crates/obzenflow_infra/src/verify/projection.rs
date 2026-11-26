@@ -179,7 +179,7 @@ fn comparable_data_payload(event: &ChainEvent, payload: &Value) -> Value {
     let mut payload = payload.clone();
     if matches!(
         event.payload,
-        ChainPayload::Execution(ExecutionPayload::MemberRecorded(_))
+        ChainPayload::Execution(ExecutionPayload::EventReceived(_))
     ) {
         if let Some(flow_id) = payload.get_mut("recorded_flow_id") {
             *flow_id = Value::String(RECORDED_FLOW_NAMESPACE.to_string());

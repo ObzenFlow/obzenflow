@@ -20,7 +20,6 @@ mod tests {
     use obzenflow_runtime::queries::FiniteRead;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::systems::Port;
-    use std::sync::Arc;
 
     use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead};
     use obzenflow_runtime::stages::common::handlers::{
@@ -77,8 +76,15 @@ mod tests {
         Port::to(NoOut)
     }
 
+    #[derive(Clone)]
+    struct OutIngress;
+
+    impl obzenflow_runtime::events::IngressDecoder for OutIngress {
+        type Output = Out;
+    }
+
     fn live_read() -> SourceRead<Out, Continuous> {
-        SourceRead::channel(Arc::new(source_channel::<Out>(1).1))
+        SourceRead::events(Port::to(source_channel::<Out>(1).1), OutIngress)
     }
 
     struct Src(Port<dyn OutInput>);

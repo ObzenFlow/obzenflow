@@ -26,8 +26,8 @@
 
 pub use obzenflow_infra::application::{
     ApplicationError, ArchiveOffers, Banner, ControlPlaneAuthModeArg, CorsModeArg,
-    CurrentRunLocator, FlowApplication, FlowApplicationBuilder, FlowConfig, Footer, LogLevel,
-    OnTerminalArg, Presentation, ReplayRunContext, RunMode, RunPresentationOutcome,
+    CurrentRunLocator, FlowApplication, FlowApplicationBuilder, FlowConfig, Footer, HostedIngress,
+    LogLevel, OnTerminalArg, Presentation, ReplayRunContext, RunMode, RunPresentationOutcome,
     RunSubstrateState, StartupMode, WebSurfaceAttachment, WebSurfaceWiring,
     WebSurfaceWiringContext,
 };

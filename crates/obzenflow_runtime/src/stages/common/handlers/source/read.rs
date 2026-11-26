@@ -9,11 +9,11 @@ use crate::queries::{FiniteRead, QueryCall, QueryRequest};
 use crate::systems::Port;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::{
-    ReattachGuarantee, SourcePollContinuation, SourcePollErrorKind,
+    SourcePollContinuation, SourcePollErrorKind,
 };
 use obzenflow_core::event::{EffectFailureDetail, SourceDiagnosticReason, SourceReadFailure};
-use obzenflow_core::WriterId;
-use serde::Serialize;
+use obzenflow_core::ingress::{HostedIngressBindingSlot, IngressContentDigest};
+use obzenflow_core::{EventId, WriterId};
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -192,8 +192,32 @@ impl<Output: Send + Sync + 'static> DrivenRead<Output> {
         self.reads.ready().await
     }
 
-    pub(crate) fn next_output(&mut self) -> Option<Result<Output, SourceError>> {
+    pub(crate) fn next_output(&mut self) -> Option<Result<SourceOutput<Output>, SourceError>> {
         self.reads.next_output()
+    }
+
+    pub(crate) fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
+        self.reads.hosted_ingress_slot()
+    }
+
+    pub(crate) fn holds_receipts(&self) -> bool {
+        self.reads.holds_receipts()
+    }
+
+    pub(crate) fn install_context(&mut self, resuming: bool) {
+        self.reads.install_context(resuming);
+    }
+
+    pub(crate) fn crossed_to_live(&self) {
+        self.reads.crossed_to_live();
+    }
+
+    pub(crate) fn admitted(&mut self, admission: Admission, event: EventId) {
+        self.reads.admitted(admission, event);
+    }
+
+    pub(crate) fn settle_committed(&mut self, committed: &[EventId]) {
+        self.reads.settle_committed(committed);
     }
 
     pub(crate) async fn read(
@@ -210,20 +234,41 @@ pub(crate) enum ReadEnd {
     EndOfInput,
 }
 
+pub(crate) enum SourceOutput<Output> {
+    Value(Output),
+    Admitted(Box<super::hosted::Staged>),
+}
+
+pub(crate) struct Admission {
+    pub(crate) identity: Option<(super::hosted::IdentityKey, IngressContentDigest)>,
+    pub(crate) accepted_at_ns: u64,
+    pub(crate) receipts: Option<super::hosted::PendingReceipts>,
+}
+
 #[async_trait]
-trait Reads<Output>: Send + Sync {
+pub(super) trait Reads<Output>: Send + Sync {
     fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError>;
     fn is_continuous(&self) -> bool;
     fn has_pending(&self) -> bool;
     async fn ready(&self) -> Result<(), SourceError> {
         Ok(())
     }
-    fn next_output(&mut self) -> Option<Result<Output, SourceError>>;
+    fn next_output(&mut self) -> Option<Result<SourceOutput<Output>, SourceError>>;
     async fn read(
         &mut self,
         effects: &mut EffectsCore,
         deadline: Option<Duration>,
     ) -> Result<ReadEnd, EffectError>;
+    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
+        None
+    }
+    fn holds_receipts(&self) -> bool {
+        false
+    }
+    fn install_context(&mut self, _resuming: bool) {}
+    fn crossed_to_live(&self) {}
+    fn admitted(&mut self, _admission: Admission, _event: EventId) {}
+    fn settle_committed(&mut self, _committed: &[EventId]) {}
 }
 
 struct FiniteReads<R: QueryRequest, Record, M, Split, F> {
@@ -260,14 +305,17 @@ where
         !self.pending.is_empty()
     }
 
-    fn next_output(&mut self) -> Option<Result<Output, SourceError>> {
+    fn next_output(&mut self) -> Option<Result<SourceOutput<Output>, SourceError>> {
         let record = self.pending.pop_front()?;
-        Some((self.output)(
-            self.metadata
-                .as_ref()
-                .expect("pending records have page metadata"),
-            record,
-        ))
+        Some(
+            (self.output)(
+                self.metadata
+                    .as_ref()
+                    .expect("pending records have page metadata"),
+                record,
+            )
+            .map(SourceOutput::Value),
+        )
     }
 
     async fn read(
@@ -417,73 +465,20 @@ fn reported(failure: SourceReadFailure) -> SourceError {
     }
 }
 
-impl<T: Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> SourceRead<T, Continuous> {
-    /// Receive sender-initiated values from a bounded in-process channel.
-    pub fn channel(receiver: Arc<crate::events::SourceReceiver<T>>) -> Self {
+impl<Output: Send + Sync + 'static> SourceRead<Output, Continuous> {
+    /// `SourceRead::events` reads the events of an event port. `decoder` runs once for each
+    /// event. The source records each event as `runtime.event.received` before its fact.
+    pub fn events<D>(port: Port<dyn crate::events::Events>, decoder: D) -> Self
+    where
+        D: crate::events::IngressDecoder<Output = Output>,
+    {
+        let reads = super::events::EventReads::new(port, decoder);
+        let continuation = reads.continuation();
         Self {
-            reads: Box::new(ChannelEvents {
-                receiver,
-                pending: None,
-            }),
-            continuation: SourceContinuation::Reattach {
-                guarantee: ReattachGuarantee::AtMostOnce,
-            },
+            reads: Box::new(reads),
+            continuation,
             lifetime: PhantomData,
         }
-    }
-}
-
-struct ChannelEvents<T> {
-    receiver: Arc<crate::events::SourceReceiver<T>>,
-    pending: Option<T>,
-}
-
-#[async_trait]
-impl<T: Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> Reads<T>
-    for ChannelEvents<T>
-{
-    fn declaration(&self) -> Result<Option<EffectDeclaration>, StageEffectsError> {
-        Ok(None)
-    }
-
-    fn is_continuous(&self) -> bool {
-        true
-    }
-
-    fn has_pending(&self) -> bool {
-        self.pending.is_some()
-    }
-
-    async fn ready(&self) -> Result<(), SourceError> {
-        self.receiver
-            .ready()
-            .await
-            .map_err(|_| SourceError::Other(SourceDiagnosticReason::InputClosed.into()))
-    }
-
-    fn next_output(&mut self) -> Option<Result<T, SourceError>> {
-        self.pending.take().map(Ok)
-    }
-
-    async fn read(
-        &mut self,
-        effects: &mut EffectsCore,
-        _deadline: Option<Duration>,
-    ) -> Result<ReadEnd, EffectError> {
-        let member = effects
-            .record_member(|| async {
-                let item =
-                    self.receiver.take(1).pop().ok_or_else(|| {
-                        EffectError::Execution("ready channel held no value".into())
-                    })?;
-                serde_json::to_value(item).map_err(|e| EffectError::Serialization(e.to_string()))
-            })
-            .await?;
-        self.pending = Some(
-            serde_json::from_value(member)
-                .map_err(|e| EffectError::Serialization(e.to_string()))?,
-        );
-        Ok(ReadEnd::Batch)
     }
 }
 

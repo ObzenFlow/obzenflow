@@ -43,7 +43,7 @@ impl<H: super::UnifiedAsyncInfiniteSourceHandler> AdmittedSource<H> {
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a source handler",
-    note = "`source!` takes the handler of a framework builder, a `query(…).through(port)` line, or the `HostedSource<_>` from ingress registration"
+    note = "`source!` takes the handler of a framework builder, a `query(…).through(port)` line or a `subscribe(…).through(port)` line"
 )]
 pub trait AdmitSource<Family: ?Sized>: sealed::Admitted<Family> + Send + Sync + 'static {
     type Output: OneFactOutcome + Send + Sync + 'static;

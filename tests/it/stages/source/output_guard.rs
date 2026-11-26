@@ -12,15 +12,8 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let csv = fs::read_to_string(root.join("crates/obzenflow_infra/src/systems/file/csv.rs"))
         .expect("read CSV source");
-    let ingress = fs::read_to_string(
-        root.join("crates/obzenflow_infra/src/web/endpoints/event_ingestion/mod.rs"),
-    )
-    .expect("read hosted ingress source");
     let csv_example = fs::read_to_string(root.join("examples/csv_demo_support_sla/flow.rs"))
         .expect("read CSV example");
-    let ingress_example =
-        fs::read_to_string(root.join("examples/http_ingestion_piggy_bank_demo/runner.rs"))
-            .expect("read hosted ingress example");
     let yaml_example =
         fs::read_to_string(root.join("examples/http_ingestion_piggy_bank_demo/flow.rs"))
             .expect("read YAML example");
@@ -42,10 +35,6 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
         );
     }
 
-    assert!(ingress.contains("pub fn ingress_source<D>(decoder: D"));
-    assert!(ingress.contains("pub fn http_ingress<D>(decoder: D"));
-    assert!(!ingress.contains("pub fn http_ingress<T>"));
-
     assert!(csv_example.contains("CsvSource::builder(CustomerCsv)"));
     assert!(csv_example.contains("CsvSource::builder(TicketCsv)"));
     assert!(yaml.contains("pub trait YamlDecoder"));
@@ -53,5 +42,4 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
     assert!(yaml.contains("pub fn builder(decoder: D)"));
 
     assert!(yaml_example.contains("YamlSource::builder(AccountYaml)"));
-    assert!(ingress_example.contains("http_ingress(LedgerIngress,"));
 }

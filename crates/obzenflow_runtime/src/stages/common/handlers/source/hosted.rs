@@ -2,44 +2,30 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::erased::{
-    ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncInfinite,
-    UnifiedAsyncInfiniteSourceHandler,
-};
-use super::prepared::{sealed as admission_sealed, AdmitSource, AdmittedSource};
-use super::read::recording_ends;
-use super::typed::{configuration_fatal, effect_fatal, preserve_recorded, protocol_fatal};
 use super::SourceContinuation;
-use super::SourceError;
-use crate::effects::{EffectError, EffectInvocationContext, EffectsCore};
-use crate::events::{HostedSubmission, IngressReceiptSender, SourceReceiver};
-use crate::messaging::upstream_subscription::StageInputPosition;
-use crate::stages::common::handler_error::StageFatal;
-use async_trait::async_trait;
+use crate::events::IngressReceiptSender;
 use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::schema::TypedFact;
-use obzenflow_core::event::{ChainPayload, EventKind, SourceDiagnosticReason};
+use obzenflow_core::event::{ChainPayload, EventKind};
 use obzenflow_core::ingress::{
     HostedIngressBindingSlot, IngressAttemptSeq, IngressContentDigest, IngressContext,
     IngressReceipt, IngressRequestId,
 };
-use obzenflow_core::{ChainEvent, EventId, EventType, OneFactOutcome};
+use obzenflow_core::{EventId, EventType};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HostedMember {
-    fact: HostedFact,
-    context: IngressContext,
+pub(crate) struct HostedMember {
+    pub(crate) fact: HostedFact,
+    pub(crate) context: IngressContext,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct HostedFact {
+pub(crate) struct HostedFact {
     kind: EventKind,
     event_type: EventType,
     schema_version: NonZeroU32,
@@ -47,21 +33,7 @@ struct HostedFact {
 }
 
 impl HostedFact {
-    fn of<T: OneFactOutcome>(value: T) -> Result<Self, String> {
-        let mut facts = value.into_facts().map_err(|error| {
-            format!(
-                "typed source output serialization failed for `{}`: {error}",
-                std::any::type_name::<T>()
-            )
-        })?;
-        if facts.len() != 1 {
-            return Err(format!(
-                "one_fact_outcome: `{}` lowered to {} facts instead of exactly one",
-                std::any::type_name::<T>(),
-                facts.len(),
-            ));
-        }
-        let fact = facts.pop().expect("length checked above");
+    pub(crate) fn of(fact: TypedFact) -> Result<Self, String> {
         Ok(Self {
             kind: fact.payload.kind(),
             payload: serde_json::to_value(&fact.payload).map_err(|error| error.to_string())?,
@@ -70,7 +42,7 @@ impl HostedFact {
         })
     }
 
-    fn into_typed(self) -> Result<TypedFact, serde_json::Error> {
+    pub(crate) fn into_typed(self) -> Result<TypedFact, serde_json::Error> {
         Ok(TypedFact {
             payload: ChainPayload::decode(
                 self.kind,
@@ -84,383 +56,15 @@ impl HostedFact {
     }
 }
 
-type ReceiptKey = (IngressAttemptSeq, Option<usize>);
+pub(crate) type ReceiptKey = (IngressAttemptSeq, Option<usize>);
 
-fn receipt_key(context: &IngressContext) -> ReceiptKey {
+pub(crate) fn receipt_key(context: &IngressContext) -> ReceiptKey {
     (context.attempt_seq, context.batch_index)
-}
-
-struct QueueState<T> {
-    rx: SourceReceiver<HostedSubmission<T>>,
-    receipts: Mutex<HashMap<ReceiptKey, IngressReceiptSender>>,
-}
-
-impl<T> QueueState<T> {
-    fn take_receipt(&self, context: &IngressContext) -> Option<IngressReceiptSender> {
-        self.receipts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&receipt_key(context))
-    }
-}
-
-impl<T: OneFactOutcome> QueueState<T> {
-    fn member(&self, submission: HostedSubmission<T>) -> Result<HostedMember, EffectError> {
-        let fact = HostedFact::of(submission.value).map_err(EffectError::Serialization)?;
-        self.receipts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(receipt_key(&submission.context), submission.receipt);
-        Ok(HostedMember {
-            fact,
-            context: submission.context,
-        })
-    }
-}
-
-/// `HostedSource` is the handler of a hosted source stage. It holds the read
-/// port of its endpoint's queue. The host keeps the queue's submission handle.
-pub struct HostedSource<T> {
-    queue: Arc<QueueState<T>>,
-    slot: HostedIngressBindingSlot,
-    batch: usize,
-}
-
-impl<T> fmt::Debug for HostedSource<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HostedSource")
-            .field("output", &std::any::type_name::<T>())
-            .field("ingress_key", self.slot.ingress_key())
-            .field("max_batch_size", &self.batch)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<T: OneFactOutcome + Send + Sync + 'static> HostedSource<T> {
-    /// `HostedSource::http` makes a source of the submissions that the framework-managed
-    /// HTTP ingress admits.
-    pub fn http(rx: SourceReceiver<HostedSubmission<T>>, slot: HostedIngressBindingSlot) -> Self {
-        Self::admitting(rx, slot)
-    }
-
-    /// `HostedSource::ingress` makes a source of the submissions that the protocol-neutral
-    /// ingress admits.
-    pub fn ingress(
-        rx: SourceReceiver<HostedSubmission<T>>,
-        slot: HostedIngressBindingSlot,
-    ) -> Self {
-        Self::admitting(rx, slot)
-    }
-
-    fn admitting(rx: SourceReceiver<HostedSubmission<T>>, slot: HostedIngressBindingSlot) -> Self {
-        let queue = Arc::new(QueueState {
-            rx,
-            receipts: Mutex::new(HashMap::new()),
-        });
-        Self {
-            queue,
-            slot,
-            batch: 1000,
-        }
-    }
-
-    pub fn with_max_batch_size(mut self, max_batch_size: usize) -> Self {
-        self.batch = max_batch_size.max(1);
-        self
-    }
-}
-
-const SENDER_REDELIVERS: SourceContinuation = SourceContinuation::Reattach {
-    guarantee: ReattachGuarantee::SenderRedelivers,
-};
-
-impl<Out: OneFactOutcome + Send + Sync + 'static>
-    admission_sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler> for HostedSource<Out>
-{
-}
-
-impl<Out: OneFactOutcome + Send + Sync + 'static> AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler>
-    for HostedSource<Out>
-{
-    type Output = Out;
-    type Handler = HostedReadAdapter<Out>;
-
-    fn admit(self) -> AdmittedSource<Self::Handler> {
-        AdmittedSource {
-            handler: HostedReadAdapter::new(self),
-            continuation: SENDER_REDELIVERS,
-            declaration: Ok(None),
-        }
-    }
-}
-
-#[doc(hidden)]
-pub struct HostedReadAdapter<T> {
-    pending: VecDeque<HostedSubmission<T>>,
-    queue: Arc<QueueState<T>>,
-    slot: HostedIngressBindingSlot,
-    batch: usize,
-    admission: HostedAdmission,
-    context: Option<EffectInvocationContext>,
-    number: u64,
-    effects: Option<EffectsCore>,
-    staged: VecDeque<Staged>,
-    reproduced: bool,
-    replayed: u64,
-    recorded: Option<crate::replay::ReplayDriver>,
-    emitted: Option<ChainEvent>,
-    held: Option<ChainEvent>,
-}
-
-impl<T: OneFactOutcome + Send + Sync + 'static> HostedReadAdapter<T> {
-    fn new(source: HostedSource<T>) -> Self {
-        Self {
-            admission: HostedAdmission::new(source.slot.clone()),
-            pending: VecDeque::new(),
-            queue: source.queue,
-            slot: source.slot,
-            batch: source.batch,
-            context: None,
-            number: 0,
-            effects: None,
-            staged: VecDeque::new(),
-            reproduced: false,
-            replayed: 0,
-            recorded: None,
-            emitted: None,
-            held: None,
-        }
-    }
-
-    async fn invocation(&mut self) -> ErasedSourceInvocation {
-        self.emitted = None;
-        if let Some(event) = self.held.take() {
-            self.emitted = Some(event.clone());
-            return ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(vec![event]));
-        }
-        loop {
-            if let Some(staged) = self.staged.pop_front() {
-                return match self.materialize(staged).await {
-                    Ok(None) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof),
-                    Ok(Some(event)) => {
-                        self.emitted = Some(event.clone());
-                        ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(vec![
-                            event,
-                        ]))
-                    }
-                    Err(fatal) => ErasedSourceInvocation::fatal(fatal),
-                };
-            }
-            if let Some(end) = self.read().await {
-                return end;
-            }
-        }
-    }
-
-    async fn read(&mut self) -> Option<ErasedSourceInvocation> {
-        let Some(mut context) = self.context.clone() else {
-            return Some(ErasedSourceInvocation::fatal(configuration_fatal(
-                "hosted ingress read before the runtime installed its stage context",
-            )));
-        };
-        let Some(number) = self.number.checked_add(1) else {
-            return Some(ErasedSourceInvocation::fatal(protocol_fatal(
-                "hosted read number exhausted",
-            )));
-        };
-        context.input_seq = StageInputPosition(number);
-        if recording_ends(&context, number) {
-            let mut effects = EffectsCore::new(context);
-            if let Err(error) = effects.reproduce_trailing_crossing().await {
-                return Some(ErasedSourceInvocation::fatal(effect_fatal(
-                    &effects, &error,
-                )));
-            }
-            return Some(ErasedSourceInvocation::completed(
-                ErasedSourceCompletion::Eof,
-            ));
-        }
-        let mut effects = EffectsCore::new(context);
-        let reproduced = effects.is_replaying();
-        if !reproduced {
-            if let Err(error) = effects.cross_to_live().await {
-                return Some(ErasedSourceInvocation::fatal(effect_fatal(
-                    &effects, &error,
-                )));
-            }
-            if self.admission.pending.is_empty() {
-                self.slot.set_restoring(false);
-            }
-            if self.pending.is_empty() {
-                if self.queue.rx.ready().await.is_err() {
-                    return Some(ErasedSourceInvocation::handler_error(
-                        SourceError::Transport(SourceDiagnosticReason::InputClosed.into()),
-                    ));
-                }
-                self.pending.extend(self.queue.rx.take(self.batch));
-            }
-        }
-        let outcome = effects
-            .record_member(|| async {
-                let submission = self
-                    .pending
-                    .pop_front()
-                    .ok_or_else(|| EffectError::Execution("ready ingress held no member".into()))?;
-                let member = self.queue.member(submission)?;
-                serde_json::to_value(member).map_err(|e| EffectError::Serialization(e.to_string()))
-            })
-            .await;
-        self.reproduced = reproduced;
-        match outcome {
-            Ok(member) => {
-                let member = match serde_json::from_value::<HostedMember>(member) {
-                    Ok(member) => member,
-                    Err(error) => {
-                        return Some(ErasedSourceInvocation::fatal(protocol_fatal(
-                            error.to_string(),
-                        )))
-                    }
-                };
-                self.number = number;
-                effects.adopt_answer_as_parent();
-                if !reproduced {
-                    if let Some(fatal) =
-                        self.admission.foreign_member(std::slice::from_ref(&member))
-                    {
-                        return Some(ErasedSourceInvocation::fatal(fatal));
-                    }
-                }
-                let queue = &self.queue;
-                let staged = self.admission.decide(vec![member], |context| {
-                    (!reproduced).then(|| queue.take_receipt(context)).flatten()
-                });
-                self.staged.extend(staged);
-                self.effects = Some(effects);
-                None
-            }
-            Err(error) => Some(ErasedSourceInvocation::fatal(effect_fatal(
-                &effects, &error,
-            ))),
-        }
-    }
-
-    async fn materialize(&mut self, staged: Staged) -> Result<Option<ChainEvent>, StageFatal> {
-        let Staged {
-            fact,
-            context,
-            receipts,
-            identity,
-        } = staged;
-        let effects = self
-            .effects
-            .as_mut()
-            .expect("a committed read supplied the staged members");
-        let fact = fact.into_typed().map_err(|error| {
-            protocol_fatal(format!(
-                "a recorded hosted member cannot be decoded: {error}"
-            ))
-        })?;
-        let (mut event, _) = match effects.prepare_typed_fact(fact, false).await {
-            Ok(prepared) => prepared,
-            Err(error) => return Err(effect_fatal(effects, &error)),
-        };
-        if self.reproduced
-            && self.context.as_ref().is_some_and(|stage| {
-                super::read::recording_ends_before(stage, self.number, &event.id)
-            })
-        {
-            if let Err(error) = effects.reproduce_trailing_crossing().await {
-                return Err(effect_fatal(effects, &error));
-            }
-            return Ok(None);
-        }
-        let accepted_at_ns = context.accepted_at_ns;
-        event.ingress_context = Some(context);
-        let event = preserve_recorded(&mut self.recorded, self.context.as_ref(), event).await?;
-        self.admission
-            .admitted(identity, accepted_at_ns, receipts, event.id);
-        if self.reproduced {
-            self.replayed += 1;
-        }
-        Ok(Some(event))
-    }
-}
-
-impl<T: OneFactOutcome + Send + Sync + 'static> SealAsyncInfinite for HostedReadAdapter<T> {}
-
-#[async_trait]
-impl<T: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceHandler
-    for HostedReadAdapter<T>
-{
-    fn install_read_context(&mut self, context: EffectInvocationContext) {
-        self.slot
-            .set_restoring(context.stage.runtime_execution.resume_control().is_some());
-        self.context = Some(context);
-    }
-
-    fn has_pending_records(&self) -> bool {
-        self.held.is_some() || !self.staged.is_empty()
-    }
-
-    fn poll_cancelled(&mut self) {
-        if let Some(event) = self.emitted.take() {
-            self.held = Some(event);
-        }
-    }
-
-    fn replayed_facts(&self) -> u64 {
-        self.replayed
-    }
-
-    async fn cross_to_live(&mut self) -> Result<bool, StageFatal> {
-        if self.has_pending_records() || !self.admission.pending.is_empty() {
-            return Ok(false);
-        }
-        let Some(context) = self.context.clone() else {
-            return Ok(false);
-        };
-        if context
-            .stage
-            .effect_history
-            .as_ref()
-            .is_some_and(|history| history.actions().next_unreproduced().is_some())
-        {
-            return Ok(false);
-        }
-        let execution = context.stage.runtime_execution.clone();
-        let stage_id = context.stage.stage_id;
-        let mut effects = EffectsCore::new(context);
-        match effects.cross_to_live().await {
-            Ok(()) => {
-                let live = matches!(
-                    execution.source_phase_for(stage_id),
-                    crate::execution::SourceExecutionPhase::Live
-                );
-                if live {
-                    self.slot.set_restoring(false);
-                }
-                Ok(live)
-            }
-            Err(error) => Err(effect_fatal(&effects, &error)),
-        }
-    }
-
-    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
-        Some(self.slot.clone())
-    }
-
-    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
-        self.invocation().await
-    }
-
-    fn settle_committed(&mut self, committed: &[EventId]) {
-        self.admission.settle(committed);
-    }
 }
 
 /// Fixed-size index key: a 128-bit SHA-256 prefix of request ID and batch index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct IdentityKey(u128);
+pub(crate) struct IdentityKey(u128);
 
 impl IdentityKey {
     fn of(id: &IngressRequestId, batch_index: Option<usize>) -> Self {
@@ -487,16 +91,16 @@ struct CommittedIdentity {
     accepted_at_ns: u64,
 }
 
-struct PendingReceipts {
+pub(crate) struct PendingReceipts {
     original: IngressReceiptSender,
     joined: Vec<IngressReceiptSender>,
 }
 
-struct Staged {
-    fact: HostedFact,
-    context: IngressContext,
-    receipts: Option<PendingReceipts>,
-    identity: Option<(IdentityKey, IngressContentDigest)>,
+pub(crate) struct Staged {
+    pub(crate) fact: HostedFact,
+    pub(crate) context: IngressContext,
+    pub(crate) receipts: Option<PendingReceipts>,
+    pub(crate) identity: Option<(IdentityKey, IngressContentDigest)>,
 }
 
 impl Staged {
@@ -518,15 +122,21 @@ impl Staged {
 }
 
 /// The source's single-writer admission decision and receipt settlement.
-pub(super) struct HostedAdmission {
+pub(crate) struct HostedAdmission {
     slot: HostedIngressBindingSlot,
     committed: HashMap<IdentityKey, CommittedIdentity>,
     expiry: VecDeque<(u64, IdentityKey)>,
-    pending: HashMap<EventId, PendingReceipts>,
+    pub(crate) pending: HashMap<EventId, PendingReceipts>,
 }
 
 impl HostedAdmission {
-    pub(super) fn new(slot: HostedIngressBindingSlot) -> Self {
+    pub(crate) fn continuation() -> SourceContinuation {
+        SourceContinuation::Reattach {
+            guarantee: ReattachGuarantee::SenderRedelivers,
+        }
+    }
+
+    pub(crate) fn new(slot: HostedIngressBindingSlot) -> Self {
         Self {
             slot,
             committed: HashMap::new(),
@@ -539,20 +149,20 @@ impl HostedAdmission {
         duration_ns(self.slot.timing().idempotency_window())
     }
 
-    fn foreign_member(&self, members: &[HostedMember]) -> Option<StageFatal> {
+    pub(crate) fn foreign_member(&self, members: &[HostedMember]) -> Option<String> {
         members
             .iter()
             .find(|member| &member.context.ingress_key != self.slot.ingress_key())
             .map(|member| {
-                protocol_fatal(format!(
+                format!(
                     "hosted ingress submission for '{}' reached source '{}'",
                     member.context.ingress_key,
                     self.slot.ingress_key()
-                ))
+                )
             })
     }
 
-    fn decide(
+    pub(crate) fn decide(
         &mut self,
         members: Vec<HostedMember>,
         mut receipt: impl FnMut(&IngressContext) -> Option<IngressReceiptSender>,
@@ -610,7 +220,7 @@ impl HostedAdmission {
         staged
     }
 
-    fn admitted(
+    pub(crate) fn admitted(
         &mut self,
         identity: Option<(IdentityKey, IngressContentDigest)>,
         accepted_at_ns: u64,
@@ -626,7 +236,7 @@ impl HostedAdmission {
         self.publish();
     }
 
-    pub(super) fn settle(&mut self, committed: &[EventId]) {
+    pub(crate) fn settle(&mut self, committed: &[EventId]) {
         for event_id in committed {
             if let Some(receipts) = self.pending.remove(event_id) {
                 deliver_receipt(
@@ -714,8 +324,6 @@ fn deliver_receipt(sender: IngressReceiptSender, receipt: IngressReceipt) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::source_channel;
-    use obzenflow_core::event::StageFatalCode;
     use obzenflow_core::ingress::{IngressKey, IngressRequestIdentity, IngressTiming};
     use obzenflow_core::TypedPayload;
     use serde::{Deserialize, Serialize};
@@ -768,7 +376,8 @@ mod tests {
             self.attempt += 1;
             let (sender, answer) = oneshot::channel();
             let member = HostedMember {
-                fact: HostedFact::of(Row(row)).expect("a row lowers"),
+                fact: HostedFact::of(crate::events::one_fact(Row(row)).expect("a row lowers"))
+                    .expect("a row records"),
                 context: context(accepted_at_s, KEY, batch_index, request, row, self.attempt),
             };
             (member, answer, sender)
@@ -829,53 +438,6 @@ mod tests {
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Closed) => panic!("receipt dropped"),
         }
-    }
-
-    #[test]
-    fn hosted_source_admission_records_sender_redelivers() {
-        let (_tx, rx) = source_channel::<HostedSubmission<Row>>(1);
-        let admitted = HostedSource::ingress(rx, HostedIngressBindingSlot::new(KEY)).admit();
-        assert_eq!(
-            admitted.continuation,
-            SourceContinuation::Reattach {
-                guarantee: ReattachGuarantee::SenderRedelivers
-            }
-        );
-        assert_eq!(
-            admitted
-                .handler
-                .hosted_ingress_slot()
-                .map(|slot| slot.ingress_key().clone()),
-            Some(IngressKey::from(KEY))
-        );
-    }
-
-    #[tokio::test]
-    async fn hosted_ready_leaves_submission_queued() {
-        let (tx, rx) = source_channel::<HostedSubmission<Row>>(2);
-        let queue = Arc::new(QueueState {
-            rx,
-            receipts: Mutex::new(HashMap::new()),
-        });
-        let (receipt, _answer) = oneshot::channel();
-        tx.send(HostedSubmission::new(
-            Row(1),
-            context(1, KEY, None, None, 1, 1),
-            receipt,
-        ))
-        .await
-        .expect("the queue has space");
-        queue
-            .rx
-            .ready()
-            .await
-            .expect("the queue holds a submission");
-        assert_eq!(queue.rx.len(), 1, "readiness takes nothing");
-        assert_eq!(tx.capacity(), 1, "readiness frees no slot");
-        let submission = queue.rx.take(1).pop().unwrap();
-        let member = queue.member(submission).unwrap();
-        assert_eq!(member.context.attempt_seq, IngressAttemptSeq(1));
-        assert_eq!(tx.capacity(), 2, "the read frees the slot");
     }
 
     #[test]
@@ -1068,6 +630,6 @@ mod tests {
             .admission
             .foreign_member(&[member])
             .expect("a foreign context is a framework invariant");
-        assert_eq!(fatal.code, StageFatalCode::Protocol);
+        assert!(fatal.contains("other.key"), "{fatal}");
     }
 }

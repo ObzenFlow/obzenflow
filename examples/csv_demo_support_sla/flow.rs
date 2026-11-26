@@ -16,7 +16,7 @@ use obzenflow::stages::sinks::{CsvProjection, CsvSink};
 use obzenflow::stages::sources::{CsvDecoder, CsvFile, CsvSource};
 use obzenflow::stages::transforms::TypedTransformHandler;
 use obzenflow::systems::file::CsvFileSystem;
-use obzenflow::systems::{Port, SystemConfig};
+use obzenflow::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -144,8 +144,8 @@ fn build_flow() -> FlowDefinition {
             .build()
             .map_err(resources_failed)?;
         let ticket_store: Port<dyn CsvFile> = match &settings.tickets {
-            TicketInput::File(path) => CsvFileSystem::at(path).port(),
-            TicketInput::Fixture(config) => config.clone().port(),
+            TicketInput::File(path) => Port::deferred(CsvFileSystem::at(path)),
+            TicketInput::Fixture(config) => Port::deferred(config.clone()),
         };
         let tickets = CsvSource::builder(TicketCsv)
             .through(ticket_store)

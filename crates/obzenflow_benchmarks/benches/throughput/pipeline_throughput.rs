@@ -49,7 +49,7 @@ impl Source {
             Numbers::counting(inputs, 1)
         };
         Self {
-            port: numbers.port(),
+            port: Port::to(numbers),
             origin,
         }
     }

@@ -77,7 +77,7 @@ impl RecordedAction {
                 input_position: cursor.input_seq,
                 effect_ordinal: cursor.effect_ordinal,
             },
-            Self::Member(cursor) => DepartureAction::MemberRecorded {
+            Self::Member(cursor) => DepartureAction::EventReceived {
                 number: cursor.input_seq.get(),
             },
             Self::Fact { id, event_type } => DepartureAction::Fact {
@@ -505,38 +505,37 @@ impl ActionScan {
         {
             return Ok(());
         }
-        let row = if let ChainPayload::Execution(ExecutionPayload::MemberRecorded(row)) =
-            &event.payload
-        {
-            let cursor = super::history::member_cursor(row);
-            self.actions.push(RecordedAction::Member(cursor.clone()));
-            Some(ActionRow::Member(cursor))
-        } else if EffectAttemptStarted::matches_event_type(&event.event_type()) {
-            let started = EffectAttemptStarted::try_from_event(event)
-                .map_err(|error| EffectError::Serialization(error.to_string()))?;
-            self.effect(started.cursor.clone(), &started.effect_type);
-            Some(ActionRow::Effect {
-                cursor: started.cursor,
-                attempt: Some(started.attempt),
-            })
-        } else if let Some(provenance) = &event.effect_provenance {
-            self.effect(
-                provenance.cursor.clone(),
-                &provenance.descriptor.effect_type,
-            );
-            Some(ActionRow::Effect {
-                cursor: provenance.cursor.clone(),
-                attempt: provenance.attempt,
-            })
-        } else if event.consumes_data_credit() {
-            self.actions.push(RecordedAction::Fact {
-                id: event.id,
-                event_type: EventType::from(event.event_type()),
-            });
-            Some(ActionRow::Fact(event.id))
-        } else {
-            None
-        };
+        let row =
+            if let ChainPayload::Execution(ExecutionPayload::EventReceived(row)) = &event.payload {
+                let cursor = super::history::member_cursor(row);
+                self.actions.push(RecordedAction::Member(cursor.clone()));
+                Some(ActionRow::Member(cursor))
+            } else if EffectAttemptStarted::matches_event_type(&event.event_type()) {
+                let started = EffectAttemptStarted::try_from_event(event)
+                    .map_err(|error| EffectError::Serialization(error.to_string()))?;
+                self.effect(started.cursor.clone(), &started.effect_type);
+                Some(ActionRow::Effect {
+                    cursor: started.cursor,
+                    attempt: Some(started.attempt),
+                })
+            } else if let Some(provenance) = &event.effect_provenance {
+                self.effect(
+                    provenance.cursor.clone(),
+                    &provenance.descriptor.effect_type,
+                );
+                Some(ActionRow::Effect {
+                    cursor: provenance.cursor.clone(),
+                    attempt: provenance.attempt,
+                })
+            } else if event.consumes_data_credit() {
+                self.actions.push(RecordedAction::Fact {
+                    id: event.id,
+                    event_type: EventType::from(event.event_type()),
+                });
+                Some(ActionRow::Fact(event.id))
+            } else {
+                None
+            };
         if let Some(row) = row {
             if let Some(generation) = self.pending.take() {
                 let entry = self.anchors.entry(row).or_insert(generation);

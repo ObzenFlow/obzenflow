@@ -23,6 +23,7 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_benchmarks::numbers::{NextNumber, NumberFeed, Numbers};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handlers::source::SourceRead;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
@@ -32,7 +33,7 @@ struct IdleSource(obzenflow_runtime::systems::Port<dyn NumberFeed>);
 
 impl IdleSource {
     fn new() -> Self {
-        Self(Numbers::idle().port())
+        Self(Port::to(Numbers::idle()))
     }
 }
 

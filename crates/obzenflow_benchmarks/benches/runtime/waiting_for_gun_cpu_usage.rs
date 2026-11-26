@@ -19,6 +19,7 @@ use obzenflow_runtime::bootstrap::{install_bootstrap_config, BootstrapConfig, St
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
@@ -28,7 +29,7 @@ struct IdleSource(obzenflow_runtime::systems::Port<dyn NumberFeed>);
 
 impl IdleSource {
     fn new() -> Self {
-        Self(Numbers::idle().port())
+        Self(Port::to(Numbers::idle()))
     }
 }
 

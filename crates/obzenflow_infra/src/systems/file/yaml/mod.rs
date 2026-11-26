@@ -171,7 +171,7 @@ impl<D: YamlDecoder> YamlSourceBuilder<D> {
     /// `build` checks only the configuration of the source. It does not open the file.
     pub fn build(self) -> anyhow::Result<YamlSource<D>> {
         let port = match (self.path, self.port) {
-            (Some(path), None) => YamlFileSystem::at(path).port(),
+            (Some(path), None) => Port::deferred(YamlFileSystem::at(path)),
             (None, Some(port)) => port,
             (None, None) => anyhow::bail!("yaml source: the source must have a path or a port"),
             (Some(_), Some(_)) => {

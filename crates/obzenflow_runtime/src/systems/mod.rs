@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! A system is any type that implements a port. A flow chooses the system behind
-//! each port with [`Port::to`], [`Port::deferred`] or [`SystemConfig::port`].
+//! A system is any type that implements a port. A flow builds each port from its
+//! system with [`Port::to`], or from a [`SystemConfig`] with [`Port::deferred`].
 //!
 //! One system serves two ports from one instance through an `Arc`:
 //!
@@ -30,4 +30,4 @@ mod port;
 pub use config::SystemConfig;
 pub use port::Port;
 #[doc(hidden)]
-pub use port::{PortImpl, ServesPort};
+pub use port::{EffectKind, PortImpl, PortKind, QueryKind, ServesPort};

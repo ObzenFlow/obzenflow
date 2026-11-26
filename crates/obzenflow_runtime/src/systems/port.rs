@@ -87,8 +87,9 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         ))
     }
 
-    /// `Port::deferred` binds a port to a system that `resolver` builds at the first live call
-    /// of a run. The port type is the `#[obzenflow::port]` trait that the system implements.
+    /// `Port::deferred` builds a port from `config`. The port builds its system at the first
+    /// live call of a run. `config` is a [`super::SystemConfig`] or a function that returns
+    /// the system. The port type is the `#[obzenflow::port]` trait that the system implements.
     ///
     /// ```
     /// # use obzenflow_runtime::effects::EffectPortResolutionError;
@@ -105,14 +106,15 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
     /// let engine = Port::deferred(SimulatedRiskEngine::from_env);
     /// # let port: Port<dyn RiskEnginePort> = engine;
     /// ```
-    pub fn deferred<T, F>(resolver: F) -> Self
+    pub fn deferred<C>(config: C) -> Self
     where
-        T: Send + Sync + 'static,
-        F: Fn() -> Result<T, EffectPortResolutionError> + Send + Sync + 'static,
-        PortImpl<T>: ServesPort<P, T>,
+        C: super::SystemConfig,
+        PortImpl<C::System>: ServesPort<P, C::System>,
     {
         Self::over(SystemPort::deferred::<P>(Arc::new(move || {
-            resolver().map(|system| <PortImpl<T> as ServesPort<P, T>>::coerce(Arc::new(system)))
+            config.resolve().map(|system| {
+                <PortImpl<C::System> as ServesPort<P, C::System>>::coerce(Arc::new(system))
+            })
         })))
     }
 
@@ -134,6 +136,14 @@ impl<P: ?Sized + Send + Sync + 'static> Port<P> {
         }
     }
 
+    pub(crate) fn eager_system(&self) -> Option<Arc<P>> {
+        self.port.eager_system::<P>()
+    }
+
+    pub(crate) fn resolve_system(&self) -> Result<Arc<P>, EffectPortResolutionError> {
+        self.port.resolve_system::<P>()
+    }
+
     pub(crate) fn binding_name(&self) -> LogicalEffectBindingName {
         LogicalEffectBindingName::new(format!("port.{}", self.port.ordinal()))
             .expect("a port coordinate forms a binding name")
@@ -152,6 +162,17 @@ pub struct PortImpl<T>(PhantomData<fn() -> Arc<T>>);
 pub trait ServesPort<P: ?Sized, T> {
     fn coerce(port: Arc<T>) -> Arc<P>;
 }
+
+#[doc(hidden)]
+pub trait PortKind {
+    type Kind;
+}
+
+#[doc(hidden)]
+pub struct QueryKind;
+
+#[doc(hidden)]
+pub struct EffectKind;
 
 impl<P: ?Sized + Send + Sync + 'static> Clone for Port<P> {
     fn clone(&self) -> Self {
@@ -175,8 +196,9 @@ impl<P: ?Sized + Send + Sync + 'static> std::fmt::Debug for Port<P> {
 mod tests {
     use super::Port;
     use crate::commands::AnswersEffect;
-    use crate::effects::{Call, EffectError, EffectPortRegistry};
+    use crate::effects::{Call, EffectError, EffectPortRegistry, EffectPortResolutionError};
     use crate::queries::{FiniteRead, QueryCall, QueryContext, QueryError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -226,6 +248,38 @@ mod tests {
         fn append(&self, _: &AppendEntry) -> Result<EntryAppended, EffectError> {
             Ok(EntryAppended)
         }
+    }
+
+    struct LedgerSettings(Arc<AtomicUsize>);
+
+    impl crate::systems::SystemConfig for LedgerSettings {
+        type System = Ledger;
+
+        fn resolve(&self) -> Result<Ledger, EffectPortResolutionError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Ledger)
+        }
+    }
+
+    #[test]
+    fn deferred_port_resolve_builds_system() {
+        let built = Arc::new(AtomicUsize::new(0));
+        let configured: Port<dyn EntryFeed> = Port::deferred(LedgerSettings(Arc::clone(&built)));
+        let counter = Arc::clone(&built);
+        let function: Port<dyn EntryLedger> = Port::deferred(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(Ledger)
+        });
+        assert_eq!(built.load(Ordering::SeqCst), 0);
+        assert!(configured.eager_system().is_none());
+        assert!(function.eager_system().is_none());
+        configured
+            .resolve_system()
+            .expect("the configuration builds its system");
+        function
+            .resolve_system()
+            .expect("the function builds its system");
+        assert_eq!(built.load(Ordering::SeqCst), 2);
     }
 
     #[test]
