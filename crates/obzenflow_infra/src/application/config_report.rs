@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::presentation::shell_path;
 use crate::journal::disk::inspect::load_manifest;
 use crate::journal::disk::replay_archive::DiskReplayArchive;
 use crate::journal::read::{
@@ -9,8 +10,7 @@ use crate::journal::read::{
     LogicVersionChange, RunConfigChanges,
 };
 use obzenflow_core::journal::archive_actions::{
-    decide, shell_path, ArchiveEvidence, ArchiveOverrides, FailureEvidence, FlowEvidence,
-    ReplayVerb,
+    decide, ArchiveEvidence, ArchiveOverrides, FailureEvidence, FlowEvidence, ReplayVerb,
 };
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_runtime::pipeline::FlowHandle;
@@ -276,7 +276,6 @@ mod tests {
             live_writer: false,
             sources: Vec::new(),
             failure,
-            resume: None,
         };
         let line = |evidence: &ArchiveEvidence, flow: &FlowEvidence| {
             remedy_line(

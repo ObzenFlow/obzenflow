@@ -16,14 +16,17 @@ use super::scanner::{
 };
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, SourcePollContinuation,
+};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{SystemEvent, SystemPayload};
+use obzenflow_core::event::{SourceDiagnosticReason, SystemEvent, SystemPayload};
 use obzenflow_core::journal::archive::manifest::{
     RunManifest, RunManifestInterruptedAppend, EFFECT_BINDING_DESCRIPTOR_CAPABILITY,
     JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
-use obzenflow_core::journal::archive_actions::{ArchiveEvidence, ReplayVerb, ResumeEvidence};
+use obzenflow_core::journal::archive_actions::{ArchiveEvidence, FailureEvidence, ReplayVerb};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
 use std::collections::{HashMap, HashSet};
@@ -33,6 +36,15 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// `ResumeEvidence` holds the observed head of a history and the archive
+/// evidence that a plain resume of the head reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeEvidence {
+    pub run: PathBuf,
+    pub continued_from: Option<PathBuf>,
+    pub archive: ArchiveEvidence,
+}
 
 pub struct DiskReplayArchive {
     archive_path: PathBuf,
@@ -54,7 +66,7 @@ pub struct DiskReplayArchive {
     /// The runs a resume of this one merges with, nearest first (B6).
     ancestors: Vec<Arc<DiskReplayArchive>>,
     live_writer: bool,
-    failure: obzenflow_core::journal::archive_actions::FailureEvidence,
+    failure: FailureEvidence,
     interrupted_appends: Vec<RunManifestInterruptedAppend>,
 }
 
@@ -169,7 +181,6 @@ impl DiskReplayArchive {
                 })
                 .collect(),
             failure: self.failure,
-            resume: None,
         }
     }
 
@@ -1289,13 +1300,53 @@ fn scan_marker_generation(
     Ok(max_generation)
 }
 
+pub(crate) fn departs_from_archive(execution: &ExecutionPayload) -> bool {
+    match execution {
+        ExecutionPayload::StageFatalRecorded(fatal) => fatal.reason.departs_from_archive(),
+        ExecutionPayload::SourcePollFailed(failure) => {
+            failure.continuation == SourcePollContinuation::Terminal
+                && failure.diagnostic.reason() == SourceDiagnosticReason::InputChanged
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug, Default)]
+struct FailureFold {
+    departed: bool,
+    other: bool,
+}
+
+impl FailureFold {
+    fn observe(&mut self, execution: &ExecutionPayload) {
+        if departs_from_archive(execution) {
+            self.departed = true;
+        } else if match execution {
+            ExecutionPayload::StageFatalRecorded(_) => true,
+            ExecutionPayload::SourcePollFailed(failure) => {
+                failure.continuation == SourcePollContinuation::Terminal
+            }
+            _ => false,
+        } {
+            self.other = true;
+        }
+    }
+
+    fn finish(self, contract_violation: bool) -> FailureEvidence {
+        if self.departed && !self.other && !contract_violation {
+            FailureEvidence::DepartedFromArchive
+        } else {
+            FailureEvidence::Other
+        }
+    }
+}
+
 fn scan_failure_evidence(
     archive_path: &Path,
     manifest: &RunManifest,
     contract_violation: bool,
-) -> Result<obzenflow_core::journal::archive_actions::FailureEvidence, ReplayError> {
+) -> Result<FailureEvidence, ReplayError> {
     use obzenflow_core::event::ChainPayload;
-    use obzenflow_core::journal::archive_actions::{FailureEvidence, FailureFold};
     let policy = ReadPolicy::SealedScan {
         tolerate_torn_tail: true,
     };
@@ -1492,5 +1543,95 @@ pub(crate) fn admission_run(requested: &Path, continued: &Path) -> PathBuf {
 fn causal_admission_error(error: obzenflow_core::journal::JournalError) -> ReplayError {
     ReplayError::Parse {
         message: format!("Invalid archived causal commitment: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::StageFatalReason;
+
+    fn fatal(reason: StageFatalReason) -> ExecutionPayload {
+        use obzenflow_core::event::{StageFatalCode, StageFatalRecorded, StageFatalSeverity};
+        ExecutionPayload::StageFatalRecorded(StageFatalRecorded {
+            severity: StageFatalSeverity::Primary,
+            stage_id: StageId::new(),
+            stage_key: "score".to_string(),
+            causal_event_id: None,
+            input_position: None,
+            primary_cause_event_id: None,
+            code: StageFatalCode::Replay,
+            reason,
+            detail: String::new(),
+            departure: None,
+        })
+    }
+
+    fn poll_failed(
+        continuation: SourcePollContinuation,
+        reason: SourceDiagnosticReason,
+    ) -> ExecutionPayload {
+        ExecutionPayload::SourcePollFailed(
+            obzenflow_core::event::payloads::execution_payload::SourcePollFailedFact {
+                kind: obzenflow_core::event::status::processing_status::ErrorKind::Remote,
+                detail: String::new(),
+                continuation,
+                diagnostic: reason.into(),
+            },
+        )
+    }
+
+    fn folded(rows: &[ExecutionPayload], contract_violation: bool) -> FailureEvidence {
+        let mut fold = FailureFold::default();
+        for row in rows {
+            fold.observe(row);
+        }
+        fold.finish(contract_violation)
+    }
+
+    #[test]
+    fn departures_alone_fold_to_departed_from_archive() {
+        let input_changed = poll_failed(
+            SourcePollContinuation::Terminal,
+            SourceDiagnosticReason::InputChanged,
+        );
+        for departures in [
+            vec![fatal(StageFatalReason::DescriptorMismatch)],
+            vec![fatal(StageFatalReason::MissingRecordedFact)],
+            vec![
+                fatal(StageFatalReason::MissingRecordedEffect),
+                fatal(StageFatalReason::UnusedFactHistory),
+            ],
+            vec![input_changed.clone()],
+        ] {
+            assert_eq!(
+                folded(&departures, false),
+                FailureEvidence::DepartedFromArchive,
+                "{departures:?}"
+            );
+            assert_eq!(folded(&departures, true), FailureEvidence::Other);
+        }
+        for other in [
+            vec![],
+            vec![fatal(StageFatalReason::JournalFailure)],
+            vec![
+                fatal(StageFatalReason::UnusedEffectHistory),
+                fatal(StageFatalReason::JournalFailure),
+            ],
+            vec![
+                input_changed,
+                poll_failed(
+                    SourcePollContinuation::Terminal,
+                    SourceDiagnosticReason::RemoteFailed,
+                ),
+            ],
+            vec![poll_failed(
+                SourcePollContinuation::Recoverable,
+                SourceDiagnosticReason::InputChanged,
+            )],
+            vec![fatal(StageFatalReason::RecordingEnded)],
+        ] {
+            assert_eq!(folded(&other, false), FailureEvidence::Other, "{other:?}");
+        }
     }
 }

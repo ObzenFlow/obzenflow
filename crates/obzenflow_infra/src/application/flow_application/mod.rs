@@ -11,8 +11,10 @@
 //! - HTTP server management
 //! - Graceful shutdown handling
 
+use super::error::replay_error_text;
 use super::managed_lifecycle::{ApplicationLifecycle, ApplicationTask};
 use super::observability::PreparedObservability;
+use super::presentation::shell_path;
 use super::web_surface::label_endpoint;
 use super::{
     ApplicationError, ArchiveOffers, FlowConfig, HostedIngress, Presentation,
@@ -30,7 +32,6 @@ use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetric
 use crate::web::RuntimeInstanceId;
 use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
-use obzenflow_core::journal::archive_actions::shell_path;
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::web::HttpEndpoint;
@@ -160,6 +161,22 @@ fn resolve_startup_config(
     };
 
     result.map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
+}
+
+async fn interrupted_resume_advice(
+    requested: &std::path::Path,
+    opened: &std::path::Path,
+    flow: &obzenflow_core::journal::archive_actions::FlowEvidence,
+) -> Result<super::ResumeAdvice, obzenflow_core::journal::archive::ReplayError> {
+    let mut target =
+        crate::journal::disk::replay_archive::DiskReplayArchive::resume_evidence(opened).await?;
+    if target.run == opened {
+        target.run = requested.to_path_buf();
+    }
+    if target.continued_from.as_deref() == Some(opened) {
+        target.continued_from = Some(requested.to_path_buf());
+    }
+    Ok(super::ResumeAdvice::judge(&target, flow))
 }
 
 /// Configuration for log level filtering
@@ -702,7 +719,7 @@ impl FlowApplication {
             // bootstrap snapshot carries it; the build consumes it without the
             // factory opening anything. A bad archive fails here, before any
             // journal is created.
-            let mut resume_read_error = None;
+            let mut opened_archive = None;
             let bootstrap_config = {
                 let mut bootstrap_config = config.bootstrap_config();
                 if config.server.enabled || config.replay.is_some() {
@@ -712,9 +729,6 @@ impl FlowApplication {
                 if let Some(replay) = bootstrap_config.replay.clone() {
                     use crate::journal::disk::replay_archive::{admission_run, DiskReplayArchive};
                     use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
-                    use obzenflow_core::journal::archive_actions::{
-                        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence,
-                    };
                     // A resume continues the head of a history, merging a torn
                     // run with its ancestors (FLOWIP-134i B6, B7, B13); a
                     // replay reproduces exactly one run.
@@ -745,10 +759,11 @@ impl FlowApplication {
                         | ReplayError::ContinuedByAnother { .. }
                         | ReplayError::LocationNotWritable { .. }
                         | ReplayError::ReplayedRunMissing { .. } => {
-                            ApplicationError::ResumeRefused(e.to_string())
+                            ApplicationError::ResumeRefused(replay_error_text(&e))
                         }
                         other => ApplicationError::InvalidConfiguration(format!(
-                            "Failed to open replay archive: {other}"
+                            "Failed to open replay archive: {}",
+                            replay_error_text(&other)
                         )),
                     })?;
                     if std::fs::canonicalize(&replay.archive_path)
@@ -764,35 +779,11 @@ impl FlowApplication {
                         admitted.archive_path =
                             admission_run(&replay.archive_path, archive.archive_path());
                     }
-                    let mut evidence = archive.evidence();
-                    let refused_as_interrupted = matches!(
-                        decide(
-                            replay.verb,
-                            &replay.archive_path,
-                            &evidence,
-                            &FlowEvidence::default(),
-                            ArchiveOverrides {
-                                allow_incomplete_archive: replay.allow_incomplete_archive,
-                            },
-                        ),
-                        Err(ArchiveRefusal::Interrupted { .. })
-                    );
-                    if refused_as_interrupted {
-                        match DiskReplayArchive::resume_evidence(archive.archive_path()).await {
-                            Ok(mut target) => {
-                                if target.run == archive.archive_path() {
-                                    target.run = replay.archive_path.clone();
-                                }
-                                if target.continued_from.as_deref() == Some(archive.archive_path())
-                                {
-                                    target.continued_from = Some(replay.archive_path.clone());
-                                }
-                                evidence.resume = Some(Box::new(target));
-                            }
-                            Err(error) => resume_read_error = Some(error),
-                        }
-                    }
-                    bootstrap_config.archive_evidence = Some(evidence);
+                    opened_archive = Some((
+                        replay.archive_path.clone(),
+                        archive.archive_path().to_path_buf(),
+                    ));
+                    bootstrap_config.archive_evidence = Some(archive.evidence());
                     bootstrap_config.replay_archive = Some(Arc::new(archive));
                 }
                 bootstrap_config
@@ -842,11 +833,18 @@ impl FlowApplication {
                     // means the build failed before substrate selection, so no run
                     // directory exists to point at.
                     let error = match &failure.error {
-                        obzenflow_dsl::FlowBuildError::ArchiveVerbRefused(refusal) => {
-                            ApplicationError::archive_refusal(refusal, resume_read_error.as_ref())
+                        obzenflow_dsl::FlowBuildError::ArchiveVerbRefused { refusal, flow } => {
+                            use obzenflow_core::journal::archive_actions::ArchiveRefusal;
+                            let resume = match (refusal, &opened_archive) {
+                                (ArchiveRefusal::Interrupted { .. }, Some((requested, opened))) => {
+                                    Some(interrupted_resume_advice(requested, opened, flow).await)
+                                }
+                                _ => None,
+                            };
+                            ApplicationError::archive_refusal(refusal, resume.as_ref())
                         }
-                        obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
-                            ApplicationError::ResumeRefused(failure.error.to_string())
+                        obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(error) => {
+                            ApplicationError::ResumeRefused(replay_error_text(error))
                         }
                         obzenflow_dsl::FlowBuildError::ApplicationSettings(error) => {
                             ApplicationError::InvalidConfiguration(error.to_string())

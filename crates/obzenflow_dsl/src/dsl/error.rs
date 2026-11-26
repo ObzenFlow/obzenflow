@@ -356,15 +356,19 @@ pub enum FlowBuildError {
     )]
     OrderObserverFanInRequiresDeterministicOrder { stage_name: String },
 
-    /// Archive admission refused the verb; displays the refusal verbatim.
-    #[error("{0}")]
-    ArchiveVerbRefused(obzenflow_core::journal::archive_actions::ArchiveRefusal),
+    /// Archive admission refused the verb. The error also carries the facts of
+    /// the flow that admission read.
+    #[error("{refusal}")]
+    ArchiveVerbRefused {
+        refusal: obzenflow_core::journal::archive_actions::ArchiveRefusal,
+        flow: Box<obzenflow_core::journal::archive_actions::FlowEvidence>,
+    },
 
     #[error(
         "Resume requires a durable current run (FLOWIP-120u F13). The live continuation \
          records new effect outcomes, and an ephemeral run has no location: the continuation \
          could never be resumed, and its effects would re-execute on the next resume of the \
-         original archive. Switch `journals:` to `disk_journals(...)`, or use `--replay-from` \
+         original archive. Switch `journals:` to `disk_journals(...)`, or replay the archive \
          for an effect-free bounded rehearsal."
     )]
     ResumeRefusedEphemeralRun,

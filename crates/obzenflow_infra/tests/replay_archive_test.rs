@@ -316,9 +316,7 @@ async fn archive_missing_system_log_requires_flag() {
     assert_eq!(
         err.to_string(),
         format!(
-            "Replay archive system.log missing at {}.\nRestore it from a copy of the run \
-             directory, or pass --allow-incomplete-archive to open the run as interrupted from \
-             its stage journals.",
+            "Replay archive system.log missing at {}",
             system_log.display()
         )
     );
@@ -505,9 +503,9 @@ async fn open_rejects_previous_journal_schema_version_before_typed_parse() {
         ),
         "expected UnsupportedJournalSchemaVersion for a 2.0 archive, got: {err}"
     );
-    assert!(
-        err.to_string().contains("re-record"),
-        "refusal must carry the re-record guidance, got: {err}"
+    assert_eq!(
+        err.to_string(),
+        format!("unsupported journal schema version: 2.0 (supported: {JOURNAL_SCHEMA_VERSION})")
     );
 }
 
@@ -1076,19 +1074,19 @@ async fn resume_with_missing_ancestor_log_refused() {
         panic!("a resume opens an ancestor that has no system.log");
     };
     assert!(
-        matches!(&error, ReplayError::AncestorMissingSystemLog { .. }),
+        matches!(
+            &error,
+            ReplayError::AncestorMissingSystemLog { system_log: path, .. } if path == &system_log
+        ),
         "{error}"
     );
     assert_eq!(
         error.to_string(),
         format!(
             "cannot resume {resumed}: its reconstruction did not complete, and the archive it \
-             resumed from, {parent}, has no system.log.\nRestore {system_log} from a copy, then \
-             resume {resumed} again, or resume it with --allow-incomplete-archive to open \
-             {parent} as interrupted from its stage journals.",
+             resumed from, {parent}, has no system.log.",
             resumed = resumed.display(),
-            parent = parent.display(),
-            system_log = system_log.display()
+            parent = parent.display()
         )
     );
 }
@@ -1152,7 +1150,7 @@ async fn archive_looped_system_log_reports_io() {
 async fn torn_resume_evidence_merges_ancestor() {
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;
     use obzenflow_core::journal::archive_actions::{
-        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb, ResumeAdvice,
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
     };
     let base = tempdir().unwrap();
     let parent_facts = [source_fact(1), source_fact(2), source_eof()];
@@ -1165,17 +1163,11 @@ async fn torn_resume_evidence_merges_ancestor() {
         )],
     };
 
-    let mut evidence = DiskReplayArchive::open(torn.clone(), false)
+    let evidence = DiskReplayArchive::open(torn.clone(), false)
         .await
         .unwrap()
         .evidence();
     assert_eq!(evidence.sources[0].recorded_eof, None);
-    let resume = DiskReplayArchive::resume_evidence(&torn).await.unwrap();
-    assert_eq!(
-        resume.archive.sources[0].recorded_eof,
-        Some(EofKind::Natural)
-    );
-    evidence.resume = Some(Box::new(resume));
     assert_eq!(
         decide(
             ReplayVerb::Replay,
@@ -1184,22 +1176,32 @@ async fn torn_resume_evidence_merges_ancestor() {
             &flow,
             ArchiveOverrides::default()
         ),
-        Err(ArchiveRefusal::Interrupted {
-            run: torn.clone(),
-            resume: Some(Box::new(ResumeAdvice {
-                run: torn.clone(),
-                continued_from: None,
-                admission: Ok(()),
-            })),
-        })
+        Err(ArchiveRefusal::Interrupted { run: torn.clone() })
+    );
+    let resume = DiskReplayArchive::resume_evidence(&torn).await.unwrap();
+    assert_eq!(
+        resume.archive.sources[0].recorded_eof,
+        Some(EofKind::Natural)
+    );
+    assert_eq!((&resume.run, &resume.continued_from), (&torn, &None));
+    assert_eq!(
+        decide(
+            ReplayVerb::Resume,
+            &resume.run,
+            &resume.archive,
+            &flow,
+            ArchiveOverrides::default()
+        ),
+        Ok(())
     );
 }
 
 #[tokio::test]
 async fn replay_completed_head_offers_replay() {
     use obzenflow_core::journal::archive_actions::{
-        decide, shell_path, ArchiveOverrides, FlowEvidence, ReplayVerb,
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
     };
+    use obzenflow_infra::application::{shell_path, ApplicationError};
     let base = tempdir().unwrap();
     let facts = [source_fact(1), source_eof()];
     let (parent, head) = write_claimed_resume(
@@ -1211,29 +1213,45 @@ async fn replay_completed_head_offers_replay() {
     )
     .await;
     let before = (archive_bytes(&parent), archive_bytes(&head));
-    let mut archive = DiskReplayArchive::open(parent.clone(), false)
+    let archive = DiskReplayArchive::open(parent.clone(), false)
         .await
         .unwrap()
         .evidence();
-    archive.resume = Some(Box::new(
-        DiskReplayArchive::resume_evidence(&parent).await.unwrap(),
-    ));
+    assert_eq!(
+        decide(
+            ReplayVerb::Replay,
+            &parent,
+            &archive,
+            &FlowEvidence::default(),
+            ArchiveOverrides::default(),
+        ),
+        Err(ArchiveRefusal::Interrupted {
+            run: parent.clone()
+        })
+    );
+    let target = DiskReplayArchive::resume_evidence(&parent).await.unwrap();
+    assert_eq!(
+        (&target.run, target.continued_from.as_ref()),
+        (&head, Some(&parent))
+    );
     let refusal = decide(
-        ReplayVerb::Replay,
-        &parent,
-        &archive,
+        ReplayVerb::Resume,
+        &target.run,
+        &target.archive,
         &FlowEvidence::default(),
         ArchiveOverrides::default(),
     )
     .unwrap_err();
-    assert_eq!(refusal.to_string(), format!(
-        "cannot replay {parent}: it has no terminal record, so it was interrupted.\n\
-         Pass --allow-incomplete-archive to replay the recorded prefix of {parent}.\n\
-         {head} continued {parent}.\n\
-         cannot resume {head}: it completed naturally and every source is finite, so there is no work left to continue.\n\
-         Replay it with --replay-from {operand}.",
-        parent = parent.display(), head = head.display(), operand = shell_path(&head)
-    ));
+    assert_eq!(refusal, ArchiveRefusal::NoWorkLeft { run: head.clone() });
+    assert_eq!(
+        ApplicationError::from(&refusal).to_string(),
+        format!(
+            "cannot resume {head}: it completed naturally and every source is finite, so there \
+             is no work left to continue.\nReplay it with --replay-from {operand}.",
+            head = head.display(),
+            operand = shell_path(&head)
+        )
+    );
     assert_eq!((archive_bytes(&parent), archive_bytes(&head)), before);
 }
 
@@ -1266,7 +1284,9 @@ async fn resume_mismatched_claim_reports_identity() {
 
 #[tokio::test]
 async fn resume_locked_head_reports_writer() {
-    use obzenflow_core::journal::archive_actions::{ArchiveRefusal, FlowEvidence, ReplayVerb};
+    use obzenflow_core::journal::archive_actions::{
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+    };
     let base = tempdir().unwrap();
     let (parent, head) = write_claimed_resume(base.path(), &[], 0, None, None).await;
     let writer = std::fs::File::open(head.join(SOURCE_LOG)).unwrap();
@@ -1274,7 +1294,13 @@ async fn resume_locked_head_reports_writer() {
     std::fs::remove_file(head.join("system.log")).unwrap();
     let target = DiskReplayArchive::resume_evidence(&parent).await.unwrap();
     assert_eq!(
-        target.judge(&FlowEvidence::default()).admission,
+        decide(
+            ReplayVerb::Resume,
+            &target.run,
+            &target.archive,
+            &FlowEvidence::default(),
+            ArchiveOverrides::default(),
+        ),
         Err(ArchiveRefusal::StillRunning {
             verb: ReplayVerb::Resume,
             run: head
@@ -1328,7 +1354,7 @@ async fn resume_aliased_ancestor_refuses_cycle() {
 #[tokio::test]
 async fn linked_resume_names_replayed_run() {
     use obzenflow_core::journal::archive_actions::{
-        decide, ArchiveOverrides, FlowEvidence, ReplayVerb,
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
     };
     const REPLAY_ID: &str = "flow_01H00000000000000000000001";
     let base = tempdir().unwrap();
@@ -1347,32 +1373,33 @@ async fn linked_resume_names_replayed_run() {
     write_stopped_run(&replay, REPLAY_ID, None, &[source_fact(1)]).await;
     record_replay_of(&replay, &original);
 
-    let mut evidence = DiskReplayArchive::open(replay.clone(), false)
+    let evidence = DiskReplayArchive::open(replay.clone(), false)
         .await
         .unwrap()
         .evidence();
+    assert_eq!(
+        decide(
+            ReplayVerb::Replay,
+            &replay,
+            &evidence,
+            &FlowEvidence::default(),
+            ArchiveOverrides::default(),
+        ),
+        Err(ArchiveRefusal::Interrupted {
+            run: replay.clone()
+        })
+    );
     let resume = DiskReplayArchive::resume_evidence(&replay).await.unwrap();
     assert_eq!(resume.run, original);
-    evidence.resume = Some(Box::new(resume));
-    let refusal = decide(
-        ReplayVerb::Replay,
-        &replay,
-        &evidence,
-        &FlowEvidence::default(),
-        ArchiveOverrides::default(),
-    )
-    .unwrap_err();
     assert_eq!(
-        refusal.to_string(),
-        format!(
-            "cannot replay {replay}: it has no terminal record, so it was interrupted.\nPass \
-             --allow-incomplete-archive to replay its recorded prefix.\ncannot resume \
-             {original}: it completed naturally and every source is finite, so there is no work \
-             left to continue.\nReplay it with --replay-from {operand}.",
-            replay = replay.display(),
-            original = original.display(),
-            operand = obzenflow_core::journal::archive_actions::shell_path(&original)
-        )
+        decide(
+            ReplayVerb::Resume,
+            &resume.run,
+            &resume.archive,
+            &FlowEvidence::default(),
+            ArchiveOverrides::default(),
+        ),
+        Err(ArchiveRefusal::NoWorkLeft { run: original })
     );
 }
 

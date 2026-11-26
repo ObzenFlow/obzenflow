@@ -12,7 +12,7 @@ use obzenflow_core::event::{ChainPayload, StageFatalReason, StageFatalRecorded};
 use obzenflow_core::journal::archive_actions::FlowEvidence;
 use obzenflow_core::journal::read::RunRecordData;
 
-use crate::application::ApplicationError;
+use crate::application::{ApplicationError, ResumeAdvice};
 use crate::journal::disk::replay_archive::DiskReplayArchive;
 use crate::journal::read::{open_disk_run, JournalReadError};
 
@@ -33,7 +33,7 @@ pub(super) async fn refine_replay_failure(
                 Some(flow) => Some(Box::new(
                     DiskReplayArchive::resume_evidence(replay_run)
                         .await
-                        .map(|target| target.judge(flow)),
+                        .map(|target| ResumeAdvice::judge(&target, flow)),
                 )),
                 None => None,
             },

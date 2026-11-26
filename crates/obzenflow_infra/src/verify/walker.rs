@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn max_divergences_caps_recording_but_not_counting() {
+    fn max_divergences_caps_saved_details() {
         let baseline: Vec<ChainEvent> = (0..10).map(|n| data("a", json!({ "n": n }))).collect();
         let candidate: Vec<ChainEvent> = (0..10)
             .map(|n| data("a", json!({ "n": n + 100 })))

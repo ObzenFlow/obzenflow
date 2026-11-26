@@ -3,10 +3,37 @@
 // https://obzenflow.dev
 
 use super::run_mode::RunMode;
-use obzenflow_core::journal::archive_actions::shell_path;
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use std::fmt::Display;
 use std::io::IsTerminal;
+use std::path::Path;
+
+/// `shell_path` renders an archive path as one POSIX shell argument.
+pub fn shell_path(path: &Path) -> String {
+    use std::fmt::Write;
+
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if !bytes.is_empty()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(b))
+    {
+        return path.display().to_string();
+    }
+    let mut word = String::from("'");
+    for chunk in bytes.utf8_chunks() {
+        word.push_str(&chunk.valid().replace('\'', r"'\''"));
+        if !chunk.invalid().is_empty() {
+            word.push_str("'\"$(printf '");
+            for byte in chunk.invalid() {
+                write!(word, "\\{byte:03o}").expect("writing to a String succeeds");
+            }
+            word.push_str("')\"'");
+        }
+    }
+    word.push('\'');
+    word
+}
 
 const INDENT: &str = "  ";
 const NESTED_INDENT: &str = "    ";

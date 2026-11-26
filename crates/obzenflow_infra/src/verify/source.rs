@@ -81,13 +81,7 @@ impl DiskRunSource {
 }
 
 fn unreadable_status(error: ReplayError) -> String {
-    match error {
-        ReplayError::MissingSystemLog { path } => format!(
-            "unknown (Replay archive system.log missing at {})",
-            path.display()
-        ),
-        error => format!("unknown ({error})"),
-    }
+    format!("unknown ({error})")
 }
 
 /// Reads a run directory's manifest through the archive's schema and

@@ -26,16 +26,14 @@ use obzenflow_core::journal::archive::ReplayArchive;
 ///
 /// Distinct from the presentation `obzenflow_infra::RunMode`, which is a
 /// banner-and-footer surface and is never read for a runtime decision.
-/// FLOWIP-120n adds `Resume` (`--resume-from`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
     /// No replay verb: do live work, reconstruct nothing.
     Live,
-    /// `--replay-from`: reconstruct a bounded recording and drain at its end.
+    /// `Replay` reconstructs a bounded recording and drains at its end.
     Replay,
-    /// `Resume` resumes a recorded run (`--resume-from`) from the last fact it
-    /// committed. The new run catches up on the recording first, then continues
-    /// live.
+    /// `Resume` resumes a recorded run from the last fact it committed. The new
+    /// run catches up on the recording first, then continues live.
     Resume,
 }
 
@@ -459,7 +457,7 @@ impl RuntimeExecution {
             RuntimeMode::Resume => {
                 let archive_ref = archive
                     .as_deref()
-                    .expect("--resume-from requires an archive; config layer must reject earlier");
+                    .expect("a resume requires an archive; config layer must reject earlier");
                 let resume_generation =
                     ReaderGeneration(archive_ref.max_recorded_generation().0 + 1);
                 let state = Arc::new(ResumeState::new(resume_generation));

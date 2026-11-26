@@ -2309,7 +2309,7 @@ async fn durable_execution_contract() {
              with --resume-from {operand}, or pass --allow-incomplete-archive to replay its \
              recorded prefix.",
             torn = torn.display(),
-            operand = obzenflow_core::journal::archive_actions::shell_path(&torn)
+            operand = obzenflow_infra::application::shell_path(&torn)
         )),
         "S5: the replay refusal names the resume: {refusal}"
     );
