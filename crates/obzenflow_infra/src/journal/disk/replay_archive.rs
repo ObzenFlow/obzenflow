@@ -23,7 +23,7 @@ use obzenflow_core::journal::archive::manifest::{
     JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
-use obzenflow_core::journal::archive_actions::{ArchiveEvidence, ReplayVerb};
+use obzenflow_core::journal::archive_actions::{ArchiveEvidence, ReplayVerb, ResumeEvidence};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
 use std::collections::HashMap;
@@ -169,11 +169,13 @@ impl DiskReplayArchive {
                 })
                 .collect(),
             failure: self.failure,
+            resume: None,
         }
     }
 
-    /// The evidence of a run this process just finished writing, as `verb`
-    /// would open it. The run must have stopped and be the head of its history.
+    /// `written_run_evidence` returns the evidence of `run` as `verb` opens it,
+    /// without the liveness probe or the continuation checks. If the run can
+    /// still be live, the caller probes its liveness.
     pub async fn written_run_evidence(
         run: PathBuf,
         verb: ReplayVerb,
@@ -187,6 +189,18 @@ impl DiskReplayArchive {
             }
         };
         Ok(archive.evidence())
+    }
+
+    /// `resume_evidence` returns what a plain resume of `run` reads, and the
+    /// run that admission names for that resume. It does not probe liveness or
+    /// continuation claims.
+    pub async fn resume_evidence(run: &Path) -> Result<ResumeEvidence, ReplayError> {
+        let (continued, _) = Self::resolve_replayed_run(run.to_path_buf())?;
+        let archive = Self::written_run_evidence(continued.clone(), ReplayVerb::Resume).await?;
+        Ok(ResumeEvidence {
+            run: admission_run(run, &continued),
+            archive,
+        })
     }
 
     pub(crate) async fn footer_evidence(run: &Path) -> [Option<ArchiveEvidence>; 2] {
@@ -349,29 +363,23 @@ impl DiskReplayArchive {
                     scan.reconstruction_completed,
                     scan.contract_violation,
                 ),
-                Err(err) => {
-                    if allow_incomplete_archive
-                        && !matches!(err, ReplayError::UnsupportedJournalSchemaVersion { .. })
-                    {
-                        tracing::warn!(
-                            archive_path = %archive_path.display(),
-                            system_log_path = %system_log_path.display(),
-                            error = %err,
-                            "Replay archive system.log could not be read; proceeding due to allow_incomplete_archive"
-                        );
-                        (
-                            StatusDerivation {
-                                terminal_events_found: 0,
-                                chosen: ArchiveStatus::Unknown,
-                                warning: Some(err.to_string()),
-                            },
-                            None,
-                            false,
-                        )
-                    } else {
-                        return Err(err);
-                    }
+                Err(ReplayError::MissingSystemLog { path }) if allow_incomplete_archive => {
+                    tracing::warn!(
+                        archive_path = %archive_path.display(),
+                        system_log_path = %path.display(),
+                        "Replay archive system.log could not be read; proceeding due to allow_incomplete_archive"
+                    );
+                    (
+                        StatusDerivation {
+                            terminal_events_found: 0,
+                            chosen: ArchiveStatus::Unknown,
+                            warning: Some(format!("system.log missing at {}", path.display())),
+                        },
+                        None,
+                        false,
+                    )
                 }
+                Err(err) => return Err(err),
             };
         let status = status_derivation.chosen;
         let failure = if status == ArchiveStatus::Failed && manifest.resume.is_some() {
@@ -484,13 +492,25 @@ impl DiskReplayArchive {
                     ancestor,
                 });
             }
-            let opened = Self::open_replay(ancestor.clone(), true, Liveness::Stopped, purpose)
-                .await
-                .map_err(|error| ReplayError::AncestorUnreadable {
+            let opened = Self::open_replay(
+                ancestor.clone(),
+                self.allow_incomplete_archive,
+                Liveness::Stopped,
+                purpose,
+            )
+            .await
+            .map_err(|error| match error {
+                ReplayError::MissingSystemLog { path } => ReplayError::AncestorMissingSystemLog {
+                    archive: self.archive_path.clone(),
+                    ancestor,
+                    system_log: path,
+                },
+                error => ReplayError::AncestorUnreadable {
                     archive: self.archive_path.clone(),
                     ancestor,
                     source: Box::new(error),
-                })?;
+                },
+            })?;
             parent = opened.unfinished_parent();
             ancestors.push(Arc::new(opened));
         }
@@ -623,11 +643,6 @@ impl DiskReplayArchive {
         self.status_derivation.clone()
     }
 
-    /// FLOWIP-120q torn-tail policy. A cleanly `Completed` run flushed every
-    /// record before its terminal event, so a torn final record is corruption.
-    /// Any other status was interrupted, so an unterminated final record is a
-    /// tolerated torn tail. `allow_incomplete_archive` governs only whether a
-    /// non-terminal archive may be opened, never read-time tolerance.
     fn read_policy(&self) -> ReadPolicy {
         ReadPolicy::SealedScan {
             tolerate_torn_tail: self.status != ArchiveStatus::Completed,
@@ -1419,6 +1434,14 @@ pub(crate) fn replayed_run(manifest: &RunManifest) -> Option<PathBuf> {
     match (&manifest.replay, &manifest.resume) {
         (Some(replay), None) => Some(PathBuf::from(&replay.replay_from)),
         _ => None,
+    }
+}
+
+pub(crate) fn admission_run(requested: &Path, continued: &Path) -> PathBuf {
+    if std::fs::canonicalize(requested).is_ok_and(|requested| requested == continued) {
+        requested.to_path_buf()
+    } else {
+        continued.to_path_buf()
     }
 }
 

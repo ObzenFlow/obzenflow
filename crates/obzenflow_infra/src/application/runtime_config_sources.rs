@@ -33,7 +33,7 @@ pub(crate) fn build_runtime_config_snapshot(
     let mut set = CandidateSet::default();
     admit_file_candidates(&mut set, file)?;
     admit_env_candidates(&mut set)?;
-    admit_resume_view_cli(&mut set, cli)?;
+    admit_archive_cli(&mut set, cli)?;
     Ok(ResolvedRuntimeConfig::new(set).with_ai_endpoints(ai_endpoint_tables(file)?))
 }
 
@@ -559,13 +559,10 @@ fn admit_file_candidates(
         );
     }
 
-    // The runtime.resume.* view over the existing [replay] table
-    // (absorption without moving the parse; provenance stays honest by
-    // admitting the same raw inputs 010h resolves).
-    let replay = &file.replay;
+    let archive = &file.archive;
     for (key, path) in [
-        ("runtime.resume.replay_from", &replay.from),
-        ("runtime.resume.resume_from", &replay.resume_from),
+        ("archive.replay_from", &archive.replay_from),
+        ("archive.resume_from", &archive.resume_from),
     ] {
         if let Some(value) = path {
             admit(
@@ -580,10 +577,10 @@ fn admit_file_candidates(
     }
     for (key, flag) in [
         (
-            "runtime.resume.allow_incomplete_archive",
-            replay.allow_incomplete_archive,
+            "archive.allow_incomplete_archive",
+            archive.allow_incomplete_archive,
         ),
-        ("runtime.resume.verify", replay.verify),
+        ("archive.verify", archive.verify),
     ] {
         if let Some(value) = flag {
             admit(
@@ -806,8 +803,6 @@ fn admit_middleware_fields(
     Ok(())
 }
 
-/// Env acquisition: the canonical spellings (§2 environment-tier lock) plus
-/// the named 010h spellings kept by the runtime.resume view. Global-only.
 fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
     for &name in REMOVED_AI_ENV {
         if std::env::var_os(name).is_some() {
@@ -864,13 +859,10 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// The resume-view CLI flags (the only CLI candidates in the first pass;
-/// `--set` is deferred). Positive flags admit only when set, matching the
-/// 010h resolve_positive_flag posture.
-fn admit_resume_view_cli(set: &mut CandidateSet, cli: &FlowConfig) -> Result<(), ConfigError> {
+fn admit_archive_cli(set: &mut CandidateSet, cli: &FlowConfig) -> Result<(), ConfigError> {
     for (key, path) in [
-        ("runtime.resume.replay_from", &cli.replay_from),
-        ("runtime.resume.resume_from", &cli.resume_from),
+        ("archive.replay_from", &cli.replay_from),
+        ("archive.resume_from", &cli.resume_from),
     ] {
         if let Some(value) = path {
             admit(
@@ -885,10 +877,10 @@ fn admit_resume_view_cli(set: &mut CandidateSet, cli: &FlowConfig) -> Result<(),
     }
     for (key, flag) in [
         (
-            "runtime.resume.allow_incomplete_archive",
+            "archive.allow_incomplete_archive",
             cli.allow_incomplete_archive,
         ),
-        ("runtime.resume.verify", cli.verify),
+        ("archive.verify", cli.verify),
     ] {
         if flag {
             admit(
@@ -1496,23 +1488,23 @@ mod tests {
     }
 
     #[test]
-    fn resume_view_carries_cli_over_file_with_named_env_spellings() {
+    fn archive_cli_flag_overrides_file() {
         let _lock = env_lock();
         let _guard = EnvGuard::new(&["OBZENFLOW_REPLAY_VERIFY"]);
         let snapshot = snapshot(
-            "[replay]\nverify = false",
+            "[archive]\nverify = false",
             &["--replay-from", "/tmp/run", "--verify"],
         );
         let docs = snapshot.global_view();
         let verify = docs
             .iter()
-            .find(|d| d.key_path == "runtime.resume.verify")
+            .find(|d| d.key_path == "archive.verify")
             .unwrap();
         assert_eq!(verify.value, serde_json::json!(true));
         assert_eq!(verify.source, "cli");
         let from = docs
             .iter()
-            .find(|d| d.key_path == "runtime.resume.replay_from")
+            .find(|d| d.key_path == "archive.replay_from")
             .unwrap();
         assert_eq!(from.source, "cli");
         assert_eq!(from.value, serde_json::json!("/tmp/run"));

@@ -354,7 +354,6 @@ mod tests {
     fn secret_value_redaction_machinery_works_via_a_synthetic_spec() {
         let spec = KnobSpec {
             key_path: "ai.endpoints.resolved_api_key",
-            file_path: None,
             value_type: KnobType::Text,
             target: KnobTarget::StageOrEffect,
             default: KnobDefault::OptionalAbsent,

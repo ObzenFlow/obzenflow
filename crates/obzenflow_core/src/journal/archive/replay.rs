@@ -35,7 +35,11 @@ pub enum ReplayError {
         supported: u32,
     },
 
-    #[error("Replay archive system.log missing at {path}")]
+    #[error(
+        "Replay archive system.log missing at {path}.\nRestore it from a copy of the run \
+         directory, or pass --allow-incomplete-archive to open the run as interrupted from its \
+         stage journals."
+    )]
     MissingSystemLog { path: PathBuf },
 
     #[error("Stage '{stage_key}' not found in run manifest")]
@@ -93,6 +97,24 @@ pub enum ReplayError {
         archive: PathBuf,
         ancestor: PathBuf,
         source: Box<ReplayError>,
+    },
+
+    /// A torn resumed run merges with the archive it resumed from, which has no
+    /// `system.log`.
+    #[error(
+        "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
+         from, {}, has no system.log.\nRestore {} from a copy, then resume {} again, or resume \
+         it with --allow-incomplete-archive to open {} as interrupted from its stage journals.",
+        .archive.display(),
+        .ancestor.display(),
+        .system_log.display(),
+        .archive.display(),
+        .ancestor.display()
+    )]
+    AncestorMissingSystemLog {
+        archive: PathBuf,
+        ancestor: PathBuf,
+        system_log: PathBuf,
     },
 
     /// A torn resumed run's source records are not a prefix of its ancestor's.

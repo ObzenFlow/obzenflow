@@ -200,7 +200,7 @@ impl LogLevel {
 ///
 /// # Example
 /// ```ignore
-/// fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// fn main() -> anyhow::Result<()> {
 ///     let flow = build_flow(); // returns a deferred FlowDefinition
 ///     FlowApplication::builder()
 ///         .with_web_endpoint(my_endpoint)
@@ -467,7 +467,7 @@ impl FlowApplicationBuilder {
 /// use obzenflow_infra::application::FlowApplication;
 ///
 /// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// async fn main() -> anyhow::Result<()> {
 ///     FlowApplication::run(build_flow()).await?;
 ///     Ok(())
 /// }
@@ -477,7 +477,7 @@ impl FlowApplicationBuilder {
 /// ```ignore
 /// use obzenflow_infra::application::{FlowApplication, LogLevel};
 ///
-/// fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// fn main() -> anyhow::Result<()> {
 ///     FlowApplication::builder()
 ///         .with_log_level(LogLevel::Info)
 ///         .run_blocking(build_flow())?;
@@ -708,8 +708,11 @@ impl FlowApplication {
                         obzenflow_runtime::bootstrap::StartupMode::Manual;
                 }
                 if let Some(replay) = bootstrap_config.replay.clone() {
-                    use crate::journal::disk::replay_archive::DiskReplayArchive;
+                    use crate::journal::disk::replay_archive::{admission_run, DiskReplayArchive};
                     use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
+                    use obzenflow_core::journal::archive_actions::{
+                        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence,
+                    };
                     // A resume continues the head of a history, merging a torn
                     // run with its ancestors (FLOWIP-134i B6, B7, B13); a
                     // replay reproduces exactly one run.
@@ -732,6 +735,7 @@ impl FlowApplication {
                     .map_err(|e| match e {
                         ReplayError::AncestorMissing { .. }
                         | ReplayError::AncestorUnreadable { .. }
+                        | ReplayError::AncestorMissingSystemLog { .. }
                         | ReplayError::AncestorDisagrees { .. }
                         | ReplayError::NamespaceDisagrees { .. }
                         | ReplayError::AlreadyContinued { .. }
@@ -754,7 +758,30 @@ impl FlowApplication {
                             replay.archive_path.display()
                         ));
                     }
-                    bootstrap_config.archive_evidence = Some(archive.evidence());
+                    if let Some(admitted) = bootstrap_config.replay.as_mut() {
+                        admitted.archive_path =
+                            admission_run(&replay.archive_path, archive.archive_path());
+                    }
+                    let mut evidence = archive.evidence();
+                    let refused_as_interrupted = matches!(
+                        decide(
+                            replay.verb,
+                            &replay.archive_path,
+                            &evidence,
+                            &FlowEvidence::default(),
+                            ArchiveOverrides {
+                                allow_incomplete_archive: replay.allow_incomplete_archive,
+                            },
+                        ),
+                        Err(ArchiveRefusal::Interrupted { .. })
+                    );
+                    if refused_as_interrupted {
+                        evidence.resume = DiskReplayArchive::resume_evidence(&replay.archive_path)
+                            .await
+                            .ok()
+                            .map(Box::new);
+                    }
+                    bootstrap_config.archive_evidence = Some(evidence);
                     bootstrap_config.replay_archive = Some(Arc::new(archive));
                 }
                 bootstrap_config
@@ -1153,10 +1180,15 @@ impl FlowApplication {
             (Err(err), flow_name, run_state, built_flow) => {
                 let err = match (&run_mode, run_state.as_ref().and_then(|s| s.locator())) {
                     (super::run_mode::RunMode::Replay(ctx), Some(locator)) => {
+                        let flow_evidence = built_flow
+                            .as_ref()
+                            .map(|flow| flow.archive_flow_evidence().clone())
+                            .unwrap_or_default();
                         super::replay_stop::refine_replay_failure(
                             err,
                             &ctx.archive_path,
                             locator.path(),
+                            &flow_evidence,
                         )
                         .await
                     }
@@ -1271,7 +1303,7 @@ impl FlowApplication {
         };
         if std::fs::metadata(&baseline).is_err() {
             return skip(format!(
-                "verification skipped: source archive unavailable ({})\nrestore the source archive, then compare baseline {} and candidate {} with obzenflow::application::verify_run_dirs",
+                "verification skipped: source archive unavailable ({})\nrestore the source archive, then run obzenflow verify --baseline {} --candidate {}",
                 baseline.display(),
                 baseline.display(),
                 candidate.display()

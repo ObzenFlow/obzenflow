@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Admission of a replay or resume of a run, decided from the run's archive
-//! evidence and the flow's own facts. Archive checks run before flow checks.
+//! `archive_actions` admits or refuses a replay or a resume of a run. It
+//! decides from the archive evidence of the run and from the facts of the flow.
+//! [`decide`] checks the cycle first and a live writer next. For a resume, it
+//! then checks the no-work-left row and the sources. It checks the archive rows
+//! last, so no refusal names a command that an earlier check refuses.
 
 use super::ArchiveStatus;
 use crate::event::payloads::execution_payload::{ExecutionPayload, SourcePollContinuation};
@@ -12,6 +15,26 @@ use crate::event::SourceDiagnosticReason;
 use crate::source::{ResumeRefusal, SourceContinuation};
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+/// `ADMISSION_TABLE` shows the admission that [`decide`] returns for each
+/// archive status, verb and override. `--help` prints it after the options. A
+/// test compares it with [`decide`].
+pub const ADMISSION_TABLE: &str = "\
+Archive admission (the flag is --allow-incomplete-archive):
+Archive          | --replay-from | --resume-from
+completed, every source finite and ended naturally
+                 | admitted      | refused: no work left
+completed with a source stopped, or cancelled
+                 | admitted      | admitted
+interrupted (no terminal record)
+                 | with the flag | admitted
+failed: a stage departed from its archive
+                 | with the flag | admitted
+failed: any other reason
+                 | with the flag | with the flag
+A still-running run refuses both.
+A cyclic topology refuses both.
+A resume refuses a source whose connector cannot continue its recorded input.";
 
 /// The operator's archive verb, a bounded replay that drains or a resume that
 /// catches up and continues live.
@@ -107,6 +130,15 @@ pub struct ArchiveEvidence {
     pub sources: Vec<SourceEvidence>,
     /// Consulted only when resuming a `Failed` archive.
     pub failure: FailureEvidence,
+    pub resume: Option<Box<ResumeEvidence>>,
+}
+
+/// `ResumeEvidence` contains the run that a plain resume continues, as
+/// admission names it, and the evidence that the resume reads there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeEvidence {
+    pub run: PathBuf,
+    pub archive: ArchiveEvidence,
 }
 
 impl ArchiveEvidence {
@@ -156,6 +188,7 @@ pub enum ArchiveRefusal {
     },
     Interrupted {
         run: PathBuf,
+        resume: Option<Box<ArchiveRefusal>>,
     },
     /// A replay or resume of a flow with a cycle; `members` names the stages
     /// on it.
@@ -205,11 +238,20 @@ impl fmt::Display for ArchiveRefusal {
                 verb = verb.word(),
                 run = run.display()
             ),
-            Self::Interrupted { run } => write!(
+            Self::Interrupted { run, resume: None } => write!(
                 f,
                 "cannot replay {run}: it has no terminal record, so it was interrupted.\nResume \
                  it with --resume-from {run}, or pass --allow-incomplete-archive to replay its \
                  recorded prefix.",
+                run = run.display()
+            ),
+            Self::Interrupted {
+                run,
+                resume: Some(resume),
+            } => write!(
+                f,
+                "cannot replay {run}: it has no terminal record, so it was interrupted.\nPass \
+                 --allow-incomplete-archive to replay its recorded prefix.\n{resume}",
                 run = run.display()
             ),
             Self::Cycle { verb, run, members } => write!(
@@ -235,26 +277,6 @@ pub fn decide(
     overrides: ArchiveOverrides,
 ) -> Result<(), ArchiveRefusal> {
     let run = run.to_path_buf();
-    if archive.live_writer {
-        return Err(ArchiveRefusal::StillRunning { verb, run });
-    }
-    match (archive.status, verb) {
-        (ArchiveStatus::Completed, ReplayVerb::Resume) if archive.completed_naturally() => {
-            return Err(ArchiveRefusal::NoWorkLeft { run });
-        }
-        (ArchiveStatus::Completed | ArchiveStatus::Cancelled, _)
-        | (ArchiveStatus::Unknown, ReplayVerb::Resume) => {}
-        (ArchiveStatus::Unknown, ReplayVerb::Replay) if !overrides.allow_incomplete_archive => {
-            return Err(ArchiveRefusal::Interrupted { run });
-        }
-        (ArchiveStatus::Failed, ReplayVerb::Resume)
-            if archive.failure == FailureEvidence::DepartedFromArchive => {}
-        (ArchiveStatus::Failed, _) if !overrides.allow_incomplete_archive => {
-            return Err(ArchiveRefusal::Failed { verb, run });
-        }
-        (ArchiveStatus::Unknown | ArchiveStatus::Failed, _) => {}
-    }
-
     if !flow.cycle_members.is_empty() {
         return Err(ArchiveRefusal::Cycle {
             verb,
@@ -262,26 +284,63 @@ pub fn decide(
             members: flow.cycle_members.clone(),
         });
     }
+    if archive.live_writer {
+        return Err(ArchiveRefusal::StillRunning { verb, run });
+    }
     if verb == ReplayVerb::Resume {
-        let mut refusals: Vec<(String, ResumeRefusal)> = flow
-            .sources
-            .iter()
-            .filter_map(|(stage_key, continuation)| {
-                continuation
-                    .resume_refusal(
-                        archive
-                            .source(stage_key)
-                            .and_then(|source| source.recorded_eof),
-                    )
-                    .map(|refusal| (stage_key.clone(), refusal))
-            })
-            .collect();
-        refusals.sort_by(|(left, _), (right, _)| left.cmp(right));
+        if archive.completed_naturally() {
+            return Err(ArchiveRefusal::NoWorkLeft { run });
+        }
+        let refusals = source_refusals(archive, flow);
         if !refusals.is_empty() {
             return Err(ArchiveRefusal::Sources { run, refusals });
         }
     }
-    Ok(())
+    match (archive.status, verb) {
+        (ArchiveStatus::Completed | ArchiveStatus::Cancelled, _)
+        | (ArchiveStatus::Unknown, ReplayVerb::Resume) => Ok(()),
+        (ArchiveStatus::Unknown, ReplayVerb::Replay) if !overrides.allow_incomplete_archive => {
+            let resume = archive.resume.as_deref().and_then(|resume| {
+                decide(
+                    ReplayVerb::Resume,
+                    &resume.run,
+                    &resume.archive,
+                    flow,
+                    ArchiveOverrides::default(),
+                )
+                .err()
+                .map(Box::new)
+            });
+            Err(ArchiveRefusal::Interrupted { run, resume })
+        }
+        (ArchiveStatus::Failed, ReplayVerb::Resume)
+            if archive.failure == FailureEvidence::DepartedFromArchive =>
+        {
+            Ok(())
+        }
+        (ArchiveStatus::Failed, _) if !overrides.allow_incomplete_archive => {
+            Err(ArchiveRefusal::Failed { verb, run })
+        }
+        (ArchiveStatus::Unknown | ArchiveStatus::Failed, _) => Ok(()),
+    }
+}
+
+fn source_refusals(archive: &ArchiveEvidence, flow: &FlowEvidence) -> Vec<(String, ResumeRefusal)> {
+    let mut refusals: Vec<(String, ResumeRefusal)> = flow
+        .sources
+        .iter()
+        .filter_map(|(stage_key, continuation)| {
+            continuation
+                .resume_refusal(
+                    archive
+                        .source(stage_key)
+                        .and_then(|source| source.recorded_eof),
+                )
+                .map(|refusal| (stage_key.clone(), refusal))
+        })
+        .collect();
+    refusals.sort_by(|(left, _), (right, _)| left.cmp(right));
+    refusals
 }
 
 fn unfinished_sources_refusal(archive: &Path, sources: &[String]) -> String {
@@ -332,6 +391,7 @@ mod tests {
             live_writer: false,
             sources,
             failure: FailureEvidence::Other,
+            resume: None,
         }
     }
 
@@ -372,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn a_live_writer_refuses_both_verbs_before_any_other_row() {
+    fn live_writer_both_verbs_refused() {
         let mut live = archive(ArchiveStatus::Failed, finished());
         live.live_writer = true;
         for (verb, copy) in [
@@ -645,20 +705,252 @@ mod tests {
     }
 
     #[test]
-    fn archive_rows_are_checked_before_the_flows() {
-        let failed = archive(ArchiveStatus::Failed, finished());
-        let everything_wrong = FlowEvidence {
-            cycle_members: vec!["triage".to_string()],
-            sources: safe_flow().sources,
+    fn cyclic_flow_any_archive_returns_cycle() {
+        let cyclic = FlowEvidence {
+            cycle_members: vec!["review".to_string(), "triage".to_string()],
+            ..safe_flow()
         };
-        assert!(matches!(
-            decided(ReplayVerb::Resume, &failed, &everything_wrong, plain()),
-            Err(ArchiveRefusal::Failed { .. })
+        let mut live = archive(ArchiveStatus::Cancelled, finished());
+        live.live_writer = true;
+        for evidence in [
+            archive(ArchiveStatus::Completed, finished()),
+            archive(ArchiveStatus::Cancelled, finished()),
+            archive(ArchiveStatus::Unknown, finished()),
+            archive(ArchiveStatus::Failed, finished()),
+            live,
+        ] {
+            for verb in [ReplayVerb::Replay, ReplayVerb::Resume] {
+                for overrides in [plain(), incomplete()] {
+                    assert_eq!(
+                        decided(verb, &evidence, &cyclic, overrides),
+                        Err(ArchiveRefusal::Cycle {
+                            verb,
+                            run: PathBuf::from(RUN),
+                            members: cyclic.cycle_members.clone(),
+                        }),
+                        "{evidence:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn unfinished() -> Vec<SourceEvidence> {
+        vec![
+            source("store_orders", true, Some(EofKind::Truncated)),
+            source("web_orders", true, None),
+        ]
+    }
+
+    #[test]
+    fn failed_resume_unfinished_input_returns_sources() {
+        let failed = archive(ArchiveStatus::Failed, unfinished());
+        for overrides in [plain(), incomplete()] {
+            assert!(matches!(
+                decided(ReplayVerb::Resume, &failed, &safe_flow(), overrides),
+                Err(ArchiveRefusal::Sources { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn interrupted_replay_refused_resume_prints_refusal() {
+        let killed = ArchiveEvidence {
+            resume: Some(Box::new(ResumeEvidence {
+                run: PathBuf::from(RUN),
+                archive: archive(ArchiveStatus::Unknown, unfinished()),
+            })),
+            ..archive(ArchiveStatus::Unknown, unfinished())
+        };
+        assert_eq!(
+            decided(ReplayVerb::Replay, &killed, &safe_flow(), plain())
+                .unwrap_err()
+                .to_string(),
+            "cannot replay /runs/r1: it has no terminal record, so it was interrupted.\nPass \
+             --allow-incomplete-archive to replay its recorded prefix.\ncannot resume /runs/r1: \
+             sources 'store_orders' and 'web_orders' stopped with their input unfinished, and \
+             only the stopped process held that input.\nStart a new run."
+        );
+        let killed_replay = ArchiveEvidence {
+            resume: Some(Box::new(ResumeEvidence {
+                run: PathBuf::from("/runs/r0"),
+                archive: archive(ArchiveStatus::Completed, finished()),
+            })),
+            ..archive(ArchiveStatus::Unknown, unfinished())
+        };
+        assert_eq!(
+            decided(ReplayVerb::Replay, &killed_replay, &safe_flow(), plain())
+                .unwrap_err()
+                .to_string(),
+            "cannot replay /runs/r1: it has no terminal record, so it was interrupted.\nPass \
+             --allow-incomplete-archive to replay its recorded prefix.\ncannot resume /runs/r0: \
+             it completed naturally and every source is finite, so there is no work left to \
+             continue.\nReplay it with --replay-from /runs/r0."
+        );
+    }
+
+    #[test]
+    fn interrupted_replay_admitted_resume_named() {
+        let killed = ArchiveEvidence {
+            resume: Some(Box::new(ResumeEvidence {
+                run: PathBuf::from(RUN),
+                archive: archive(ArchiveStatus::Unknown, finished()),
+            })),
+            ..archive(ArchiveStatus::Unknown, finished())
+        };
+        assert_eq!(
+            decided(ReplayVerb::Replay, &killed, &safe_flow(), plain())
+                .unwrap_err()
+                .to_string(),
+            "cannot replay /runs/r1: it has no terminal record, so it was interrupted.\nResume \
+             it with --resume-from /runs/r1, or pass --allow-incomplete-archive to replay its \
+             recorded prefix."
+        );
+    }
+
+    const ROWS: [&str; 5] = [
+        "completed, every source finite and ended naturally",
+        "completed with a source stopped, or cancelled",
+        "interrupted (no terminal record)",
+        "failed: a stage departed from its archive",
+        "failed: any other reason",
+    ];
+
+    fn row_of(evidence: &ArchiveEvidence) -> &'static str {
+        match evidence.status {
+            ArchiveStatus::Completed
+                if evidence.sources.iter().all(|source| {
+                    source.finite && source.recorded_eof == Some(EofKind::Natural)
+                }) =>
+            {
+                ROWS[0]
+            }
+            ArchiveStatus::Completed | ArchiveStatus::Cancelled => ROWS[1],
+            ArchiveStatus::Unknown => ROWS[2],
+            ArchiveStatus::Failed if evidence.failure == FailureEvidence::DepartedFromArchive => {
+                ROWS[3]
+            }
+            ArchiveStatus::Failed => ROWS[4],
+        }
+    }
+
+    fn cell(verb: ReplayVerb, evidence: &ArchiveEvidence, flow: &FlowEvidence) -> String {
+        match (
+            decided(verb, evidence, flow, plain()),
+            decided(verb, evidence, flow, incomplete()),
+        ) {
+            (Ok(()), _) => "admitted".to_string(),
+            (Err(_), Ok(())) => "with the flag".to_string(),
+            (Err(ArchiveRefusal::NoWorkLeft { .. }), Err(_)) => "refused: no work left".to_string(),
+            (Err(refusal), Err(_)) => format!("refused: {refusal:?}"),
+        }
+    }
+
+    fn source_shapes() -> Vec<Vec<SourceEvidence>> {
+        vec![
+            vec![source("web_orders", true, Some(EofKind::Natural))],
+            finished(),
+            vec![source("web_orders", true, Some(EofKind::Truncated))],
+            vec![source("web_orders", true, Some(EofKind::Poison))],
+            vec![source("web_orders", true, None)],
+            vec![source("web_orders", false, Some(EofKind::Natural))],
+            vec![source("web_orders", false, None)],
+            vec![
+                source("store_orders", true, Some(EofKind::Natural)),
+                source("web_orders", true, Some(EofKind::Truncated)),
+            ],
+        ]
+    }
+
+    fn check_line(
+        subject: &str,
+        evidence: &ArchiveEvidence,
+        flow: &FlowEvidence,
+        triggered: fn(&ArchiveRefusal) -> bool,
+    ) -> String {
+        let refused = |verb| {
+            [plain(), incomplete()].into_iter().all(|overrides| {
+                decided(verb, evidence, flow, overrides).is_err_and(|refusal| triggered(&refusal))
+            })
+        };
+        match (refused(ReplayVerb::Replay), refused(ReplayVerb::Resume)) {
+            (true, true) => format!("A {subject} refuses both."),
+            (false, true) => format!("A resume refuses {subject}."),
+            (true, false) => format!("A replay refuses {subject}."),
+            (false, false) => format!("No verb refuses {subject}."),
+        }
+    }
+
+    #[test]
+    fn admission_table_matches_decide() {
+        let continuing = FlowEvidence {
+            cycle_members: Vec::new(),
+            sources: vec![
+                ("store_orders".to_string(), SourceContinuation::RecordedRead),
+                ("web_orders".to_string(), SourceContinuation::RecordedRead),
+            ],
+        };
+        let mut cells: Vec<Option<(String, String)>> = vec![None; ROWS.len()];
+        for status in [
+            ArchiveStatus::Completed,
+            ArchiveStatus::Cancelled,
+            ArchiveStatus::Unknown,
+            ArchiveStatus::Failed,
+        ] {
+            for failure in [FailureEvidence::Other, FailureEvidence::DepartedFromArchive] {
+                for sources in source_shapes() {
+                    let evidence = ArchiveEvidence {
+                        failure,
+                        ..archive(status, sources)
+                    };
+                    let row = row_of(&evidence);
+                    let index = ROWS.iter().position(|label| *label == row).unwrap();
+                    let rendered = (
+                        cell(ReplayVerb::Replay, &evidence, &continuing),
+                        cell(ReplayVerb::Resume, &evidence, &continuing),
+                    );
+                    match &cells[index] {
+                        Some(first) => assert_eq!(first, &rendered, "{row}: {evidence:?}"),
+                        None => cells[index] = Some(rendered),
+                    }
+                }
+            }
+        }
+
+        let mut lines = vec![
+            "Archive admission (the flag is --allow-incomplete-archive):".to_string(),
+            "Archive          | --replay-from | --resume-from".to_string(),
+        ];
+        for (label, rendered) in ROWS.iter().zip(cells) {
+            let (replay, resume) = rendered.expect("every row has evidence");
+            lines.push((*label).to_string());
+            lines.push(format!("{:17}| {replay:<13} | {resume}", ""));
+        }
+        let mut live = archive(ArchiveStatus::Cancelled, finished());
+        live.live_writer = true;
+        lines.push(check_line(
+            "still-running run",
+            &live,
+            &continuing,
+            |refusal| matches!(refusal, ArchiveRefusal::StillRunning { .. }),
         ));
-        let stopped = archive(ArchiveStatus::Cancelled, finished());
-        assert!(matches!(
-            decided(ReplayVerb::Resume, &stopped, &everything_wrong, plain()),
-            Err(ArchiveRefusal::Cycle { .. })
+        let cyclic = FlowEvidence {
+            cycle_members: vec!["review".to_string(), "triage".to_string()],
+            ..continuing.clone()
+        };
+        lines.push(check_line(
+            "cyclic topology",
+            &archive(ArchiveStatus::Cancelled, finished()),
+            &cyclic,
+            |refusal| matches!(refusal, ArchiveRefusal::Cycle { .. }),
         ));
+        lines.push(check_line(
+            "a source whose connector cannot continue its recorded input",
+            &archive(ArchiveStatus::Cancelled, unfinished()),
+            &safe_flow(),
+            |refusal| matches!(refusal, ArchiveRefusal::Sources { .. }),
+        ));
+
+        assert_eq!(lines.join("\n"), ADMISSION_TABLE);
     }
 }

@@ -138,12 +138,8 @@ mod tests {
         let resumed = evidence(
             vec![
                 row("runtime.max_lineage_depth", "global", json!(100)),
-                row("runtime.resume.resume_from", "global", json!("/runs/r0")),
-                row(
-                    "runtime.resume.allow_incomplete_archive",
-                    "global",
-                    json!(true),
-                ),
+                row("archive.resume_from", "global", json!("/runs/r0")),
+                row("archive.allow_incomplete_archive", "global", json!(true)),
             ],
             Some(json!({"accounts_file": "accounts.yaml"})),
         );

@@ -42,7 +42,7 @@ pub enum ApplicationError {
         replayed: PathBuf,
         stage_key: String,
         input_position: Option<u64>,
-        resume: PathBuf,
+        resume: Result<PathBuf, ArchiveRefusal>,
     },
 
     /// A resume refused before any work, naming the run to act on
@@ -66,9 +66,7 @@ impl fmt::Display for ApplicationError {
             Self::FeatureNotEnabled(feature) => write!(f, "Feature not enabled: {feature}"),
             Self::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {msg}"),
             Self::IoError(err) => write!(f, "IO error: {err}"),
-            Self::Verification { exit_code, summary } => {
-                write!(f, "replay verification (exit code {exit_code}): {summary}")
-            }
+            Self::Verification { summary, .. } => write!(f, "replay verification: {summary}"),
             Self::ReplayRecordingEnded {
                 replayed,
                 stage_key,
@@ -83,11 +81,11 @@ impl fmt::Display for ApplicationError {
                 if let Some(input) = input_position {
                     write!(f, " at input {input}")?;
                 }
-                write!(
-                    f,
-                    ", and a replay never executes an effect.\nResume {} to finish this run's work.",
-                    resume.display()
-                )
+                f.write_str(", and a replay never executes an effect.\n")?;
+                match resume {
+                    Ok(run) => write!(f, "Resume {} to finish this run's work.", run.display()),
+                    Err(refusal) => write!(f, "{refusal}"),
+                }
             }
             Self::ResumeRefused(refusal) | Self::ReplayRefused(refusal) => f.write_str(refusal),
             Self::Other(err) => write!(f, "Application error: {err}"),
@@ -179,5 +177,44 @@ mod tests {
             };
             assert_eq!(ApplicationError::from(&refusal).to_string(), expected);
         }
+    }
+
+    #[test]
+    fn verification_display_omits_exit_code() {
+        let error = ApplicationError::Verification {
+            exit_code: 3,
+            summary: "verification refused: candidate replayed with --allow-incomplete-archive"
+                .to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "replay verification: verification refused: candidate replayed with \
+             --allow-incomplete-archive"
+        );
+        assert_eq!(error.process_exit_code(), 3);
+    }
+
+    #[test]
+    fn replay_stop_refused_resume_prints_refusal() {
+        use obzenflow_core::source::ResumeRefusal;
+        let error = ApplicationError::ReplayRecordingEnded {
+            replayed: PathBuf::from("runs/r1"),
+            stage_key: "authorize_payment".to_string(),
+            input_position: Some(3),
+            resume: Err(ArchiveRefusal::Sources {
+                run: PathBuf::from("/runs/r1"),
+                refusals: vec![
+                    ("store_orders".to_string(), ResumeRefusal::UnfinishedInput),
+                    ("web_orders".to_string(), ResumeRefusal::UnfinishedInput),
+                ],
+            }),
+        };
+        assert_eq!(
+            error.to_string(),
+            "replay of runs/r1 stopped: stage 'authorize_payment' reached the end of its \
+             recording at input 3, and a replay never executes an effect.\ncannot resume \
+             /runs/r1: sources 'store_orders' and 'web_orders' stopped with their input \
+             unfinished, and only the stopped process held that input.\nStart a new run."
+        );
     }
 }

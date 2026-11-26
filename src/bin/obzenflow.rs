@@ -61,6 +61,11 @@ enum Command {
     /// Inspect run metadata, stage data journal files and record byte offsets.
     Inspect(InspectArgs),
     /// Verify a candidate run's recorded output against a baseline, or call logs against their lineage.
+    ///
+    /// For runs, exit codes are 0 certified match, 1 divergence, 2 certified region
+    /// matched with uncertified stages and 3 refused. For call logs, 0 every log
+    /// passes, 1 a log breaks a rule, 2 a log is uncertified and 3 refused. Any other
+    /// failure exits 4, and so does a wrong or missing argument.
     Verify(VerifyArgs),
 }
 
@@ -135,13 +140,17 @@ struct InspectArgs {
 struct VerifyArgs {
     #[command(subcommand)]
     check: Option<VerifyCheck>,
-    #[arg(long, required = true)]
+    /// The run directory the candidate is compared to.
+    #[arg(long, required = true, value_name = "PATH")]
     baseline: Option<PathBuf>,
-    #[arg(long, required = true)]
+    /// The run directory under test.
+    #[arg(long, required = true, value_name = "PATH")]
     candidate: Option<PathBuf>,
-    #[arg(long)]
+    /// Write the comparison report here.
+    #[arg(long, value_name = "PATH")]
     report_path: Option<PathBuf>,
-    #[arg(long, default_value_t = 5)]
+    /// How many divergences to list.
+    #[arg(long, default_value_t = 5, value_name = "N")]
     max_divergences: usize,
 }
 
@@ -165,7 +174,15 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Cli::parse().command).await {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if error.use_stderr() => {
+            eprint!("{error}");
+            return ExitCode::from(4);
+        }
+        Err(error) => error.exit(),
+    };
+    match run(cli.command).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("obzenflow: {error}");

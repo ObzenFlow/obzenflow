@@ -33,8 +33,9 @@ pub enum RuntimeMode {
     Live,
     /// `--replay-from`: reconstruct a bounded recording and drain at its end.
     Replay,
-    /// `--resume-from`: catch up on the recording, then continue live from the
-    /// recorded high-water mark (FLOWIP-120n).
+    /// `Resume` resumes a recorded run (`--resume-from`) from the last fact it
+    /// committed. The new run catches up on the recording first, then continues
+    /// live.
     Resume,
 }
 
@@ -386,10 +387,6 @@ impl ExecutionStrategy for Resume {
     }
 }
 
-/// A sealed archive is a finished recording: a missing recorded outcome in it
-/// is genuine corruption. An archive that is neither completed nor cancelled
-/// is replayed only under `allow_incomplete_archive`, which tolerates its torn
-/// tail.
 fn archive_is_sealed(status: ArchiveStatus) -> bool {
     matches!(status, ArchiveStatus::Completed | ArchiveStatus::Cancelled)
 }

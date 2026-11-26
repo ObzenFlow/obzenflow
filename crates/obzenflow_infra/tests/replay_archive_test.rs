@@ -97,17 +97,7 @@ fn write_manifest_of(
 
 async fn write_system_log_completed(dir: &Path) {
     let writer_id = WriterId::from(SystemId::new());
-    let event = SystemEvent::new(
-        writer_id,
-        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed {
-            duration_ms: DurationMs(1),
-            metrics: obzenflow_core::metrics::FlowLifecycleMetricsSnapshot {
-                events_in_total: 0,
-                events_out_total: 0,
-                errors_total: 0,
-            },
-        }),
-    );
+    let event = SystemEvent::new(writer_id, SystemPayload::PipelineLifecycle(completed()));
 
     let record = JournalRecord::new(JournalWriterId::new(), event);
 
@@ -320,11 +310,50 @@ async fn open_fails_when_system_log_missing_unless_allowed() {
         .err()
         .unwrap();
     assert!(matches!(err, ReplayError::MissingSystemLog { .. }));
+    let system_log = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .join("system.log");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "Replay archive system.log missing at {}.\nRestore it from a copy of the run \
+             directory, or pass --allow-incomplete-archive to open the run as interrupted from \
+             its stage journals.",
+            system_log.display()
+        )
+    );
 
     let archive = DiskReplayArchive::open(dir.path().to_path_buf(), true)
         .await
         .unwrap();
     assert_eq!(archive.status(), ArchiveStatus::Unknown);
+}
+
+#[tokio::test]
+async fn damaged_system_log_with_flag_refused() {
+    let dir = tempdir().unwrap();
+    write_run(
+        dir.path(),
+        FLOW_ID,
+        None,
+        &[source_fact(1)],
+        Some(completed()),
+    )
+    .await;
+    flip_first_record_byte(&dir.path().join("system.log"));
+
+    for allow_incomplete_archive in [false, true] {
+        let Err(error) =
+            DiskReplayArchive::open(dir.path().to_path_buf(), allow_incomplete_archive).await
+        else {
+            panic!("a damaged system.log opens with allow_incomplete_archive={allow_incomplete_archive}");
+        };
+        assert!(
+            matches!(&error, ReplayError::Parse { message }
+                if message.starts_with("system.log record corrupt at line 1 in ")),
+            "{error}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -685,6 +714,16 @@ async fn write_stopped_run(
     resume: Option<obzenflow_core::journal::archive::manifest::RunManifestResumeConfig>,
     facts: &[ChainEvent],
 ) {
+    write_run(dir, flow_id, resume, facts, None).await;
+}
+
+async fn write_run(
+    dir: &Path,
+    flow_id: &str,
+    resume: Option<obzenflow_core::journal::archive::manifest::RunManifestResumeConfig>,
+    facts: &[ChainEvent],
+    ending: Option<PipelineLifecycleEvent>,
+) {
     write_manifest_of(dir, flow_id, resume);
     let run: obzenflow_core::FlowId = flow_id.parse().unwrap();
     let system_id = SystemId::new();
@@ -707,6 +746,15 @@ async fn write_stopped_run(
         )
         .await
         .unwrap();
+    if let Some(ending) = ending {
+        system
+            .append(
+                SystemEvent::new(system_id.into(), SystemPayload::PipelineLifecycle(ending)),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+    }
     let stage: obzenflow_core::StageId = "stage_01H00000000000000000000000".parse().unwrap();
     let source = DiskJournal::<ChainEvent>::with_owner_in_run(
         dir.join(SOURCE_LOG),
@@ -734,6 +782,99 @@ fn source_fact(row: u64) -> ChainEvent {
         std::num::NonZeroU32::MIN,
         serde_json::json!({ "row": row }),
     )
+}
+
+fn source_eof() -> ChainEvent {
+    ChainEventFactory::eof_event(
+        WriterId::from(
+            "stage_01H00000000000000000000000"
+                .parse::<obzenflow_core::StageId>()
+                .unwrap(),
+        ),
+        true,
+    )
+}
+
+fn completed() -> PipelineLifecycleEvent {
+    PipelineLifecycleEvent::Completed {
+        duration_ms: DurationMs(1),
+        metrics: obzenflow_core::metrics::FlowLifecycleMetricsSnapshot {
+            events_in_total: 0,
+            events_out_total: 0,
+            errors_total: 0,
+        },
+    }
+}
+
+fn cancelled() -> PipelineLifecycleEvent {
+    PipelineLifecycleEvent::Cancelled {
+        reason: "stopped by the operator".to_string(),
+        duration_ms: DurationMs(1),
+        metrics: None,
+        failure_cause: None,
+    }
+}
+
+fn flip_first_record_byte(journal: &Path) {
+    let mut bytes = std::fs::read(journal).unwrap();
+    bytes[40] ^= 0xff;
+    std::fs::write(journal, &bytes).unwrap();
+}
+
+fn record_replay_of(dir: &Path, original: &Path) {
+    let path = dir.join(RUN_MANIFEST_FILENAME);
+    let mut manifest: RunManifest =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    manifest.replay = Some(
+        obzenflow_core::journal::archive::manifest::RunManifestReplayConfig {
+            replay_from: original.display().to_string(),
+            allow_incomplete_archive: false,
+        },
+    );
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+}
+
+async fn write_claimed_resume(
+    base: &Path,
+    parent_ending: Option<PipelineLifecycleEvent>,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    const RESUMED_ID: &str = "flow_01H00000000000000000000001";
+    let (parent, resumed) = (base.join("r0"), base.join("r1"));
+    let fact = source_fact(1);
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::create_dir_all(&resumed).unwrap();
+    write_run(
+        &parent,
+        FLOW_ID,
+        None,
+        std::slice::from_ref(&fact),
+        parent_ending,
+    )
+    .await;
+    let parent = std::fs::canonicalize(&parent).unwrap();
+    write_stopped_run(
+        &resumed,
+        RESUMED_ID,
+        Some(
+            obzenflow_core::journal::archive::manifest::RunManifestResumeConfig {
+                resumed_from: parent.clone(),
+                resume_generation: 1,
+                merged_from: Vec::new(),
+            },
+        ),
+        std::slice::from_ref(&fact),
+    )
+    .await;
+    let resumed = std::fs::canonicalize(&resumed).unwrap();
+    DiskReplayArchive::open_for_resume(parent.clone(), false)
+        .await
+        .unwrap()
+        .claim_continuation(
+            RESUMED_ID.parse().unwrap(),
+            &obzenflow_core::journal::factory::CurrentRunLocator::new(resumed.clone()),
+        )
+        .unwrap();
+    (parent, resumed)
 }
 
 fn append_tail(journal: &Path, tail: &[u8]) -> u64 {
@@ -901,6 +1042,121 @@ async fn admission_merged_ancestor_tail_recorded() {
             left_bytes: 4096,
             tail_kind: TailKind::ZeroFilled,
         }]
+    );
+}
+
+#[tokio::test]
+async fn resume_with_damaged_ancestor_log_refused() {
+    let base = tempdir().unwrap();
+    let (parent, resumed) = write_claimed_resume(base.path(), Some(cancelled())).await;
+    flip_first_record_byte(&parent.join("system.log"));
+
+    for allow_incomplete_archive in [false, true] {
+        let Err(error) =
+            DiskReplayArchive::open_for_resume(resumed.clone(), allow_incomplete_archive).await
+        else {
+            panic!("a damaged ancestor system.log opens with allow_incomplete_archive={allow_incomplete_archive}");
+        };
+        assert!(
+            matches!(&error, ReplayError::AncestorUnreadable { ancestor, source, .. }
+                if *ancestor == parent
+                    && matches!(source.as_ref(), ReplayError::Parse { message }
+                        if message.starts_with("system.log record corrupt at line 1 in "))),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn resume_with_missing_ancestor_log_refused() {
+    let base = tempdir().unwrap();
+    let (parent, resumed) = write_claimed_resume(base.path(), None).await;
+    let system_log = parent.join("system.log");
+    std::fs::remove_file(&system_log).unwrap();
+
+    let Err(error) = DiskReplayArchive::open_for_resume(resumed.clone(), false).await else {
+        panic!("a resume opens an ancestor that has no system.log");
+    };
+    assert!(
+        matches!(&error, ReplayError::AncestorMissingSystemLog { .. }),
+        "{error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "cannot resume {resumed}: its reconstruction did not complete, and the archive it \
+             resumed from, {parent}, has no system.log.\nRestore {system_log} from a copy, then \
+             resume {resumed} again, or resume it with --allow-incomplete-archive to open \
+             {parent} as interrupted from its stage journals.",
+            resumed = resumed.display(),
+            parent = parent.display(),
+            system_log = system_log.display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn missing_ancestor_log_with_flag_resumes() {
+    let base = tempdir().unwrap();
+    let (parent, resumed) = write_claimed_resume(base.path(), None).await;
+    std::fs::remove_file(parent.join("system.log")).unwrap();
+
+    let head = DiskReplayArchive::open_for_resume(resumed, true)
+        .await
+        .expect("the flag opens the ancestor from its stage journals");
+    let ancestors = head.ancestors();
+    assert_eq!(ancestors.len(), 1);
+    assert_eq!(ancestors[0].archive_path(), parent);
+    assert_eq!(ancestors[0].archive_status(), ArchiveStatus::Unknown);
+}
+
+#[tokio::test]
+async fn linked_resume_names_replayed_run() {
+    use obzenflow_core::journal::archive_actions::{
+        decide, ArchiveOverrides, FlowEvidence, ReplayVerb,
+    };
+    const REPLAY_ID: &str = "flow_01H00000000000000000000001";
+    let base = tempdir().unwrap();
+    let (original, replay) = (base.path().join("original"), base.path().join("replay"));
+    std::fs::create_dir_all(&original).unwrap();
+    std::fs::create_dir_all(&replay).unwrap();
+    write_run(
+        &original,
+        FLOW_ID,
+        None,
+        &[source_fact(1), source_eof()],
+        Some(completed()),
+    )
+    .await;
+    let original = std::fs::canonicalize(&original).unwrap();
+    write_stopped_run(&replay, REPLAY_ID, None, &[source_fact(1)]).await;
+    record_replay_of(&replay, &original);
+
+    let mut evidence = DiskReplayArchive::open(replay.clone(), false)
+        .await
+        .unwrap()
+        .evidence();
+    let resume = DiskReplayArchive::resume_evidence(&replay).await.unwrap();
+    assert_eq!(resume.run, original);
+    evidence.resume = Some(Box::new(resume));
+    let refusal = decide(
+        ReplayVerb::Replay,
+        &replay,
+        &evidence,
+        &FlowEvidence::default(),
+        ArchiveOverrides::default(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "cannot replay {replay}: it has no terminal record, so it was interrupted.\nPass \
+             --allow-incomplete-archive to replay its recorded prefix.\ncannot resume \
+             {original}: it completed naturally and every source is finite, so there is no work \
+             left to continue.\nReplay it with --replay-from {original}.",
+            replay = replay.display(),
+            original = original.display()
+        )
     );
 }
 

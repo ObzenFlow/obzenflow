@@ -229,7 +229,7 @@ pub enum Redaction {
 pub enum EnvBinding {
     /// `OBZENFLOW_<KEY_PATH>` uppercased (§2 environment-tier lock).
     Canonical,
-    /// A fixed spelling (the `runtime.resume.*` view keeps the 010h names).
+    /// `Named` gives the knob a fixed name for its environment variable.
     Named(&'static str),
     /// No env binding.
     None,
@@ -239,9 +239,6 @@ pub enum EnvBinding {
 pub struct KnobSpec {
     /// Canonical dotted key, e.g. `runtime.max_lineage_depth`.
     pub key_path: &'static str,
-    /// File table path when it differs from the key path (the
-    /// `runtime.resume.*` view over the 010h `[replay]` table).
-    pub file_path: Option<&'static str>,
     pub value_type: KnobType,
     pub target: KnobTarget,
     pub default: KnobDefault,
@@ -287,7 +284,7 @@ impl KnobSpec {
             };
         }
 
-        let path = self.file_path.unwrap_or(self.key_path);
+        let path = self.key_path;
         let table = path.rsplit_once('.').map_or(path, |(table, _)| table);
         if let (ConfigScope::Stage { stage }, ConfigSubject::Effect { effect_type }) =
             (&address.scope, &address.subject)
@@ -320,7 +317,7 @@ pub fn stage_table(spec: &KnobSpec, stage: &str) -> String {
     if middleware_file_component(spec.key_path).is_some() {
         return format!("middleware.stages.{stage}");
     }
-    let path = spec.file_path.unwrap_or(spec.key_path);
+    let path = spec.key_path;
     let table = path.rsplit_once('.').map_or(path, |(table, _)| table);
     format!("{table}.stages.{stage}")
 }
@@ -379,7 +376,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
         vec![
             KnobSpec {
                 key_path: "ai.embeddings.endpoint",
-                file_path: None,
                 value_type: KnobType::Text,
                 target: KnobTarget::Effect,
                 default: KnobDefault::Value(ConfigValue::Text("ollama".to_string())),
@@ -390,7 +386,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "ai.embeddings.model",
-                file_path: None,
                 value_type: KnobType::Text,
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
@@ -401,7 +396,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "ai.embeddings.request_timeout_ms",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -417,7 +411,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "ai.models.endpoint",
-                file_path: None,
                 value_type: KnobType::Text,
                 target: KnobTarget::Effect,
                 default: KnobDefault::Value(ConfigValue::Text("ollama".to_string())),
@@ -428,7 +421,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "ai.models.model",
-                file_path: None,
                 value_type: KnobType::Text,
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
@@ -439,7 +431,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "ai.models.request_timeout_ms",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -454,8 +445,47 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 env: EnvBinding::Canonical,
             },
             KnobSpec {
+                key_path: "archive.allow_incomplete_archive",
+                value_type: KnobType::Bool,
+                target: KnobTarget::Global,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Immutable,
+                role: KnobRole::Invocation,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Named("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE"),
+            },
+            KnobSpec {
+                key_path: "archive.replay_from",
+                value_type: KnobType::Path,
+                target: KnobTarget::Global,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Immutable,
+                role: KnobRole::Invocation,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Named("OBZENFLOW_REPLAY_FROM"),
+            },
+            KnobSpec {
+                key_path: "archive.resume_from",
+                value_type: KnobType::Path,
+                target: KnobTarget::Global,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Immutable,
+                role: KnobRole::Invocation,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Named("OBZENFLOW_RESUME_FROM"),
+            },
+            KnobSpec {
+                key_path: "archive.verify",
+                value_type: KnobType::Bool,
+                target: KnobTarget::Global,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Immutable,
+                role: KnobRole::Invocation,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Named("OBZENFLOW_REPLAY_VERIFY"),
+            },
+            KnobSpec {
                 key_path: "contracts.source_contract_strict_mode",
-                file_path: None,
                 value_type: KnobType::Token {
                     allowed: TOKENS_STRICT_MODE,
                 },
@@ -468,7 +498,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: JOURNAL_ROOT_KEY,
-                file_path: None,
                 value_type: KnobType::Path,
                 target: KnobTarget::Global,
                 default: KnobDefault::OptionalAbsent,
@@ -479,7 +508,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: JOURNAL_SYNC_KEY,
-                file_path: None,
                 value_type: KnobType::Token {
                     allowed: JournalSync::TOKENS,
                 },
@@ -494,7 +522,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u32::MAX as u64,
@@ -508,7 +535,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_COUNT_WINDOW_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u32::MAX as u64,
@@ -522,7 +548,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
-                file_path: None,
                 value_type: KnobType::F64Range {
                     min_exclusive: 0.0,
                     max_inclusive: 1.0,
@@ -536,7 +561,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_MAX_OPEN_FOR_MS_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -550,7 +574,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u32::MAX as u64,
@@ -564,7 +587,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_MODE_KEY,
-                file_path: None,
                 value_type: KnobType::Token {
                     allowed: TOKENS_CIRCUIT_BREAKER_MODE,
                 },
@@ -577,7 +599,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_OPEN_FOR_MODE_KEY,
-                file_path: None,
                 value_type: KnobType::Token {
                     allowed: TOKENS_CIRCUIT_BREAKER_OPEN_FOR_MODE,
                 },
@@ -590,7 +611,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -604,7 +624,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_OPEN_FOR_MULTIPLIER_KEY,
-                file_path: None,
                 value_type: KnobType::F64 { min_exclusive: 1.0 },
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
@@ -615,7 +634,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_PROBES_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u32::MAX as u64,
@@ -629,7 +647,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-                file_path: None,
                 value_type: KnobType::Bool,
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
@@ -640,7 +657,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -654,7 +670,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
-                file_path: None,
                 value_type: KnobType::F64Range {
                     min_exclusive: 0.0,
                     max_inclusive: 1.0,
@@ -668,7 +683,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RATE_LIMITER_BURST_CAPACITY_KEY,
-                file_path: None,
                 value_type: KnobType::F64 { min_exclusive: 0.0 },
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
@@ -679,7 +693,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RATE_LIMITER_COST_PER_ATTEMPT_KEY,
-                file_path: None,
                 value_type: KnobType::F64 { min_exclusive: 0.0 },
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
@@ -690,7 +703,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RATE_LIMITER_EVENTS_PER_SECOND_KEY,
-                file_path: None,
                 value_type: KnobType::F64 { min_exclusive: 0.0 },
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
@@ -701,7 +713,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RETRY_ATTEMPT_START_WINDOW_MS_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -715,7 +726,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RETRY_FIXED_DELAY_MS_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -729,7 +739,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RETRY_KIND_KEY,
-                file_path: None,
                 value_type: KnobType::Token {
                     allowed: TOKENS_RETRY_KIND,
                 },
@@ -742,7 +751,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RETRY_MAX_ATTEMPTS_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u32::MAX as u64,
@@ -756,7 +764,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RETRY_MAX_BACKOFF_MS_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -770,7 +777,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RETRY_MAX_OUTAGE_WAIT_MS_KEY,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -784,7 +790,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: RETRY_ON_REFUSAL_KEY,
-                file_path: None,
                 value_type: KnobType::Token {
                     allowed: TOKENS_RETRY_ON_REFUSAL,
                 },
@@ -797,7 +802,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.ai.max_open_keys",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u32::MAX as u64,
@@ -811,7 +815,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.backpressure.mode",
-                file_path: None,
                 value_type: KnobType::Token {
                     allowed: BackpressureMode::TOKENS,
                 },
@@ -832,7 +835,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.backpressure.stall_timeout_ms",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -850,7 +852,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.backpressure.window",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -868,7 +869,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.cycle_max_iterations",
-                file_path: None,
                 value_type: KnobType::U64 { min: 1, max: 65535 },
                 target: KnobTarget::Flow,
                 default: KnobDefault::Value(ConfigValue::U64(30)),
@@ -879,7 +879,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.heartbeat_interval",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -893,7 +892,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.max_lineage_depth",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -909,7 +907,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.metrics_drain_timeout_ms",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 0,
                     max: u64::MAX,
@@ -923,7 +920,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.observability.export_interval_ms",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -939,7 +935,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.observability.interval_ms",
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: u64::MAX,
@@ -953,7 +948,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: "runtime.observability.mode",
-                file_path: None,
                 value_type: KnobType::Token {
                     allowed: &["every_record", "periodic"],
                 },
@@ -964,55 +958,8 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
-            // The runtime.resume.* view over the 010h [replay] parse
-            // (absorption without moving the parse; Immutable: run identity).
-            KnobSpec {
-                key_path: "runtime.resume.allow_incomplete_archive",
-                file_path: Some("replay.allow_incomplete_archive"),
-                value_type: KnobType::Bool,
-                target: KnobTarget::Global,
-                default: KnobDefault::OptionalAbsent,
-                mutability: Mutability::Immutable,
-                role: KnobRole::Invocation,
-                redaction: Redaction::Plain,
-                env: EnvBinding::Named("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE"),
-            },
-            KnobSpec {
-                key_path: "runtime.resume.replay_from",
-                file_path: Some("replay.from"),
-                value_type: KnobType::Path,
-                target: KnobTarget::Global,
-                default: KnobDefault::OptionalAbsent,
-                mutability: Mutability::Immutable,
-                role: KnobRole::Invocation,
-                redaction: Redaction::Plain,
-                env: EnvBinding::Named("OBZENFLOW_REPLAY_FROM"),
-            },
-            KnobSpec {
-                key_path: "runtime.resume.resume_from",
-                file_path: Some("replay.resume_from"),
-                value_type: KnobType::Path,
-                target: KnobTarget::Global,
-                default: KnobDefault::OptionalAbsent,
-                mutability: Mutability::Immutable,
-                role: KnobRole::Invocation,
-                redaction: Redaction::Plain,
-                env: EnvBinding::Named("OBZENFLOW_RESUME_FROM"),
-            },
-            KnobSpec {
-                key_path: "runtime.resume.verify",
-                file_path: Some("replay.verify"),
-                value_type: KnobType::Bool,
-                target: KnobTarget::Global,
-                default: KnobDefault::OptionalAbsent,
-                mutability: Mutability::Immutable,
-                role: KnobRole::Invocation,
-                redaction: Redaction::Plain,
-                env: EnvBinding::Named("OBZENFLOW_REPLAY_VERIFY"),
-            },
             KnobSpec {
                 key_path: super::SINK_BATCH_MAX_WAIT_MS,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 0,
                     max: u64::MAX,
@@ -1026,7 +973,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             KnobSpec {
                 key_path: super::SINK_BATCH_SIZE,
-                file_path: None,
                 value_type: KnobType::U64 {
                     min: 1,
                     max: obzenflow_core::journal::limits::MAX_GROUP_RECORDS as u64,
@@ -1113,7 +1059,7 @@ pub fn schema_view() -> Vec<KnobSchemaDoc> {
                 if let Some(component) = middleware_file_component(spec.key_path) {
                     format!("[middleware.stages.<stage>.by_type.\"<effect-type>\".{component}]")
                 } else {
-                    let path = spec.file_path.unwrap_or(spec.key_path);
+                    let path = spec.key_path;
                     let table = path.rsplit_once('.').map_or(path, |(table, _)| table);
                     format!("[{table}{address_suffix}]")
                 };
@@ -1174,20 +1120,16 @@ mod tests {
             );
         }
         for spec in registry {
-            // Required implies no default value by construction of the enum;
-            // Edge targets carry a binding by construction. The checkable
-            // invariants: no Live entries in the first pass (§7 linkage),
-            // and aliases only on the runtime.resume view.
             assert_ne!(
                 spec.mutability,
                 Mutability::Live,
                 "{}: nothing is Live before 010b",
                 spec.key_path
             );
-            if spec.file_path.is_some() || matches!(spec.env, EnvBinding::Named(_)) {
+            if matches!(spec.env, EnvBinding::Named(_)) {
                 assert!(
-                    spec.key_path.starts_with("runtime.resume."),
-                    "{}: aliases are reserved for the runtime.resume view",
+                    spec.key_path.starts_with("archive."),
+                    "{}: named env spellings are reserved for the archive knobs",
                     spec.key_path
                 );
             }
@@ -1204,11 +1146,11 @@ mod tests {
         assert_eq!(
             invocation,
             [
+                "archive.allow_incomplete_archive",
+                "archive.replay_from",
+                "archive.resume_from",
+                "archive.verify",
                 "journal.root",
-                "runtime.resume.allow_incomplete_archive",
-                "runtime.resume.replay_from",
-                "runtime.resume.resume_from",
-                "runtime.resume.verify",
             ]
         );
     }

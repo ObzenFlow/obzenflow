@@ -193,3 +193,38 @@ fn control_origins_are_http_loopback_only() {
         );
     }
 }
+
+#[test]
+fn verify_long_help_lists_exit_codes() {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    let top = command.render_help().to_string();
+    assert!(
+        top.contains(
+            "Verify a candidate run's recorded output against a baseline, or call logs against \
+             their lineage\n"
+        ),
+        "{top}"
+    );
+    let verify = command
+        .find_subcommand_mut("verify")
+        .expect("verify subcommand");
+    let long = verify.render_long_help().to_string();
+    for text in [
+        "For runs, exit codes are 0 certified match, 1 divergence, 2 certified region matched \
+         with uncertified stages and 3 refused. For call logs, 0 every log passes, 1 a log \
+         breaks a rule, 2 a log is uncertified and 3 refused. Any other failure exits 4, and so \
+         does a wrong or missing argument.",
+        "--baseline <PATH>",
+        "The run directory the candidate is compared to",
+        "--candidate <PATH>",
+        "The run directory under test",
+        "--report-path <PATH>",
+        "Write the comparison report here",
+        "--max-divergences <N>",
+        "How many divergences to list",
+        "[default: 5]",
+    ] {
+        assert!(long.contains(text), "missing {text:?} in {long}");
+    }
+}

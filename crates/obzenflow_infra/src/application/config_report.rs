@@ -281,6 +281,7 @@ mod tests {
             live_writer: false,
             sources: Vec::new(),
             failure,
+            resume: None,
         };
         let line = |evidence: &ArchiveEvidence, flow: &FlowEvidence| {
             remedy_line(

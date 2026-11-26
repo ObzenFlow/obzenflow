@@ -15,8 +15,8 @@ pub enum RunMode {
     Live,
     /// Strict replay of a recorded run (`--replay-from`).
     Replay(ReplayRunContext),
-    /// Resume of a recorded run (`--resume-from`): catch up on the archive,
-    /// then continue live from the recorded high-water mark (FLOWIP-120n).
+    /// `Resume` resumes a recorded run (`--resume-from`) from the last fact it
+    /// committed. The new run catches up on the archive first, then continues live.
     Resume(ReplayRunContext),
 }
 
@@ -67,9 +67,6 @@ impl ReplayRunContext {
     }
 }
 
-/// Best-effort manifest peek for banner copy. Archive validation, including
-/// `allow_incomplete_archive` semantics, stays with the replay archive open
-/// path; an unreadable manifest here only costs the flow id in the copy.
 fn peek_archive_flow_id(archive_path: &Path) -> Option<String> {
     let manifest = std::fs::read_to_string(archive_path.join(RUN_MANIFEST_FILENAME)).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;

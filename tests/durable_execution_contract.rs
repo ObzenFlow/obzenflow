@@ -2294,6 +2294,23 @@ async fn durable_execution_contract() {
     after_rebuild
         .record(&torn, Ended::Interrupted { killed: true })
         .await;
+    let refused = Child::spawn(&s5, replay(&torn), None);
+    let log = refused.log.clone();
+    assert_eq!(
+        refused.exit().await.code(),
+        Some(2),
+        "S5: the replay refuses"
+    );
+    let refusal = read_log(&log);
+    assert!(
+        refusal.contains(&format!(
+            "cannot replay {torn}: it has no terminal record, so it was interrupted.\nResume it \
+             with --resume-from {torn}, or pass --allow-incomplete-archive to replay its \
+             recorded prefix.",
+            torn = torn.display()
+        )),
+        "S5: the replay refusal names the resume: {refusal}"
+    );
     let rebuilt_head = Child::spawn(&s5, resume(&torn), None).completed().await;
     after_rebuild.record(&rebuilt_head, Ended::Natural).await;
 
@@ -4007,8 +4024,9 @@ mod payment_demo {
             key: &IdempotencyKey,
             ctx: &EffectContext,
         ) -> Result<outcome![PaymentAuthorized | PaymentDeclined], EffectError> {
+            let answer = self.processor.authorize(request, key, ctx).await;
             hold_until(&self.release).await;
-            self.processor.authorize(request, key, ctx).await
+            answer
         }
     }
 
@@ -4298,7 +4316,10 @@ mod payment_demo {
 
         let child = Child::spawn(&scenario, Vec::new(), Some(Hold::Processor));
         let killed = child.run().await;
-        until(&killed, name, early).await;
+        until(&killed, name, |archive| {
+            early(archive) && !read_lines::<GatewayCall>(&gateway_calls(&scenario)).is_empty()
+        })
+        .await;
         child.signal(Signal::Kill);
         assert!(!child.exit().await.success(), "{name}: the kill lands");
         assert_eq!(
@@ -4333,6 +4354,52 @@ mod payment_demo {
             "{name}: the refusal prints alone: {log}"
         );
         assert_eq!(scenario.runs(), runs, "{name}: no run directory");
+        let (_, source_refusal) = log
+            .split_once(&format!("cannot resume {}: ", killed.display()))
+            .expect("the refusal prints");
+        let source_refusal = source_refusal.trim_end();
+
+        let refused = Child::spawn(&scenario, replay(&killed), Some(Hold::Processor));
+        let log = refused.log.clone();
+        assert_eq!(
+            refused.exit().await.code(),
+            Some(2),
+            "{name}: the replay refuses"
+        );
+        let log = read_log(&log);
+        let (_, replay_refusal) = log
+            .split_once(&format!("cannot replay {}: ", killed.display()))
+            .unwrap_or_else(|| panic!("{name}: the replay refusal prints: {log}"));
+        assert!(
+            !replay_refusal.contains("--resume-from"),
+            "{name}: the replay refusal offers no resume: {replay_refusal}"
+        );
+        assert!(
+            replay_refusal.trim_end().ends_with(&format!(
+                "cannot resume {}: {source_refusal}",
+                killed.display()
+            )),
+            "{name}: the replay refusal ends with the source refusal: {replay_refusal}"
+        );
+
+        let mut flagged = replay(&killed);
+        flagged.push("--allow-incomplete-archive".into());
+        let stopped = Child::spawn(&scenario, flagged, Some(Hold::Processor));
+        let log = stopped.log.clone();
+        assert_eq!(
+            stopped.exit().await.code(),
+            Some(2),
+            "{name}: the flagged replay stops"
+        );
+        let log = read_log(&log);
+        let head = std::fs::canonicalize(&killed).expect("the killed run resolves");
+        assert!(
+            log.contains(&format!(
+                "a replay never executes an effect.\ncannot resume {}: {source_refusal}",
+                head.display()
+            )),
+            "{name}: the replay stop prints the source refusal: {log}"
+        );
 
         let child = Child::spawn(&scenario, Vec::new(), Some(Hold::Processor));
         let log = child.log.clone();
