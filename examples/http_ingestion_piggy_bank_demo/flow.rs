@@ -5,7 +5,9 @@
 use super::domain::*;
 use super::handlers::{AccountLedger, Assess};
 use super::money::UsdCents;
-use obzenflow::events::{IngressDecodeError, IngressDecoder, IngressRecord};
+use obzenflow::application::ingress::IngestionConfig;
+use obzenflow::application::HostedIngress;
+use obzenflow::events::{subscribe, IngressDecodeError, IngressDecoder, IngressRecord};
 use obzenflow::flow::{
     flow, join, merge, sink, source, stateful, transform, FlowBuildError, FlowDefinition,
 };
@@ -13,15 +15,19 @@ use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::SnapshotTableFormatter;
 use obzenflow::stages::sources::{
-    CsvDecodeError, CsvDecoder, CsvRecord, CsvSource, HostedSource, YamlDecodeError, YamlDecoder,
-    YamlRecord, YamlSelection, YamlSource,
+    CsvDecodeError, CsvDecoder, CsvRecord, CsvSource, YamlDecodeError, YamlDecoder, YamlRecord,
+    YamlSelection, YamlSource,
 };
 use obzenflow::stages::stateful::emit;
 use obzenflow::stages::{joins, merges, sinks, stateful, transforms};
+use obzenflow::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const DEMO_JOURNAL_ROOT: &str = "target/http-ingestion-piggy-bank-demo-logs";
+pub const ACCOUNTS_BASE_PATH: &str = "/api/bank/accounts";
+pub const TX_BASE_PATH: &str = "/api/bank/tx";
+pub const ACH_BASE_PATH: &str = "/api/bank/ach";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -210,25 +216,11 @@ fn retry_returned_line(returned: &RetryReturned) -> String {
     )
 }
 
-pub fn build_flow(
-    new_accounts_source: HostedSource<AccountOpened>,
-    tx_source: HostedSource<LedgerEntry>,
-    ach_source: HostedSource<AchDebit>,
-) -> FlowDefinition {
-    assemble_flow(
-        PathBuf::from(DEMO_JOURNAL_ROOT),
-        new_accounts_source,
-        tx_source,
-        ach_source,
-    )
+pub fn build_flow(hosted: HostedIngress) -> FlowDefinition {
+    assemble_flow(PathBuf::from(DEMO_JOURNAL_ROOT), hosted)
 }
 
-pub fn assemble_flow(
-    journal_root: PathBuf,
-    new_accounts_source: HostedSource<AccountOpened>,
-    tx_source: HostedSource<LedgerEntry>,
-    ach_source: HostedSource<AchDebit>,
-) -> FlowDefinition {
+pub fn assemble_flow(journal_root: PathBuf, hosted: HostedIngress) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: PiggyBankSettings| {
         let accounts_source = YamlSource::builder(AccountYaml)
             .path(settings.accounts_file)
@@ -245,6 +237,19 @@ pub fn assemble_flow(
             .chunk_size(1)
             .build()
             .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
+        let endpoint = |base_path: &str| {
+            let config = IngestionConfig {
+                base_path: base_path.to_string(),
+                ..Default::default()
+            };
+            hosted
+                .http(config)
+                .map(Port::to)
+                .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))
+        };
+        let new_accounts_source = subscribe(AccountIngress).through(endpoint(ACCOUNTS_BASE_PATH)?);
+        let tx_source = subscribe(LedgerIngress).through(endpoint(TX_BASE_PATH)?);
+        let ach_source = subscribe(AchIngress).through(endpoint(ACH_BASE_PATH)?);
         let batch_presentments = transforms::map(present);
         let live_presentments = transforms::map(present);
         let assess_handler = Assess::new(settings.fee_rule);

@@ -113,7 +113,7 @@ impl Delivery {
 
     pub fn source(&self) -> Source {
         Source {
-            port: Numbers::counting(self.workload.inputs, 1).port(),
+            port: Port::to(Numbers::counting(self.workload.inputs, 1)),
             origin: self.origin,
         }
     }

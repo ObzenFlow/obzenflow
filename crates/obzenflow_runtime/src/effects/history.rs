@@ -272,7 +272,7 @@ impl EffectCursorHistory {
     }
 }
 
-pub(super) fn member_cursor(member: &obzenflow_core::source::MemberRecorded) -> EffectCursor {
+pub(super) fn member_cursor(member: &obzenflow_core::source::EventReceived) -> EffectCursor {
     EffectCursor::new(
         member.recorded_flow_id.clone(),
         member.stage_key.clone(),
@@ -541,8 +541,7 @@ impl EffectHistory {
             }
             let event = envelope.authored();
             actions.observe(&event)?;
-            if let ChainPayload::Execution(ExecutionPayload::MemberRecorded(member)) =
-                &event.payload
+            if let ChainPayload::Execution(ExecutionPayload::EventReceived(member)) = &event.payload
             {
                 if member.stage_key != stage_key
                     || archive

@@ -3,12 +3,12 @@
 // https://obzenflow.dev
 
 //! This module holds the portable data of sources, such as the queries that a source
-//! asks and the members that a sender pushes.
+//! asks and the events that a sender pushes.
 
 mod input;
 mod query;
 
-pub use input::{MemberRecorded, MEMBER_RECORDED_EVENT_TYPE};
+pub use input::EventReceived;
 pub use query::{QueryBookmark, QueryError};
 
 use serde_json::{Map, Value};

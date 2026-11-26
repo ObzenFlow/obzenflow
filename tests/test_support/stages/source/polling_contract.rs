@@ -154,7 +154,10 @@ fn live_once() -> SourceRead<PollingEvent, Continuous> {
     let (sender, receiver) = source_channel(1);
     assert!(sender.try_send(PollingEvent { ordinal: 0 }).is_ok());
     std::mem::forget(sender);
-    SourceRead::channel(Arc::new(receiver))
+    SourceRead::events(
+        Port::to(receiver),
+        crate::replay_testkit::ChannelIngress::new(),
+    )
 }
 
 struct AsyncFiniteOnce(Port<dyn PollInput>);

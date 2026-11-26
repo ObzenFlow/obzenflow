@@ -42,15 +42,19 @@ use gateway_demo::domain::{
 };
 use gateway_demo::gateway::ProcessorResponse;
 use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
-use obzenflow::application::{verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication};
+use obzenflow::application::{
+    verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication, HostedIngress,
+};
 use obzenflow::commands::perform;
 use obzenflow::effects::simulated::CallLog;
 use obzenflow::effects::{
     EffectContext, EffectError, Effects, IdempotencyKey, Keyed, StageCompletion,
 };
 use obzenflow::error::HandlerError;
-use obzenflow::events::{source_channel, IngressDecoder, SourceSender};
-use obzenflow::flow::{effectful_transform, flow, sink, source, stateful, FlowDefinition};
+use obzenflow::events::{source_channel, subscribe, IngressDecoder, SourceSender};
+use obzenflow::flow::{
+    effectful_transform, flow, sink, source, stateful, FlowBuildError, FlowDefinition,
+};
 use obzenflow::journal::disk_journals;
 use obzenflow::journal::read::{
     open_disk_run, ChainPayload, ExecutionPayload, FlowControlPayload, PipelineLifecycleEvent,
@@ -62,11 +66,11 @@ use obzenflow::queries::FiniteRead;
 use obzenflow::schema::{outcome, TypedPayload};
 use obzenflow::stages::sinks::DiscardSink;
 use obzenflow::stages::sources::{
-    HostedSource, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
+    YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
 };
 use obzenflow::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
 use obzenflow::stages::transforms::EffectfulTransformHandler;
-use obzenflow::systems::{Port, SystemConfig};
+use obzenflow::systems::Port;
 use obzenflow_core::event::payloads::execution_payload::{ReattachGuarantee, SourceReattachedFact};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::EventId;
@@ -230,7 +234,7 @@ fn http_order(order_id: &str) -> serde_json::Value {
 /// 084l's.
 enum WebOrders {
     Yaml(YamlSource<OrderYaml>),
-    Http(HostedSource<CustomerOrderPlaced>),
+    Http(HostedIngress),
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +566,15 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
                 }
                 }
             }
-            WebOrders::Http(web_orders_input) => flow! {
+            WebOrders::Http(hosted) => {
+                let endpoint = hosted
+                    .http(IngestionConfig {
+                        base_path: HTTP_BASE.into(),
+                        ..IngestionConfig::default()
+                    })
+                    .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
+                let web_orders_input = subscribe(HttpOrders).through(Port::to(endpoint));
+                flow! {
                 name: "durable_execution_contract",
                 journals: disk_journals(journals),
 
@@ -584,7 +596,8 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
                     settlement |> settled;
                     authorize_payment |> receipts;
                 }
-            },
+                }
+            }
         })
     })
 }
@@ -607,18 +620,12 @@ fn durable_execution_contract_child() {
     let plan: Plan = serde_json::from_str(&std::env::var(PLAN).expect("the parent passes a plan"))
         .expect("the plan parses");
     let args = std::iter::once("obzenflow".to_string()).chain(plan.args);
-    let mut app = FlowApplication::builder().with_cli_args(args);
+    let app = FlowApplication::builder().with_cli_args(args);
     let scenario = &plan.scenario;
     let result = match scenario.graph {
         Graph::Payment | Graph::NarrowPayment => {
             let web = match scenario.http {
-                Some(_) => WebOrders::Http(app.http_ingress(
-                    HttpOrders,
-                    IngestionConfig {
-                        base_path: HTTP_BASE.into(),
-                        ..IngestionConfig::default()
-                    },
-                )),
+                Some(_) => WebOrders::Http(app.hosted_ingress()),
                 None => WebOrders::Yaml(orders(scenario.web_input(), "/web_orders")),
             };
             app.with_config_file(payment_config(scenario))
@@ -675,28 +682,34 @@ fn durable_execution_contract_child() {
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::tickets_input(scenario)).port(),
+                Port::deferred(source_ports::ticket_store(source_ports::tickets_input(
+                    scenario,
+                ))),
                 plan.hold,
             )),
         Graph::SourcePortTicketPages(pages) => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::paged_tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::tickets_input(scenario)).port(),
+                Port::deferred(source_ports::ticket_store(source_ports::tickets_input(
+                    scenario,
+                ))),
                 pages,
             )),
         Graph::SourcePortTicketCopy => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                source_ports::ticket_store(source_ports::ticket_copy(scenario)).port(),
+                Port::deferred(source_ports::ticket_store(source_ports::ticket_copy(
+                    scenario,
+                ))),
                 plan.hold,
             )),
         Graph::SourcePortTicketFixture(count) => app
             .with_config_file(source_ports::tickets_config(scenario))
             .run_blocking(source_ports::tickets_flow(
                 scenario,
-                scripted_tickets::TicketFixture { count }.port(),
+                Port::deferred(scripted_tickets::TicketFixture { count }),
                 plan.hold,
             )),
         Graph::SourcePortOwned => app.run_blocking(source_ports::owned_flow(
@@ -1418,12 +1431,11 @@ impl Archive {
     fn read_orders(&self) -> Vec<String> {
         self.rows("web_orders", RunJournalKind::Data)
             .filter_map(|row| {
-                let ChainPayload::Execution(ExecutionPayload::MemberRecorded(record)) =
-                    &row.payload
+                let ChainPayload::Execution(ExecutionPayload::EventReceived(record)) = &row.payload
                 else {
                     return None;
                 };
-                record.member["fact"]["payload"]["order_id"]
+                record.event["admitted"]["fact"]["payload"]["order_id"]
                     .as_str()
                     .map(str::to_owned)
             })
@@ -2835,7 +2847,6 @@ mod then_live {
     use super::*;
     use obzenflow::flow::{join, merge};
     use obzenflow::middleware::rate_limit;
-    use obzenflow::stages::sources::ChannelSource;
     use obzenflow::stages::{joins, merges};
     use obzenflow_core::event::payloads::execution_payload::{JoinPhaseFact, StageLifecycleFact};
     use obzenflow_core::StageKey;
@@ -3065,6 +3076,20 @@ mod then_live {
         }
     }
 
+    #[derive(Clone)]
+    struct AccountIngress;
+
+    impl IngressDecoder for AccountIngress {
+        type Output = Account;
+    }
+
+    #[derive(Clone)]
+    struct EntryIngress;
+
+    impl IngressDecoder for EntryIngress {
+        type Output = Entry;
+    }
+
     pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
         let batch_accounts_input = yaml(AccountYaml, accounts_input(scenario), "/accounts");
         let batch_tx_input = yaml(EntryYaml, entries_input(scenario), "/entries");
@@ -3072,8 +3097,8 @@ mod then_live {
         let (entry_sender, live_tx_input) = source_channel::<Entry>(1);
         Box::leak(Box::new(account_sender));
         send_live_entries(live_entries_input(scenario), entry_sender);
-        let live_accounts_input = ChannelSource::new(live_accounts_input);
-        let live_tx_input = ChannelSource::new(live_tx_input);
+        let live_accounts_input = subscribe(AccountIngress).through(Port::to(live_accounts_input));
+        let live_tx_input = subscribe(EntryIngress).through(Port::to(live_tx_input));
         let journals = scenario.journals();
         let graph = scenario.graph;
         let slow_tx_input = (graph == Graph::ThenLiveTwoBatch)

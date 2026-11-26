@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! A system is any type that implements a port. A flow chooses the system behind each
-//! port with [`Port::to`], [`Port::deferred`] or [`SystemConfig::port`]. The
-//! framework's own systems are in [`file`] and [`http`].
+//! A system is any type that implements a port. A flow builds the port of each system
+//! with [`Port::to`] or [`Port::deferred`]. `Port::deferred` takes a [`SystemConfig`],
+//! which builds the system at the first live call. The framework's own systems are in
+//! [`file`] and [`http`].
 
 pub use obzenflow_runtime::systems::{Port, SystemConfig};
 

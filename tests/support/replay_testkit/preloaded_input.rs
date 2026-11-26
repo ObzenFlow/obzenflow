@@ -3,17 +3,39 @@
 // https://obzenflow.dev
 
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::events::{source_channel, SourceReceiver};
+use obzenflow_runtime::events::{source_channel, Events, IngressDecoder};
 use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead};
 use obzenflow_runtime::stages::common::handlers::TypedInfiniteSourceHandler;
-use serde::de::DeserializeOwned;
-use std::sync::Arc;
+use obzenflow_runtime::systems::Port;
+use std::marker::PhantomData;
 
 pub struct PreloadedInput<T> {
-    receiver: Arc<SourceReceiver<T>>,
+    port: Port<dyn Events>,
+    output: PhantomData<fn() -> T>,
 }
 
-pub fn preloaded_input<T>(values: impl IntoIterator<Item = T>) -> PreloadedInput<T> {
+pub struct ChannelIngress<T>(PhantomData<fn() -> T>);
+
+impl<T> ChannelIngress<T> {
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T> Clone for ChannelIngress<T> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl<T: TypedPayload + Send + Sync + 'static> IngressDecoder for ChannelIngress<T> {
+    type Output = T;
+}
+
+pub fn preloaded_input<T>(values: impl IntoIterator<Item = T>) -> PreloadedInput<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
     let values: Vec<T> = values.into_iter().collect();
     let (sender, receiver) = source_channel(values.len().max(1));
     for value in values {
@@ -21,17 +43,18 @@ pub fn preloaded_input<T>(values: impl IntoIterator<Item = T>) -> PreloadedInput
     }
     std::mem::forget(sender);
     PreloadedInput {
-        receiver: Arc::new(receiver),
+        port: Port::to(receiver),
+        output: PhantomData,
     }
 }
 
 impl<T> TypedInfiniteSourceHandler for PreloadedInput<T>
 where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    T: TypedPayload + Send + Sync + 'static,
 {
     type Output = T;
 
     fn read(&self) -> SourceRead<T, Continuous> {
-        SourceRead::channel(self.receiver.clone())
+        SourceRead::events(self.port.clone(), ChannelIngress::new())
     }
 }

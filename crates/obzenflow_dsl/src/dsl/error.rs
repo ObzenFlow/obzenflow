@@ -175,15 +175,15 @@ pub enum FlowBuildError {
     #[error(transparent)]
     MiddlewarePlan(Box<MiddlewarePlanError>),
 
-    #[error("hosted ingress '{ingress_key}' is assigned to both stages '{first_stage}' and '{second_stage}'; assign each hosted source binding to one stage")]
-    DuplicateHostedIngressBinding {
+    #[error("stages '{first_stage}' and '{second_stage}' subscribe to hosted ingress '{ingress_key}'; give each subscribe line its own endpoint")]
+    HostedIngressSubscribedTwice {
         ingress_key: String,
         first_stage: String,
         second_stage: String,
     },
 
-    #[error("stage '{stage_name}' uses hosted ingress '{ingress_key}', already bound to stage '{bound_stage}'; construct a fresh hosted source for this flow")]
-    HostedIngressAlreadyBound {
+    #[error("stage '{stage_name}' subscribes to hosted ingress '{ingress_key}', which an earlier build gave to stage '{bound_stage}'; give this flow its own endpoint from hosted.http or app.ingress")]
+    HostedIngressReused {
         ingress_key: String,
         stage_name: String,
         bound_stage: String,

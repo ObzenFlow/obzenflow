@@ -26,7 +26,7 @@ use obzenflow_runtime::systems::Port;
 use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -80,7 +80,6 @@ struct CsvLayout {
 enum RegisterState {
     Closed,
     Open(Box<OpenRegister>),
-    Poisoned(String),
 }
 
 struct OpenRegister {
@@ -89,6 +88,7 @@ struct OpenRegister {
     digest: Context,
     columns: Option<Vec<String>>,
     header_written: Written,
+    poisoned: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -141,13 +141,13 @@ impl SinkGroupSystem<CsvRow> for CsvRegister {
             }
             let register = match &mut *state {
                 RegisterState::Open(register) => register,
-                RegisterState::Poisoned(reason) => {
-                    return Err(EffectError::DestinationChanged {
-                        message: reason.clone(),
-                    });
-                }
                 RegisterState::Closed => unreachable!("the code above opens a closed register"),
             };
+            if let Some(reason) = &register.poisoned {
+                return Err(EffectError::DestinationChanged {
+                    message: reason.clone(),
+                });
+            }
             match register.append_group(&layout, &rows) {
                 Ok(appended) => Ok(appended),
                 Err(error) => {
@@ -155,7 +155,7 @@ impl SinkGroupSystem<CsvRow> for CsvRegister {
                         "{} is in an unknown state after a failed write: {error}",
                         layout.path.display()
                     );
-                    *state = RegisterState::Poisoned(reason.clone());
+                    register.poisoned = Some(reason.clone());
                     Err(EffectError::DestinationChanged { message: reason })
                 }
             }
@@ -175,9 +175,14 @@ impl OpenRegister {
                 .read(true)
                 .write(true)
                 .create(true)
-                .truncate(!continues_history)
+                .truncate(false)
                 .open(&layout.path)
                 .map_err(|error| io_failure(&layout.path, error))?;
+            hold(&file, &layout.path)?;
+            if !continues_history {
+                file.set_len(0)
+                    .map_err(|error| io_failure(&layout.path, error))?;
+            }
             if continues_history
                 && file
                     .metadata()
@@ -195,6 +200,7 @@ impl OpenRegister {
                 digest: Context::new(&SHA256),
                 columns: layout.columns.clone(),
                 header_written: Written::Nothing,
+                poisoned: None,
             });
         };
         let mut file = OpenOptions::new()
@@ -202,6 +208,7 @@ impl OpenRegister {
             .write(true)
             .open(&layout.path)
             .map_err(|_| no_longer_matches(&layout.path, recorded))?;
+        hold(&file, &layout.path)?;
         let actual = file
             .metadata()
             .map_err(|error| io_failure(&layout.path, error))?
@@ -252,6 +259,7 @@ impl OpenRegister {
             } else {
                 Written::Nothing
             },
+            poisoned: None,
         })
     }
 
@@ -285,6 +293,21 @@ impl OpenRegister {
         self.file.sync_data()?;
         Ok(replies)
     }
+}
+
+fn hold(file: &File, path: &Path) -> Result<(), EffectError> {
+    let message = match file.try_lock() {
+        Ok(()) => return Ok(()),
+        Err(TryLockError::WouldBlock) => format!(
+            "Another CSV sink or another run writes {}. Give each CSV sink its own file, and let one run write the file at a time.",
+            path.display()
+        ),
+        Err(TryLockError::Error(error)) => format!(
+            "The CSV sink cannot lock {} ({error}). Write CSV files to a local file system.",
+            path.display()
+        ),
+    };
+    Err(EffectError::DestinationChanged { message })
 }
 
 fn set_aside_tail(file: &mut File, path: &Path, length: u64) -> Result<(), EffectError> {
@@ -733,6 +756,91 @@ mod tests {
             .err()
             .expect("a changed file is refused");
         assert!(error.to_string().contains("no longer holds"), "{error}");
+    }
+
+    #[test]
+    fn shared_register_file_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let link = dir.path().join("register-link.csv");
+        let mut first = OpenRegister::open(&layout(&path), None, false).unwrap();
+        first.append_group(&layout(&path), &[row(1)]).unwrap();
+        std::fs::hard_link(&path, &link).unwrap();
+        let error = OpenRegister::open(&layout(&link), None, false)
+            .err()
+            .expect("a held file is refused");
+        assert!(
+            matches!(error, EffectError::DestinationChanged { .. }),
+            "{error}"
+        );
+        drop(first);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "id,name\n1,row-1\n"
+        );
+    }
+
+    #[test]
+    fn held_register_file_resume_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let mut first = OpenRegister::open(&layout(&path), None, false).unwrap();
+        let recorded = first
+            .append_group(&layout(&path), &[row(1)])
+            .unwrap()
+            .remove(0);
+        first.append_group(&layout(&path), &[row(2)]).unwrap();
+        let error = OpenRegister::open(&layout(&path), Some(&recorded), true)
+            .err()
+            .expect("a held file is refused");
+        assert!(
+            matches!(error, EffectError::DestinationChanged { .. }),
+            "{error}"
+        );
+        drop(first);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "id,name\n1,row-1\n2,row-2\n"
+        );
+    }
+
+    #[test]
+    fn dropped_register_file_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        drop(OpenRegister::open(&layout(&path), None, false).unwrap());
+        assert!(OpenRegister::open(&layout(&path), None, false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn poisoned_register_second_writer_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let layout = layout(&path);
+        let mut register = OpenRegister::open(&layout, None, false).unwrap();
+        register.append_group(&layout, &[row(1)]).unwrap();
+        register.file = File::open(&path).unwrap();
+        register.file.try_lock().unwrap();
+        let first = CsvRegister {
+            layout: layout.clone().into(),
+            state: Arc::new(Mutex::new(RegisterState::Open(Box::new(register)))),
+        };
+        let ctx = EffectContext::for_test(FlowId::new(), "register", 1);
+        first.append(&row(2), &ctx).await.unwrap_err();
+        let second = CsvRegister {
+            layout: layout.into(),
+            state: Arc::new(Mutex::new(RegisterState::Closed)),
+        };
+        let error = second.append(&row(9), &ctx).await.unwrap_err();
+        assert!(
+            matches!(error, EffectError::DestinationChanged { .. }),
+            "{error}"
+        );
+        drop(first);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "id,name\n1,row-1\n"
+        );
     }
 
     #[test]

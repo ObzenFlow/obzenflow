@@ -2,13 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Handle-first ingress plus optional HTTP event ingestion endpoints
+//! `event_ingestion` holds hosted HTTP endpoints and a protocol-neutral ingress handle.
 //!
-//! Applications use [`crate::application::FlowApplicationBuilder::http_ingress`]
-//! to register HTTP ingress and receive its hosted source handler for the flow. The
-//! builder hosts the ingress and controls its lifecycle. For an application-owned
-//! protocol, clone a handle from [`ingress_source`]. Then give the bundle to
-//! [`crate::application::FlowApplicationBuilder::ingress`].
+//! [`crate::application::HostedIngress::http`] registers an HTTP endpoint that a
+//! `subscribe` line reads. [`ingress_source`] creates an [`Ingress`] for an
+//! application-owned protocol.
+//!
 //! HTTP ingress provides the hosted routes:
 //! - `POST {base_path}/events` (single event)
 //! - `POST {base_path}/batch`  (batch)
@@ -41,17 +40,20 @@ pub use validation::{
     validate_submission, SchemaValidator, TypedValidator, ValidationConfig, ValidationError,
 };
 
-pub use obzenflow_adapters::sources::http::HostedSource;
+use async_trait::async_trait;
+use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::ingress::{
     HostedIngressBindingSlot, IngressAttemptContext, IngressRequestId, OUTCOME_UNKNOWN_RETRY_AFTER,
 };
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::events::{HostedSubmission, IngressDecoder, SourceReceiver};
+use obzenflow_runtime::events::{Arrival, Events, SourceReceiver};
 use obzenflow_runtime::execution::SourceExecutionPhases;
 use obzenflow_runtime::prelude::FlowHandle;
+use obzenflow_runtime::stages::common::handlers::SourceError;
 use settlement::EvidenceState;
 use shared::{admit_typed, AdmittedRequest, EdgeRefusal};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -69,7 +71,8 @@ pub struct IngressHandle<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
-    state: IngestionState<T>,
+    state: IngestionState,
+    payload: PhantomData<fn(T)>,
 }
 
 impl<T> Clone for IngressHandle<T>
@@ -79,6 +82,7 @@ where
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
+            payload: PhantomData,
         }
     }
 }
@@ -119,7 +123,14 @@ where
                 .await;
             return refused_outcome(refused);
         }
-        let admitted = match admit_typed(payload, request_id.as_ref()) {
+        let Some(decoder) = self.state.decoder() else {
+            let refused = self
+                .state
+                .refuse_not_ready(&attempt, request_id.as_ref())
+                .await;
+            return refused_outcome(refused);
+        };
+        let admitted = match admit_typed(decoder.as_ref(), payload, request_id.as_ref()) {
             Ok(admitted) => admitted,
             Err(refusal) => {
                 let recorded = self
@@ -178,32 +189,32 @@ where
         self.state.ingress_key().as_str()
     }
 
-    pub(crate) fn state(&self) -> IngestionState<T> {
+    pub(crate) fn state(&self) -> IngestionState {
         self.state.clone()
     }
+}
 
-    pub(crate) fn ingress_slot(&self) -> HostedIngressBindingSlot {
-        self.state.ingress_slot()
-    }
-
+impl IngestionState {
     pub(crate) fn bind_flow_handle(
         &self,
         flow_handle: &Arc<FlowHandle>,
     ) -> Result<JoinHandle<()>, ApplicationError> {
-        let slot = self.state.ingress_slot();
+        let slot = self.ingress_slot();
         if !slot.is_filled() {
-            return Err(ApplicationError::FlowBuildFailed(format!(
-                "hosted ingress handle '{}' was registered but its source half was not placed in \
-                 the flow topology; place the ingress source in flow!",
-                slot.ingress_key()
-            )));
+            return Err(unbound_ingress(&slot));
         }
-        install_evidence_writer(&self.state, flow_handle.ingress_evidence(), "handle")?;
-        install_source_phases(&self.state, flow_handle.source_phases(), "handle")?;
-        Ok(self
-            .state
-            .watch_pipeline_state(flow_handle.state_receiver()))
+        install_evidence_writer(self, flow_handle.ingress_evidence(), "handle")?;
+        install_source_phases(self, flow_handle.source_phases(), "handle")?;
+        Ok(self.watch_pipeline_state(flow_handle.state_receiver()))
     }
+}
+
+pub(crate) fn unbound_ingress(slot: &HostedIngressBindingSlot) -> ApplicationError {
+    ApplicationError::FlowBuildFailed(format!(
+        "hosted ingress '{}' was registered but no subscribe line binds its port; bind it with \
+         subscribe(…).through(port) in flow!",
+        slot.ingress_key()
+    ))
 }
 
 fn refused_outcome(edge: EdgeRefusal) -> IngressOutcome {
@@ -215,8 +226,8 @@ fn refused_outcome(edge: EdgeRefusal) -> IngressOutcome {
 
 /// Install the host system journal's evidence writer, or fail startup when
 /// recording is enabled and the flow has no system journal.
-fn install_evidence_writer<T>(
-    state: &IngestionState<T>,
+fn install_evidence_writer(
+    state: &IngestionState,
     writer: Option<obzenflow_runtime::pipeline::ingress::IngressEvidenceWriter>,
     kind: &str,
 ) -> Result<(), ApplicationError> {
@@ -236,8 +247,8 @@ fn install_evidence_writer<T>(
     }
 }
 
-fn install_source_phases<T>(
-    state: &IngestionState<T>,
+fn install_source_phases(
+    state: &IngestionState,
     phases: Option<SourceExecutionPhases>,
     kind: &str,
 ) -> Result<(), ApplicationError> {
@@ -254,169 +265,93 @@ fn install_source_phases<T>(
     }
 }
 
-/// `Ingress` holds a hosted source and an ingress handle for an application-owned
-/// protocol.
-pub struct Ingress<D>
-where
-    D: IngressDecoder,
-{
-    source: HostedSource<D::Output>,
-    handle: IngressHandle<D::Output>,
-    decoder: D,
-}
-
-impl<D> Ingress<D>
-where
-    D: IngressDecoder,
-{
-    /// `into_parts` splits the bundle into its hosted source and its submission handle.
-    /// It does not start a runtime execution. One source stage reads the submissions.
-    ///
-    /// ```compile_fail,E0382
-    /// use obzenflow_infra::web::endpoints::event_ingestion::Ingress;
-    /// use obzenflow_runtime::events::IngressDecoder;
-    ///
-    /// fn transfer_twice<D: IngressDecoder>(ingress: Ingress<D>) {
-    ///     let (source, handle) = ingress.into_parts();
-    ///     let (another_source, _) = ingress.into_parts(); // ingress was consumed
-    /// }
-    /// ```
-    pub fn into_parts(self) -> (HostedSource<D::Output>, IngressHandle<D::Output>) {
-        (self.source, self.handle)
-    }
-
-    pub fn handle(&self) -> IngressHandle<D::Output> {
-        self.handle.clone()
-    }
-}
-
-/// Framework-owned HTTP ingress bundle for a single typed payload.
-pub struct HttpIngress<D>
-where
-    D: IngressDecoder,
-{
-    source: HostedSource<D::Output>,
-    attachment: HttpIngressAttachment<D::Output>,
-}
-
-/// HTTP hosting and submission half returned by [`HttpIngress::into_parts`].
-///
-/// Pass this attachment to [`crate::application::FlowApplicationBuilder::with_http_ingress`]
-/// and place the source half in the flow topology. Submission handles may be cloned;
-/// the attachment retains ownership of its HTTP surface.
-pub struct HttpIngressAttachment<T>
+/// `Ingress` is an ingress for an application-owned protocol. It holds the event
+/// system that a `subscribe` line reads and the handle that submits each value.
+pub struct Ingress<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
-    surface: WebSurfaceAttachment,
+    events: IngressEvents,
     handle: IngressHandle<T>,
 }
 
-impl<D> HttpIngress<D>
-where
-    D: IngressDecoder,
-{
-    /// `into_parts` splits the bundle into its hosted source and its HTTP hosting
-    /// attachment. It does not start a runtime execution. One source stage reads the
-    /// submissions.
-    ///
-    /// ```compile_fail,E0382
-    /// use obzenflow_infra::web::endpoints::event_ingestion::HttpIngress;
-    /// use obzenflow_runtime::events::IngressDecoder;
-    ///
-    /// fn transfer_twice<D: IngressDecoder>(ingress: HttpIngress<D>) {
-    ///     let (source, http) = ingress.into_parts();
-    ///     let (another_source, _) = ingress.into_parts(); // ingress was consumed
-    /// }
-    /// ```
-    pub fn into_parts(self) -> (HostedSource<D::Output>, HttpIngressAttachment<D::Output>) {
-        (self.source, self.attachment)
-    }
-
-    /// Clone the underlying handle used by the hosted HTTP adaptor.
-    pub fn handle(&self) -> IngressHandle<D::Output> {
-        self.attachment.handle()
-    }
-}
-
-impl<T> HttpIngressAttachment<T>
+impl<T> Ingress<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
-    /// Clone the underlying handle used by the hosted HTTP adaptor.
+    /// `handle` returns a clone of the submission handle.
     pub fn handle(&self) -> IngressHandle<T> {
         self.handle.clone()
     }
 
-    /// Consume the HTTP attachment and return its managed web surface.
-    pub fn into_surface(self) -> WebSurfaceAttachment {
-        self.surface
-    }
-
-    pub(crate) fn into_surface_and_handle(self) -> (WebSurfaceAttachment, IngressHandle<T>) {
-        (self.surface, self.handle)
+    pub(crate) fn into_parts(self) -> (IngressEvents, IngressHandle<T>) {
+        (self.events, self.handle)
     }
 }
 
-/// `ingress_source` creates a hosted source and a protocol-neutral ingress handle. The
-/// source's system is `ingress`. [`crate::application::FlowApplicationBuilder::ingress`]
-/// registers the bundle.
-pub fn ingress_source<D>(decoder: D, config: IngestionConfig) -> Ingress<D>
+/// `ingress_source` creates an [`Ingress`] of `T` for an application-owned protocol.
+/// [`crate::application::FlowApplicationBuilder::ingress`] registers it. The
+/// [`IngressHandle`] runs the decoder of the `subscribe` line on each value that it submits.
+pub fn ingress_source<T>(config: IngestionConfig) -> Ingress<T>
 where
-    D: IngressDecoder,
-{
-    hosted_ingress(decoder, config, HostedSource::ingress)
-}
-
-type HostedSystem<T> =
-    fn(SourceReceiver<HostedSubmission<T>>, HostedIngressBindingSlot) -> HostedSource<T>;
-
-fn hosted_ingress<D>(
-    decoder: D,
-    config: IngestionConfig,
-    system: HostedSystem<D::Output>,
-) -> Ingress<D>
-where
-    D: IngressDecoder,
+    T: TypedPayload + Send + Sync + 'static,
 {
     let (state, rx) = IngestionState::new(config);
     Ingress {
-        source: system(rx, state.ingress_slot()),
-        handle: IngressHandle { state },
-        decoder,
+        events: IngressEvents {
+            rx,
+            slot: state.ingress_slot(),
+        },
+        handle: IngressHandle {
+            state,
+            payload: PhantomData,
+        },
     }
 }
 
-/// `http_ingress` creates an HTTP ingress bundle. Use it when you compose the source and
-/// the attachment yourself. The source's system is `http-ingress`. The decoder runs at
-/// admission, together with any configured validator.
-pub fn http_ingress<D>(decoder: D, config: IngestionConfig) -> HttpIngress<D>
-where
-    D: IngressDecoder,
-{
-    let Ingress {
-        source,
-        handle,
-        decoder,
-    } = hosted_ingress(decoder, config, HostedSource::http);
-    let surface = create_ingestion_surface(handle.state(), decoder);
-    HttpIngress {
-        source,
-        attachment: HttpIngressAttachment { surface, handle },
+pub(crate) struct IngressEvents {
+    rx: SourceReceiver<Arrival>,
+    slot: HostedIngressBindingSlot,
+}
+
+#[async_trait]
+impl Events for IngressEvents {
+    async fn ready(&self) -> Result<(), SourceError> {
+        self.rx
+            .ready()
+            .await
+            .map_err(|_| SourceError::Transport(SourceDiagnosticReason::InputClosed.into()))
+    }
+
+    fn take(&self) -> Option<Arrival> {
+        self.rx.take(1).pop()
+    }
+
+    fn hosted_ingress(&self) -> Option<HostedIngressBindingSlot> {
+        Some(self.slot.clone())
     }
 }
 
-fn create_ingestion_surface<D>(state: IngestionState<D::Output>, decoder: D) -> WebSurfaceAttachment
-where
-    D: IngressDecoder,
-{
+pub(crate) fn http_endpoint(
+    config: IngestionConfig,
+) -> (IngressEvents, IngestionState, WebSurfaceAttachment) {
+    let (state, rx) = IngestionState::new(config);
+    let events = IngressEvents {
+        rx,
+        slot: state.ingress_slot(),
+    };
+    let surface = create_ingestion_surface(state.clone());
+    (events, state, surface)
+}
+
+fn create_ingestion_surface(state: IngestionState) -> WebSurfaceAttachment {
     let ingress_slot = state.ingress_slot();
     let base_path = state.config.base_path.clone();
 
     let state_for_wiring = state.clone();
     let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
-        Box::new(SingleEventEndpoint::new(state.clone(), decoder.clone())),
-        Box::new(BatchEventEndpoint::new(state.clone(), decoder)),
+        Box::new(SingleEventEndpoint::new(state.clone())),
+        Box::new(BatchEventEndpoint::new(state.clone())),
         Box::new(IngestionHealthEndpoint::new(state)),
     ];
 

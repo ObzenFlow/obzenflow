@@ -1468,7 +1468,14 @@ async fn failed_answer_append_records_journal_fatal() {
 }
 
 #[derive(Clone)]
-struct ChannelRows(Arc<crate::events::SourceReceiver<Row>>);
+struct RowIngress;
+
+impl crate::events::IngressDecoder for RowIngress {
+    type Output = Row;
+}
+
+#[derive(Clone)]
+struct ChannelRows(crate::systems::Port<dyn crate::events::Events>);
 
 #[async_trait]
 impl TypedAsyncInfiniteSourceHandler for ChannelRows {
@@ -1479,7 +1486,7 @@ impl TypedAsyncInfiniteSourceHandler for ChannelRows {
     }
 
     fn read(&self) -> SourceRead<Row, crate::stages::common::handlers::source::Continuous> {
-        SourceRead::channel(Arc::clone(&self.0))
+        SourceRead::events(self.0.clone(), RowIngress)
     }
 }
 
@@ -1489,11 +1496,11 @@ async fn held_member_past_deadline_commits_once() {
     let (source, ports, declarations) = admitted::<
         dyn crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler,
         _,
-    >(ChannelRows(Arc::new(receiver)));
+    >(ChannelRows(crate::systems::Port::to(receiver)));
     let (stage, mut resources, _) = resources_with_ports(ports, declarations).await;
     let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
     let (writing, release) = journal.block_matching_append(|event| {
-        event.event_type() == obzenflow_core::source::MEMBER_RECORDED_EVENT_TYPE
+        event.event_type() == obzenflow_core::event::vocabulary::event::RECEIVED
     });
     resources.data_journal = journal.clone();
     let config = infinite::InfiniteSourceConfig::new(stage, "input", "lifecycle");
@@ -1531,8 +1538,211 @@ async fn held_member_past_deadline_commits_once() {
     let rows = journal.read_all_unordered().await.unwrap();
     let members = rows
         .iter()
-        .filter(|row| row.event_type() == obzenflow_core::source::MEMBER_RECORDED_EVENT_TYPE)
+        .filter(|row| row.event_type() == obzenflow_core::event::vocabulary::event::RECEIVED)
         .count();
     assert_eq!(members, 1, "the held member commits once");
     assert_eq!(facts(&rows), 1, "the held member advances to its record");
+}
+
+mod channel_lifecycle {
+    use super::*;
+    use crate::events::{
+        source_channel, subscribe, Arrival, Events, IngressDecodeError, IngressDecoder,
+        IngressRecord, SourceReceiver, SourceSender,
+    };
+    use crate::stages::common::handlers::source::Continuous;
+    use crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler;
+    use infinite::AsyncInfiniteSourceBuilder as Builder;
+    use infinite::InfiniteSourceConfig as Config;
+    use infinite::InfiniteSourceEvent as Event;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Amount {
+        cents: u64,
+    }
+
+    impl TypedPayload for Amount {
+        const EVENT_TYPE: &'static str = "lifecycle.amount";
+    }
+
+    #[derive(Clone)]
+    struct AmountIngress;
+
+    impl IngressDecoder for AmountIngress {
+        type Output = Amount;
+
+        fn decode(&self, record: IngressRecord<'_>) -> Result<Amount, IngressDecodeError> {
+            let amount: Amount = record.deserialize()?;
+            if amount.cents == 0 {
+                return Err(IngressDecodeError::invalid_value("cents"));
+            }
+            Ok(amount)
+        }
+    }
+
+    struct HandwrittenAmounts(Port<dyn Events>);
+
+    #[async_trait]
+    impl TypedAsyncInfiniteSourceHandler for HandwrittenAmounts {
+        type Output = Amount;
+
+        fn read(&self) -> SourceRead<Amount, Continuous> {
+            SourceRead::events(self.0.clone(), AmountIngress)
+        }
+    }
+
+    struct Counted {
+        amounts: SourceReceiver<Amount>,
+        takes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Events for Counted {
+        async fn ready(&self) -> Result<(), SourceError> {
+            Events::ready(&self.amounts).await
+        }
+
+        fn take(&self) -> Option<Arrival> {
+            self.takes.fetch_add(1, Ordering::SeqCst);
+            Events::take(&self.amounts)
+        }
+    }
+
+    fn received(rows: &Rows) -> Vec<(u64, serde_json::Value)> {
+        rows.iter()
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::EventReceived(received)) => {
+                    Some((received.number.get(), received.event.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn published(rows: &Rows) -> Vec<serde_json::Value> {
+        rows.iter()
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Fact(fact) => Some(fact.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    struct Run {
+        data: Vec<JournalRecord<ChainPayload>>,
+        errors: Vec<JournalRecord<ChainPayload>>,
+    }
+
+    async fn run<H>(handler: H, sender: SourceSender<Amount>, cents: &[u64], facts: usize) -> Run
+    where
+        H: AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler>,
+        H::Handler: UnifiedAsyncInfiniteSourceHandler,
+    {
+        let (source, ports, declarations) =
+            admitted::<dyn UnifiedAsyncInfiniteSourceHandler, _>(handler);
+        let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
+        let config = Config::new(stage, "input", "lifecycle");
+        let handle = Builder::new(source, config, resources)
+            .build()
+            .await
+            .unwrap();
+        for event in [Event::Initialize, Event::Ready, Event::Start] {
+            handle.send_event(event).await.unwrap();
+        }
+        for &cents in cents {
+            sender
+                .send(Amount { cents })
+                .await
+                .expect("the channel has space");
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let rows = journals.data.read_all_unordered().await.unwrap();
+                if received(&rows).len() == cents.len() && published(&rows).len() == facts {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the stage records every value");
+        handle.send_event(Event::BeginDrain).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+            .await
+            .expect("source terminates")
+            .expect("source completes");
+        Run {
+            data: journals.data.read_causally_ordered().await.unwrap(),
+            errors: journals.error.read_causally_ordered().await.unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_channel_value_rejects_record() {
+        let (sender, amounts) = source_channel::<Amount>(4);
+        let line = subscribe(AmountIngress).through(Port::to(amounts));
+        let run = run(line, sender, &[0, 5], 1).await;
+        assert_eq!(
+            received(&run.data).len(),
+            2,
+            "the stage records both values"
+        );
+        assert_eq!(
+            published(&run.data),
+            [serde_json::json!({"cents": 5})],
+            "only the accepted value publishes"
+        );
+        let failures = source_failures(&run.errors);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let (_, ExecutionPayload::SourceRecordRejected(rejected)) = failures[0] else {
+            panic!("expected runtime.source.record_rejected, got {failures:?}");
+        };
+        assert_eq!(rejected.kind, ErrorKind::Validation);
+    }
+
+    #[tokio::test]
+    async fn drain_during_ready_takes_no_arrival() {
+        let (sender, amounts) = source_channel::<Amount>(4);
+        let counted = Arc::new(Counted {
+            amounts,
+            takes: AtomicUsize::new(0),
+        });
+        let line = subscribe(AmountIngress).through(Port::to(Arc::clone(&counted)));
+        let (source, ports, declarations) =
+            admitted::<dyn UnifiedAsyncInfiniteSourceHandler, _>(line);
+        let (stage, resources, journals) = resources_with_ports(ports, declarations).await;
+        let config = Config::new(stage, "input", "lifecycle");
+        let handle = Builder::new(source, config, resources)
+            .build()
+            .await
+            .unwrap();
+        for event in [Event::Initialize, Event::Ready, Event::Start] {
+            handle.send_event(event).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.send_event(Event::BeginDrain).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+            .await
+            .expect("source terminates")
+            .expect("source completes");
+        drop(sender);
+        assert_eq!(counted.takes.load(Ordering::SeqCst), 0);
+        let rows = journals.data.read_all_unordered().await.unwrap();
+        assert!(received(&rows).is_empty(), "the drain records no event");
+    }
+
+    #[tokio::test]
+    async fn events_read_matches_subscribe_line_rows() {
+        let (sender, amounts) = source_channel::<Amount>(4);
+        let handwritten = run(HandwrittenAmounts(Port::to(amounts)), sender, &[1, 0, 2], 2).await;
+        let (sender, amounts) = source_channel::<Amount>(4);
+        let line = subscribe(AmountIngress).through(Port::to(amounts));
+        let line = run(line, sender, &[1, 0, 2], 2).await;
+        assert_eq!(received(&handwritten.data), received(&line.data));
+        assert_eq!(published(&handwritten.data), published(&line.data));
+        assert_eq!(
+            source_failures(&handwritten.errors).len(),
+            source_failures(&line.errors).len()
+        );
+    }
 }

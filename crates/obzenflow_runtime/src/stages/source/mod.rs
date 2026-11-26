@@ -27,8 +27,8 @@ pub use boundary::{
 };
 
 pub use crate::stages::common::handlers::source::{
-    HostedSource, RecordDeError, SourceError, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    RecordDeError, SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 #[doc(hidden)]
 pub use crate::stages::common::handlers::source::{ResumeRefusal, SourceContinuation};

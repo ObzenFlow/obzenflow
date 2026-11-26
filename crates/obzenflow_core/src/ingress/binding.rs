@@ -2,17 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-115d: the hosted-ingress binding slot.
-//!
-//! The write-once coordination primitive shared between a hosted source's typed
-//! half (which enters flow topology) and its ingress handle or optional hosted
-//! web-surface half. The ingress source/handle constructor creates it, the DSL
-//! fills it during source-stage materialization, and the host reads it during
-//! handle or web-surface wiring.
-
 use super::boundary::IngressBoundaryMiddleware;
 use super::timing::IngressTiming;
 use super::IngressKey;
+use crate::event::schema::TypedFact;
+use crate::event::SourceDiagnostic;
 use crate::{StageId, StageKey};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -36,9 +30,21 @@ pub struct FilledHostedIngress {
     pub boundary: Option<Arc<dyn IngressBoundaryMiddleware>>,
 }
 
-/// A second source stage attempted to bind a hosted surface that was already
-/// bound (cloned source halves must not silently attach one listener surface to
-/// multiple source stages).
+/// `IngressFactDecoder` decodes one submitted body into the fact that its source
+/// stage publishes. The hosted ingress runs the decoder once on each body, at admission.
+pub trait IngressFactDecoder: Send + Sync {
+    /// `event_type` is the event type of the decoded fact.
+    fn event_type(&self) -> &'static str;
+
+    /// `accepts` returns `true` if this decoder takes a submission of `event_type`.
+    fn accepts(&self, event_type: &str) -> bool;
+
+    /// `decode` returns the fact of one body, or a diagnostic that holds no submitted value.
+    fn decode(&self, data: &serde_json::Value) -> Result<TypedFact, SourceDiagnostic>;
+}
+
+/// `HostedIngressAlreadyBound` is the error that [`HostedIngressBindingSlot::fill`]
+/// returns for a filled slot. One hosted ingress serves one source stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostedIngressAlreadyBound;
 
@@ -53,14 +59,8 @@ impl std::fmt::Display for HostedIngressAlreadyBound {
 
 impl std::error::Error for HostedIngressAlreadyBound {}
 
-/// Write-once binding slot shared between a hosted source's typed half (which
-/// enters flow topology) and its hosted web-surface half (which enters
-/// `FlowApplication`).
-///
-/// `http_ingress` creates it, the DSL fills it during source-stage
-/// materialization, and `FlowApplication` reads it during web-surface wiring.
-/// Cloning shares the same write-once cell, so a fill through the source half is
-/// visible to the surface half.
+/// `HostedIngressBindingSlot` is a write-once slot that the event system of a hosted
+/// ingress shares with its web surface or submission handle. All clones share one cell.
 #[derive(Clone)]
 pub struct HostedIngressBindingSlot {
     ingress_key: IngressKey,
@@ -70,6 +70,7 @@ pub struct HostedIngressBindingSlot {
     /// FLOWIP-084l: identity-index entries, published by the source's writer.
     idempotency_entries: Arc<AtomicU64>,
     restoring: Arc<AtomicBool>,
+    decoder: Arc<OnceLock<Arc<dyn IngressFactDecoder>>>,
 }
 
 impl HostedIngressBindingSlot {
@@ -80,6 +81,7 @@ impl HostedIngressBindingSlot {
             timing: Arc::new(OnceLock::new()),
             idempotency_entries: Arc::new(AtomicU64::new(0)),
             restoring: Arc::new(AtomicBool::new(false)),
+            decoder: Arc::new(OnceLock::new()),
         }
     }
 
@@ -103,8 +105,8 @@ impl HostedIngressBindingSlot {
         self.cell.set(filled).map_err(|_| HostedIngressAlreadyBound)
     }
 
-    /// The filled binding, or `None` if the source half was never placed in
-    /// flow topology (a startup error for a registered hosted surface).
+    /// `filled` returns the [`FilledHostedIngress`] of the slot, or `None` when no source
+    /// stage reads the hosted ingress.
     pub fn filled(&self) -> Option<&FilledHostedIngress> {
         self.cell.get()
     }
@@ -140,6 +142,18 @@ impl HostedIngressBindingSlot {
 
     pub fn idempotency_entries(&self) -> u64 {
         self.idempotency_entries.load(Ordering::Relaxed)
+    }
+
+    /// `install_decoder` installs the decoder of the `subscribe` line of this hosted
+    /// ingress. Only the first call installs a decoder.
+    pub fn install_decoder(&self, decoder: Arc<dyn IngressFactDecoder>) {
+        self.decoder.get_or_init(|| decoder);
+    }
+
+    /// `decoder` returns the decoder of the `subscribe` line of this hosted ingress, or
+    /// `None` before a line installs one.
+    pub fn decoder(&self) -> Option<&Arc<dyn IngressFactDecoder>> {
+        self.decoder.get()
     }
 }
 

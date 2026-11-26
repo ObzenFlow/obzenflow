@@ -6,7 +6,9 @@ use super::erased::{
     ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncFinite, SealAsyncInfinite,
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
 };
-use super::read::{read_failure, Continuous, DrivenRead, Finite, ReadEnd, SourceRead};
+use super::read::{
+    read_failure, Continuous, DrivenRead, Finite, ReadEnd, SourceOutput, SourceRead,
+};
 use super::SourceError;
 use crate::stages::common::handler_error::StageFatal;
 use async_trait::async_trait;
@@ -158,8 +160,14 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
         }
     }
 
+    fn install(&mut self, context: crate::effects::EffectInvocationContext) {
+        self.read
+            .install_context(context.stage.runtime_execution.resume_control().is_some());
+        self.context = Some(context);
+    }
+
     async fn cross_to_live(&mut self) -> Result<bool, StageFatal> {
-        if !self.read.is_continuous() || self.has_pending() {
+        if !self.read.is_continuous() || self.has_pending() || self.read.holds_receipts() {
             return Ok(false);
         }
         let Some(context) = self.context.clone() else {
@@ -177,10 +185,16 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
         let stage_id = context.stage.stage_id;
         let mut effects = crate::effects::EffectsCore::new(context);
         match effects.cross_to_live().await {
-            Ok(()) => Ok(!matches!(
-                execution.source_phase_for(stage_id),
-                crate::execution::SourceExecutionPhase::Replaying
-            )),
+            Ok(()) => {
+                let live = !matches!(
+                    execution.source_phase_for(stage_id),
+                    crate::execution::SourceExecutionPhase::Replaying
+                );
+                if live {
+                    self.read.crossed_to_live();
+                }
+                Ok(live)
+            }
             Err(error) => Err(effect_fatal(&effects, &error)),
         }
     }
@@ -318,21 +332,42 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
         None
     }
 
-    async fn output(&mut self, output: Output) -> ErasedSourceInvocation {
+    async fn output(&mut self, output: SourceOutput<Output>) -> ErasedSourceInvocation {
         let effects = self
             .effects
             .as_mut()
             .expect("a committed read supplied the pending records");
-        let fact = match output.into_facts() {
-            Ok(mut facts) if facts.len() == 1 => facts.pop().expect("one source fact"),
-            Ok(_) => {
-                return ErasedSourceInvocation::fatal(protocol_fatal(
-                    "a source output must produce one fact",
-                ))
+        let (fact, admission) = match output {
+            SourceOutput::Value(output) => match output.into_facts() {
+                Ok(mut facts) if facts.len() == 1 => (facts.pop().expect("one source fact"), None),
+                Ok(_) => {
+                    return ErasedSourceInvocation::fatal(protocol_fatal(
+                        "a source output must produce one fact",
+                    ))
+                }
+                Err(error) => {
+                    return ErasedSourceInvocation::fatal(protocol_fatal(error.to_string()))
+                }
+            },
+            SourceOutput::Admitted(staged) => {
+                let staged = *staged;
+                let fact = match staged.fact.into_typed() {
+                    Ok(fact) => fact,
+                    Err(error) => {
+                        return ErasedSourceInvocation::fatal(protocol_fatal(format!(
+                            "a recorded event cannot be decoded: {error}"
+                        )))
+                    }
+                };
+                let admission = super::read::Admission {
+                    identity: staged.identity,
+                    accepted_at_ns: staged.context.accepted_at_ns,
+                    receipts: staged.receipts,
+                };
+                (fact, Some((staged.context, admission)))
             }
-            Err(error) => return ErasedSourceInvocation::fatal(protocol_fatal(error.to_string())),
         };
-        let event = match effects.prepare_typed_fact(fact, false).await {
+        let mut event = match effects.prepare_typed_fact(fact, false).await {
             Ok((event, _)) => event,
             Err(error) => return ErasedSourceInvocation::fatal(effect_fatal(effects, &error)),
         };
@@ -346,8 +381,15 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> DrivenReads<Output> {
                 Err(error) => ErasedSourceInvocation::fatal(effect_fatal(effects, &error)),
             };
         }
+        let admission = admission.map(|(context, admission)| {
+            event.ingress_context = Some(context);
+            admission
+        });
         match self.preserved(event).await {
             Ok(event) => {
+                if let Some(admission) = admission {
+                    self.read.admitted(admission, event.id);
+                }
                 if self.reproduced {
                     self.replayed += 1;
                 }
@@ -471,7 +513,7 @@ where
     }
 
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
-        self.reads.context = Some(context);
+        self.reads.install(context);
     }
 
     fn poll_cancelled(&mut self) {
@@ -486,8 +528,16 @@ where
         self.reads.replayed
     }
 
+    fn hosted_ingress_slot(&self) -> Option<obzenflow_core::ingress::HostedIngressBindingSlot> {
+        self.reads.read.hosted_ingress_slot()
+    }
+
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
         self.reads.invocation().await
+    }
+
+    fn settle_committed(&mut self, committed: &[obzenflow_core::EventId]) {
+        self.reads.read.settle_committed(committed);
     }
 }
 
@@ -572,7 +622,7 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceH
     }
 
     fn install_read_context(&mut self, context: crate::effects::EffectInvocationContext) {
-        self.reads.context = Some(context);
+        self.reads.install(context);
     }
 
     fn poll_cancelled(&mut self) {
@@ -587,8 +637,16 @@ impl<Output: OneFactOutcome + Send + Sync + 'static> UnifiedAsyncInfiniteSourceH
         self.reads.replayed
     }
 
+    fn hosted_ingress_slot(&self) -> Option<obzenflow_core::ingress::HostedIngressBindingSlot> {
+        self.reads.read.hosted_ingress_slot()
+    }
+
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
         self.reads.invocation().await
+    }
+
+    fn settle_committed(&mut self, committed: &[obzenflow_core::EventId]) {
+        self.reads.read.settle_committed(committed);
     }
 }
 

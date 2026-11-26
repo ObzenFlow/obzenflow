@@ -15,15 +15,13 @@ use super::managed_lifecycle::{ApplicationLifecycle, ApplicationTask};
 use super::observability::PreparedObservability;
 use super::web_surface::label_endpoint;
 use super::{
-    ApplicationError, ArchiveOffers, FlowConfig, Presentation, RunPresentationOutcome,
-    WebSurfaceAttachment, WebSurfaceWiringContext,
+    ApplicationError, ArchiveOffers, FlowConfig, HostedIngress, Presentation,
+    RunPresentationOutcome, WebSurfaceAttachment, WebSurfaceWiringContext,
 };
 #[cfg(feature = "warp-server")]
 use crate::application::config::CorsModeArg;
 use crate::application::config::{ConsoleDefaults, ResolvedStartupConfig};
-use crate::web::endpoints::event_ingestion::{
-    http_ingress, HttpIngressAttachment, IngestionConfig, Ingress, IngressHandle,
-};
+use crate::web::endpoints::event_ingestion::{Ingress, IngressHandle};
 #[cfg(feature = "warp-server")]
 use crate::web::host_config::{HostConfig, HostCorsConfig, HostCorsMode};
 #[cfg(feature = "warp-server")]
@@ -38,9 +36,8 @@ use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
-use obzenflow_runtime::events::IngressDecoder;
+use obzenflow_runtime::events::Events;
 use obzenflow_runtime::prelude::FlowHandle;
-use obzenflow_runtime::stages::HostedSource;
 use obzenflow_runtime::stages::LivenessSnapshots;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -65,6 +62,7 @@ struct LaunchParams {
     presentation: Option<Presentation>,
     cli_args: Option<Vec<OsString>>,
     ingress_slots: Vec<HostedIngressBindingSlot>,
+    hosted_ingress: HostedIngress,
     ai_models: Option<obzenflow_runtime::ai::AiModelResolvers>,
     #[cfg(all(test, feature = "tokio-console"))]
     test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
@@ -224,6 +222,7 @@ pub struct FlowApplicationBuilder {
     cli_args: Option<Vec<OsString>>,
     /// FLOWIP-084l: registered hosted ingress, given `[server.ingress]` at launch.
     ingress_slots: Vec<HostedIngressBindingSlot>,
+    hosted_ingress: HostedIngress,
     ai_models: Option<obzenflow_runtime::ai::AiModelResolvers>,
     #[cfg(all(test, feature = "tokio-console"))]
     test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
@@ -311,52 +310,22 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// `http_ingress` creates HTTP ingress and hosts it. It returns the hosted source handler
-    /// for a `source!` stage. The builder connects the ingress to the
-    /// lifecycle of the application. The source's system is `http-ingress`.
-    pub fn http_ingress<D>(
-        &mut self,
-        decoder: D,
-        config: IngestionConfig,
-    ) -> HostedSource<D::Output>
-    where
-        D: IngressDecoder,
-    {
-        let (source, http) = http_ingress(decoder, config).into_parts();
-        self.attach_http_ingress(http);
-        source
+    /// `hosted_ingress` returns the [`HostedIngress`] of this application. Give it to the
+    /// factory of the flow, which registers each hosted HTTP endpoint with it.
+    pub fn hosted_ingress(&self) -> HostedIngress {
+        self.hosted_ingress.clone()
     }
 
-    /// `ingress` registers ingress for an application-owned protocol. It returns the hosted
-    /// source handler for a `source!` stage. Before you give the bundle to
+    /// `ingress` registers an ingress for an application-owned protocol and returns its
+    /// event system. Build its port with `Port::to`. Before you give the ingress to
     /// `ingress`, clone its submission handle with `Ingress::handle`.
-    pub fn ingress<D>(&mut self, ingress: Ingress<D>) -> HostedSource<D::Output>
-    where
-        D: IngressDecoder,
-    {
-        let (source, handle) = ingress.into_parts();
-        self.attach_ingress_handle(handle);
-        source
-    }
-
-    /// Register an HTTP attachment obtained by explicitly splitting an ingress bundle.
-    ///
-    /// Prefer [`Self::http_ingress`] for ordinary application wiring.
-    pub fn with_http_ingress<T>(mut self, ingress: HttpIngressAttachment<T>) -> Self
+    pub fn ingress<T>(&mut self, ingress: Ingress<T>) -> impl Events + 'static
     where
         T: TypedPayload + Send + Sync + 'static,
     {
-        self.attach_http_ingress(ingress);
-        self
-    }
-
-    fn attach_http_ingress<T>(&mut self, ingress: HttpIngressAttachment<T>)
-    where
-        T: TypedPayload + Send + Sync + 'static,
-    {
-        let (surface, handle) = ingress.into_surface_and_handle();
-        self.web_surfaces.push(surface);
+        let (events, handle) = ingress.into_parts();
         self.attach_ingress_handle(handle);
+        events
     }
 
     /// Wire a developer-owned ingress handle to the built flow.
@@ -372,7 +341,8 @@ impl FlowApplicationBuilder {
     where
         T: TypedPayload + Send + Sync + 'static,
     {
-        let slot = handle.ingress_slot();
+        let state = handle.state();
+        let slot = state.ingress_slot();
         if !self
             .ingress_slots
             .iter()
@@ -381,7 +351,7 @@ impl FlowApplicationBuilder {
             self.ingress_slots.push(slot);
         }
         self.flow_handle_hooks.push(Box::new(move |flow_handle| {
-            handle.bind_flow_handle(flow_handle)
+            state.bind_flow_handle(flow_handle)
         }));
     }
 
@@ -469,6 +439,7 @@ impl FlowApplicationBuilder {
             presentation: self.presentation,
             cli_args: self.cli_args,
             ingress_slots: self.ingress_slots,
+            hosted_ingress: self.hosted_ingress,
             ai_models: self.ai_models,
             #[cfg(all(test, feature = "tokio-console"))]
             test_console_bound_address: self.test_console_bound_address,
@@ -627,11 +598,12 @@ impl FlowApplication {
         config: ResolvedStartupConfig,
     ) -> Result<(), ApplicationError> {
         let LaunchParams {
-            web_surfaces,
+            mut web_surfaces,
             extra_endpoints,
-            flow_handle_hooks,
+            mut flow_handle_hooks,
             presentation,
             ingress_slots,
+            hosted_ingress,
             ai_models,
             #[cfg(all(test, feature = "warp-server"))]
             test_shutdown_signal,
@@ -824,6 +796,7 @@ impl FlowApplication {
                 Some(exporter) => build_context.with_metrics_exporter(exporter),
                 None => build_context,
             };
+            hosted_ingress.serve(config.server.enabled);
             let flow_handle = match flow.build(build_context).await {
                 Ok(handle) => handle,
                 Err(failure) => {
@@ -849,6 +822,25 @@ impl FlowApplication {
                     break 'run (Err(error), None, failure.run, None);
                 }
             };
+
+            for registration in hosted_ingress.take_registrations() {
+                let slot = registration.slot();
+                if let Err(installed) = slot.install_timing(config.server.ingress) {
+                    if slot.timing() != installed {
+                        let error = ApplicationError::InvalidConfiguration(format!(
+                            "hosted ingress '{}' is already hosted with different \
+                             [server.ingress] timing",
+                            slot.ingress_key()
+                        ));
+                        break 'run (Err(error), None, None, None);
+                    }
+                }
+                let state = registration.state;
+                flow_handle_hooks.push(Box::new(move |flow_handle| {
+                    state.bind_flow_handle(flow_handle)
+                }));
+                web_surfaces.push(registration.surface);
+            }
 
             print_banner(&resumed_replayed_run);
             application.protect_flow(&flow_handle);
@@ -929,18 +921,9 @@ impl FlowApplication {
             let mut all_extra_endpoints = extra_endpoints;
             for surface in web_surfaces {
                 let (surface_name, endpoints, wiring, ingress_slot) = surface.into_parts();
-                // FLOWIP-115d (AC41): a registered hosted ingress surface whose
-                // source half was never placed in flow topology has an unfilled
-                // binding slot. Fail startup before serving endpoints rather than
-                // silently running without its configured ingress identity.
                 if let Some(slot) = ingress_slot {
                     if !slot.is_filled() {
-                        let error = ApplicationError::FlowBuildFailed(format!(
-                            "hosted ingress surface '{surface_name}' (ingress key '{}') was \
-                                 registered but its source half was not placed in the flow \
-                                 topology; place the http_ingress source in flow!",
-                            slot.ingress_key()
-                        ));
+                        let error = crate::web::endpoints::event_ingestion::unbound_ingress(&slot);
                         let result = application
                             .fail_before_run(flow_handle.clone(), error)
                             .await;

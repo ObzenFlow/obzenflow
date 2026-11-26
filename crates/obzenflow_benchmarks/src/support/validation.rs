@@ -20,6 +20,7 @@ use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::runtime_config::JournalSync;
 use obzenflow_runtime::stages::common::handlers::source::SourceRead;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
+use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -55,7 +56,10 @@ impl TypedFiniteSourceHandler for Ticks {
 
 fn definition(base: PathBuf, count: u64) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let input = Ticks(crate::numbers::Numbers::counting(count, TICKS_PER_READ).port());
+        let input = Ticks(Port::to(crate::numbers::Numbers::counting(
+            count,
+            TICKS_PER_READ,
+        )));
         let output = DiscardTicks::new();
         Ok(flow! {
             name: "validation_benchmark",

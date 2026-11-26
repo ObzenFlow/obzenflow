@@ -6,7 +6,7 @@ use super::{FiniteRead, QueryRequest};
 use crate::stages::common::handlers::source::{
     Finite, SourceError, SourceRead, TypedAsyncFiniteSourceHandler,
 };
-use crate::systems::Port;
+use crate::systems::{EffectKind, Port, PortKind, QueryKind};
 use async_trait::async_trait;
 use obzenflow_core::OneFactOutcome;
 use std::sync::Arc;
@@ -128,7 +128,7 @@ impl<R: QueryRequest, D> PendingQuery<R, D> {
     /// `through` binds the line to the port of the query's system and returns the
     /// source handler. A port whose methods are `#[effect]` methods does not compile:
     ///
-    /// ```compile_fail,E0308
+    /// ```compile_fail,E0271
     /// # use obzenflow_runtime::effects::EffectError;
     /// # use obzenflow_runtime::queries::{query, FiniteRead, QueryContext, QueryError};
     /// # use obzenflow_runtime::systems::Port;
@@ -163,13 +163,38 @@ impl<R: QueryRequest, D> PendingQuery<R, D> {
     /// let ledger: Port<dyn TickLedger> = Port::to(Ledger);
     /// let source = query(Position).through(ledger);
     /// ```
-    pub fn through<Record, Output>(self, port: Port<R::Port>) -> Query<Output>
+    ///
+    /// The event port does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// # use obzenflow_runtime::events::{source_channel, Events};
+    /// # use obzenflow_runtime::queries::{query, FiniteRead, QueryContext, QueryError};
+    /// # use obzenflow_runtime::systems::Port;
+    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    /// # struct Position;
+    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    /// # struct Tick;
+    /// # impl obzenflow_core::TypedPayload for Tick { const EVENT_TYPE: &'static str = "docs.tick"; }
+    /// # #[obzenflow_runtime::effects::port]
+    /// # #[async_trait::async_trait]
+    /// # trait TickFeed: Send + Sync {
+    /// #     #[query(type = "docs.ticks.read")]
+    /// #     async fn read(&self, from: &Position, ctx: &QueryContext)
+    /// #         -> Result<FiniteRead<Tick, Position>, QueryError>;
+    /// # }
+    /// let (_, ticks) = source_channel::<Tick>(1);
+    /// let events: Port<dyn Events> = Port::to(ticks);
+    /// let source = query(Position).through(events);
+    /// ```
+    pub fn through<P, Record, Output>(self, port: Port<P>) -> Query<Output>
     where
+        P: ?Sized + PortKind + QueryLine<R, <P as PortKind>::Kind>,
         R: QueryRequest<Answer = FiniteRead<Record, R>>,
         Record: Send + Sync + 'static,
         D: Fn(Record) -> Result<Output, SourceError> + Send + Sync + 'static,
         Output: Send + Sync + 'static,
     {
+        let port = <P as QueryLine<R, P::Kind>>::port(port);
         let decode = Arc::new(self.decode);
         let first = self.first;
         Query {
@@ -179,6 +204,34 @@ impl<R: QueryRequest, D> PendingQuery<R, D> {
             }),
             poll_timeout: self.poll_timeout,
         }
+    }
+}
+
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`query` binds a port whose method is marked `#[query]`; this port delivers events"
+)]
+pub trait QueryLine<R: QueryRequest, Kind>: Send + Sync + 'static {
+    fn port(port: Port<Self>) -> Port<R::Port>;
+}
+
+impl<P, R> QueryLine<R, QueryKind> for P
+where
+    P: ?Sized + PortKind<Kind = QueryKind> + Send + Sync + 'static,
+    R: QueryRequest<Port = P>,
+{
+    fn port(port: Port<P>) -> Port<P> {
+        port
+    }
+}
+
+impl<P, R> QueryLine<R, EffectKind> for P
+where
+    P: ?Sized + PortKind<Kind = EffectKind> + Send + Sync + 'static,
+    R: QueryRequest<Port = P>,
+{
+    fn port(port: Port<P>) -> Port<P> {
+        port
     }
 }
 

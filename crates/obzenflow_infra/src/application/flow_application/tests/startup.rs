@@ -7,19 +7,20 @@ use crate::web::endpoints::event_ingestion::IngestionConfig;
 use obzenflow_core::event::payloads::system_payload::{
     PipelineLifecycleEvent as PipelineFact, SystemPayload as SystemFact,
 };
-use obzenflow_runtime::events::IngressDecoder;
-
-#[derive(Clone, Debug)]
-struct IdleIngress;
-
-impl IngressDecoder for IdleIngress {
-    type Output = IdlePayload;
-}
+use obzenflow_dsl::FlowBuildError;
 
 #[cfg(feature = "reqwest-client")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_ingress_builder_hosts_multiple_sources() {
+async fn hosted_http_two_endpoints_deliver() {
     use obzenflow_adapters::sinks::RecordingSink;
+    use obzenflow_runtime::events::{subscribe, IngressDecoder};
+
+    #[derive(Clone, Debug)]
+    struct IdleIngress;
+
+    impl IngressDecoder for IdleIngress {
+        type Output = IdlePayload;
+    }
 
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("obzenflow.toml");
@@ -62,12 +63,19 @@ enabled = false
         base_path: path.to_string(),
         ..Default::default()
     };
-    let first = app.http_ingress(IdleIngress, config("/first"));
-    let second = app.http_ingress(IdleIngress, config("/second"));
+    let hosted = app.hosted_ingress();
     let (output, delivered) = RecordingSink::<IdlePayload>::new();
     let definition = FlowDefinition::materialize(move |_| {
+        let endpoint = |path: &str| {
+            hosted
+                .http(config(path))
+                .map(Port::to)
+                .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))
+        };
+        let first = subscribe(IdleIngress).through(endpoint("/first")?);
+        let second = subscribe(IdleIngress).through(endpoint("/second")?);
         Ok(flow! {
-            name: "http_ingress_builder",
+            name: "hosted_http_endpoints",
             journals: crate::journal::memory_journals(),
             stages: {
                 first = source!(IdlePayload => first);
@@ -115,7 +123,7 @@ enabled = false
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_ingress_builder_without_source_fails_startup() {
+async fn hosted_http_unsubscribed_endpoint_fails_startup() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("obzenflow.toml");
     std::fs::write(
@@ -131,17 +139,17 @@ enabled = false
 "#,
     )
     .unwrap();
-    let mut app = FlowApplication::builder()
+    let app = FlowApplication::builder()
         .with_config_file(config_path)
         .with_cli_args(["missing-ingress-test"]);
-    app.http_ingress(
-        IdleIngress,
-        IngestionConfig {
-            ingress_key: Some("unplaced-ingress".into()),
-            ..Default::default()
-        },
-    );
+    let hosted = app.hosted_ingress();
     let definition = FlowDefinition::materialize(move |_| {
+        hosted
+            .http(IngestionConfig {
+                ingress_key: Some("unplaced-ingress".into()),
+                ..Default::default()
+            })
+            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
         let input = one_shot();
         let output = noop_sink();
         Ok(flow! {
@@ -158,11 +166,11 @@ enabled = false
     let error = tokio::time::timeout(Duration::from_secs(10), app.run_async(definition))
         .await
         .expect("missing ingress source must fail promptly")
-        .expect_err("an HTTP attachment cannot replace source placement");
+        .expect_err("an endpoint that no subscribe line reads fails startup");
     assert!(
         matches!(&error, ApplicationError::FlowBuildFailed(message)
             if message.contains("unplaced-ingress")
-                && message.contains("source half was not placed in the flow topology")),
+                && message.contains("no subscribe line binds its port")),
         "unexpected startup error: {error}"
     );
 }

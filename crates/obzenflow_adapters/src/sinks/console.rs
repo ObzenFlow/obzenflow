@@ -685,27 +685,24 @@ struct ConsoleTable {
     destination: OutputDestination,
 }
 
-impl ConsoleTable {
-    fn port(self) -> Result<Port<dyn ConsoleTablePort>, ConsoleFormatError> {
-        static PORTS: OnceLock<Mutex<HashMap<String, Port<dyn ConsoleTablePort>>>> =
-            OnceLock::new();
-        let shape = serde_json::to_vec(&(
-            &self.columns,
-            self.max_width,
-            matches!(self.destination, OutputDestination::Stderr),
-        ))
-        .map_err(|error| ConsoleFormatError::new(error.to_string()))?;
-        let digest = ring::digest::digest(&ring::digest::SHA256, &shape);
-        let instance = super::hex(&digest.as_ref()[..16]);
-        let mut ports = PORTS
-            .get_or_init(Mutex::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        Ok(ports
-            .entry(instance.clone())
-            .or_insert_with(|| Port::deferred_grouped::<TableRow, _, _>(move || Ok(self.clone())))
-            .clone())
-    }
+fn table_port(table: ConsoleTable) -> Result<Port<dyn ConsoleTablePort>, ConsoleFormatError> {
+    static PORTS: OnceLock<Mutex<HashMap<String, Port<dyn ConsoleTablePort>>>> = OnceLock::new();
+    let shape = serde_json::to_vec(&(
+        &table.columns,
+        table.max_width,
+        matches!(table.destination, OutputDestination::Stderr),
+    ))
+    .map_err(|error| ConsoleFormatError::new(error.to_string()))?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, &shape);
+    let instance = super::hex(&digest.as_ref()[..16]);
+    let mut ports = PORTS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    Ok(ports
+        .entry(instance)
+        .or_insert_with(|| Port::deferred_grouped::<TableRow, _, _>(move || Ok(table.clone())))
+        .clone())
 }
 
 #[async_trait]
@@ -769,12 +766,11 @@ impl<T, E> ConsoleSink<T, TableFormatter<T, E>> {
         let destination = self.destination.ok_or_else(|| {
             ConsoleFormatError::new("select the table system with through() after batch_size()")
         })?;
-        let port = ConsoleTable {
+        let port = table_port(ConsoleTable {
             columns: self.formatter.columns.clone(),
             max_width: self.formatter.max_col_width,
             destination,
-        }
-        .port()?;
+        })?;
         Ok(TableConsoleSink {
             formatter: self.formatter,
             port,

@@ -3520,14 +3520,13 @@ macro_rules! sink {
 /// ```
 ///
 /// The handler slot of a source stage takes a source handler or
-/// `placeholder!()`. A pull source is the line `query(first).through(port)`.
-/// The framework reads through that port. Hosted ingress registration returns
-/// a hosted source handler.
+/// `placeholder!()`. A pull source is the line `query(first).through(port)`. A push
+/// source is the line `subscribe(decoder).through(port)`. The framework reads the input
+/// through the port of the line.
 ///
 /// ```
-/// # use obzenflow_runtime::events::{source_channel, HostedSubmission};
+/// # use obzenflow_runtime::events::{source_channel, subscribe, IngressDecoder};
 /// # use obzenflow_runtime::queries::{query, FiniteRead, QueryContext, QueryError};
-/// # use obzenflow_runtime::stages::HostedSource;
 /// # use obzenflow_runtime::systems::Port;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
@@ -3559,12 +3558,16 @@ macro_rules! sink {
 ///     }
 /// }
 ///
+/// #[derive(Clone)]
+/// struct FactIngress;
+///
+/// impl IngressDecoder for FactIngress {
+///     type Output = Fact;
+/// }
+///
 /// let facts = query(NextFact).through(Port::to(FactFile));
-/// # let (_, submissions) = source_channel::<HostedSubmission<Fact>>(1);
-/// # let posted = HostedSource::ingress(
-/// #     submissions,
-/// #     obzenflow_core::ingress::HostedIngressBindingSlot::new("grammar.facts"),
-/// # );
+/// # let (_, submissions) = source_channel::<Fact>(1);
+/// let posted = subscribe(FactIngress).through(Port::to(submissions));
 /// let read = obzenflow_dsl::source!(Fact => facts);
 /// let received = obzenflow_dsl::source!(Fact => posted);
 /// ```
@@ -3602,6 +3605,29 @@ macro_rules! sink {
 /// # }
 /// let fact_file: Port<dyn FactInput> = Port::to(FactFile);
 /// let read = obzenflow_dsl::source!(Fact => fact_file);
+/// ```
+///
+/// The compiler refuses a row when the output of the decoder is not the type of the stage.
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_runtime::events::{source_channel, subscribe, IngressDecoder};
+/// # use obzenflow_runtime::systems::Port;
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct AchDebit;
+/// # impl obzenflow_core::TypedPayload for AchDebit { const EVENT_TYPE: &'static str = "docs.ach_debit"; }
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct LedgerEntry;
+/// # impl obzenflow_core::TypedPayload for LedgerEntry { const EVENT_TYPE: &'static str = "docs.ledger_entry"; }
+/// #[derive(Clone)]
+/// struct AchIngress;
+///
+/// impl IngressDecoder for AchIngress {
+///     type Output = AchDebit;
+/// }
+///
+/// # let (_, debits) = source_channel::<AchDebit>(1);
+/// let ach_source = subscribe(AchIngress).through(Port::to(debits));
+/// let live_ach = obzenflow_dsl::source!(LedgerEntry => ach_source);
 /// ```
 #[macro_export]
 macro_rules! source {

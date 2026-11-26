@@ -19,7 +19,7 @@ pub use join::{
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
 pub use source::{
-    HostedSource, SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler, UnifiedAsyncFiniteSourceHandler,
     UnifiedAsyncInfiniteSourceHandler,
 };

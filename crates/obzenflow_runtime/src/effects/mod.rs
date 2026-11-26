@@ -80,7 +80,7 @@ pub use crate::commands::{
     PortReply, PortServesRequest, WholePort,
 };
 #[doc(hidden)]
-pub use crate::systems::{Port, PortImpl, ServesPort};
+pub use crate::systems::{EffectKind, Port, PortImpl, PortKind, QueryKind, ServesPort};
 pub(crate) use actions::{
     ActionCheck, ActionDeparture, ActionRow, RecordedAction, RecordedActions,
 };

@@ -175,10 +175,19 @@ fn expand_trait(args: &PortArgs, mut item: ItemTrait) -> TokenStream {
     item = thread_safe(stripped_trait(item));
     let shared = shared_forwarding(&effects, &item);
     let errors = errors.into_iter().map(syn::Error::into_compile_error);
+    let kind = if query_port {
+        quote!(#effects::QueryKind)
+    } else {
+        quote!(#effects::EffectKind)
+    };
     quote! {
         #item
 
         #(#answers)*
+
+        impl #effects::PortKind for dyn #port {
+            type Kind = #kind;
+        }
 
         impl<ObzenflowPortImpl> #effects::ServesPort<dyn #port, ObzenflowPortImpl>
             for #effects::PortImpl<ObzenflowPortImpl>
@@ -356,11 +365,20 @@ fn expand_impl(args: &PortArgs, item: ItemImpl) -> TokenStream {
     if !queries.is_empty() && !declared.is_empty() {
         errors.push(syn::Error::new_spanned(&item.self_ty, ONE_REQUEST_KIND));
     }
+    let kind = if queries.is_empty() {
+        quote!(#effects::EffectKind)
+    } else {
+        quote!(#effects::QueryKind)
+    };
     let requests = generated_requests(&effects, &port, &port, declared, &mut errors);
     let item = stripped_impl(item);
     let errors = errors.into_iter().map(syn::Error::into_compile_error);
     quote! {
         #item
+
+        impl #effects::PortKind for #port {
+            type Kind = #kind;
+        }
 
         impl #effects::ServesPort<#port, #port> for #effects::PortImpl<#port> {
             fn coerce(port: ::std::sync::Arc<#port>) -> ::std::sync::Arc<#port> {

@@ -112,7 +112,7 @@ struct TimestampedSource(Port<dyn NumberFeed>);
 
 impl TimestampedSource {
     fn new(total_events: u64) -> Self {
-        Self(Numbers::counting(total_events, 1).port())
+        Self(Port::to(Numbers::counting(total_events, 1)))
     }
 }
 

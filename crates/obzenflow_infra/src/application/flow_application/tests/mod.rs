@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use obzenflow_adapters::sources::ValuesSource;
 use obzenflow_dsl::{flow, sink, source};
-use obzenflow_runtime::events::{source_channel, SourceReceiver};
+use obzenflow_runtime::events::{source_channel, Events, IngressDecoder};
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::queries::{FiniteRead, QueryError};
 use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead};
@@ -101,15 +101,22 @@ impl TypedFiniteSourceHandler for FiniteInput {
 }
 
 struct IdleInfiniteSource {
-    receiver: Arc<SourceReceiver<IdlePayload>>,
+    port: Port<dyn Events>,
+}
+
+#[derive(Clone)]
+struct IdleIngress;
+
+impl IngressDecoder for IdleIngress {
+    type Output = IdlePayload;
 }
 
 impl IdleInfiniteSource {
     fn new() -> Self {
-        let (sender, receiver) = source_channel(1);
+        let (sender, receiver) = source_channel::<IdlePayload>(1);
         std::mem::forget(sender);
         Self {
-            receiver: Arc::new(receiver),
+            port: Port::to(receiver),
         }
     }
 }
@@ -118,7 +125,7 @@ impl TypedInfiniteSourceHandler for IdleInfiniteSource {
     type Output = IdlePayload;
 
     fn read(&self) -> SourceRead<IdlePayload, Continuous> {
-        SourceRead::channel(self.receiver.clone())
+        SourceRead::events(self.port.clone(), IdleIngress)
     }
 }
 

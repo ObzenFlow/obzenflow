@@ -18,7 +18,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_adapters::sinks::CountingSink;
-use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
+use obzenflow_adapters::sources::ValuesSource;
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, ReattachGuarantee, SourceReattachedFact,
 };
@@ -33,7 +33,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::systems::file::{CsvDecodeError, CsvDecoder, CsvRecord, CsvSource};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{EffectError, Effects};
-use obzenflow_runtime::events::{source_channel, SourceReceiver};
+use obzenflow_runtime::events::{source_channel, subscribe, SourceReceiver};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::queries::FiniteRead;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -765,7 +765,8 @@ fn build_channel_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let channel_source = ChannelSource::new(ticks);
+        let channel_source = subscribe(replay_testkit::ChannelIngress::<ChannelTick>::new())
+            .through(Port::to(ticks));
         let merge_handler = MergeTransform::new();
         let collect_handler = CountingSink::<Merged>::new(delivered);
 
@@ -794,8 +795,6 @@ fn tick(value: u64) -> ChannelTick {
     }
 }
 
-/// FLOWIP-122i: `ChannelSource` is a connector that reattaches live with
-/// `AtMostOnce`, recorded after its watermark and before its first live tick.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
     let temp = tempfile::tempdir()?;

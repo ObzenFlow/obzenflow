@@ -25,7 +25,7 @@ mod tests {
     use obzenflow_runtime::queries::FiniteRead;
     use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead};
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulTransformHandler, HostedSource, JoinReferenceView, StatefulEmission,
+        EffectfulTransformHandler, JoinReferenceView, SourceError, StatefulEmission,
         TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
         TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
         TypedStatefulHandler, TypedTransformHandler,
@@ -34,11 +34,9 @@ mod tests {
     use obzenflow_runtime::systems::Port;
     use obzenflow_runtime::typing::TransformTyping;
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
-    use serde::de::DeserializeOwned;
     use serde::{Deserialize, Serialize};
     use std::any::type_name;
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use crate::dsl::error::{EdgeTypingMismatchKind, FlowBuildError};
     use crate::dsl::stage_descriptor::StageDescriptor;
@@ -152,16 +150,65 @@ mod tests {
         SourceRead::finite(Port::to(NoInput), NextInput, move |event| Ok(output(event)))
     }
 
+    struct Decode<O>(std::marker::PhantomData<fn() -> O>);
+
+    impl<O> Clone for Decode<O> {
+        fn clone(&self) -> Self {
+            Self(std::marker::PhantomData)
+        }
+    }
+
+    impl<O: TypedPayload + Send + Sync + 'static> obzenflow_runtime::events::IngressDecoder
+        for Decode<O>
+    {
+        type Output = O;
+    }
+
+    fn decode<O>() -> Decode<O> {
+        Decode(std::marker::PhantomData)
+    }
+
     fn live_read<O>() -> SourceRead<O, Continuous>
     where
-        O: OneFactOutcome + Serialize + DeserializeOwned + Send + Sync + 'static,
+        O: TypedPayload + Send + Sync + 'static,
     {
-        SourceRead::channel(Arc::new(source_channel::<O>(1).1))
+        SourceRead::events(Port::to(source_channel::<O>(1).1), decode::<O>())
+    }
+
+    struct HostedInput(obzenflow_core::ingress::HostedIngressBindingSlot);
+
+    #[async_trait]
+    impl obzenflow_runtime::events::Events for HostedInput {
+        async fn ready(&self) -> Result<(), SourceError> {
+            std::future::pending().await
+        }
+
+        fn take(&self) -> Option<obzenflow_runtime::events::Arrival> {
+            None
+        }
+
+        fn hosted_ingress(&self) -> Option<obzenflow_core::ingress::HostedIngressBindingSlot> {
+            Some(self.0.clone())
+        }
+    }
+
+    struct ApplicationInput;
+
+    #[async_trait]
+    impl obzenflow_runtime::events::Events for ApplicationInput {
+        async fn ready(&self) -> Result<(), SourceError> {
+            std::future::pending().await
+        }
+
+        fn take(&self) -> Option<obzenflow_runtime::events::Arrival> {
+            None
+        }
     }
 
     fn live_input<T: TypedPayload + Send + Sync + 'static>(
-    ) -> obzenflow_adapters::sources::ChannelSource<T> {
-        obzenflow_adapters::sources::ChannelSource::new(source_channel(1).1)
+    ) -> obzenflow_runtime::events::Subscription<T> {
+        obzenflow_runtime::events::subscribe(decode::<T>())
+            .through(Port::to(source_channel::<T>(1).1))
     }
 
     fn exact_event(event: InputEvent) -> InputEvent {
@@ -519,6 +566,8 @@ mod tests {
         let in_process = InProcessSource;
         let infinite_exact = InfiniteExactSource;
         let async_infinite_exact = AsyncInfiniteExactSource;
+        let application = obzenflow_runtime::events::subscribe(decode::<InputEvent>())
+            .through(Port::to(ApplicationInput));
         let read = [
             crate::source!(name: "source", InputEvent => sync_exact),
             crate::source!(name: "async_source", InputEvent => async_exact),
@@ -528,6 +577,7 @@ mod tests {
                 name: "async_infinite",
                 InputEvent => async_infinite_exact
             ),
+            crate::source!(name: "application", InputEvent => application),
         ];
         let reattach = Some(SourceContinuation::Reattach {
             guarantee: ReattachGuarantee::AtMostOnce,
@@ -540,16 +590,17 @@ mod tests {
                 Some(SourceContinuation::Refuse),
                 reattach,
                 reattach,
+                reattach,
             ],
             "each read declares its continuation"
         );
 
         // FLOWIP-122i B3: Runtime admits hosted ingress with the one guarantee
         // no connector can declare.
-        let (_submit, queue) = source_channel(1);
-        let hosted = HostedSource::<InputEvent>::ingress(
-            queue,
-            obzenflow_core::ingress::HostedIngressBindingSlot::new("test.input"),
+        let hosted = obzenflow_runtime::events::subscribe(decode::<InputEvent>()).through(
+            Port::to(HostedInput(
+                obzenflow_core::ingress::HostedIngressBindingSlot::new("test.input"),
+            )),
         );
         let hosted = crate::source!(name: "hosted", InputEvent => hosted);
         assert_eq!(

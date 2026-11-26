@@ -200,7 +200,7 @@ impl ChainPayload {
                 ExecutionPayload::StageFatalRecorded(_)
                 | ExecutionPayload::EffectAttemptStarted(_)
                 | ExecutionPayload::EffectRecoveryAbandoned(_) => ReplayDisposition::ReAdmit,
-                ExecutionPayload::MemberRecorded(_)
+                ExecutionPayload::EventReceived(_)
                 | ExecutionPayload::SourceReattached(_)
                 | ExecutionPayload::EffectRecord(_)
                 | ExecutionPayload::ReplayLifecycle(_)

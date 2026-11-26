@@ -4,7 +4,6 @@
 
 use async_trait::async_trait;
 use obzenflow_runtime::queries::FiniteRead;
-use obzenflow_runtime::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -50,10 +49,6 @@ impl Numbers {
             batch: 1,
             pace: Duration::ZERO,
         }
-    }
-
-    pub fn port(self) -> Port<dyn NumberFeed> {
-        Port::to(self)
     }
 }
 

@@ -41,19 +41,24 @@ impl of::events::IngressDecoder for FactIngress {
 #[test]
 fn renamed_facade_ingress_builders_compile() {
     use self::of::application::ingress::{ingress_source, IngestionConfig};
+    use self::of::events::subscribe;
+    use self::of::flow::FlowBuildError;
+    use self::of::systems::Port;
 
     let mut app = of::application::FlowApplication::builder();
-    let http_source = app.http_ingress(FactIngress, IngestionConfig::default());
-    let inbox = ingress_source(
-        FactIngress,
-        IngestionConfig {
-            ingress_key: Some("direct".into()),
-            ..IngestionConfig::default()
-        },
-    );
+    let hosted = app.hosted_ingress();
+    let inbox = ingress_source::<Fact>(IngestionConfig {
+        ingress_key: Some("direct".into()),
+        ..IngestionConfig::default()
+    });
     inbox.handle();
-    let direct_source = app.ingress(inbox);
+    let direct = app.ingress(inbox);
     FlowDefinition::materialize(move |_| {
+        let http = hosted
+            .http(IngestionConfig::default())
+            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
+        let http_source = subscribe(FactIngress).through(Port::to(http));
+        let direct_source = subscribe(FactIngress).through(Port::to(direct));
         let output = sinks::ConsoleSink::<Fact, _>::new(sinks::DebugFormatter);
         Ok(flow! {
             name: "facade_ingress",

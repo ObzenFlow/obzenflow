@@ -14,7 +14,7 @@ use obzenflow_core::event::payloads::execution_payload::{
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceReadFailure};
 use obzenflow_runtime::effects::{EffectError, EffectPortResolutionError};
 use obzenflow_runtime::queries::{FiniteRead, QueryBookmark, QueryContext, QueryError};
-use obzenflow_runtime::systems::{Port, SystemConfig};
+use obzenflow_runtime::systems::SystemConfig;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
@@ -75,12 +75,6 @@ impl CsvFileSystem {
         self
     }
 
-    /// `port` returns a cold port for this file. Its system reads the file only
-    /// during a live read.
-    pub fn port(self) -> Port<dyn CsvFile> {
-        SystemConfig::port(self)
-    }
-
     pub(crate) fn new(path: PathBuf, format: CsvFormat) -> Self {
         Self { path, format }
     }
@@ -106,12 +100,6 @@ pub struct YamlFileSystem {
 impl YamlFileSystem {
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
-    }
-
-    /// `port` returns a cold port for this file. Its system reads the file only
-    /// during a live read.
-    pub fn port(self) -> Port<dyn YamlFile> {
-        SystemConfig::port(self)
     }
 }
 

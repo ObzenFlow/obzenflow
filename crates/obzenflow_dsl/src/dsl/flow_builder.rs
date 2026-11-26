@@ -37,7 +37,7 @@ fn validate_hosted_ingress_bindings<'a>(
     bindings.sort_by_key(|(stage, _)| *stage);
     for (index, (stage, slot)) in bindings.iter().enumerate() {
         if let Some(filled) = slot.filled() {
-            return Err(FlowBuildError::HostedIngressAlreadyBound {
+            return Err(FlowBuildError::HostedIngressReused {
                 ingress_key: slot.ingress_key().to_string(),
                 stage_name: (*stage).to_string(),
                 bound_stage: filled.stage_key.to_string(),
@@ -47,7 +47,7 @@ fn validate_hosted_ingress_bindings<'a>(
             .iter()
             .find(|(_, previous)| slot.same_binding(previous))
         {
-            return Err(FlowBuildError::DuplicateHostedIngressBinding {
+            return Err(FlowBuildError::HostedIngressSubscribedTwice {
                 ingress_key: slot.ingress_key().to_string(),
                 first_stage: (*first_stage).to_string(),
                 second_stage: (*stage).to_string(),
@@ -1730,7 +1730,29 @@ where
 #[cfg(test)]
 mod hosted_ownership_tests {
     use super::validate_hosted_ingress_bindings;
-    use obzenflow_core::ingress::HostedIngressBindingSlot;
+    use crate::dsl::FlowBuildError;
+    use obzenflow_core::ingress::{FilledHostedIngress, HostedIngressBindingSlot};
+    use obzenflow_core::StageId;
+
+    #[test]
+    fn filled_slot_returns_hosted_ingress_reused() {
+        let slot = HostedIngressBindingSlot::new("/api/bank/ach");
+        slot.fill(FilledHostedIngress {
+            stage_id: StageId::new(),
+            stage_key: "live_ach".into(),
+            boundary: None,
+        })
+        .expect("an earlier build fills the slot");
+        let error = validate_hosted_ingress_bindings([("live_ach", &slot)]).unwrap_err();
+        assert!(matches!(&error, FlowBuildError::HostedIngressReused {
+            ingress_key, stage_name, bound_stage
+        } if ingress_key == "/api/bank/ach" && stage_name == "live_ach" && bound_stage == "live_ach"));
+        assert_eq!(
+            error.to_string(),
+            "stage 'live_ach' subscribes to hosted ingress '/api/bank/ach', which an earlier build \
+             gave to stage 'live_ach'; give this flow its own endpoint from hosted.http or app.ingress"
+        );
+    }
 
     #[test]
     fn independently_constructed_same_key_slots_do_not_alias() {
@@ -1752,7 +1774,7 @@ mod hosted_ownership_tests {
         ] {
             let error = validate_hosted_ingress_bindings(bindings).unwrap_err();
             assert!(
-                matches!(error, crate::dsl::FlowBuildError::DuplicateHostedIngressBinding {
+                matches!(error, FlowBuildError::HostedIngressSubscribedTwice {
                 ingress_key, first_stage, second_stage
             } if ingress_key == "orders" && first_stage == "first" && second_stage == "second")
             );

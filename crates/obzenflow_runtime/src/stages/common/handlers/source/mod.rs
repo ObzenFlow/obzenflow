@@ -5,6 +5,7 @@
 //! Source handler components
 
 mod erased;
+mod events;
 mod hosted;
 pub(crate) mod placeholder;
 pub(crate) mod prepared;
@@ -22,7 +23,6 @@ pub use erased::{
 };
 #[cfg(test)]
 pub(crate) use erased::{SealAsyncFinite, SealAsyncInfinite};
-pub use hosted::HostedSource;
 #[doc(hidden)]
 pub use obzenflow_core::source::{ResumeRefusal, SourceContinuation};
 pub use record_de::RecordDeError;

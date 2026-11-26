@@ -96,6 +96,9 @@ event_names! {
         ATTEMPT_REFUSED => "attempt_refused",
         DUPLICATE_RECOGNIZED => "duplicate_recognized",
     },
+    event => "event" {
+        RECEIVED => "received",
+    },
 }
 
 /// Supervisor grammar, canonical built-in names and shared occurrence suffixes.

@@ -26,7 +26,7 @@ use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sources::{ListDetail, ListDetailRead};
 use obzenflow::stages::transforms;
 use obzenflow::systems::http::HttpApi;
-use obzenflow::systems::{Port, SystemConfig};
+use obzenflow::systems::Port;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -318,9 +318,10 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
 
         let stories_port: Port<dyn ListDetail> = match stories {
             Stories::Scripted => Port::deferred(|| Ok(ScriptedStories)),
-            Stories::HackerNews => HttpApi::json(base_url)
-                .list_detail("v0/topstories.json", |id| format!("v0/item/{id}.json"))
-                .port(),
+            Stories::HackerNews => Port::deferred(
+                HttpApi::json(base_url)
+                    .list_detail("v0/topstories.json", |id| format!("v0/item/{id}.json")),
+            ),
         };
         let hn_source = query(ListDetailRead::first(max_stories))
             .decode(decode_item)

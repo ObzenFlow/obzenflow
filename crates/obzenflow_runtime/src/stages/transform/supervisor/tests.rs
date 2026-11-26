@@ -8,9 +8,7 @@ use super::*;
 use crate::backpressure::{
     BackpressurePlan, BackpressureRegistry, DirectFactAdmission, EdgeCounts,
 };
-use crate::effects::{
-    BindingAuthorityFault, BindingMismatchKind, EffectPortRegistry, LogicalEffectBindingName,
-};
+use crate::effects::{BindingAuthorityFault, BindingMismatchKind, EffectPortRegistry};
 use crate::feed_plan::OutcomeContract;
 use crate::id_conversions::StageIdExt;
 use crate::pipeline::config::CycleGuardConfig;
@@ -946,7 +944,7 @@ async fn binding_fatal_records_once_and_redacted_in_running_and_draining() {
     for draining in [false, true] {
         let fault = BindingAuthorityFault::binding_mismatch(
             "https://credential-canary.example",
-            Some(LogicalEffectBindingName::new("chat").unwrap()),
+            "chat",
             BindingMismatchKind::Evidence,
         );
         let fatal = fault.stage_fatal();

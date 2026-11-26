@@ -6,12 +6,9 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::events::SourceReceiver;
 use obzenflow_runtime::queries::{FiniteRead, QueryContext, QueryError};
-use obzenflow_runtime::stages::common::handlers::source::{Continuous, SourceRead};
-use obzenflow_runtime::stages::source::{
-    SourceError, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::source::SourceRead;
+use obzenflow_runtime::stages::source::{SourceError, TypedFiniteSourceHandler};
 use obzenflow_runtime::systems::Port;
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
@@ -210,37 +207,9 @@ where
     }
 }
 
-/// A source for sender-initiated events on a bounded in-process channel.
-pub struct ChannelSource<T> {
-    receiver: std::sync::Arc<SourceReceiver<T>>,
-}
-impl<T> fmt::Debug for ChannelSource<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ChannelSource").finish_non_exhaustive()
-    }
-}
-impl<T> ChannelSource<T> {
-    pub fn new(receiver: SourceReceiver<T>) -> Self {
-        Self {
-            receiver: std::sync::Arc::new(receiver),
-        }
-    }
-}
-impl<T: TypedPayload> SourceTyping for ChannelSource<T> {
-    type Output = T;
-}
-#[async_trait]
-impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler for ChannelSource<T> {
-    type Output = T;
-    fn read(&self) -> SourceRead<T, Continuous> {
-        SourceRead::channel(self.receiver.clone())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_runtime::events::source_channel;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -374,23 +343,5 @@ mod tests {
         assert_eq!(polls.load(Ordering::SeqCst), 3);
         assert!(items(feed.take(&ValuesRead { at: next }).unwrap()).is_none());
         assert_eq!(starts.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn channel_ready_leaves_items_queued() {
-        let (tx, rx) = source_channel(16);
-        tx.send(Item(1)).await.unwrap();
-        tx.send(Item(2)).await.unwrap();
-        rx.ready().await.unwrap();
-        assert_eq!(rx.len(), 2, "readiness takes nothing");
-        assert_eq!(tx.capacity(), 14);
-        assert_eq!(rx.take(10), [Item(1), Item(2)]);
-    }
-
-    #[tokio::test]
-    async fn closed_channel_readiness_returns_input_closed() {
-        let (tx, rx) = source_channel::<Item>(1);
-        drop(tx);
-        assert!(rx.ready().await.is_err());
     }
 }
