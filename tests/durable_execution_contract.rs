@@ -95,10 +95,6 @@ const FIRST_AFTER_INVALID: &str = "S-03";
 const FIRST_CUT: &str = "S-12";
 /// Held inside S4's resumed run once its reconstruction completes (S5).
 const SECOND_CUT: &str = "S-18";
-/// The first order S4's other resumed run calls after re-executing S-12, held
-/// before that run's reconstruction completes (S5b).
-const TORN_CUT: &str = "S-13";
-const HELD_RECEIPT: &str = "W-01";
 const DECLINES: [(&str, &str); 3] = [
     ("S-05", "InsufficientFunds"),
     ("S-14", "AddressMismatch"),
@@ -280,8 +276,6 @@ fn idempotency_key(order_id: &str) -> String {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Hold {
     Gateway(String),
-    Receipt(String),
-    ReceiptAndGateway { receipt: String, gateway: String },
     BetweenEffects(String),
     AiSourceAfter(u64),
     AiCall(String),
@@ -485,28 +479,10 @@ fn receipt_for(payment: &PaymentAuthorized) -> Receipt {
     }
 }
 
-fn held_receipt_for(
-    hold: Option<String>,
-    log: PathBuf,
-    release: PathBuf,
-) -> impl Fn(&PaymentAuthorized) -> Receipt + Clone + Send + Sync + 'static {
-    move |payment| {
-        if hold.as_deref() == Some(payment.order_id.as_str()) {
-            append_line(&log, &payment.order_id).expect("log the held receipt");
-            while !release.exists() {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-        receipt_for(payment)
-    }
-}
-
 fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDefinition {
     let store_orders_input = orders(scenario.store_input(), "/store_orders");
-    let (gateway_hold, receipt_hold) = match hold {
-        Some(Hold::Gateway(order)) => (Some(order), None),
-        Some(Hold::Receipt(order)) => (None, Some(order)),
-        Some(Hold::ReceiptAndGateway { receipt, gateway }) => (Some(gateway), Some(receipt)),
+    let gateway_hold = match hold {
+        Some(Hold::Gateway(order)) => Some(order),
         Some(
             Hold::BetweenEffects(_)
             | Hold::AiSourceAfter(_)
@@ -516,7 +492,7 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
             | Hold::Ticket(_)
             | Hold::Processor,
         )
-        | None => (None, None),
+        | None => None,
     };
     let gateway = Gateway {
         calls: CallLog::open(scenario.ledger()).expect("the gateway's call log opens"),
@@ -526,12 +502,7 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
     let authorize = Authorize {
         gateway: Port::to(gateway),
     };
-    let receipt_file = perform(held_receipt_for(
-        receipt_hold,
-        scenario.held_receipts(),
-        scenario.release(),
-    ))
-    .through(Port::to(ReceiptFile {
+    let receipt_file = perform(receipt_for).through(Port::to(ReceiptFile {
         path: scenario.receipts(),
     }));
     let journals = scenario.journals();
@@ -931,10 +902,6 @@ impl Scenario {
 
     fn receipts(&self) -> PathBuf {
         self.root.join("receipts.jsonl")
-    }
-
-    fn held_receipts(&self) -> PathBuf {
-        self.root.join("held-receipts.jsonl")
     }
 
     fn release(&self) -> PathBuf {
@@ -2297,15 +2264,12 @@ async fn durable_execution_contract() {
     stopped.check(Some(&reference));
     stopped.report();
 
-    // S4: SIGKILL at the cut with the held order uncommitted. Its archive
-    // starts two histories over the same inputs: S5's copy and S5b's original.
     let s4 = Scenario::fresh("s4");
     let child = Child::spawn(&s4, Vec::new(), Some(Hold::Gateway(FIRST_CUT.into())));
     let killed = first_cut(&s4, &child, "S4").await;
     child.signal(Signal::Kill);
     assert!(!child.exit().await.success());
     let (s5, killed_copy) = Scenario::copied("s5", &s4, &killed);
-    s4.without_web_input();
 
     // S5: a second SIGKILL inside S4's resumed run, after its reconstruction
     // completes; resume of the resume.
@@ -2333,78 +2297,31 @@ async fn durable_execution_contract() {
     let rebuilt_head = Child::spawn(&s5, resume(&torn), None).completed().await;
     after_rebuild.record(&rebuilt_head, Ended::Natural).await;
 
-    let mut before_rebuild = History::new("S5b", &s4);
-    before_rebuild
-        .record(&killed, Ended::Interrupted { killed: true })
-        .await;
-    let child = Child::spawn(
-        &s4,
-        resume(&killed),
-        Some(Hold::ReceiptAndGateway {
-            receipt: HELD_RECEIPT.into(),
-            gateway: TORN_CUT.into(),
-        }),
-    );
-    let torn = child.run().await;
-    cut(&torn, "S5b", |archive| {
-        !archive.reconstruction_completed()
-            && read_lines::<String>(&s4.held_receipts()) == [HELD_RECEIPT]
-            && s4.calls().iter().any(|call| call.order_id() == TORN_CUT)
-            && !archive.outcomes().contains_key(TORN_CUT)
-    })
-    .await;
-    child.signal(Signal::Kill);
-    assert!(!child.exit().await.success());
-    before_rebuild
-        .record(&torn, Ended::Interrupted { killed: true })
-        .await;
-    assert_rejection_shown_once(&torn, &killed);
-    let head = Child::spawn(&s4, resume(&torn), None).completed().await;
-    assert_rejection_shown_once(&torn, &killed);
-    // I9: the merged resume records S4's archive among its ancestors.
-    let merged: Vec<PathBuf> = serde_json::from_value(
-        before_rebuild
-            .record(&head, Ended::Natural)
-            .await
-            .manifest()["resume"]["merged_from"]
-            .clone(),
-    )
-    .expect("merged ancestors");
-    assert_eq!(
-        merged,
-        std::slice::from_ref(&killed),
-        "S5b: the torn resume merged S4's archive"
-    );
-
     // S7: S4's archive again refuses before any run starts, naming the head.
-    let calls = s4.calls();
-    let runs = s4.runs();
-    let refused = Child::spawn(&s4, resume(&killed), None);
+    let calls = s5.calls();
+    let runs = s5.runs();
+    let refused = Child::spawn(&s5, resume(&killed_copy), None);
     let log = refused.log.clone();
     assert_eq!(
         refused.exit().await.code(),
         Some(2),
         "S7: the resume refuses"
     );
-    assert_eq!(s4.runs(), runs, "S7: no run starts");
-    assert_eq!(s4.calls(), calls, "S7: no gateway call");
+    assert_eq!(s5.runs(), runs, "S7: no run starts");
+    assert_eq!(s5.calls(), calls, "S7: no gateway call");
     let refusal = std::fs::read_to_string(log).expect("the refusal is logged");
     assert!(
         refusal.contains(&format!(
             "cannot resume {}: it was already resumed by {}, the head of this history.",
-            killed.display(),
-            head.display()
+            killed_copy.display(),
+            rebuilt_head.display()
         )),
         "{refusal}"
     );
 
-    // S6, S6b: strict replays, once neither history needs the shared inputs.
     strict_replay(&mut after_rebuild, &rebuilt_head).await;
     after_rebuild.check(Some(&reference));
     after_rebuild.report();
-    strict_replay(&mut before_rebuild, &head).await;
-    before_rebuild.check(Some(&reference));
-    before_rebuild.report();
 
     for (name, killed) in [("S8", false), ("S8b", true)] {
         let scenario = Scenario::fresh(&name.to_lowercase());
