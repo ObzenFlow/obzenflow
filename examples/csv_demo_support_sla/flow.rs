@@ -18,7 +18,6 @@ use obzenflow::stages::transforms::TypedTransformHandler;
 use obzenflow::systems::file::CsvFileSystem;
 use obzenflow::systems::Port;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub const DEMO_JOURNAL_ROOT: &str = "target/csv-demo-support-sla/logs";
@@ -218,13 +217,9 @@ fn build_flow() -> FlowDefinition {
     })
 }
 
-pub fn run_example(
-    presentation: Presentation,
-    cli_args: impl IntoIterator<Item = OsString>,
-) -> Result<()> {
+pub fn run_example(presentation: Presentation) -> Result<()> {
     FlowApplication::builder()
         .with_config_file(CONFIG_FILE)
-        .with_cli_args(cli_args)
         .with_presentation(presentation)
         .with_log_level(LogLevel::Info)
         .run_blocking(build_flow())?;

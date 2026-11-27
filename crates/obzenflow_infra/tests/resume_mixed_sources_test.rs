@@ -722,12 +722,14 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
         .ok_or_else(|| anyhow!("an unfinished Refuse source must refuse the resume"))?
     };
     match &failure.error {
-        obzenflow_dsl::dsl::FlowBuildError::ArchiveVerbRefused(
-            obzenflow_core::journal::archive_actions::ArchiveRefusal::Sources {
-                run: archive,
-                refusals,
-            },
-        ) => {
+        obzenflow_dsl::dsl::FlowBuildError::ArchiveVerbRefused {
+            refusal:
+                obzenflow_core::journal::archive_actions::ArchiveRefusal::Sources {
+                    run: archive,
+                    refusals,
+                },
+            ..
+        } => {
             assert_eq!(archive, &recorded_run);
             assert_eq!(
                 refusals,
@@ -740,7 +742,7 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
     assert!(failure
         .error
         .to_string()
-        .contains("source 'fin' stopped with its input unfinished"));
+        .contains("source 'fin' stopped before its input finished"));
     assert_eq!(
         std::fs::read_dir(journal_base.join("flows"))?.count(),
         runs_before,

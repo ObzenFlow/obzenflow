@@ -61,8 +61,26 @@ enum Command {
     /// Inspect run metadata, stage data journal files and record byte offsets.
     Inspect(InspectArgs),
     /// Verify a candidate run's recorded output against a baseline, or call logs against their lineage.
+    #[command(long_about = VERIFY_LONG_ABOUT)]
     Verify(VerifyArgs),
 }
+
+const VERIFY_LONG_ABOUT: &str = "\
+Verify a candidate run's recorded output against a baseline, or call logs against their lineage.
+
+Exit codes for runs
+  0  The candidate matches the baseline, and every stage is certified.
+  1  The candidate does not match the baseline.
+  2  The certified region matches, and some stages are not certified.
+  3  Verification refused the runs.
+
+Exit codes for call logs
+  0  Every log passes.
+  1  A log breaks a rule.
+  2  A log is not certified.
+  3  Verification refused the logs.
+
+Any other failure exits 4. A wrong or missing argument also exits 4.";
 
 #[derive(Args)]
 struct ShowArgs {
@@ -135,13 +153,28 @@ struct InspectArgs {
 struct VerifyArgs {
     #[command(subcommand)]
     check: Option<VerifyCheck>,
-    #[arg(long, required = true)]
+    #[arg(
+        long,
+        required = true,
+        value_name = "PATH",
+        help = "The run directory to compare the candidate with"
+    )]
     baseline: Option<PathBuf>,
-    #[arg(long, required = true)]
+    #[arg(
+        long,
+        required = true,
+        value_name = "PATH",
+        help = "The run directory to verify"
+    )]
     candidate: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, value_name = "PATH", help = "Write the comparison report here")]
     report_path: Option<PathBuf>,
-    #[arg(long, default_value_t = 5)]
+    #[arg(
+        long,
+        default_value_t = 5,
+        value_name = "N",
+        help = "Maximum divergence details to save per journal in the report"
+    )]
     max_divergences: usize,
 }
 
@@ -165,7 +198,15 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Cli::parse().command).await {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if error.use_stderr() => {
+            eprint!("{error}");
+            return ExitCode::from(4);
+        }
+        Err(error) => error.exit(),
+    };
+    match run(cli.command).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("obzenflow: {error}");

@@ -863,7 +863,6 @@ mod tests {
     fn required_knob_failure_names_the_edge_and_every_scope() {
         let spec = KnobSpec {
             key_path: "runtime.backpressure.window",
-            file_path: None,
             value_type: KnobType::U64 {
                 min: 1,
                 max: u64::MAX,

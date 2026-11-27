@@ -123,7 +123,7 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
 
         stages: {
             src = source!(RateLimiterTestEvent with {
-                rate_limit(50.0).burst_capacity(1.0)
+                rate_limit(0.5).burst_capacity(1.0)
             } => source);
             throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -420,7 +420,7 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
 
         stages: {
             src = source!(RateLimiterTestEvent with {
-                rate_limit(50.0).burst_capacity(1.0)
+                rate_limit(0.5).burst_capacity(1.0)
             } => source);
             passthrough = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
             snk = sink!(RateLimiterTestEvent => sink);

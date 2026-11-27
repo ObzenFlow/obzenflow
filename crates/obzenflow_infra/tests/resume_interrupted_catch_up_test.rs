@@ -774,6 +774,9 @@ async fn a_torn_resume_without_an_agreeing_ancestor_refuses() -> Result<()> {
         ),
         "{message}"
     );
-    assert!(message.contains(&format!("Restore {}", ancestor.display())));
+    assert!(message.contains(&format!(
+        "the archive that it resumed from, {}, is missing.",
+        ancestor.display()
+    )));
     Ok(())
 }

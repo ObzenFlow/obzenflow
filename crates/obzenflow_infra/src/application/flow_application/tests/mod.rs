@@ -28,6 +28,52 @@ mod lifecycle;
 mod prometheus;
 mod startup;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn verify_quoted_paths_preserve_arguments() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("Pat's Payment Runs/base");
+    let candidate = dir
+        .path()
+        .join(OsStr::from_bytes(b"Pat's Payment Runs/replay-\xff"));
+    let error =
+        FlowApplication::run_post_replay_verification(baseline.clone(), Some(candidate.clone()))
+            .await
+            .unwrap_err();
+    let ApplicationError::Verification {
+        exit_code: 3,
+        summary,
+    } = error
+    else {
+        panic!("missing baseline must refuse verification: {error}");
+    };
+    let (_, operands) = summary.split_once("then run obzenflow verify ").unwrap();
+    let output = Command::new("sh")
+        .args(["-c", &format!(r"printf '%s\0' {operands}")])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let args: Vec<_> = output
+        .stdout
+        .strip_suffix(&[0])
+        .unwrap()
+        .split(|byte| *byte == 0)
+        .collect();
+    assert_eq!(
+        args,
+        [
+            b"--baseline".as_slice(),
+            baseline.as_os_str().as_bytes(),
+            b"--candidate",
+            candidate.as_os_str().as_bytes()
+        ]
+    );
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct IdlePayload;
 

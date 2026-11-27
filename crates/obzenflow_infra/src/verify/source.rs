@@ -19,6 +19,7 @@ use obzenflow_core::journal::archive::manifest::{
     RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
     RUN_MANIFEST_FILENAME,
 };
+use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_core::journal::ArchiveStatus;
 
 use crate::journal::disk::identity::CommitmentAdmission;
@@ -65,7 +66,7 @@ impl DiskRunSource {
                 return Err(SourceOpenError::Refused(Box::new(
                     RefusalReason::StatusGate {
                         run: run_dir.to_path_buf(),
-                        status: format!("unknown ({err})"),
+                        status: unreadable_status(err),
                     },
                 )))
             }
@@ -77,6 +78,10 @@ impl DiskRunSource {
             status,
         })
     }
+}
+
+fn unreadable_status(error: ReplayError) -> String {
+    format!("unknown ({error})")
 }
 
 /// Reads a run directory's manifest through the archive's schema and
@@ -290,6 +295,16 @@ impl Iterator for JournalRows {
 mod tests {
     use super::*;
     use obzenflow_runtime::runtime_config::JournalSync;
+
+    #[test]
+    fn verify_missing_system_log_omits_flag() {
+        assert_eq!(
+            unreadable_status(ReplayError::MissingSystemLog {
+                path: PathBuf::from("/runs/r1/system.log"),
+            }),
+            "unknown (The replay archive has no system.log at /runs/r1/system.log.)"
+        );
+    }
 
     #[tokio::test]
     async fn verification_rejects_missing_commitments_before_yielding_later_rows() {

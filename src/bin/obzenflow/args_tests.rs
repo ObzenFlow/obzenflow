@@ -193,3 +193,51 @@ fn control_origins_are_http_loopback_only() {
         );
     }
 }
+
+#[test]
+fn verify_long_help_lists_exit_codes() {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    let top = command.render_help().to_string();
+    assert!(
+        top.contains(
+            "Verify a candidate run's recorded output against a baseline, or call logs against \
+             their lineage\n"
+        ),
+        "{top}"
+    );
+    let verify = command
+        .find_subcommand_mut("verify")
+        .expect("verify subcommand");
+    let long = verify.render_long_help().to_string();
+    for line in [
+        "Exit codes for runs\n",
+        "  0  The candidate matches the baseline, and every stage is certified.\n",
+        "  1  The candidate does not match the baseline.\n",
+        "  2  The certified region matches, and some stages are not certified.\n",
+        "  3  Verification refused the runs.\n",
+        "Exit codes for call logs\n",
+        "  0  Every log passes.\n",
+        "  1  A log breaks a rule.\n",
+        "  2  A log is not certified.\n",
+        "  3  Verification refused the logs.\n",
+        "Any other failure exits 4. A wrong or missing argument also exits 4.",
+    ] {
+        assert!(long.contains(line), "missing {line:?} in {long}");
+    }
+    let short = verify.render_help().to_string();
+    for text in [
+        "--baseline <PATH>",
+        "The run directory to compare the candidate with",
+        "--candidate <PATH>",
+        "The run directory to verify",
+        "--report-path <PATH>",
+        "Write the comparison report here",
+        "--max-divergences <N>",
+        "Maximum divergence details to save per journal in the report",
+        "[default: 5]",
+    ] {
+        assert!(long.contains(text), "missing {text:?} in {long}");
+        assert!(short.contains(text), "missing {text:?} in {short}");
+    }
+}

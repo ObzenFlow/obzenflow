@@ -4,11 +4,11 @@
 
 use super::{open_disk_run, JournalReadError};
 use crate::journal::disk::inspect::load_manifest;
+use crate::journal::disk::replay_archive::departs_from_archive;
 use obzenflow_core::config::EffectiveConfigEvidence;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::archive::manifest::RunManifestStage;
-use obzenflow_core::journal::archive_actions::departs_from_archive;
 use obzenflow_core::journal::read::{RunRecordData, RunStage};
 use obzenflow_core::journal::RunManifest;
 use obzenflow_runtime::runtime_config::{config_differences, ConfigDifference};

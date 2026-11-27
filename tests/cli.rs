@@ -1738,11 +1738,12 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
 }
 
 #[test]
-fn cli_version_commands_and_admission_errors_are_public() {
+fn cli_informational_requests_exit_zero() {
     let output = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
         .arg("--version")
         .output()
         .unwrap();
+    assert_eq!(output.status.code(), Some(0));
     let version = String::from_utf8(output.stdout).unwrap();
     assert!(version.contains(env!("CARGO_PKG_VERSION")));
     assert!(version.contains(&format!(
@@ -1753,6 +1754,7 @@ fn cli_version_commands_and_admission_errors_are_public() {
         .arg("--help")
         .output()
         .unwrap();
+    assert_eq!(output.status.code(), Some(0));
     let help = String::from_utf8(output.stdout).unwrap();
     for command in ["show", "start", "journal", "verify"] {
         assert!(help.contains(command));
@@ -1768,6 +1770,20 @@ fn cli_version_commands_and_admission_errors_are_public() {
     assert_eq!(output.status.code(), Some(4));
     assert!(output.stdout.is_empty());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn cli_usage_error_exits_four() {
+    let output = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+        .args(["verify", "--baseline", "a", "--candiate", "b"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("unexpected argument '--candiate' found"),
+        "{stderr}"
+    );
 }
 
 mod control_client {

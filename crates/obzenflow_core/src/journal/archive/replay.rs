@@ -14,6 +14,8 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// `ReplayError` tells why a provider cannot open, read or resume an archive.
+/// Its `Display` text gives only the cause.
 #[derive(Debug, Error)]
 pub enum ReplayError {
     #[error("Replay archive path is not a directory: {path}")]
@@ -22,20 +24,26 @@ pub enum ReplayError {
     #[error("Replay archive is missing run_manifest.json at {path}")]
     MissingManifest { path: PathBuf },
 
-    #[error("unsupported journal schema version: {journal_schema_version} (supported: {supported}); re-record the run with this build of ObzenFlow")]
+    #[error(
+        "This build of ObzenFlow does not support journal schema version \
+         {journal_schema_version}. It supports version {supported}."
+    )]
     UnsupportedJournalSchemaVersion {
         journal_schema_version: String,
         supported: &'static str,
     },
 
-    #[error("Replay archive capability '{capability}' has unsupported version {found:?} (supported: {supported}); re-record the run with this build of ObzenFlow")]
+    #[error(
+        "This build of ObzenFlow does not support version {found:?} of the archive capability \
+         '{capability}'. It supports version {supported}."
+    )]
     UnsupportedArchiveCapability {
         capability: &'static str,
         found: Option<u64>,
         supported: u32,
     },
 
-    #[error("Replay archive system.log missing at {path}")]
+    #[error("The replay archive has no system.log at {path}.")]
     MissingSystemLog { path: PathBuf },
 
     #[error("Stage '{stage_key}' not found in run manifest")]
@@ -58,7 +66,7 @@ pub enum ReplayError {
         message: String,
     },
 
-    #[error("Replay archive I/O error: {message}")]
+    #[error("An I/O operation on the replay archive failed. {message}: {source}")]
     Io {
         message: String,
         #[source]
@@ -71,23 +79,19 @@ pub enum ReplayError {
     /// A torn resumed run merges with the archive it resumed from, which is
     /// missing or unreadable (FLOWIP-134i B6).
     #[error(
-        "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
-         from, {}, is missing.\nRestore {}, then resume {} again.",
+        "ObzenFlow cannot resume {}. Its reconstruction did not complete, and the archive that \
+         it resumed from, {}, is missing.",
         .archive.display(),
-        .ancestor.display(),
-        .ancestor.display(),
-        .archive.display()
+        .ancestor.display()
     )]
     AncestorMissing { archive: PathBuf, ancestor: PathBuf },
 
     #[error(
-        "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
-         from, {}, cannot be read: {}.\nRestore {}, then resume {} again.",
+        "ObzenFlow cannot resume {}. Its reconstruction did not complete, and ObzenFlow cannot \
+         read the archive that it resumed from, {}. {}",
         .archive.display(),
         .ancestor.display(),
-        .source,
-        .ancestor.display(),
-        .archive.display()
+        .source
     )]
     AncestorUnreadable {
         archive: PathBuf,
@@ -95,16 +99,26 @@ pub enum ReplayError {
         source: Box<ReplayError>,
     },
 
+    /// The ancestor that a torn resumed run merges with has no `system.log`.
+    #[error(
+        "ObzenFlow cannot resume {}. Its reconstruction did not complete, and the archive that \
+         it resumed from, {}, has no system.log.",
+        .archive.display(),
+        .ancestor.display()
+    )]
+    AncestorMissingSystemLog {
+        archive: PathBuf,
+        ancestor: PathBuf,
+        system_log: PathBuf,
+    },
+
     /// A torn resumed run's source records are not a prefix of its ancestor's.
     #[error(
-        "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
-         from, {}, disagrees with it at source '{}'.\nRestore {} as it was recorded, then \
-         resume {} again.",
+        "ObzenFlow cannot resume {}. Its reconstruction did not complete, and the archive that \
+         it resumed from, {}, disagrees with it at source '{}'.",
         .archive.display(),
         .ancestor.display(),
-        .stage_key,
-        .ancestor.display(),
-        .archive.display()
+        .stage_key
     )]
     AncestorDisagrees {
         archive: PathBuf,
@@ -114,42 +128,44 @@ pub enum ReplayError {
 
     /// Archives of one merged lineage record different identity namespaces.
     #[error(
-        "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
-         from, {}, records a different identity namespace.\nRestore {} as it was recorded, \
-         then resume {} again.",
+        "ObzenFlow cannot resume {}. Its reconstruction did not complete, and the archive that \
+         it resumed from, {}, records a different identity namespace.",
         .archive.display(),
-        .ancestor.display(),
-        .ancestor.display(),
-        .archive.display()
+        .ancestor.display()
     )]
     NamespaceDisagrees { archive: PathBuf, ancestor: PathBuf },
 
     /// Only the head of a history resumes (FLOWIP-134i B7).
     #[error(
-        "cannot resume {}: it was already resumed by {}, the head of this history.\nResume {} \
-         instead.",
+        "ObzenFlow cannot resume {}, because {} already resumed it. {} is the head of this \
+         history.",
         .archive.display(),
         .head.display(),
         .head.display()
     )]
     AlreadyContinued { archive: PathBuf, head: PathBuf },
 
+    #[error(
+        "The continuation claim in {parent} names {successor}, but the directory {successor} is missing.",
+        parent = .parent.display(),
+        successor = .successor.display()
+    )]
+    ContinuationMissing { parent: PathBuf, successor: PathBuf },
+
     /// A resumed run whose parent carries no claim never took it over (B12).
     #[error(
-        "cannot resume {}: it stopped before taking over {}.\nResume {} instead.",
+        "ObzenFlow cannot resume {}, because it stopped before it took over {}.",
         .archive.display(),
-        .parent.display(),
         .parent.display()
     )]
     StoppedBeforeTakeover { archive: PathBuf, parent: PathBuf },
 
     /// A resumed run that lost its parent's claim to another run (B12).
     #[error(
-        "cannot resume {}: {} was continued by {}, not by this run.\nResume {} instead.",
+        "ObzenFlow cannot resume {}, because {} continued {} and this run did not.",
         .archive.display(),
-        .parent.display(),
         .head.display(),
-        .head.display()
+        .parent.display()
     )]
     ContinuedByAnother {
         archive: PathBuf,
@@ -159,21 +175,17 @@ pub enum ReplayError {
 
     /// The run's location cannot hold the claim a resume records (B12).
     #[error(
-        "cannot resume {}: its run location is not writable, so this resume cannot record \
-         that it continues it.\nMake it writable, or copy it elsewhere to start a separate \
-         history.",
+        "ObzenFlow cannot resume {}, because its run location is not writable. The resume \
+         cannot record that it continues the run.",
         .archive.display()
     )]
     LocationNotWritable { archive: PathBuf },
 
     /// Resuming a replay resumes the run it reproduces, which is missing (B13).
     #[error(
-        "cannot resume {}: the run it replays, {}, is missing.\nRestore {}, then resume {} \
-         again.",
+        "ObzenFlow cannot resume {}, because the run that it replays, {}, is missing.",
         .replay.display(),
-        .replayed.display(),
-        .replayed.display(),
-        .replay.display()
+        .replayed.display()
     )]
     ReplayedRunMissing { replay: PathBuf, replayed: PathBuf },
 }

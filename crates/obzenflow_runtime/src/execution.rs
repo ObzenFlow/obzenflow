@@ -26,15 +26,14 @@ use obzenflow_core::journal::archive::ReplayArchive;
 ///
 /// Distinct from the presentation `obzenflow_infra::RunMode`, which is a
 /// banner-and-footer surface and is never read for a runtime decision.
-/// FLOWIP-120n adds `Resume` (`--resume-from`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
     /// No replay verb: do live work, reconstruct nothing.
     Live,
-    /// `--replay-from`: reconstruct a bounded recording and drain at its end.
+    /// `Replay` reconstructs a bounded recording and drains at its end.
     Replay,
-    /// `--resume-from`: catch up on the recording, then continue live from the
-    /// recorded high-water mark (FLOWIP-120n).
+    /// `Resume` resumes a recorded run from the last fact that it committed. The
+    /// new run catches up on the recording and then continues with live work.
     Resume,
 }
 
@@ -386,10 +385,6 @@ impl ExecutionStrategy for Resume {
     }
 }
 
-/// A sealed archive is a finished recording: a missing recorded outcome in it
-/// is genuine corruption. An archive that is neither completed nor cancelled
-/// is replayed only under `allow_incomplete_archive`, which tolerates its torn
-/// tail.
 fn archive_is_sealed(status: ArchiveStatus) -> bool {
     matches!(status, ArchiveStatus::Completed | ArchiveStatus::Cancelled)
 }
@@ -460,9 +455,10 @@ impl RuntimeExecution {
                 Arc::new(Replay { incomplete })
             }
             RuntimeMode::Resume => {
-                let archive_ref = archive
-                    .as_deref()
-                    .expect("--resume-from requires an archive; config layer must reject earlier");
+                let archive_ref = archive.as_deref().expect(
+                    "A resume has an archive, because the config layer refuses a resume \
+                         without one.",
+                );
                 let resume_generation =
                     ReaderGeneration(archive_ref.max_recorded_generation().0 + 1);
                 let state = Arc::new(ResumeState::new(resume_generation));

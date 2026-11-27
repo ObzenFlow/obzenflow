@@ -59,8 +59,27 @@ pub enum OnTerminalArg {
     Park,
 }
 
+const ADMISSION_TABLE: &str = "\
+Archive admission (the flag is --allow-incomplete-archive)
+Replay uses the named run. Resume follows replay links and reads the
+ancestors that it needs to finish reconstruction. Apply each column to that run.
+Archive          | --replay-from | --resume-from
+completed, every source finite and ended naturally
+                 | admitted      | refused, no work left
+completed with a source stopped, or cancelled
+                 | admitted      | admitted
+interrupted (no terminal record)
+                 | with the flag | admitted
+failed resume whose only cause was archive departures
+                 | with the flag | admitted
+all other failures
+                 | with the flag | with the flag
+ObzenFlow refuses both verbs for a run that still has a live writer.
+ObzenFlow refuses both verbs for a flow with a cycle.
+ObzenFlow refuses a resume when the connector of a source cannot continue its recorded input.";
+
 #[derive(Parser, Debug, Clone)]
-#[command(about = "ObzenFlow Application")]
+#[command(about = "ObzenFlow Application", after_long_help = ADMISSION_TABLE)]
 pub struct FlowConfig {
     /// Path to a startup config file.
     #[arg(long)]
@@ -151,36 +170,62 @@ pub struct FlowConfig {
     #[arg(long)]
     pub control_plane_hmac_replay_window_secs: Option<u64>,
 
-    /// Replay sources from a completed or cancelled archived run directory.
-    ///
-    /// The path must be the exact run directory containing `run_manifest.json`.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Replay a recorded run from its archive",
+        long_help = "Replay a recorded run from its archive.\n\n\
+            A completed or cancelled run replays as recorded. With --allow-incomplete-archive, \
+            an interrupted or failed run replays its recorded prefix.\n\n\
+            The path must be the run directory itself, which contains `run_manifest.json`.\n\n\
+            See Archive admission below."
+    )]
     pub replay_from: Option<PathBuf>,
 
-    /// Resume a recorded run: catch up on the archive with effects suppressed,
-    /// then continue live from the recorded high-water mark.
-    ///
-    /// Resume with a build and configuration that act the same on the inputs
-    /// the run settled; a stage that departs from its archive refuses the
-    /// resume. Check a changed build first with `--replay-from <run> --verify`
-    /// against a recording that ended with a terminal record.
-    ///
-    /// The path must be the exact run directory containing `run_manifest.json`.
-    /// Mutually exclusive with `--replay-from`.
-    #[arg(long, conflicts_with = "replay_from")]
+    #[arg(
+        long,
+        conflicts_with = "replay_from",
+        help = "Resume a recorded run from the last fact that it committed",
+        long_help = "Resume a recorded run from the last fact that it committed. The new run \
+            catches up on the archive and executes no effects. Then it continues with live \
+            work.\n\n\
+            Resume with a build and a configuration that act the same on the inputs that the \
+            run settled. A stage that departs from its archive refuses the resume. Check a \
+            changed build first with `--replay-from <run> --verify` against a recording that \
+            ended completed or cancelled.\n\n\
+            The path must be the run directory itself, which contains `run_manifest.json`. Do \
+            not use it with `--replay-from`.\n\n\
+            See Archive admission below."
+    )]
     pub resume_from: Option<PathBuf>,
 
-    /// Allow replaying from incomplete archives (failed/unknown/missing system.log).
-    ///
-    /// This is intended for debugging; outputs may be partial and not suitable for regression comparison.
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Admit an interrupted or failed run to --replay-from, and a failed run to \
+            --resume-from",
+        long_help = "Admit an interrupted or failed run to --replay-from, and a failed run to \
+            --resume-from.\n\n\
+            Verify refuses such a run. Use its output only for inspection. With the flag, \
+            ObzenFlow opens a run whose system.log is missing as an interrupted run. A torn \
+            final append leaves the committed prefix readable. ObzenFlow refuses damage that a \
+            valid frame follows.\n\n\
+            See Archive admission below."
+    )]
     pub allow_incomplete_archive: bool,
 
-    /// Verify the replay output against the source archive after completion.
-    /// Requires `--replay-from`. The source archive must remain
-    /// present through completion; on a fully certified match the run prints
-    /// "output matched the original run, 0 differences" and exits 0.
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Verify the replay output against the source archive after completion",
+        long_help = "Verify the replay output against the source archive after completion.\n\n\
+            This flag needs `--replay-from`. Keep the source archive until the replay \
+            completes. When the output matches and every stage is certified, the run prints \
+            \"output matched the original run, 0 differences\" and exits 0. The source archive \
+            and the replay must both end completed or cancelled. Verification refuses a replay \
+            that --allow-incomplete-archive admitted. The run exits non-zero for every other \
+            result. To get an exit code for each verdict, run `obzenflow verify --baseline \
+            <archive> --candidate <replay>`."
+    )]
     pub verify: bool,
 
     /// Behaviour when the pipeline reaches a terminal state under --server:
@@ -365,7 +410,7 @@ pub(crate) struct RawFileStartupConfig {
     server: RawFileServerConfig,
     pub(crate) runtime: RawFileRuntimeConfig,
     metrics: RawFileMetricsConfig,
-    pub(crate) replay: RawFileReplayConfig,
+    pub(crate) archive: RawFileArchiveConfig,
     /// FLOWIP-010: runtime-owned knob namespaces below. Scope legality is
     /// encoded in the struct shapes (§4c layout), so `deny_unknown_fields`
     /// rejects wrong-scope entries at parse.
@@ -857,8 +902,8 @@ struct RawFileMetricsConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawFileReplayConfig {
-    pub(crate) from: Option<PathBuf>,
+pub(crate) struct RawFileArchiveConfig {
+    pub(crate) replay_from: Option<PathBuf>,
     pub(crate) resume_from: Option<PathBuf>,
     pub(crate) allow_incomplete_archive: Option<bool>,
     pub(crate) verify: Option<bool>,
@@ -1100,39 +1145,39 @@ impl FlowConfig {
 
         let replay_from = resolve_optional(
             self.replay_from,
-            file.replay.from,
-            parse_env_path("OBZENFLOW_REPLAY_FROM", "replay.from")?,
+            file.archive.replay_from,
+            parse_env_path("OBZENFLOW_REPLAY_FROM", "archive.replay_from")?,
         );
         let allow_incomplete_archive = resolve_positive_flag(
             self.allow_incomplete_archive,
-            file.replay.allow_incomplete_archive,
+            file.archive.allow_incomplete_archive,
             parse_env_bool(
                 "OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE",
-                "replay.allow_incomplete_archive",
+                "archive.allow_incomplete_archive",
             )?,
             false,
         );
         let verify = resolve_positive_flag(
             self.verify,
-            file.replay.verify,
-            parse_env_bool("OBZENFLOW_REPLAY_VERIFY", "replay.verify")?,
+            file.archive.verify,
+            parse_env_bool("OBZENFLOW_REPLAY_VERIFY", "archive.verify")?,
             false,
         );
         let resume_from = resolve_optional(
             self.resume_from,
-            file.replay.resume_from,
-            parse_env_path("OBZENFLOW_RESUME_FROM", "replay.resume_from")?,
+            file.archive.resume_from,
+            parse_env_path("OBZENFLOW_RESUME_FROM", "archive.resume_from")?,
         );
         if replay_from.is_some() && resume_from.is_some() {
             return Err(ConfigError::at(
-                "replay.resume_from",
-                "mutually exclusive with replay.from",
+                "archive.resume_from",
+                "Set only one of archive.resume_from and archive.replay_from.",
             ));
         }
         if verify && resume_from.is_some() {
             return Err(ConfigError::at(
-                "replay.verify",
-                "requires replay.from; a resume continues live and cannot be verified as a bounded replay",
+                "archive.verify",
+                "It needs archive.replay_from. A resume continues with live work, so verification cannot compare it as a bounded replay.",
             ));
         }
 
@@ -1157,13 +1202,13 @@ impl FlowConfig {
             validate_replay(replay)?;
         } else if allow_incomplete_archive {
             return Err(ConfigError::at(
-                "replay.allow_incomplete_archive",
-                "cannot be true without replay.from or replay.resume_from",
+                "archive.allow_incomplete_archive",
+                "It needs archive.replay_from or archive.resume_from.",
             ));
         } else if verify {
             return Err(ConfigError::at(
-                "replay.verify",
-                "cannot be true without replay.from",
+                "archive.verify",
+                "It needs archive.replay_from.",
             ));
         }
 
@@ -1418,9 +1463,13 @@ fn select_config_file(
 }
 
 fn validate_replay(replay: &ResolvedReplayConfig) -> Result<(), ConfigError> {
+    let key = match replay.verb {
+        ReplayVerb::Replay => "archive.replay_from",
+        ReplayVerb::Resume => "archive.resume_from",
+    };
     if !replay.from.is_dir() {
         return Err(ConfigError::at(
-            "replay.from",
+            key,
             format!("must be a directory: {}", replay.from.display()),
         ));
     }
@@ -1428,7 +1477,7 @@ fn validate_replay(replay: &ResolvedReplayConfig) -> Result<(), ConfigError> {
     let manifest_path = replay.from.join(RUN_MANIFEST_FILENAME);
     if !manifest_path.exists() {
         return Err(ConfigError::at(
-            "replay.from",
+            key,
             format!("path does not contain {RUN_MANIFEST_FILENAME}"),
         ));
     }
@@ -2430,7 +2479,7 @@ port = 9876
         let err = cli.resolve(None, false).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "config error at replay.from: must be a directory: /tmp/missing"
+            "config error at archive.replay_from: must be a directory: /tmp/missing"
         );
     }
 
@@ -2494,7 +2543,7 @@ port = 9876
         fs::write(
             &config_path,
             r#"
-[replay]
+[archive]
 resume_from = "/tmp/recorded"
 "#,
         )
@@ -2511,7 +2560,8 @@ resume_from = "/tmp/recorded"
         let err = cli.resolve(None, false).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "config error at replay.resume_from: mutually exclusive with replay.from"
+            "config error at archive.resume_from: Set only one of archive.resume_from and \
+             archive.replay_from."
         );
     }
 
@@ -2523,7 +2573,172 @@ resume_from = "/tmp/recorded"
         let err = cli.resolve(None, false).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "config error at replay.verify: requires replay.from; a resume continues live and cannot be verified as a bounded replay"
+            "config error at archive.verify: It needs archive.replay_from. A resume continues \
+             with live work, so verification cannot compare it as a bounded replay."
+        );
+    }
+
+    #[test]
+    fn replay_table_in_file_refused() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(&config_path, "[replay]\nfrom = \"/tmp/recorded\"\n").unwrap();
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        let rendered = cli.resolve(None, false).unwrap_err().to_string();
+        assert!(
+            rendered.contains(
+                "unknown field `replay`, expected one of `diagnostics`, `server`, `runtime`, \
+                 `metrics`, `archive`, `contracts`, `journal`, `middleware`, `ai`, `studio`, \
+                 `app`"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn replay_from_in_archive_table_selects_replay() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let archive = fake_archive_dir(&tempdir, "archive");
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(
+            &config_path,
+            format!("[archive]\nreplay_from = \"{}\"\n", archive.display()),
+        )
+        .unwrap();
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        let replay = cli
+            .resolve(None, false)
+            .unwrap()
+            .replay
+            .expect("the file selects a replay");
+        assert_eq!(replay.verb, ReplayVerb::Replay);
+        assert_eq!(replay.from, archive);
+    }
+
+    #[test]
+    fn admission_table_in_long_help_renders_once() {
+        use clap::CommandFactory;
+        let long = FlowConfig::command().render_long_help().to_string();
+        assert_eq!(
+            long.matches("Archive admission (the flag is --allow-incomplete-archive)")
+                .count(),
+            1,
+            "{long}"
+        );
+        assert!(long.trim_end().ends_with(ADMISSION_TABLE), "{long}");
+        assert_eq!(
+            long.matches("See Archive admission below.").count(),
+            3,
+            "{long}"
+        );
+        for text in [
+            "Replay a recorded run from its archive.",
+            "Resume a recorded run from the last fact that it committed. The new run catches up \
+             on the archive and executes no effects. Then it continues with live work.",
+            "against a recording that ended completed or cancelled.",
+            "Verify refuses such a run. Use its output only for inspection. With the flag, \
+             ObzenFlow opens a run whose system.log is missing as an interrupted run. A torn \
+             final append leaves the committed prefix readable. ObzenFlow refuses damage that a \
+             valid frame follows.",
+            "The run exits non-zero for every other result. To get an exit code for each \
+             verdict, run `obzenflow verify --baseline <archive> --candidate <replay>`.",
+        ] {
+            assert!(long.contains(text), "missing {text:?} in {long}");
+        }
+
+        let short = FlowConfig::command().render_help().to_string();
+        assert!(!short.contains("Archive admission"), "{short}");
+        for summary in [
+            "Replay a recorded run from its archive\n",
+            "Resume a recorded run from the last fact that it committed\n",
+            "Verify the replay output against the source archive after completion\n",
+        ] {
+            assert!(short.contains(summary), "missing {summary:?} in {short}");
+        }
+    }
+
+    #[test]
+    fn help_archive_claims_match_decisions() {
+        use clap::CommandFactory;
+        use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+        use obzenflow_core::journal::archive_actions::{
+            decide, ArchiveEvidence, ArchiveOverrides, FailureEvidence, FlowEvidence,
+            SourceEvidence,
+        };
+        use obzenflow_core::journal::ArchiveStatus;
+
+        let flow = FlowEvidence::default();
+        let admission_groups = |verb: ReplayVerb| {
+            let mut plain = Vec::new();
+            let mut flag_only = Vec::new();
+            for (word, status) in [
+                ("completed", ArchiveStatus::Completed),
+                ("cancelled", ArchiveStatus::Cancelled),
+                ("interrupted", ArchiveStatus::Unknown),
+                ("failed", ArchiveStatus::Failed),
+            ] {
+                let archive = ArchiveEvidence {
+                    status,
+                    live_writer: false,
+                    sources: vec![SourceEvidence {
+                        stage_key: "orders".into(),
+                        finite: true,
+                        recorded_eof: Some(EofKind::Natural),
+                    }],
+                    failure: FailureEvidence::Other,
+                };
+                let admits = |allow_incomplete_archive| {
+                    decide(
+                        verb,
+                        Path::new("R1"),
+                        &archive,
+                        &flow,
+                        ArchiveOverrides {
+                            allow_incomplete_archive,
+                        },
+                    )
+                    .is_ok()
+                };
+                match (admits(false), admits(true)) {
+                    (true, true) => plain.push(word),
+                    (false, true) => flag_only.push(word),
+                    (false, false) => {}
+                    (true, false) => panic!(
+                        "{word}: --{}-from R1 --allow-incomplete-archive refused a plain admission",
+                        verb.word()
+                    ),
+                }
+            }
+            (plain.join(" or "), flag_only.join(" or "))
+        };
+        let (as_recorded, prefix) = admission_groups(ReplayVerb::Replay);
+        let (_, resume_with_flag) = admission_groups(ReplayVerb::Resume);
+        let replay_detail = format!(
+            "A {as_recorded} run replays as recorded. With --allow-incomplete-archive, an \
+            {prefix} run replays its recorded prefix."
+        );
+        let flag_summary = format!(
+            "Admit an {prefix} run to --replay-from, and a {resume_with_flag} \
+            run to --resume-from"
+        );
+        let mut command = FlowConfig::command();
+        let long = command.render_long_help().to_string();
+        let short = command.render_help().to_string();
+        assert!(
+            long.contains(&replay_detail),
+            "expected {replay_detail:?} in {long}"
+        );
+        assert!(
+            long.contains(&format!("{flag_summary}.")),
+            "expected {flag_summary:?} in {long}"
+        );
+        assert!(
+            short.contains(&format!("{flag_summary}\n")),
+            "expected {flag_summary:?} in {short}"
         );
     }
 
@@ -2604,7 +2819,7 @@ port = 2222
         let config_path = tempdir.path().join("obzenflow.toml");
         fs::write(
             &config_path,
-            "[replay]\nallow_duplicate_sink_delivery = true\n",
+            "[archive]\nallow_duplicate_sink_delivery = true\n",
         )
         .unwrap();
         let cli =
@@ -2948,5 +3163,253 @@ port = "abc"
                 .to_string(),
             "config error at OBZENFLOW_CONFIG: is set but empty; name a config file or unset it"
         );
+    }
+
+    mod admission_table {
+        use crate::application::config::ADMISSION_TABLE;
+        use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+        use obzenflow_core::journal::archive_actions::{
+            decide, ArchiveEvidence, ArchiveOverrides, ArchiveRefusal, FailureEvidence,
+            FlowEvidence, ReplayVerb, SourceEvidence,
+        };
+        use obzenflow_core::journal::ArchiveStatus;
+        use obzenflow_core::source::SourceContinuation;
+        use std::path::Path;
+
+        const RUN: &str = "/runs/r1";
+
+        const ROWS: [&str; 5] = [
+            "completed, every source finite and ended naturally",
+            "completed with a source stopped, or cancelled",
+            "interrupted (no terminal record)",
+            "failed resume whose only cause was archive departures",
+            "all other failures",
+        ];
+
+        fn source(stage_key: &str, finite: bool, recorded_eof: Option<EofKind>) -> SourceEvidence {
+            SourceEvidence {
+                stage_key: stage_key.to_string(),
+                finite,
+                recorded_eof,
+            }
+        }
+
+        fn archive(status: ArchiveStatus, sources: Vec<SourceEvidence>) -> ArchiveEvidence {
+            ArchiveEvidence {
+                status,
+                live_writer: false,
+                sources,
+                failure: FailureEvidence::Other,
+            }
+        }
+
+        fn finished() -> Vec<SourceEvidence> {
+            vec![
+                source("store_orders", true, Some(EofKind::Natural)),
+                source("web_orders", true, Some(EofKind::Natural)),
+            ]
+        }
+
+        fn unfinished() -> Vec<SourceEvidence> {
+            vec![
+                source("store_orders", true, Some(EofKind::Truncated)),
+                source("web_orders", true, None),
+            ]
+        }
+
+        fn flow(continuation: SourceContinuation) -> FlowEvidence {
+            FlowEvidence {
+                cycle_members: Vec::new(),
+                sources: vec![
+                    ("store_orders".to_string(), continuation),
+                    ("web_orders".to_string(), continuation),
+                ],
+            }
+        }
+
+        fn decided(
+            verb: ReplayVerb,
+            evidence: &ArchiveEvidence,
+            flow: &FlowEvidence,
+            allow_incomplete_archive: bool,
+        ) -> Result<(), ArchiveRefusal> {
+            decide(
+                verb,
+                Path::new(RUN),
+                evidence,
+                flow,
+                ArchiveOverrides {
+                    allow_incomplete_archive,
+                },
+            )
+        }
+
+        fn row_of(evidence: &ArchiveEvidence) -> &'static str {
+            match evidence.status {
+                ArchiveStatus::Completed
+                    if evidence.sources.iter().all(|source| {
+                        source.finite && source.recorded_eof == Some(EofKind::Natural)
+                    }) =>
+                {
+                    ROWS[0]
+                }
+                ArchiveStatus::Completed | ArchiveStatus::Cancelled => ROWS[1],
+                ArchiveStatus::Unknown => ROWS[2],
+                ArchiveStatus::Failed
+                    if evidence.failure == FailureEvidence::DepartedFromArchive =>
+                {
+                    ROWS[3]
+                }
+                ArchiveStatus::Failed => ROWS[4],
+            }
+        }
+
+        fn cell(verb: ReplayVerb, evidence: &ArchiveEvidence, flow: &FlowEvidence) -> String {
+            match (
+                decided(verb, evidence, flow, false),
+                decided(verb, evidence, flow, true),
+            ) {
+                (Ok(()), Ok(())) => "admitted".to_string(),
+                (
+                    Err(ArchiveRefusal::Failed { .. } | ArchiveRefusal::Interrupted { .. }),
+                    Ok(()),
+                ) => "with the flag".to_string(),
+                (
+                    Err(ArchiveRefusal::NoWorkLeft { .. }),
+                    Err(ArchiveRefusal::NoWorkLeft { .. }),
+                ) => "refused, no work left".to_string(),
+                (plain, flagged) => panic!(
+                    "{}: --{verb}-from {RUN}: {plain:?}; --{verb}-from {RUN} \
+                     --allow-incomplete-archive: {flagged:?}",
+                    row_of(evidence),
+                    verb = verb.word()
+                ),
+            }
+        }
+
+        fn source_shapes() -> Vec<Vec<SourceEvidence>> {
+            vec![
+                vec![source("web_orders", true, Some(EofKind::Natural))],
+                finished(),
+                vec![source("web_orders", true, Some(EofKind::Truncated))],
+                vec![source("web_orders", true, Some(EofKind::Poison))],
+                vec![source("web_orders", true, None)],
+                vec![source("web_orders", false, Some(EofKind::Natural))],
+                vec![source("web_orders", false, None)],
+                vec![
+                    source("store_orders", true, Some(EofKind::Natural)),
+                    source("web_orders", true, Some(EofKind::Truncated)),
+                ],
+            ]
+        }
+
+        fn check_line(
+            subject: &str,
+            evidence: &ArchiveEvidence,
+            flow: &FlowEvidence,
+            triggered: fn(&ArchiveRefusal) -> bool,
+        ) -> String {
+            let refused = |verb: ReplayVerb| {
+                let decision = |allow_incomplete_archive: bool| match decided(
+                    verb,
+                    evidence,
+                    flow,
+                    allow_incomplete_archive,
+                ) {
+                    Ok(()) => false,
+                    Err(refusal) if triggered(&refusal) => true,
+                    Err(other) => panic!(
+                        "unexpected refusal for {subject}, {verb:?}, flag \
+                             {allow_incomplete_archive}: {other:?}"
+                    ),
+                };
+                let plain = decision(false);
+                let flagged = decision(true);
+                assert_eq!(
+                    plain,
+                    flagged,
+                    "{subject}: --{verb}-from {RUN} and --{verb}-from {RUN} \
+                     --allow-incomplete-archive disagree",
+                    verb = verb.word()
+                );
+                plain
+            };
+            match (refused(ReplayVerb::Replay), refused(ReplayVerb::Resume)) {
+                (true, true) => format!("ObzenFlow refuses both verbs for {subject}."),
+                (false, true) => format!("ObzenFlow refuses a resume when {subject}."),
+                (true, false) => format!("ObzenFlow refuses a replay when {subject}."),
+                (false, false) => format!("ObzenFlow refuses no verb for {subject}."),
+            }
+        }
+
+        #[test]
+        fn admission_table_all_rows_match() {
+            let continuing = flow(SourceContinuation::RecordedRead);
+            let mut cells: Vec<Option<(String, String)>> = vec![None; ROWS.len()];
+            for status in [
+                ArchiveStatus::Completed,
+                ArchiveStatus::Cancelled,
+                ArchiveStatus::Unknown,
+                ArchiveStatus::Failed,
+            ] {
+                for failure in [FailureEvidence::Other, FailureEvidence::DepartedFromArchive] {
+                    for sources in source_shapes() {
+                        let evidence = ArchiveEvidence {
+                            failure,
+                            ..archive(status, sources)
+                        };
+                        let row = row_of(&evidence);
+                        let index = ROWS.iter().position(|label| *label == row).unwrap();
+                        let rendered = (
+                            cell(ReplayVerb::Replay, &evidence, &continuing),
+                            cell(ReplayVerb::Resume, &evidence, &continuing),
+                        );
+                        match &cells[index] {
+                            Some(first) => assert_eq!(first, &rendered, "{row}: {evidence:?}"),
+                            None => cells[index] = Some(rendered),
+                        }
+                    }
+                }
+            }
+
+            let mut lines = vec![
+                "Archive admission (the flag is --allow-incomplete-archive)".to_string(),
+                "Replay uses the named run. Resume follows replay links and reads the".to_string(),
+                "ancestors that it needs to finish reconstruction. Apply each column to that run."
+                    .to_string(),
+                "Archive          | --replay-from | --resume-from".to_string(),
+            ];
+            for (label, rendered) in ROWS.iter().zip(cells) {
+                let (replay, resume) = rendered.expect("every row has evidence");
+                lines.push((*label).to_string());
+                lines.push(format!("{:17}| {replay:<13} | {resume}", ""));
+            }
+            let mut live = archive(ArchiveStatus::Cancelled, finished());
+            live.live_writer = true;
+            lines.push(check_line(
+                "a run that still has a live writer",
+                &live,
+                &continuing,
+                |refusal| matches!(refusal, ArchiveRefusal::StillRunning { .. }),
+            ));
+            let cyclic = FlowEvidence {
+                cycle_members: vec!["review".to_string(), "triage".to_string()],
+                ..continuing.clone()
+            };
+            lines.push(check_line(
+                "a flow with a cycle",
+                &archive(ArchiveStatus::Cancelled, finished()),
+                &cyclic,
+                |refusal| matches!(refusal, ArchiveRefusal::Cycle { .. }),
+            ));
+            lines.push(check_line(
+                "the connector of a source cannot continue its recorded input",
+                &archive(ArchiveStatus::Cancelled, unfinished()),
+                &flow(SourceContinuation::Refuse),
+                |refusal| matches!(refusal, ArchiveRefusal::Sources { .. }),
+            ));
+
+            assert_eq!(lines.join("\n"), ADMISSION_TABLE);
+        }
     }
 }

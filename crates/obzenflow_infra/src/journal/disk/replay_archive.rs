@@ -16,23 +16,35 @@ use super::scanner::{
 };
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, SourcePollContinuation,
+};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{SystemEvent, SystemPayload};
+use obzenflow_core::event::{SourceDiagnosticReason, SystemEvent, SystemPayload};
 use obzenflow_core::journal::archive::manifest::{
     RunManifest, RunManifestInterruptedAppend, EFFECT_BINDING_DESCRIPTOR_CAPABILITY,
     JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
-use obzenflow_core::journal::archive_actions::{ArchiveEvidence, ReplayVerb};
+use obzenflow_core::journal::archive_actions::{ArchiveEvidence, FailureEvidence, ReplayVerb};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// `ResumeEvidence` contains the observed head of a history and the archive
+/// evidence that a plain resume of the head reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeEvidence {
+    pub run: PathBuf,
+    pub continued_from: Option<PathBuf>,
+    pub archive: ArchiveEvidence,
+}
 
 pub struct DiskReplayArchive {
     archive_path: PathBuf,
@@ -54,7 +66,7 @@ pub struct DiskReplayArchive {
     /// The runs a resume of this one merges with, nearest first (B6).
     ancestors: Vec<Arc<DiskReplayArchive>>,
     live_writer: bool,
-    failure: obzenflow_core::journal::archive_actions::FailureEvidence,
+    failure: FailureEvidence,
     interrupted_appends: Vec<RunManifestInterruptedAppend>,
 }
 
@@ -172,8 +184,9 @@ impl DiskReplayArchive {
         }
     }
 
-    /// The evidence of a run this process just finished writing, as `verb`
-    /// would open it. The run must have stopped and be the head of its history.
+    /// `written_run_evidence` returns the evidence of `run` as `verb` opens it,
+    /// without the liveness probe or the continuation checks. If the caller does
+    /// not know that the run stopped, it probes liveness first.
     pub async fn written_run_evidence(
         run: PathBuf,
         verb: ReplayVerb,
@@ -187,6 +200,50 @@ impl DiskReplayArchive {
             }
         };
         Ok(archive.evidence())
+    }
+
+    /// `resume_evidence` reads the current head and its evidence for a plain resume.
+    pub async fn resume_evidence(run: &Path) -> Result<ResumeEvidence, ReplayError> {
+        use super::continuation::{has_live_writer, read_claim, takeover, Takeover};
+
+        let mut next = Self::resolve_replayed_run(run.to_path_buf())?;
+        let mut visited = HashSet::new();
+        let mut continued_from = None;
+        loop {
+            let (path, manifest) = next;
+            if !visited.insert(path.clone()) {
+                return Err(ReplayError::Parse {
+                    message: format!(
+                        "The resume history of {} returns to {}.",
+                        run.display(),
+                        path.display()
+                    ),
+                });
+            }
+            if let Some(claim) = read_claim(&path)? {
+                next = claim.open(&path)?;
+                continued_from = Some(path);
+                continue;
+            }
+            let live_writer = has_live_writer(&path, &manifest)?;
+            if let (false, Some(resume)) = (live_writer, &manifest.resume) {
+                if takeover(&path, &manifest, &resume.resumed_from)? != Takeover::Held {
+                    next = Self::resolve_replayed_run(resume.resumed_from.clone())?;
+                    continued_from = None;
+                    continue;
+                }
+            }
+            let head =
+                Self::open_manifest(path, manifest, false, live_writer, ScanPurpose::Recovery)
+                    .await?
+                    .with_ancestors(ScanPurpose::Recovery)
+                    .await?;
+            return Ok(ResumeEvidence {
+                run: head.archive_path.clone(),
+                continued_from,
+                archive: head.evidence(),
+            });
+        }
     }
 
     pub(crate) async fn footer_evidence(run: &Path) -> [Option<ArchiveEvidence>; 2] {
@@ -240,17 +297,18 @@ impl DiskReplayArchive {
         })?;
 
         let manifest_path = archive_path.join(RUN_MANIFEST_FILENAME);
-        if !manifest_path.exists() {
-            return Err(ReplayError::MissingManifest {
-                path: manifest_path,
-            });
-        }
-
-        let manifest_body =
-            std::fs::read_to_string(&manifest_path).map_err(|e| ReplayError::Io {
-                message: format!("Failed to read run manifest: {}", manifest_path.display()),
-                source: e,
-            })?;
+        let manifest_body = std::fs::read_to_string(&manifest_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ReplayError::MissingManifest {
+                    path: manifest_path.clone(),
+                }
+            } else {
+                ReplayError::Io {
+                    message: format!("Failed to read run manifest: {}", manifest_path.display()),
+                    source: error,
+                }
+            }
+        })?;
         // FLOWIP-095j: gate on the version from the raw JSON before typed
         // deserialization. Required fields added in newer journal schemas would
         // otherwise turn an old archive into a confusing missing-field parse error
@@ -349,29 +407,26 @@ impl DiskReplayArchive {
                     scan.reconstruction_completed,
                     scan.contract_violation,
                 ),
-                Err(err) => {
-                    if allow_incomplete_archive
-                        && !matches!(err, ReplayError::UnsupportedJournalSchemaVersion { .. })
-                    {
-                        tracing::warn!(
-                            archive_path = %archive_path.display(),
-                            system_log_path = %system_log_path.display(),
-                            error = %err,
-                            "Replay archive system.log could not be read; proceeding due to allow_incomplete_archive"
-                        );
-                        (
-                            StatusDerivation {
-                                terminal_events_found: 0,
-                                chosen: ArchiveStatus::Unknown,
-                                warning: Some(err.to_string()),
-                            },
-                            None,
-                            false,
-                        )
-                    } else {
-                        return Err(err);
-                    }
+                Err(ReplayError::MissingSystemLog { path }) if allow_incomplete_archive => {
+                    tracing::warn!(
+                        archive_path = %archive_path.display(),
+                        system_log_path = %path.display(),
+                        "Replay archive system.log could not be read; proceeding due to allow_incomplete_archive"
+                    );
+                    (
+                        StatusDerivation {
+                            terminal_events_found: 0,
+                            chosen: ArchiveStatus::Unknown,
+                            warning: Some(format!(
+                                "The archive has no system.log at {}.",
+                                path.display()
+                            )),
+                        },
+                        None,
+                        false,
+                    )
                 }
+                Err(err) => return Err(err),
             };
         let status = status_derivation.chosen;
         let failure = if status == ArchiveStatus::Failed && manifest.resume.is_some() {
@@ -468,29 +523,48 @@ impl DiskReplayArchive {
         let mut ancestors: Vec<Arc<Self>> = Vec::new();
         let mut parent = self.unfinished_parent();
         while let Some(ancestor) = parent {
-            if ancestor == self.archive_path || ancestors.iter().any(|a| a.archive_path == ancestor)
-            {
+            let unreadable = |error| ReplayError::AncestorUnreadable {
+                archive: self.archive_path.clone(),
+                ancestor: ancestor.clone(),
+                source: Box::new(error),
+            };
+            let (path, manifest) =
+                Self::read_manifest(ancestor.clone()).map_err(|error| match error {
+                    ReplayError::Io { ref source, .. }
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        ReplayError::AncestorMissing {
+                            archive: self.archive_path.clone(),
+                            ancestor: ancestor.clone(),
+                        }
+                    }
+                    error => unreadable(error),
+                })?;
+            if path == self.archive_path || ancestors.iter().any(|a| a.archive_path == path) {
                 return Err(ReplayError::Parse {
                     message: format!(
                         "the resume lineage of {} returns to {}",
                         self.archive_path.display(),
-                        ancestor.display()
+                        path.display()
                     ),
                 });
             }
-            if !ancestor.exists() {
-                return Err(ReplayError::AncestorMissing {
+            let opened = Self::open_manifest(
+                path,
+                manifest,
+                self.allow_incomplete_archive,
+                false,
+                purpose,
+            )
+            .await
+            .map_err(|error| match error {
+                ReplayError::MissingSystemLog { path } => ReplayError::AncestorMissingSystemLog {
                     archive: self.archive_path.clone(),
-                    ancestor,
-                });
-            }
-            let opened = Self::open_replay(ancestor.clone(), true, Liveness::Stopped, purpose)
-                .await
-                .map_err(|error| ReplayError::AncestorUnreadable {
-                    archive: self.archive_path.clone(),
-                    ancestor,
-                    source: Box::new(error),
-                })?;
+                    ancestor: ancestor.clone(),
+                    system_log: path,
+                },
+                error => unreadable(error),
+            })?;
             parent = opened.unfinished_parent();
             ancestors.push(Arc::new(opened));
         }
@@ -506,22 +580,27 @@ impl DiskReplayArchive {
         let (mut path, mut manifest) = Self::read_manifest(archive_path)?;
         let mut visited = vec![path.clone()];
         while let Some(replayed) = replayed_run(&manifest) {
-            if visited.contains(&replayed) {
+            (path, manifest) =
+                Self::read_manifest(replayed.clone()).map_err(|error| match error {
+                    ReplayError::Io { ref source, .. }
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        ReplayError::ReplayedRunMissing {
+                            replay: path,
+                            replayed,
+                        }
+                    }
+                    error => error,
+                })?;
+            if visited.contains(&path) {
                 return Err(ReplayError::Parse {
                     message: format!(
                         "the replays from {} return to {}",
                         visited[0].display(),
-                        replayed.display()
+                        path.display()
                     ),
                 });
             }
-            if !replayed.exists() {
-                return Err(ReplayError::ReplayedRunMissing {
-                    replay: path,
-                    replayed,
-                });
-            }
-            (path, manifest) = Self::read_manifest(replayed)?;
             visited.push(path.clone());
         }
         Ok((path, manifest))
@@ -623,11 +702,6 @@ impl DiskReplayArchive {
         self.status_derivation.clone()
     }
 
-    /// FLOWIP-120q torn-tail policy. A cleanly `Completed` run flushed every
-    /// record before its terminal event, so a torn final record is corruption.
-    /// Any other status was interrupted, so an unterminated final record is a
-    /// tolerated torn tail. `allow_incomplete_archive` governs only whether a
-    /// non-terminal archive may be opened, never read-time tolerance.
     fn read_policy(&self) -> ReadPolicy {
         ReadPolicy::SealedScan {
             tolerate_torn_tail: self.status != ArchiveStatus::Completed,
@@ -1229,13 +1303,53 @@ fn scan_marker_generation(
     Ok(max_generation)
 }
 
+pub(crate) fn departs_from_archive(execution: &ExecutionPayload) -> bool {
+    match execution {
+        ExecutionPayload::StageFatalRecorded(fatal) => fatal.reason.departs_from_archive(),
+        ExecutionPayload::SourcePollFailed(failure) => {
+            failure.continuation == SourcePollContinuation::Terminal
+                && failure.diagnostic.reason() == SourceDiagnosticReason::InputChanged
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug, Default)]
+struct FailureFold {
+    departed: bool,
+    other: bool,
+}
+
+impl FailureFold {
+    fn observe(&mut self, execution: &ExecutionPayload) {
+        if departs_from_archive(execution) {
+            self.departed = true;
+        } else if match execution {
+            ExecutionPayload::StageFatalRecorded(_) => true,
+            ExecutionPayload::SourcePollFailed(failure) => {
+                failure.continuation == SourcePollContinuation::Terminal
+            }
+            _ => false,
+        } {
+            self.other = true;
+        }
+    }
+
+    fn finish(self, contract_violation: bool) -> FailureEvidence {
+        if self.departed && !self.other && !contract_violation {
+            FailureEvidence::DepartedFromArchive
+        } else {
+            FailureEvidence::Other
+        }
+    }
+}
+
 fn scan_failure_evidence(
     archive_path: &Path,
     manifest: &RunManifest,
     contract_violation: bool,
-) -> Result<obzenflow_core::journal::archive_actions::FailureEvidence, ReplayError> {
+) -> Result<FailureEvidence, ReplayError> {
     use obzenflow_core::event::ChainPayload;
-    use obzenflow_core::journal::archive_actions::{FailureEvidence, FailureFold};
     let policy = ReadPolicy::SealedScan {
         tolerate_torn_tail: true,
     };
@@ -1294,15 +1408,14 @@ pub(crate) struct SystemLogScan {
 }
 
 pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError> {
-    if !path.exists() {
-        return Err(ReplayError::MissingSystemLog {
+    let file = File::open(path).map_err(|source| match source.kind() {
+        std::io::ErrorKind::NotFound => ReplayError::MissingSystemLog {
             path: path.to_path_buf(),
-        });
-    }
-
-    let file = File::open(path).map_err(|e| ReplayError::Io {
-        message: format!("Failed to open system.log at {}", path.display()),
-        source: e,
+        },
+        _ => ReplayError::Io {
+            message: format!("Failed to open system.log at {}", path.display()),
+            source,
+        },
     })?;
     let mut reader = BufReader::new(file);
     let mut buf = Vec::new();
@@ -1422,8 +1535,106 @@ pub(crate) fn replayed_run(manifest: &RunManifest) -> Option<PathBuf> {
     }
 }
 
+pub(crate) fn admission_run(requested: &Path, continued: &Path) -> PathBuf {
+    if std::fs::canonicalize(requested).is_ok_and(|requested| requested == continued) {
+        requested.to_path_buf()
+    } else {
+        continued.to_path_buf()
+    }
+}
+
 fn causal_admission_error(error: obzenflow_core::journal::JournalError) -> ReplayError {
     ReplayError::Parse {
         message: format!("Invalid archived causal commitment: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::StageFatalReason;
+
+    fn fatal(reason: StageFatalReason) -> ExecutionPayload {
+        use obzenflow_core::event::{StageFatalCode, StageFatalRecorded, StageFatalSeverity};
+        ExecutionPayload::StageFatalRecorded(StageFatalRecorded {
+            severity: StageFatalSeverity::Primary,
+            stage_id: StageId::new(),
+            stage_key: "score".to_string(),
+            causal_event_id: None,
+            input_position: None,
+            primary_cause_event_id: None,
+            code: StageFatalCode::Replay,
+            reason,
+            detail: String::new(),
+            departure: None,
+        })
+    }
+
+    fn poll_failed(
+        continuation: SourcePollContinuation,
+        reason: SourceDiagnosticReason,
+    ) -> ExecutionPayload {
+        ExecutionPayload::SourcePollFailed(
+            obzenflow_core::event::payloads::execution_payload::SourcePollFailedFact {
+                kind: obzenflow_core::event::status::processing_status::ErrorKind::Remote,
+                detail: String::new(),
+                continuation,
+                diagnostic: reason.into(),
+            },
+        )
+    }
+
+    fn folded(rows: &[ExecutionPayload], contract_violation: bool) -> FailureEvidence {
+        let mut fold = FailureFold::default();
+        for row in rows {
+            fold.observe(row);
+        }
+        fold.finish(contract_violation)
+    }
+
+    #[test]
+    fn departures_alone_fold_to_departed_from_archive() {
+        let input_changed = poll_failed(
+            SourcePollContinuation::Terminal,
+            SourceDiagnosticReason::InputChanged,
+        );
+        for departures in [
+            vec![fatal(StageFatalReason::DescriptorMismatch)],
+            vec![fatal(StageFatalReason::MissingRecordedFact)],
+            vec![
+                fatal(StageFatalReason::MissingRecordedEffect),
+                fatal(StageFatalReason::UnusedFactHistory),
+            ],
+            vec![input_changed.clone()],
+        ] {
+            assert_eq!(
+                folded(&departures, false),
+                FailureEvidence::DepartedFromArchive,
+                "{departures:?}"
+            );
+            assert_eq!(folded(&departures, true), FailureEvidence::Other);
+        }
+        for other in [
+            vec![],
+            vec![fatal(StageFatalReason::JournalFailure)],
+            vec![
+                fatal(StageFatalReason::UnusedEffectHistory),
+                fatal(StageFatalReason::JournalFailure),
+            ],
+            vec![
+                input_changed,
+                poll_failed(
+                    SourcePollContinuation::Terminal,
+                    SourceDiagnosticReason::RemoteFailed,
+                ),
+            ],
+            vec![poll_failed(
+                SourcePollContinuation::Recoverable,
+                SourceDiagnosticReason::InputChanged,
+            )],
+            vec![fatal(StageFatalReason::RecordingEnded)],
+        ] {
+            assert_eq!(folded(&other, false), FailureEvidence::Other, "{other:?}");
+        }
     }
 }

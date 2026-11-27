@@ -97,17 +97,7 @@ fn write_manifest_of(
 
 async fn write_system_log_completed(dir: &Path) {
     let writer_id = WriterId::from(SystemId::new());
-    let event = SystemEvent::new(
-        writer_id,
-        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed {
-            duration_ms: DurationMs(1),
-            metrics: obzenflow_core::metrics::FlowLifecycleMetricsSnapshot {
-                events_in_total: 0,
-                events_out_total: 0,
-                errors_total: 0,
-            },
-        }),
-    );
+    let event = SystemEvent::new(writer_id, SystemPayload::PipelineLifecycle(completed()));
 
     let record = JournalRecord::new(JournalWriterId::new(), event);
 
@@ -311,7 +301,7 @@ async fn open_fails_when_manifest_missing() {
 }
 
 #[tokio::test]
-async fn open_fails_when_system_log_missing_unless_allowed() {
+async fn archive_missing_system_log_requires_flag() {
     let dir = tempdir().unwrap();
     write_manifest(dir.path());
 
@@ -320,11 +310,48 @@ async fn open_fails_when_system_log_missing_unless_allowed() {
         .err()
         .unwrap();
     assert!(matches!(err, ReplayError::MissingSystemLog { .. }));
+    let system_log = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .join("system.log");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "The replay archive has no system.log at {}.",
+            system_log.display()
+        )
+    );
 
     let archive = DiskReplayArchive::open(dir.path().to_path_buf(), true)
         .await
         .unwrap();
     assert_eq!(archive.status(), ArchiveStatus::Unknown);
+}
+
+#[tokio::test]
+async fn damaged_system_log_with_flag_refused() {
+    let dir = tempdir().unwrap();
+    write_run(
+        dir.path(),
+        FLOW_ID,
+        None,
+        &[source_fact(1)],
+        Some(completed()),
+    )
+    .await;
+    flip_first_record_byte(&dir.path().join("system.log"));
+
+    for allow_incomplete_archive in [false, true] {
+        let Err(error) =
+            DiskReplayArchive::open(dir.path().to_path_buf(), allow_incomplete_archive).await
+        else {
+            panic!("a damaged system.log opens with allow_incomplete_archive={allow_incomplete_archive}");
+        };
+        assert!(
+            matches!(&error, ReplayError::Parse { message }
+                if message.starts_with("system.log record corrupt at line 1 in ")),
+            "{error}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -476,9 +503,12 @@ async fn open_rejects_previous_journal_schema_version_before_typed_parse() {
         ),
         "expected UnsupportedJournalSchemaVersion for a 2.0 archive, got: {err}"
     );
-    assert!(
-        err.to_string().contains("re-record"),
-        "refusal must carry the re-record guidance, got: {err}"
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "This build of ObzenFlow does not support journal schema version 2.0. It supports \
+             version {JOURNAL_SCHEMA_VERSION}."
+        )
     );
 }
 
@@ -599,7 +629,7 @@ async fn open_rejects_previous_journal_format_before_parsing_legacy_retry_rows()
     );
     assert!(
         err.to_string()
-            .contains("unsupported journal schema version"),
+            .contains("does not support journal schema version"),
         "refusal must identify the incompatible record format, got: {err}"
     );
 }
@@ -685,6 +715,16 @@ async fn write_stopped_run(
     resume: Option<obzenflow_core::journal::archive::manifest::RunManifestResumeConfig>,
     facts: &[ChainEvent],
 ) {
+    write_run(dir, flow_id, resume, facts, None).await;
+}
+
+async fn write_run(
+    dir: &Path,
+    flow_id: &str,
+    resume: Option<obzenflow_core::journal::archive::manifest::RunManifestResumeConfig>,
+    facts: &[ChainEvent],
+    ending: Option<PipelineLifecycleEvent>,
+) {
     write_manifest_of(dir, flow_id, resume);
     let run: obzenflow_core::FlowId = flow_id.parse().unwrap();
     let system_id = SystemId::new();
@@ -707,6 +747,15 @@ async fn write_stopped_run(
         )
         .await
         .unwrap();
+    if let Some(ending) = ending {
+        system
+            .append(
+                SystemEvent::new(system_id.into(), SystemPayload::PipelineLifecycle(ending)),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+    }
     let stage: obzenflow_core::StageId = "stage_01H00000000000000000000000".parse().unwrap();
     let source = DiskJournal::<ChainEvent>::with_owner_in_run(
         dir.join(SOURCE_LOG),
@@ -734,6 +783,95 @@ fn source_fact(row: u64) -> ChainEvent {
         std::num::NonZeroU32::MIN,
         serde_json::json!({ "row": row }),
     )
+}
+
+fn source_eof() -> ChainEvent {
+    ChainEventFactory::eof_event(
+        WriterId::from(
+            "stage_01H00000000000000000000000"
+                .parse::<obzenflow_core::StageId>()
+                .unwrap(),
+        ),
+        true,
+    )
+}
+
+fn completed() -> PipelineLifecycleEvent {
+    PipelineLifecycleEvent::Completed {
+        duration_ms: DurationMs(1),
+        metrics: obzenflow_core::metrics::FlowLifecycleMetricsSnapshot {
+            events_in_total: 0,
+            events_out_total: 0,
+            errors_total: 0,
+        },
+    }
+}
+
+fn cancelled() -> PipelineLifecycleEvent {
+    PipelineLifecycleEvent::Cancelled {
+        reason: "stopped by the operator".to_string(),
+        duration_ms: DurationMs(1),
+        metrics: None,
+        failure_cause: None,
+    }
+}
+
+fn flip_first_record_byte(journal: &Path) {
+    let mut bytes = std::fs::read(journal).unwrap();
+    bytes[40] ^= 0xff;
+    std::fs::write(journal, &bytes).unwrap();
+}
+
+fn record_replay_of(dir: &Path, original: &Path) {
+    let path = dir.join(RUN_MANIFEST_FILENAME);
+    let mut manifest: RunManifest =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    manifest.replay = Some(
+        obzenflow_core::journal::archive::manifest::RunManifestReplayConfig {
+            replay_from: original.display().to_string(),
+            allow_incomplete_archive: false,
+        },
+    );
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+}
+
+async fn write_claimed_resume(
+    base: &Path,
+    parent_facts: &[ChainEvent],
+    caught_up: usize,
+    parent_ending: Option<PipelineLifecycleEvent>,
+    resume_ending: Option<PipelineLifecycleEvent>,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    const RESUMED_ID: &str = "flow_01H00000000000000000000001";
+    let (parent, resumed) = (base.join("r0"), base.join("r1"));
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::create_dir_all(&resumed).unwrap();
+    write_run(&parent, FLOW_ID, None, parent_facts, parent_ending).await;
+    let parent = std::fs::canonicalize(&parent).unwrap();
+    write_run(
+        &resumed,
+        RESUMED_ID,
+        Some(
+            obzenflow_core::journal::archive::manifest::RunManifestResumeConfig {
+                resumed_from: parent.clone(),
+                resume_generation: 1,
+                merged_from: Vec::new(),
+            },
+        ),
+        &parent_facts[..caught_up],
+        resume_ending,
+    )
+    .await;
+    let resumed = std::fs::canonicalize(&resumed).unwrap();
+    DiskReplayArchive::open_for_resume(parent.clone(), false)
+        .await
+        .unwrap()
+        .claim_continuation(
+            RESUMED_ID.parse().unwrap(),
+            &obzenflow_core::journal::factory::CurrentRunLocator::new(resumed.clone()),
+        )
+        .unwrap();
+    (parent, resumed)
 }
 
 fn append_tail(journal: &Path, tail: &[u8]) -> u64 {
@@ -901,6 +1039,370 @@ async fn admission_merged_ancestor_tail_recorded() {
             left_bytes: 4096,
             tail_kind: TailKind::ZeroFilled,
         }]
+    );
+}
+
+#[tokio::test]
+async fn resume_with_damaged_ancestor_log_refused() {
+    let base = tempdir().unwrap();
+    let (parent, resumed) =
+        write_claimed_resume(base.path(), &[source_fact(1)], 1, Some(cancelled()), None).await;
+    flip_first_record_byte(&parent.join("system.log"));
+
+    for allow_incomplete_archive in [false, true] {
+        let Err(error) =
+            DiskReplayArchive::open_for_resume(resumed.clone(), allow_incomplete_archive).await
+        else {
+            panic!("a damaged ancestor system.log opens with allow_incomplete_archive={allow_incomplete_archive}");
+        };
+        assert!(
+            matches!(&error, ReplayError::AncestorUnreadable { ancestor, source, .. }
+                if *ancestor == parent
+                    && matches!(source.as_ref(), ReplayError::Parse { message }
+                        if message.starts_with("system.log record corrupt at line 1 in "))),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn resume_with_missing_ancestor_log_refused() {
+    let base = tempdir().unwrap();
+    let (parent, resumed) =
+        write_claimed_resume(base.path(), &[source_fact(1)], 1, None, None).await;
+    let system_log = parent.join("system.log");
+    std::fs::remove_file(&system_log).unwrap();
+
+    let Err(error) = DiskReplayArchive::open_for_resume(resumed.clone(), false).await else {
+        panic!("a resume opens an ancestor that has no system.log");
+    };
+    assert!(
+        matches!(
+            &error,
+            ReplayError::AncestorMissingSystemLog { system_log: path, .. } if path == &system_log
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "ObzenFlow cannot resume {resumed}. Its reconstruction did not complete, and the \
+             archive that it resumed from, {parent}, has no system.log.",
+            resumed = resumed.display(),
+            parent = parent.display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn missing_ancestor_log_with_flag_resumes() {
+    let base = tempdir().unwrap();
+    let (parent, resumed) =
+        write_claimed_resume(base.path(), &[source_fact(1)], 1, None, None).await;
+    std::fs::remove_file(parent.join("system.log")).unwrap();
+
+    let head = DiskReplayArchive::open_for_resume(resumed, true)
+        .await
+        .expect("the flag opens the ancestor from its stage journals");
+    let ancestors = head.ancestors();
+    assert_eq!(ancestors.len(), 1);
+    assert_eq!(ancestors[0].archive_path(), parent);
+    assert_eq!(ancestors[0].archive_status(), ArchiveStatus::Unknown);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn archive_looped_system_log_reports_io() {
+    use obzenflow_infra::verify::{render_verdict, verify_run_dirs, VerifyOptions};
+
+    let base = tempdir().unwrap();
+    let (parent, resumed) =
+        write_claimed_resume(base.path(), &[source_fact(1)], 1, None, None).await;
+    let log = parent.join("system.log");
+    std::fs::remove_file(&log).unwrap();
+    std::os::unix::fs::symlink("system.log", &log).unwrap();
+    let cause = std::fs::File::open(&log).unwrap_err();
+
+    for allow_incomplete in [true, false] {
+        let Err(error) =
+            DiskReplayArchive::open_for_resume(resumed.clone(), allow_incomplete).await
+        else {
+            panic!(
+                "resume accepted an unreadable ancestor with allow_incomplete={allow_incomplete}"
+            );
+        };
+        assert!(
+            matches!(&error, ReplayError::AncestorUnreadable { ancestor, source, .. }
+            if ancestor == &parent && matches!(source.as_ref(), ReplayError::Io { source, .. }
+                if source.raw_os_error() == cause.raw_os_error())),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains(&log.display().to_string()), "{message}");
+        assert!(message.contains(&cause.to_string()), "{message}");
+    }
+
+    let verdict = verify_run_dirs(&parent, &resumed, &VerifyOptions::default()).unwrap();
+    let message = render_verdict(&verdict);
+    assert_eq!(verdict.exit_code(), 3);
+    assert!(message.contains(&log.display().to_string()), "{message}");
+    assert!(message.contains(&cause.to_string()), "{message}");
+}
+
+#[tokio::test]
+async fn torn_resume_evidence_merges_ancestor() {
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+    use obzenflow_core::journal::archive_actions::{
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+    };
+    let base = tempdir().unwrap();
+    let parent_facts = [source_fact(1), source_fact(2), source_eof()];
+    let (_, torn) = write_claimed_resume(base.path(), &parent_facts, 1, None, None).await;
+    let flow = FlowEvidence {
+        cycle_members: Vec::new(),
+        sources: vec![(
+            "returns".to_string(),
+            obzenflow_core::source::SourceContinuation::Refuse,
+        )],
+    };
+
+    let evidence = DiskReplayArchive::open(torn.clone(), false)
+        .await
+        .unwrap()
+        .evidence();
+    assert_eq!(evidence.sources[0].recorded_eof, None);
+    assert_eq!(
+        decide(
+            ReplayVerb::Replay,
+            &torn,
+            &evidence,
+            &flow,
+            ArchiveOverrides::default()
+        ),
+        Err(ArchiveRefusal::Interrupted { run: torn.clone() })
+    );
+    let resume = DiskReplayArchive::resume_evidence(&torn).await.unwrap();
+    assert_eq!(
+        resume.archive.sources[0].recorded_eof,
+        Some(EofKind::Natural)
+    );
+    assert_eq!((&resume.run, &resume.continued_from), (&torn, &None));
+    assert_eq!(
+        decide(
+            ReplayVerb::Resume,
+            &resume.run,
+            &resume.archive,
+            &flow,
+            ArchiveOverrides::default()
+        ),
+        Ok(())
+    );
+}
+
+#[tokio::test]
+async fn replay_completed_head_offers_replay() {
+    use obzenflow_core::journal::archive_actions::{
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+    };
+    use obzenflow_infra::application::{shell_path, ApplicationError};
+    let base = tempdir().unwrap();
+    let facts = [source_fact(1), source_eof()];
+    let (parent, head) = write_claimed_resume(
+        &base.path().join("Pat's Runs"),
+        &facts,
+        facts.len(),
+        None,
+        Some(completed()),
+    )
+    .await;
+    let before = (archive_bytes(&parent), archive_bytes(&head));
+    let archive = DiskReplayArchive::open(parent.clone(), false)
+        .await
+        .unwrap()
+        .evidence();
+    assert_eq!(
+        decide(
+            ReplayVerb::Replay,
+            &parent,
+            &archive,
+            &FlowEvidence::default(),
+            ArchiveOverrides::default(),
+        ),
+        Err(ArchiveRefusal::Interrupted {
+            run: parent.clone()
+        })
+    );
+    let target = DiskReplayArchive::resume_evidence(&parent).await.unwrap();
+    assert_eq!(
+        (&target.run, target.continued_from.as_ref()),
+        (&head, Some(&parent))
+    );
+    let refusal = decide(
+        ReplayVerb::Resume,
+        &target.run,
+        &target.archive,
+        &FlowEvidence::default(),
+        ArchiveOverrides::default(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal, ArchiveRefusal::NoWorkLeft { run: head.clone() });
+    assert_eq!(
+        ApplicationError::from(&refusal).to_string(),
+        format!(
+            "ObzenFlow cannot resume {head}, because the run completed naturally and every \
+             source is finite. No work remains.\nReplay it with --replay-from {operand}.",
+            head = head.display(),
+            operand = shell_path(&head)
+        )
+    );
+    assert_eq!((archive_bytes(&parent), archive_bytes(&head)), before);
+}
+
+#[tokio::test]
+async fn resume_missing_successor_names_directory() {
+    let base = tempdir().unwrap();
+    let (parent, head) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    std::fs::rename(&head, base.path().join("saved")).unwrap();
+    assert!(matches!(DiskReplayArchive::resume_evidence(&parent).await,
+        Err(ReplayError::ContinuationMissing { parent: from, successor }) if from == parent && successor == head
+    ));
+}
+
+#[tokio::test]
+async fn resume_mismatched_claim_reports_identity() {
+    let base = tempdir().unwrap();
+    let (parent, head) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    std::fs::rename(&head, base.path().join("saved")).unwrap();
+    std::fs::create_dir(&head).unwrap();
+    write_stopped_run(&head, FLOW_ID, None, &[]).await;
+    let error = DiskReplayArchive::resume_evidence(&parent)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ReplayError::Parse { message } if message == format!(
+            "The continuation claim in {} names flow_01H00000000000000000000001, but {} contains {FLOW_ID}.", parent.display(), head.display()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn resume_locked_head_reports_writer() {
+    use obzenflow_core::journal::archive_actions::{
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+    };
+    let base = tempdir().unwrap();
+    let (parent, head) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    let writer = std::fs::File::open(head.join(SOURCE_LOG)).unwrap();
+    writer.try_lock().unwrap();
+    std::fs::remove_file(head.join("system.log")).unwrap();
+    let target = DiskReplayArchive::resume_evidence(&parent).await.unwrap();
+    assert_eq!(
+        decide(
+            ReplayVerb::Resume,
+            &target.run,
+            &target.archive,
+            &FlowEvidence::default(),
+            ArchiveOverrides::default(),
+        ),
+        Err(ArchiveRefusal::StillRunning {
+            verb: ReplayVerb::Resume,
+            run: head
+        })
+    );
+}
+
+#[tokio::test]
+async fn resume_unclaimed_child_selects_parent() {
+    let base = tempdir().unwrap();
+    let (parent, child) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    std::fs::remove_file(parent.join("run_continuation.json")).unwrap();
+    let target = DiskReplayArchive::resume_evidence(&child).await.unwrap();
+    assert_eq!(target.run, parent);
+    assert_eq!(target.continued_from, None);
+}
+
+#[tokio::test]
+async fn replay_aliased_cycle_refused() {
+    let base = tempdir().unwrap();
+    let replay = base.path().join("replay");
+    std::fs::create_dir(&replay).unwrap();
+    write_stopped_run(&replay, FLOW_ID, None, &[]).await;
+    record_replay_of(&replay, &replay.join("..").join("replay"));
+    let error = DiskReplayArchive::resume_evidence(&replay)
+        .await
+        .unwrap_err();
+    let replay = std::fs::canonicalize(replay).unwrap();
+    assert!(matches!(error, ReplayError::Parse { message }
+        if message == format!("the replays from {0} return to {0}", replay.display())));
+}
+
+#[tokio::test]
+async fn resume_aliased_ancestor_refuses_cycle() {
+    use obzenflow_core::journal::archive::manifest::RunManifestResumeConfig;
+    let base = tempdir().unwrap();
+    let (parent, head) = write_claimed_resume(base.path(), &[], 0, None, None).await;
+    let path = parent.join(RUN_MANIFEST_FILENAME);
+    let mut manifest: RunManifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest.resume = Some(RunManifestResumeConfig {
+        resumed_from: parent.join("..").join("r0"),
+        resume_generation: 1,
+        merged_from: Vec::new(),
+    });
+    std::fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let error = DiskReplayArchive::resume_evidence(&head).await.unwrap_err();
+    assert!(matches!(error, ReplayError::Parse { message }
+        if message == format!("the resume lineage of {} returns to {}", head.display(), parent.display())));
+}
+
+#[tokio::test]
+async fn linked_resume_names_replayed_run() {
+    use obzenflow_core::journal::archive_actions::{
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+    };
+    const REPLAY_ID: &str = "flow_01H00000000000000000000001";
+    let base = tempdir().unwrap();
+    let (original, replay) = (base.path().join("original"), base.path().join("replay"));
+    std::fs::create_dir_all(&original).unwrap();
+    std::fs::create_dir_all(&replay).unwrap();
+    write_run(
+        &original,
+        FLOW_ID,
+        None,
+        &[source_fact(1), source_eof()],
+        Some(completed()),
+    )
+    .await;
+    let original = std::fs::canonicalize(&original).unwrap();
+    write_stopped_run(&replay, REPLAY_ID, None, &[source_fact(1)]).await;
+    record_replay_of(&replay, &original);
+
+    let evidence = DiskReplayArchive::open(replay.clone(), false)
+        .await
+        .unwrap()
+        .evidence();
+    assert_eq!(
+        decide(
+            ReplayVerb::Replay,
+            &replay,
+            &evidence,
+            &FlowEvidence::default(),
+            ArchiveOverrides::default(),
+        ),
+        Err(ArchiveRefusal::Interrupted {
+            run: replay.clone()
+        })
+    );
+    let resume = DiskReplayArchive::resume_evidence(&replay).await.unwrap();
+    assert_eq!(resume.run, original);
+    assert_eq!(
+        decide(
+            ReplayVerb::Resume,
+            &resume.run,
+            &resume.archive,
+            &FlowEvidence::default(),
+            ArchiveOverrides::default(),
+        ),
+        Err(ArchiveRefusal::NoWorkLeft { run: original })
     );
 }
 

@@ -22,10 +22,12 @@ pub(crate) mod runtime_config_sources;
 mod web_surface;
 
 pub use config::{ControlPlaneAuthModeArg, CorsModeArg, FlowConfig, OnTerminalArg, StartupMode};
-pub use error::ApplicationError;
+pub use error::{ApplicationError, ResumeAdvice};
 pub use flow_application::{FlowApplication, FlowApplicationBuilder, LogLevel};
 pub use hosted_ingress::HostedIngress;
 pub use obzenflow_core::journal::factory::{CurrentRunLocator, RunSubstrateState};
-pub use presentation::{ArchiveOffers, Banner, Footer, Presentation, RunPresentationOutcome};
+pub use presentation::{
+    shell_path, ArchiveOffers, Banner, Footer, Presentation, RunPresentationOutcome,
+};
 pub use run_mode::{ReplayRunContext, RunMode};
 pub use web_surface::{WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext};

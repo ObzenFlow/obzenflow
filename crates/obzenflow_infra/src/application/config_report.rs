@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::presentation::shell_path;
 use crate::journal::disk::inspect::load_manifest;
 use crate::journal::disk::replay_archive::DiskReplayArchive;
 use crate::journal::read::{
@@ -114,13 +115,7 @@ pub(super) async fn resume_remedy(
     let evidence = DiskReplayArchive::written_run_evidence(run.to_path_buf(), ReplayVerb::Resume)
         .await
         .ok()?;
-    remedy_line(
-        &evidence,
-        flow.archive_flow_evidence(),
-        &resumed_from,
-        run,
-        &locator.to_string(),
-    )
+    remedy_line(&evidence, flow.archive_flow_evidence(), &resumed_from, run)
 }
 
 fn remedy_line(
@@ -128,7 +123,6 @@ fn remedy_line(
     flow: &FlowEvidence,
     resumed_from: &Path,
     run: &Path,
-    shown: &str,
 ) -> Option<String> {
     let admitted = evidence.failure == FailureEvidence::DepartedFromArchive
         && decide(
@@ -141,8 +135,9 @@ fn remedy_line(
         .is_ok();
     admitted.then(|| {
         format!(
-            "To continue this run, restore what {} recorded, then add: --resume-from {shown}",
-            resumed_from.display()
+            "To continue this run, restore what {} recorded. Then add --resume-from {}.",
+            resumed_from.display(),
+            shell_path(run)
         )
     })
 }
@@ -287,16 +282,15 @@ mod tests {
                 evidence,
                 flow,
                 Path::new("/runs/killed"),
-                Path::new("/runs/refused"),
-                "runs/refused",
+                Path::new("runs/refused"),
             )
         };
         let flow = FlowEvidence::default();
         assert_eq!(
             line(&failed(FailureEvidence::DepartedFromArchive), &flow).as_deref(),
             Some(
-                "To continue this run, restore what /runs/killed recorded, then add: \
-                 --resume-from runs/refused"
+                "To continue this run, restore what /runs/killed recorded. Then add \
+                 --resume-from runs/refused."
             )
         );
         assert_eq!(line(&failed(FailureEvidence::Other), &flow), None);

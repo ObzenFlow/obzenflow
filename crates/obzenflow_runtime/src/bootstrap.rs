@@ -50,7 +50,6 @@ pub use obzenflow_core::journal::archive_actions::ReplayVerb;
 pub struct ReplayBootstrap {
     /// Path to a run archive directory containing `run_manifest.json`.
     pub archive_path: PathBuf,
-    /// When true, allow replay from an incomplete archive.
     pub allow_incomplete_archive: bool,
     /// Which verb selected the archive.
     pub verb: ReplayVerb,

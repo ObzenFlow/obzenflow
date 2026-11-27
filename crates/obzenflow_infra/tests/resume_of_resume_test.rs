@@ -514,9 +514,10 @@ async fn only_the_head_of_a_history_resumes() -> Result<()> {
     assert_eq!(
         refusal.to_string(),
         format!(
-            "cannot resume {}: it was already resumed by {}, the head of this history.\nResume \
-             {} instead.",
+            "ObzenFlow cannot resume {}, because {} already resumed it. {} is the head of this \
+             history.\nResume {} instead.",
             r0.display(),
+            r1.display(),
             r1.display(),
             r1.display()
         )
@@ -592,6 +593,7 @@ async fn racing_resumes_of_one_archive_cannot_both_proceed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
     let r0 = record(&journal_base, 4).await?;
+    assert_eq!(DiskReplayArchive::resume_evidence(&r0).await?.run, r0);
 
     let (head, orphan) = {
         let _bootstrap = install_bootstrap_config(
@@ -638,6 +640,11 @@ async fn racing_resumes_of_one_archive_cannot_both_proceed() -> Result<()> {
         (head, orphan)
     };
     assert_eq!(continued_by(&r0), Some(head.clone()));
+    for run in [&r0, &orphan] {
+        let target = DiskReplayArchive::resume_evidence(run).await?;
+        assert_eq!(target.run, head);
+        assert_eq!(target.continued_from.as_deref(), Some(r0.as_path()));
+    }
     match resume_refusal(&orphan).await {
         ReplayError::ContinuedByAnother {
             archive,
@@ -731,8 +738,10 @@ async fn an_orphan_and_its_staged_claim_never_block_the_parent() -> Result<()> {
     let set_mode = |mode| std::fs::set_permissions(&r0, std::fs::Permissions::from_mode(mode));
 
     set_mode(0o555)?;
+    let observed = DiskReplayArchive::resume_evidence(&r0).await;
     let unwritable = resume_refusal(&r0).await;
     set_mode(0o755)?;
+    assert_eq!(observed?.run, r0);
     match unwritable {
         ReplayError::LocationNotWritable { archive } => assert_eq!(archive, r0),
         other => panic!("an unwritable parent must refuse: {other}"),
@@ -865,14 +874,21 @@ async fn resuming_a_replay_resumes_the_run_it_reproduces() -> Result<()> {
     // A replay whose recorded run is gone refuses, naming it.
     std::fs::remove_dir_all(&r0)?;
     assert_eq!(read_run_lineage(&replayed_again)?, replay_lineage(true));
-    match resume_refusal(&replayed_again).await {
-        ReplayError::ReplayedRunMissing {
-            replay,
-            replayed: missing,
-        } => {
-            assert_eq!((replay, missing), (replayed, r0))
+    for refusal in [
+        resume_refusal(&replayed_again).await,
+        DiskReplayArchive::resume_evidence(&replayed_again)
+            .await
+            .unwrap_err(),
+    ] {
+        match refusal {
+            ReplayError::ReplayedRunMissing {
+                replay,
+                replayed: missing,
+            } => {
+                assert_eq!((&replay, &missing), (&replayed, &r0))
+            }
+            other => panic!("a replay of a missing run must refuse: {other}"),
         }
-        other => panic!("a replay of a missing run must refuse: {other}"),
     }
     Ok(())
 }

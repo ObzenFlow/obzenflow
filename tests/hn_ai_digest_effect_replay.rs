@@ -1607,7 +1607,7 @@ async fn recovery_abandonment_fails_the_window_without_start_two() {
     assert!(
         refusal
             .to_string()
-            .contains("there is no work left to continue"),
+            .contains("every source is finite. No work remains."),
         "{refusal}"
     );
     assert_eq!(refused.connect_count() + refused.call_count(), 0);

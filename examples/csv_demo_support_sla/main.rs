@@ -9,5 +9,5 @@ use obzenflow::application::{Banner, Presentation};
 fn main() -> anyhow::Result<()> {
     let presentation = Presentation::new(Banner::new("CSV Demo: Support SLA"));
 
-    support::flow::run_example(presentation, std::env::args_os())
+    support::flow::run_example(presentation)
 }

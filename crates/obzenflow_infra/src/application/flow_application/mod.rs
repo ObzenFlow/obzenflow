@@ -11,8 +11,10 @@
 //! - HTTP server management
 //! - Graceful shutdown handling
 
+use super::error::replay_error_text;
 use super::managed_lifecycle::{ApplicationLifecycle, ApplicationTask};
 use super::observability::PreparedObservability;
+use super::presentation::shell_path;
 use super::web_surface::label_endpoint;
 use super::{
     ApplicationError, ArchiveOffers, FlowConfig, HostedIngress, Presentation,
@@ -161,6 +163,22 @@ fn resolve_startup_config(
     result.map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
 }
 
+async fn interrupted_resume_advice(
+    requested: &std::path::Path,
+    opened: &std::path::Path,
+    flow: &obzenflow_core::journal::archive_actions::FlowEvidence,
+) -> Result<super::ResumeAdvice, obzenflow_core::journal::archive::ReplayError> {
+    let mut target =
+        crate::journal::disk::replay_archive::DiskReplayArchive::resume_evidence(opened).await?;
+    if target.run == opened {
+        target.run = requested.to_path_buf();
+    }
+    if target.continued_from.as_deref() == Some(opened) {
+        target.continued_from = Some(requested.to_path_buf());
+    }
+    Ok(super::ResumeAdvice::judge(&target, flow))
+}
+
 /// Configuration for log level filtering
 #[derive(Debug, Clone)]
 pub enum LogLevel {
@@ -200,7 +218,7 @@ impl LogLevel {
 ///
 /// # Example
 /// ```ignore
-/// fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// fn main() -> anyhow::Result<()> {
 ///     let flow = build_flow(); // returns a deferred FlowDefinition
 ///     FlowApplication::builder()
 ///         .with_web_endpoint(my_endpoint)
@@ -467,7 +485,7 @@ impl FlowApplicationBuilder {
 /// use obzenflow_infra::application::FlowApplication;
 ///
 /// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// async fn main() -> anyhow::Result<()> {
 ///     FlowApplication::run(build_flow()).await?;
 ///     Ok(())
 /// }
@@ -477,7 +495,7 @@ impl FlowApplicationBuilder {
 /// ```ignore
 /// use obzenflow_infra::application::{FlowApplication, LogLevel};
 ///
-/// fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// fn main() -> anyhow::Result<()> {
 ///     FlowApplication::builder()
 ///         .with_log_level(LogLevel::Info)
 ///         .run_blocking(build_flow())?;
@@ -701,6 +719,7 @@ impl FlowApplication {
             // bootstrap snapshot carries it; the build consumes it without the
             // factory opening anything. A bad archive fails here, before any
             // journal is created.
+            let mut opened_archive = None;
             let bootstrap_config = {
                 let mut bootstrap_config = config.bootstrap_config();
                 if config.server.enabled || config.replay.is_some() {
@@ -708,7 +727,7 @@ impl FlowApplication {
                         obzenflow_runtime::bootstrap::StartupMode::Manual;
                 }
                 if let Some(replay) = bootstrap_config.replay.clone() {
-                    use crate::journal::disk::replay_archive::DiskReplayArchive;
+                    use crate::journal::disk::replay_archive::{admission_run, DiskReplayArchive};
                     use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
                     // A resume continues the head of a history, merging a torn
                     // run with its ancestors (FLOWIP-134i B6, B7, B13); a
@@ -732,6 +751,7 @@ impl FlowApplication {
                     .map_err(|e| match e {
                         ReplayError::AncestorMissing { .. }
                         | ReplayError::AncestorUnreadable { .. }
+                        | ReplayError::AncestorMissingSystemLog { .. }
                         | ReplayError::AncestorDisagrees { .. }
                         | ReplayError::NamespaceDisagrees { .. }
                         | ReplayError::AlreadyContinued { .. }
@@ -739,10 +759,11 @@ impl FlowApplication {
                         | ReplayError::ContinuedByAnother { .. }
                         | ReplayError::LocationNotWritable { .. }
                         | ReplayError::ReplayedRunMissing { .. } => {
-                            ApplicationError::ResumeRefused(e.to_string())
+                            ApplicationError::ResumeRefused(replay_error_text(&e))
                         }
                         other => ApplicationError::InvalidConfiguration(format!(
-                            "Failed to open replay archive: {other}"
+                            "Failed to open replay archive: {}",
+                            replay_error_text(&other)
                         )),
                     })?;
                     if std::fs::canonicalize(&replay.archive_path)
@@ -754,6 +775,14 @@ impl FlowApplication {
                             replay.archive_path.display()
                         ));
                     }
+                    if let Some(admitted) = bootstrap_config.replay.as_mut() {
+                        admitted.archive_path =
+                            admission_run(&replay.archive_path, archive.archive_path());
+                    }
+                    opened_archive = Some((
+                        replay.archive_path.clone(),
+                        archive.archive_path().to_path_buf(),
+                    ));
                     bootstrap_config.archive_evidence = Some(archive.evidence());
                     bootstrap_config.replay_archive = Some(Arc::new(archive));
                 }
@@ -804,11 +833,18 @@ impl FlowApplication {
                     // means the build failed before substrate selection, so no run
                     // directory exists to point at.
                     let error = match &failure.error {
-                        obzenflow_dsl::FlowBuildError::ArchiveVerbRefused(refusal) => {
-                            ApplicationError::from(refusal)
+                        obzenflow_dsl::FlowBuildError::ArchiveVerbRefused { refusal, flow } => {
+                            use obzenflow_core::journal::archive_actions::ArchiveRefusal;
+                            let resume = match (refusal, &opened_archive) {
+                                (ArchiveRefusal::Interrupted { .. }, Some((requested, opened))) => {
+                                    Some(interrupted_resume_advice(requested, opened, flow).await)
+                                }
+                                _ => None,
+                            };
+                            ApplicationError::archive_refusal(refusal, resume.as_ref())
                         }
-                        obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
-                            ApplicationError::ResumeRefused(failure.error.to_string())
+                        obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(error) => {
+                            ApplicationError::ResumeRefused(replay_error_text(error))
                         }
                         obzenflow_dsl::FlowBuildError::ApplicationSettings(error) => {
                             ApplicationError::InvalidConfiguration(error.to_string())
@@ -864,7 +900,10 @@ impl FlowApplication {
 
             let print_replay_hint = |locator: &CurrentRunLocator| {
                 println!("FlowApplication complete!");
-                println!("To replay, add: --replay-from {locator}");
+                println!(
+                    "To replay, add: --replay-from {}",
+                    shell_path(locator.path())
+                );
                 println!("(Source settings are ignored during replay)");
             };
 
@@ -1157,6 +1196,7 @@ impl FlowApplication {
                             err,
                             &ctx.archive_path,
                             locator.path(),
+                            built_flow.as_ref().map(|flow| flow.archive_flow_evidence()),
                         )
                         .await
                     }
@@ -1271,10 +1311,10 @@ impl FlowApplication {
         };
         if std::fs::metadata(&baseline).is_err() {
             return skip(format!(
-                "verification skipped: source archive unavailable ({})\nrestore the source archive, then compare baseline {} and candidate {} with obzenflow::application::verify_run_dirs",
+                "verification skipped: source archive unavailable ({})\nrestore the source archive, then run obzenflow verify --baseline {} --candidate {}",
                 baseline.display(),
-                baseline.display(),
-                candidate.display()
+                shell_path(&baseline),
+                shell_path(&candidate)
             ));
         }
 

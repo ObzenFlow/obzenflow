@@ -457,7 +457,10 @@ where
                     allow_incomplete_archive: replay.allow_incomplete_archive,
                 },
             )
-            .map_err(FlowBuildError::ArchiveVerbRefused)?;
+            .map_err(|refusal| FlowBuildError::ArchiveVerbRefused {
+                refusal,
+                flow: Box::new(__archive_flow_evidence.clone()),
+            })?;
         }
 
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.

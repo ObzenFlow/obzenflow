@@ -79,6 +79,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
@@ -1605,6 +1606,13 @@ impl Archive {
             .collect()
     }
 
+    fn store_read(&self, order: &str) -> bool {
+        let order = format!("\"{order}\"");
+        self.rows("store_orders", RunJournalKind::Data)
+            .filter(|row| row.event_type() == "query.answered")
+            .any(|row| serde_json::to_string(&row.payload).is_ok_and(|text| text.contains(&order)))
+    }
+
     fn manifest(&self) -> serde_json::Value {
         serde_json::from_str(
             &std::fs::read_to_string(self.dir.join("run_manifest.json"))
@@ -2294,6 +2302,24 @@ async fn durable_execution_contract() {
     after_rebuild
         .record(&torn, Ended::Interrupted { killed: true })
         .await;
+    let refused = Child::spawn(&s5, replay(&torn), None);
+    let log = refused.log.clone();
+    assert_eq!(
+        refused.exit().await.code(),
+        Some(2),
+        "S5: the replay refuses"
+    );
+    let refusal = read_log(&log);
+    assert!(
+        refusal.contains(&format!(
+            "ObzenFlow cannot replay {torn}, because the run is interrupted and has no terminal \
+             record.\nResume it with --resume-from {operand}. To replay its recorded prefix \
+             instead, add --allow-incomplete-archive.",
+            torn = torn.display(),
+            operand = obzenflow_infra::application::shell_path(&torn)
+        )),
+        "S5: the replay refusal names the resume: {refusal}"
+    );
     let rebuilt_head = Child::spawn(&s5, resume(&torn), None).completed().await;
     after_rebuild.record(&rebuilt_head, Ended::Natural).await;
 
@@ -2312,16 +2338,89 @@ async fn durable_execution_contract() {
     let refusal = std::fs::read_to_string(log).expect("the refusal is logged");
     assert!(
         refusal.contains(&format!(
-            "cannot resume {}: it was already resumed by {}, the head of this history.",
+            "ObzenFlow cannot resume {}, because {} already resumed it. {} is the head of this \
+             history.",
             killed_copy.display(),
+            rebuilt_head.display(),
             rebuilt_head.display()
         )),
         "{refusal}"
     );
 
-    strict_replay(&mut after_rebuild, &rebuilt_head).await;
+    let refused = Child::spawn(&s5, replay(&killed_copy), None);
+    let log = refused.log.clone();
+    assert_eq!(refused.exit().await.code(), Some(2));
+    let refusal = read_log(&log);
+    let word = refusal
+        .lines()
+        .find_map(|line| line.strip_prefix("Replay it with --replay-from "))
+        .and_then(|command| command.strip_suffix('.'))
+        .unwrap_or_else(|| panic!("The refusal must name the replay command: {refusal}"));
+    let parsed = std::process::Command::new("sh")
+        .args(["-c", &format!(r"printf '%s\0' {word}")])
+        .output()
+        .unwrap();
+    assert!(parsed.status.success(), "{parsed:?}");
+    let operand = std::ffi::OsStr::from_bytes(parsed.stdout.strip_suffix(&[0]).unwrap());
+    assert_eq!(Path::new(operand), rebuilt_head);
+    strict_replay(&mut after_rebuild, Path::new(operand)).await;
     after_rebuild.check(Some(&reference));
     after_rebuild.report();
+
+    std::fs::rename(&rebuilt_head, s5.root.join("saved-head")).unwrap();
+    let missing = format!(
+        "The continuation claim in {torn} names {head}, but the directory {head} is missing.\n\
+         Restore {head} to check whether this history can resume.",
+        torn = torn.display(),
+        head = rebuilt_head.display()
+    );
+    for flagged in [false, true] {
+        let mut args = replay(&killed_copy);
+        if flagged {
+            args.push("--allow-incomplete-archive".into());
+        }
+        let child = Child::spawn(&s5, args, None);
+        let log = child.log.clone();
+        let replay_run = if flagged {
+            Some(child.run().await)
+        } else {
+            None
+        };
+        assert_eq!(child.exit().await.code(), Some(2));
+        let output = read_log(&log);
+        let primary = if let Some(run) = replay_run {
+            let archive = Archive::read(&run).await;
+            let fatal = archive
+                .rows("authorize_payment", RunJournalKind::Error)
+                .find_map(|row| match &row.payload {
+                    ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) => {
+                        Some(fatal)
+                    }
+                    _ => None,
+                })
+                .expect("the effect recorded its stop");
+            assert_eq!(
+                fatal.reason,
+                obzenflow_core::event::StageFatalReason::RecordingEnded
+            );
+            format!(
+                "stage '{}' reached the end of its recording at input {}",
+                fatal.stage_key,
+                fatal.input_position.expect("the effect recorded an input")
+            )
+        } else {
+            format!(
+                "ObzenFlow cannot replay {}, because the run is interrupted and has no terminal \
+                 record",
+                killed_copy.display()
+            )
+        };
+        assert!(
+            output.contains(&primary) && output.contains(&missing),
+            "{output}"
+        );
+        assert!(!output.contains("--resume-from "), "{output}");
+    }
 
     for (name, killed) in [("S8", false), ("S8b", true)] {
         let scenario = Scenario::fresh(&name.to_lowercase());
@@ -2415,6 +2514,7 @@ async fn durable_execution_contract() {
     let killed = child.run().await;
     cut(&killed, "S9", |archive| {
         archive.rejections() == 1
+            && archive.store_read(FIRST_AFTER_INVALID)
             && s9.calls().iter().any(|call| call.order_id() == "S-01")
             && !archive
                 .admitted()
@@ -2744,7 +2844,8 @@ async fn a_running_run_refuses_resume_and_replay() {
         let refusal = std::fs::read_to_string(log).expect("the refusal is logged");
         assert!(
             refusal.contains(&format!(
-                "cannot {verb} {}: it is still running.\nStop it, then {verb} it again.",
+                "ObzenFlow cannot {verb} {}, because the run still has a live writer.\nStop the \
+                 run. Then {verb} it again.",
                 running.display()
             )),
             "{refusal}"
@@ -4007,8 +4108,9 @@ mod payment_demo {
             key: &IdempotencyKey,
             ctx: &EffectContext,
         ) -> Result<outcome![PaymentAuthorized | PaymentDeclined], EffectError> {
+            let answer = self.processor.authorize(request, key, ctx).await;
             hold_until(&self.release).await;
-            self.processor.authorize(request, key, ctx).await
+            answer
         }
     }
 
@@ -4288,7 +4390,7 @@ mod payment_demo {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_run_stopped_before_its_feeds_finish_offers_only_replay() {
+    async fn resume_unfinished_payment_feeds_refused() {
         let name = "payment_early_stop";
         let scenario = Scenario::for_graph(name, Graph::PaymentDemo);
         let early = |archive: &Archive| {
@@ -4298,7 +4400,10 @@ mod payment_demo {
 
         let child = Child::spawn(&scenario, Vec::new(), Some(Hold::Processor));
         let killed = child.run().await;
-        until(&killed, name, early).await;
+        until(&killed, name, |archive| {
+            early(archive) && !read_lines::<GatewayCall>(&gateway_calls(&scenario)).is_empty()
+        })
+        .await;
         child.signal(Signal::Kill);
         assert!(!child.exit().await.success(), "{name}: the kill lands");
         assert_eq!(
@@ -4317,7 +4422,12 @@ mod payment_demo {
         let log = read_log(&log);
         let refusal = log
             .lines()
-            .find(|line| line.starts_with(&format!("cannot resume {}: ", killed.display())))
+            .find(|line| {
+                line.starts_with(&format!(
+                    "ObzenFlow cannot resume {}, because ",
+                    killed.display()
+                ))
+            })
             .unwrap_or_else(|| panic!("{name}: the refusal prints: {log}"));
         assert!(
             refusal.contains("'web_orders'")
@@ -4333,6 +4443,59 @@ mod payment_demo {
             "{name}: the refusal prints alone: {log}"
         );
         assert_eq!(scenario.runs(), runs, "{name}: no run directory");
+        let (_, source_refusal) = log
+            .split_once(&format!(
+                "ObzenFlow cannot resume {}, because ",
+                killed.display()
+            ))
+            .expect("the refusal prints");
+        let source_refusal = source_refusal.trim_end();
+
+        let refused = Child::spawn(&scenario, replay(&killed), Some(Hold::Processor));
+        let log = refused.log.clone();
+        assert_eq!(
+            refused.exit().await.code(),
+            Some(2),
+            "{name}: the replay refuses"
+        );
+        let log = read_log(&log);
+        let (_, replay_refusal) = log
+            .split_once(&format!(
+                "ObzenFlow cannot replay {}, because ",
+                killed.display()
+            ))
+            .unwrap_or_else(|| panic!("{name}: the replay refusal prints: {log}"));
+        assert!(
+            !replay_refusal.contains("--resume-from"),
+            "{name}: the replay refusal offers no resume: {replay_refusal}"
+        );
+        assert!(
+            replay_refusal.trim_end().ends_with(&format!(
+                "ObzenFlow cannot resume {}, because {source_refusal}",
+                killed.display()
+            )),
+            "{name}: the replay refusal ends with the source refusal: {replay_refusal}"
+        );
+
+        let mut flagged = replay(&killed);
+        flagged.push("--allow-incomplete-archive".into());
+        let stopped = Child::spawn(&scenario, flagged, Some(Hold::Processor));
+        let log = stopped.log.clone();
+        assert_eq!(
+            stopped.exit().await.code(),
+            Some(2),
+            "{name}: the flagged replay stops"
+        );
+        let log = read_log(&log);
+        let head = std::fs::canonicalize(&killed).expect("the killed run resolves");
+        assert!(
+            log.contains(&format!(
+                "a replay never executes an effect.\nObzenFlow cannot resume {}, because \
+                 {source_refusal}",
+                head.display()
+            )),
+            "{name}: the replay stop prints the source refusal: {log}"
+        );
 
         let child = Child::spawn(&scenario, Vec::new(), Some(Hold::Processor));
         let log = child.log.clone();
@@ -5514,9 +5677,9 @@ mod flash_sale {
         let dir_name = |run: &Path| run.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
             remedy.contains(&format!(
-                "{} recorded, then add: --resume-from ",
+                "{} recorded. Then add --resume-from ",
                 dir_name(&killed)
-            )) && remedy.ends_with(&dir_name(&refused)),
+            )) && remedy.ends_with(&format!("{}.", dir_name(&refused))),
             "{name}: {remedy}"
         );
 
@@ -7066,7 +7229,7 @@ mod csv_register {
             .find(|line| line.starts_with("To continue this run, restore what "))
             .unwrap_or_else(|| panic!("missing recovery instructions: {output}"));
         assert!(
-            remedy.contains(&flow_id(&run)) && remedy.ends_with(&flow_id(&refused)),
+            remedy.contains(&flow_id(&run)) && remedy.ends_with(&format!("{}.", flow_id(&refused))),
             "{remedy}"
         );
         (scenario, refused)

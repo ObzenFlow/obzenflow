@@ -93,7 +93,6 @@ pub struct RunManifestDirectFactAdmission {
 pub struct RunManifestReplayConfig {
     /// The archive this run read, canonicalized (FLOWIP-134i B16).
     pub replay_from: String,
-    /// Whether replay proceeded despite missing/corrupt terminal evidence.
     pub allow_incomplete_archive: bool,
 }
 
