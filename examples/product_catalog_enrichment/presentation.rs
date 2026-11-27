@@ -43,7 +43,8 @@ pub fn banner_for(mode: &RunMode) -> Banner {
                         .to_string(),
                     "Inner, left, and strict joins are recomputed from the recorded inputs"
                         .to_string(),
-                    "The analytics summary is rebuilt and idempotent console deliveries run again"
+                    "The replay rebuilds the analytics summary and does not call the console sinks \
+                     again"
                         .to_string(),
                 ],
             ),

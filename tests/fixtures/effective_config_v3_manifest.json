@@ -1,5 +1,5 @@
 {
-  "journal_schema_version": "27.0",
+  "journal_schema_version": "28.0",
 
   "obzenflow_version": "0.1.0",
   "flow_id": "flow_01J00000000000000000000000",
@@ -16,7 +16,10 @@
       "data_journal_file": "FiniteSource_orders.log",
       "error_journal_file": "FiniteSource_orders_error.log",
       "inbound": [],
-      "delivery_order": "single_input"
+      "delivery_order": "single_input",
+      "source_continuation": {
+        "kind": "recorded_read"
+      }
     },
     "authorize_payment": {
       "dsl_var": "authorize_payment",
@@ -46,6 +49,7 @@
     }
   },
   "system_journal_file": "system.log",
+  "cycle_members": [],
   "effective_config": {
     "schema_version": 2,
     "values": [

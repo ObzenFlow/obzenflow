@@ -16,6 +16,7 @@ use obzenflow_core::{FlowId, WriterId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use obzenflow_core::journal::archive_actions::ArchiveOverrides;
 use obzenflow_core::journal::ArchiveStatus;
 use obzenflow_core::{MiddlewareExecutionScope, ReaderGeneration, StageId};
 
@@ -105,6 +106,14 @@ pub enum UnrecordedEffect {
     RecordingEnded,
 }
 
+/// `StageRecording` tells whether a stage's recording continues past a cursor
+/// that holds no recorded attempt, or ended before that cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageRecording {
+    Continues,
+    Ended,
+}
+
 /// Whether descriptor materialisation requires every declared effect port to
 /// be registered. A replay never executes an effect, so it deliberately
 /// permits an empty registry.
@@ -138,8 +147,11 @@ pub trait ExecutionStrategy: std::fmt::Debug + Send + Sync {
     ) -> MiddlewareExecutionScope {
         self.stage_scope(stage)
     }
-    /// What a cursor without any recorded attempt means at this position.
-    fn missing_outcome(&self, at: ExecutionPosition) -> UnrecordedEffect;
+    /// `missing_outcome` tells what a cursor without a recorded attempt means at
+    /// this position. `recording` tells whether the recording of the stage
+    /// continues past the cursor.
+    fn missing_outcome(&self, at: ExecutionPosition, recording: StageRecording)
+        -> UnrecordedEffect;
     /// Whether a durable Start without a terminal authorizes a new
     /// at-least-once attempt; otherwise the recording ends there.
     fn in_doubt_authorizes_attempt(&self) -> bool;
@@ -162,7 +174,11 @@ impl ExecutionStrategy for Live {
     fn stage_scope(&self, _stage: StageId) -> MiddlewareExecutionScope {
         MiddlewareExecutionScope::LiveHandler
     }
-    fn missing_outcome(&self, _at: ExecutionPosition) -> UnrecordedEffect {
+    fn missing_outcome(
+        &self,
+        _at: ExecutionPosition,
+        _recording: StageRecording,
+    ) -> UnrecordedEffect {
         UnrecordedEffect::Execute
     }
     fn in_doubt_authorizes_attempt(&self) -> bool {
@@ -179,13 +195,41 @@ impl ExecutionStrategy for Live {
     }
 }
 
-/// Bounded reconstruction of a recording that drains at its end. A replay
-/// never executes an effect (FLOWIP-134i B13): its scope is strict replay
-/// throughout, and `incomplete`, set from archive status at construction, only
-/// decides whether a miss is corruption or the end of the recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingEnd {
+    Sealed,
+    PerStage,
+    AnyMiss,
+}
+
+impl RecordingEnd {
+    fn of(status: ArchiveStatus, overrides: ArchiveOverrides) -> Self {
+        match status {
+            ArchiveStatus::Completed => Self::Sealed,
+            ArchiveStatus::Cancelled => Self::PerStage,
+            ArchiveStatus::Failed | ArchiveStatus::NotStarted | ArchiveStatus::Unknown => {
+                if overrides.allow_incomplete_archive {
+                    Self::AnyMiss
+                } else {
+                    Self::Sealed
+                }
+            }
+        }
+    }
+
+    fn of_archive(archive: &dyn ReplayArchive) -> Self {
+        Self::of(
+            archive.archive_status(),
+            ArchiveOverrides {
+                allow_incomplete_archive: archive.allow_incomplete_archive(),
+            },
+        )
+    }
+}
+
 #[derive(Debug)]
 struct Replay {
-    incomplete: bool,
+    recording_end: RecordingEnd,
 }
 
 impl ExecutionStrategy for Replay {
@@ -195,11 +239,18 @@ impl ExecutionStrategy for Replay {
     fn stage_scope(&self, _stage: StageId) -> MiddlewareExecutionScope {
         MiddlewareExecutionScope::StrictReplayHandler
     }
-    fn missing_outcome(&self, _at: ExecutionPosition) -> UnrecordedEffect {
-        if self.incomplete {
-            UnrecordedEffect::RecordingEnded
-        } else {
-            UnrecordedEffect::Corrupt
+    fn missing_outcome(
+        &self,
+        _at: ExecutionPosition,
+        recording: StageRecording,
+    ) -> UnrecordedEffect {
+        match (self.recording_end, recording) {
+            (RecordingEnd::Sealed, _) | (RecordingEnd::PerStage, StageRecording::Continues) => {
+                UnrecordedEffect::Corrupt
+            }
+            (RecordingEnd::PerStage, StageRecording::Ended) | (RecordingEnd::AnyMiss, _) => {
+                UnrecordedEffect::RecordingEnded
+            }
         }
     }
     fn in_doubt_authorizes_attempt(&self) -> bool {
@@ -360,7 +411,11 @@ impl ExecutionStrategy for Resume {
             MiddlewareExecutionScope::ResumeHandler
         }
     }
-    fn missing_outcome(&self, _at: ExecutionPosition) -> UnrecordedEffect {
+    fn missing_outcome(
+        &self,
+        _at: ExecutionPosition,
+        _recording: StageRecording,
+    ) -> UnrecordedEffect {
         UnrecordedEffect::Execute
     }
     fn in_doubt_authorizes_attempt(&self) -> bool {
@@ -383,17 +438,6 @@ impl ExecutionStrategy for Resume {
             HeartbeatExecutionPolicy::DormantUntilLive
         }
     }
-}
-
-fn archive_is_sealed(status: ArchiveStatus) -> bool {
-    matches!(status, ArchiveStatus::Completed | ArchiveStatus::Cancelled)
-}
-
-/// Whether a replay over this archive treats a missing outcome as the end of
-/// the recording rather than corruption: only an unsealed archive admitted
-/// under `allow_incomplete_archive`.
-fn replay_incomplete(status: ArchiveStatus, allow_incomplete: bool) -> bool {
-    !archive_is_sealed(status) && allow_incomplete
 }
 
 /// `SourceExecutionPhases` gives read-only access to the current execution phase of each
@@ -440,19 +484,18 @@ impl RuntimeExecution {
         &self.observations
     }
 
-    /// The one strategy-selection point. The verb picks the strategy; archive
-    /// status is read exactly once here, only to set `Replay`'s `incomplete`
-    /// flag. FLOWIP-120n adds the `RuntimeMode::Resume` arm and its strategy.
+    /// `new` is the one point that selects a strategy. The verb selects the
+    /// strategy. For a replay, the status and the override of the archive set
+    /// where the recording ends.
     pub fn new(mode: RuntimeMode, archive: Option<Arc<dyn ReplayArchive>>) -> Self {
         let mut resume = None;
         let strategy: Arc<dyn ExecutionStrategy> = match mode {
             RuntimeMode::Live => Arc::new(Live),
             RuntimeMode::Replay => {
-                let incomplete = archive
+                let recording_end = archive
                     .as_deref()
-                    .map(|a| replay_incomplete(a.archive_status(), a.allow_incomplete_archive()))
-                    .unwrap_or(false);
-                Arc::new(Replay { incomplete })
+                    .map_or(RecordingEnd::Sealed, RecordingEnd::of_archive);
+                Arc::new(Replay { recording_end })
             }
             RuntimeMode::Resume => {
                 let archive_ref = archive.as_deref().expect(
@@ -527,8 +570,12 @@ impl RuntimeExecution {
         let mut resume = None;
         let strategy: Arc<dyn ExecutionStrategy> = match mode {
             EffectRuntimeMode::Live => Arc::new(Live),
-            EffectRuntimeMode::ReplayStrict => Arc::new(Replay { incomplete: false }),
-            EffectRuntimeMode::ReplayIncomplete => Arc::new(Replay { incomplete: true }),
+            EffectRuntimeMode::ReplayStrict => Arc::new(Replay {
+                recording_end: RecordingEnd::Sealed,
+            }),
+            EffectRuntimeMode::ReplayIncomplete => Arc::new(Replay {
+                recording_end: RecordingEnd::AnyMiss,
+            }),
             // Catch-up with no registered effect mark: every miss is live.
             EffectRuntimeMode::Resume => {
                 let state = Arc::new(ResumeState::new(ReaderGeneration(1)));
@@ -612,9 +659,15 @@ impl RuntimeExecution {
         self.strategy.stage_scope(stage)
     }
 
-    /// What a cursor without any recorded attempt means at this position.
-    pub fn missing_outcome(&self, at: ExecutionPosition) -> UnrecordedEffect {
-        self.strategy.missing_outcome(at)
+    /// `missing_outcome` tells what a cursor without a recorded attempt means at
+    /// this position. `recording` tells whether the recording of the stage
+    /// continues past the cursor.
+    pub fn missing_outcome(
+        &self,
+        at: ExecutionPosition,
+        recording: StageRecording,
+    ) -> UnrecordedEffect {
+        self.strategy.missing_outcome(at, recording)
     }
 
     /// Whether an in-doubt attempt authorizes a new at-least-once attempt.
@@ -652,6 +705,14 @@ mod tests {
     use super::*;
     use obzenflow_core::MiddlewareExecutionScope as Scope;
 
+    const RECORDINGS: [StageRecording; 2] = [StageRecording::Continues, StageRecording::Ended];
+    const PLAIN: ArchiveOverrides = ArchiveOverrides {
+        allow_incomplete_archive: false,
+    };
+    const FLAGGED: ArchiveOverrides = ArchiveOverrides {
+        allow_incomplete_archive: true,
+    };
+
     fn at() -> ExecutionPosition {
         ExecutionPosition {
             stage_id: StageId::new(),
@@ -660,12 +721,23 @@ mod tests {
         }
     }
 
+    fn replay(status: ArchiveStatus, overrides: ArchiveOverrides) -> Replay {
+        Replay {
+            recording_end: RecordingEnd::of(status, overrides),
+        }
+    }
+
     #[test]
     fn live_strategy_answers() {
         let s = Live;
         assert_eq!(s.scope_at(at()), Scope::LiveHandler);
         assert_eq!(s.stage_scope(StageId::new()), Scope::LiveHandler);
-        assert_eq!(s.missing_outcome(at()), UnrecordedEffect::Execute);
+        for recording in RECORDINGS {
+            assert_eq!(
+                s.missing_outcome(at(), recording),
+                UnrecordedEffect::Execute
+            );
+        }
         assert!(s.in_doubt_authorizes_attempt());
         assert_eq!(
             s.source_phase_for(StageId::new()),
@@ -680,10 +752,23 @@ mod tests {
 
     #[test]
     fn replay_sealed_strategy_answers() {
-        let s = Replay { incomplete: false };
+        for strict in [
+            replay(ArchiveStatus::Completed, PLAIN),
+            replay(ArchiveStatus::Completed, FLAGGED),
+            replay(ArchiveStatus::Failed, PLAIN),
+            replay(ArchiveStatus::NotStarted, PLAIN),
+            replay(ArchiveStatus::Unknown, PLAIN),
+        ] {
+            for recording in RECORDINGS {
+                assert_eq!(
+                    strict.missing_outcome(at(), recording),
+                    UnrecordedEffect::Corrupt
+                );
+            }
+        }
+        let s = replay(ArchiveStatus::Completed, PLAIN);
         assert_eq!(s.scope_at(at()), Scope::StrictReplayHandler);
         assert_eq!(s.stage_scope(StageId::new()), Scope::StrictReplayHandler);
-        assert_eq!(s.missing_outcome(at()), UnrecordedEffect::Corrupt);
         assert!(!s.in_doubt_authorizes_attempt());
         assert_eq!(
             s.effect_port_registration_policy(),
@@ -702,16 +787,48 @@ mod tests {
 
     #[test]
     fn replay_incomplete_strategy_never_executes() {
-        let s = Replay { incomplete: true };
-        // FLOWIP-134i B13: a torn tail ends the recording; it never runs live.
-        assert_eq!(s.scope_at(at()), Scope::StrictReplayHandler);
-        assert_eq!(s.stage_scope(StageId::new()), Scope::StrictReplayHandler);
-        assert_eq!(s.missing_outcome(at()), UnrecordedEffect::RecordingEnded);
-        assert!(!s.in_doubt_authorizes_attempt());
-        assert_eq!(
-            s.effect_port_registration_policy(),
-            EffectPortRegistrationPolicy::OptionalStrictReplay
-        );
+        for status in [
+            ArchiveStatus::Failed,
+            ArchiveStatus::NotStarted,
+            ArchiveStatus::Unknown,
+        ] {
+            let s = replay(status, FLAGGED);
+            assert_eq!(s.scope_at(at()), Scope::StrictReplayHandler);
+            assert_eq!(s.stage_scope(StageId::new()), Scope::StrictReplayHandler);
+            for recording in RECORDINGS {
+                assert_eq!(
+                    s.missing_outcome(at(), recording),
+                    UnrecordedEffect::RecordingEnded
+                );
+            }
+            assert!(!s.in_doubt_authorizes_attempt());
+            assert_eq!(
+                s.effect_port_registration_policy(),
+                EffectPortRegistrationPolicy::OptionalStrictReplay
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_miss_past_recording_ends_replay() {
+        for overrides in [PLAIN, FLAGGED] {
+            assert_eq!(
+                replay(ArchiveStatus::Cancelled, overrides)
+                    .missing_outcome(at(), StageRecording::Ended),
+                UnrecordedEffect::RecordingEnded
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_miss_inside_recording_returns_corrupt() {
+        for overrides in [PLAIN, FLAGGED] {
+            assert_eq!(
+                replay(ArchiveStatus::Cancelled, overrides)
+                    .missing_outcome(at(), StageRecording::Continues),
+                UnrecordedEffect::Corrupt
+            );
+        }
     }
 
     #[test]
@@ -733,7 +850,10 @@ mod tests {
         assert_eq!(s.scope_at(positioned), Scope::ResumeHandler);
         assert_eq!(s.stage_scope(stage), Scope::ResumeHandler);
         assert!(s.scope_at(positioned).is_deterministic_replay());
-        assert_eq!(s.missing_outcome(positioned), UnrecordedEffect::Execute);
+        assert_eq!(
+            s.missing_outcome(positioned, StageRecording::Ended),
+            UnrecordedEffect::Execute
+        );
         assert!(s.in_doubt_authorizes_attempt());
         assert_eq!(s.source_phase_for(stage), SourceExecutionPhase::Replaying);
         assert_eq!(
@@ -818,19 +938,9 @@ mod tests {
             position: StageInputPosition(1),
             generation: None,
         };
-        assert_eq!(s.missing_outcome(at), UnrecordedEffect::Execute);
-    }
-
-    #[test]
-    fn replay_incomplete_derivation_reads_seal_and_override() {
-        // Sealed archives are strict regardless of the flag.
-        assert!(!replay_incomplete(ArchiveStatus::Completed, true));
-        assert!(!replay_incomplete(ArchiveStatus::Cancelled, true));
-        // Unsealed ends at its recording only under allow_incomplete_archive.
-        assert!(replay_incomplete(ArchiveStatus::Failed, true));
-        assert!(replay_incomplete(ArchiveStatus::Unknown, true));
-        assert!(!replay_incomplete(ArchiveStatus::Failed, false));
-        assert!(!replay_incomplete(ArchiveStatus::Unknown, false));
+        for recording in RECORDINGS {
+            assert_eq!(s.missing_outcome(at, recording), UnrecordedEffect::Execute);
+        }
     }
 
     #[test]

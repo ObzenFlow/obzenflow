@@ -1,8 +1,8 @@
 # Journal format
 
-The current schema is **25.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
+The current schema is **28.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
 version for records, frame encoding, archive interpretation, and the run
-manifest. `run_manifest.json` records `journal_schema_version: "25.0"`.
+manifest. `run_manifest.json` records `journal_schema_version: "28.0"`.
 Frame markers and disposable observation
 checkpoint stamps derive from that same authority. A breaking change to any of
 these contracts bumps the one version. Package versions remain provenance.
@@ -44,7 +44,7 @@ All fixed-width integers are little endian. A frame consists of:
 
 | Position | Bytes | Meaning |
 |---|---:|---|
-| 0 | 7 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF25.0`) |
+| 0 | 7 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF28.0`) |
 | 7 | 8 | Body length |
 | 15 | 4 | CRC32 of magic and body length |
 | 19 | body length | Compact body |

@@ -73,6 +73,7 @@ pub struct DiskReplayArchive {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Liveness {
     Probe,
+    Probed,
     Stopped,
 }
 
@@ -200,6 +201,21 @@ impl DiskReplayArchive {
             }
         };
         Ok(archive.evidence())
+    }
+
+    pub(crate) async fn probed_evidence(
+        run: PathBuf,
+        verb: ReplayVerb,
+    ) -> Result<(PathBuf, ArchiveEvidence), ReplayError> {
+        let archive = match verb {
+            ReplayVerb::Replay => {
+                Self::open_replay(run, false, Liveness::Probed, ScanPurpose::Recovery).await?
+            }
+            ReplayVerb::Resume => {
+                Self::open_resume(run, false, Liveness::Probed, ScanPurpose::Recovery).await?
+            }
+        };
+        Ok((archive.archive_path.clone(), archive.evidence()))
     }
 
     /// `resume_evidence` reads the current head and its evidence for a plain resume.
@@ -503,6 +519,10 @@ impl DiskReplayArchive {
         let (archive_path, manifest) = Self::resolve_replayed_run(archive_path)?;
         let live_writer = match liveness {
             Liveness::Probe => super::continuation::admit(&archive_path, &manifest)?,
+            Liveness::Probed => {
+                super::continuation::admit_stopped(&archive_path, &manifest)?;
+                false
+            }
             Liveness::Stopped => false,
         };
         let head = Self::open_manifest(
@@ -958,6 +978,7 @@ impl DiskReplayArchive {
             delivery_order: DeliveryOrder::SingleInput,
             ai_models: Vec::new(),
             max_open_keys: None,
+            source_continuation: Some(obzenflow_core::source::SourceContinuation::RecordedRead),
         };
         Self {
             archive_path,
@@ -978,6 +999,7 @@ impl DiskReplayArchive {
                 effective_config: None,
                 capabilities: Default::default(),
                 bounded_direct_fact_admission: Vec::new(),
+                cycle_members: Vec::new(),
             },
             status: ArchiveStatus::Cancelled,
             status_derivation: StatusDerivation {
@@ -1165,7 +1187,6 @@ fn scan_source_journals(
         })?;
         let mut reader = BufReader::new(file);
         let mut buf = Vec::new();
-        let mut line_no = 0u64;
         let mut offset = 0u64;
         let mut decoder = Decoder::new(&path);
         let mut admission =
@@ -1176,7 +1197,6 @@ fn scan_source_journals(
                 source: e,
             })?
         {
-            line_no += 1;
             let record_offset = offset;
             offset += consumed as u64;
             match dispose(
@@ -1208,23 +1228,7 @@ fn scan_source_journals(
                 | Disposition::Interrupted(_)
                 | Disposition::Skip => break,
                 Disposition::Corrupt(problem) => {
-                    if matches!(problem, super::scanner::ParseProblem::SchemaMismatch) {
-                        return Err(ReplayError::UnsupportedJournalSchemaVersion {
-                            journal_schema_version: format!("frame marker in {}", path.display()),
-                            supported: JOURNAL_SCHEMA_VERSION,
-                        });
-                    }
-                    // The scan only collects boundaries. The resume read path
-                    // re-reads this journal and fails loud on the same record
-                    // (FLOWIP-120q), before any boundary from it could matter.
-                    tracing::debug!(
-                        path = %path.display(),
-                        line = line_no,
-                        %problem,
-                        "generation scan stopped at a corrupt record; the resume \
-                         read path fails loud on it"
-                    );
-                    break;
+                    return Err(corrupt_journal(&path, record_offset, problem));
                 }
             }
         }
@@ -1290,17 +1294,29 @@ fn scan_marker_generation(
             | Disposition::Interrupted(_)
             | Disposition::Skip => break,
             Disposition::Corrupt(problem) => {
-                if matches!(problem, super::scanner::ParseProblem::SchemaMismatch) {
-                    return Err(ReplayError::UnsupportedJournalSchemaVersion {
-                        journal_schema_version: format!("frame marker in {}", path.display()),
-                        supported: JOURNAL_SCHEMA_VERSION,
-                    });
-                }
-                break;
+                return Err(corrupt_journal(path, record_offset, problem));
             }
         }
     }
     Ok(max_generation)
+}
+
+fn corrupt_journal(
+    path: &Path,
+    record_position: u64,
+    problem: super::scanner::ParseProblem,
+) -> ReplayError {
+    if matches!(problem, super::scanner::ParseProblem::SchemaMismatch) {
+        return ReplayError::UnsupportedJournalSchemaVersion {
+            journal_schema_version: format!("frame marker in {}", path.display()),
+            supported: JOURNAL_SCHEMA_VERSION,
+        };
+    }
+    ReplayError::CorruptedArchive {
+        path: path.to_path_buf(),
+        record_position,
+        message: problem.to_string(),
+    }
 }
 
 pub(crate) fn departs_from_archive(execution: &ExecutionPayload) -> bool {
@@ -1472,6 +1488,11 @@ pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError>
                             obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
                                 terminal_events_found = terminal_events_found.saturating_add(1);
                                 chosen = ArchiveStatus::Cancelled;
+                                contract_violation = false;
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::NotStarted => {
+                                terminal_events_found = terminal_events_found.saturating_add(1);
+                                chosen = ArchiveStatus::NotStarted;
                                 contract_violation = false;
                             }
                             obzenflow_core::event::PipelineLifecycleEvent::ReconstructionCompleted {

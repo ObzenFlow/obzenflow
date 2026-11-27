@@ -7,14 +7,49 @@
 //! divergences as `changed-code` versus `unexpected`.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use obzenflow_core::journal::ArchiveStatus;
 
 use super::certification::{certify, Comparison, StageCertification};
 use super::error::RefusalReason;
 use super::lineage::{identity_mode, IdentityMode};
-use super::source::RunSource;
+use super::source::{DiskRunSource, RunSource};
 use super::walker::WalkMode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerifyRole {
+    Baseline,
+    Candidate,
+}
+
+pub(crate) fn validate_run(
+    source: &dyn RunSource,
+    role: VerifyRole,
+) -> Result<(), Box<RefusalReason>> {
+    if role == VerifyRole::Candidate
+        && source
+            .manifest()
+            .replay
+            .as_ref()
+            .is_some_and(|replay| replay.allow_incomplete_archive)
+    {
+        return Err(Box::new(RefusalReason::IncompleteArchiveReplayCandidate));
+    }
+    let status = source.status();
+    if !matches!(status, ArchiveStatus::Completed | ArchiveStatus::Cancelled) {
+        return Err(Box::new(RefusalReason::StatusGate {
+            run: source.run_dir().to_path_buf(),
+            status: format!("{status:?}"),
+        }));
+    }
+    Ok(())
+}
+
+pub(crate) fn admits_baseline(run_dir: &Path) -> bool {
+    DiskRunSource::open(run_dir)
+        .is_ok_and(|source| validate_run(&source, VerifyRole::Baseline).is_ok())
+}
 
 pub(crate) struct ValidationPlan {
     pub mode: WalkMode,
@@ -27,18 +62,10 @@ pub(crate) fn validate(
     baseline: &dyn RunSource,
     candidate: &dyn RunSource,
 ) -> Result<ValidationPlan, Box<RefusalReason>> {
+    validate_run(candidate, VerifyRole::Candidate)?;
+    validate_run(baseline, VerifyRole::Baseline)?;
     let b_manifest = baseline.manifest();
     let c_manifest = candidate.manifest();
-
-    // An incomplete-archive replay may have been produced from a partial source
-    // archive, so whole-run verification cannot certify it.
-    if c_manifest
-        .replay
-        .as_ref()
-        .is_some_and(|replay| replay.allow_incomplete_archive)
-    {
-        return Err(Box::new(RefusalReason::IncompleteArchiveReplayCandidate));
-    }
 
     if b_manifest.flow_name != c_manifest.flow_name {
         return Err(Box::new(RefusalReason::FlowNameMismatch {
@@ -70,17 +97,6 @@ pub(crate) fn validate(
         if b_stage.inbound != c_stage.inbound {
             return Err(Box::new(RefusalReason::InboundMismatch {
                 stage: key.clone(),
-            }));
-        }
-    }
-
-    // The same terminal gate replay itself applies.
-    for source in [baseline, candidate] {
-        let status = source.status();
-        if !matches!(status, ArchiveStatus::Completed | ArchiveStatus::Cancelled) {
-            return Err(Box::new(RefusalReason::StatusGate {
-                run: source.run_dir().to_path_buf(),
-                status: format!("{status:?}"),
             }));
         }
     }

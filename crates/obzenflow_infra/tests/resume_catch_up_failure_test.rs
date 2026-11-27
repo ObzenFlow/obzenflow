@@ -23,7 +23,6 @@ use obzenflow_adapters::sinks::CountingSink;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{EffectError, Effects};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -257,12 +256,6 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
         b_first: 101,
         b_count: 4,
     };
-    let live_ranges = SourceRanges {
-        a_first: 5,
-        a_count: 2,
-        b_first: 105,
-        b_count: 2,
-    };
 
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
@@ -310,29 +303,24 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
     )
     .map_err(anyhow::Error::from_boxed)?;
 
-    let calls = Arc::new(AtomicUsize::new(0));
-    let delivered = Arc::new(AtomicU64::new(0));
-    let failure = {
-        let _bootstrap = install_bootstrap_config(
-            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
-                archive_path: recorded_run.clone(),
-                allow_incomplete_archive: true,
-                verb: ReplayVerb::Resume,
-            })
-            .await,
-        );
-        build_flow(
-            journal_base.clone(),
-            &live_ranges,
-            calls.clone(),
-            delivered.clone(),
+    let runs_before = std::fs::read_dir(&journal_base)?.count();
+    let refusal =
+        obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive::open_for_resume(
+            recorded_run.clone(),
+            true,
         )
-        .build(replay_testkit::unsynced_context())
         .await
         .err()
-        .ok_or_else(|| anyhow!("a corrupted source archive must refuse the resume"))?
-    };
-    let failure_reason = format!("{:?}", failure.error);
+        .ok_or_else(|| anyhow!("a corrupted source archive must refuse the resume"))?;
+    let failure_reason = refusal.to_string();
+    assert!(
+        matches!(
+            &refusal,
+            obzenflow_core::journal::archive::ReplayError::CorruptedArchive { path, .. }
+                if path.file_name() == journal_path.file_name()
+        ),
+        "the archive open must refuse the corrupted source's journal: {failure_reason}"
+    );
     assert!(
         failure_reason.contains("src_b"),
         "the failure must name the corrupted source's stage: {failure_reason}"
@@ -342,14 +330,9 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
         "the failure must name the corruption: {failure_reason}"
     );
     assert_eq!(
-        calls.load(Ordering::SeqCst),
-        0,
-        "no effect executed for the refused resume"
-    );
-    assert_eq!(
-        delivered.load(Ordering::SeqCst),
-        0,
-        "nothing reached the sink for the refused resume"
+        std::fs::read_dir(&journal_base)?.count(),
+        runs_before,
+        "the refused resume creates no run directory"
     );
 
     Ok(())

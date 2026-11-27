@@ -182,3 +182,165 @@ fn one_shot() -> ValuesSource<[IdlePayload; 1]> {
 fn noop_sink() -> obzenflow_adapters::sinks::DiscardSink<IdlePayload> {
     obzenflow_adapters::sinks::DiscardSink::new()
 }
+
+async fn recorded_source(
+    dir: &std::path::Path,
+    lifecycle: impl FnOnce(
+        &obzenflow_core::event::SystemEventFactory,
+    ) -> Vec<obzenflow_core::event::SystemEvent>,
+) {
+    use obzenflow_core::journal::archive::manifest::{
+        RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
+        OBSERVABILITY_CAPTURE_CAPABILITY, RUN_MANIFEST_FILENAME,
+    };
+    use obzenflow_core::{FlowId, Journal, JournalOwner, SystemId};
+    let system = SystemId::new();
+    let flow = FlowId::new();
+    let journal =
+        crate::journal::DiskJournal::<obzenflow_core::event::SystemEvent>::with_owner_in_run(
+            dir.join("system.log"),
+            JournalOwner::system(system),
+            flow,
+            obzenflow_runtime::runtime_config::JournalSync::Off,
+        )
+        .unwrap();
+    for event in lifecycle(&obzenflow_core::event::SystemEventFactory::new(system)) {
+        journal.append(event, Default::default()).await.unwrap();
+    }
+    drop(journal);
+    let manifest = RunManifest {
+        journal_schema_version: JOURNAL_SCHEMA_VERSION.into(),
+        obzenflow_version: env!("CARGO_PKG_VERSION").into(),
+        flow_id: flow.to_string(),
+        recorded_flow_id: None,
+        pipeline_writer_id: system.into(),
+        flow_name: "flow".into(),
+        created_at: chrono::Utc::now(),
+        replay: None,
+        resume: None,
+        interrupted_appends: Vec::new(),
+        stages: Default::default(),
+        system_journal_file: "system.log".into(),
+        metrics_journals: None,
+        effective_config: None,
+        capabilities: [
+            (OBSERVABILITY_CAPTURE_CAPABILITY.into(), 1),
+            (EFFECT_BINDING_DESCRIPTOR_CAPABILITY.into(), 1),
+        ]
+        .into(),
+        bounded_direct_fact_admission: Vec::new(),
+        cycle_members: Vec::new(),
+    };
+    std::fs::write(
+        dir.join(RUN_MANIFEST_FILENAME),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
+fn completed(
+    factory: &obzenflow_core::event::SystemEventFactory,
+) -> obzenflow_core::event::SystemEvent {
+    factory.pipeline_completed(
+        obzenflow_core::event::types::DurationMs(1),
+        obzenflow_core::metrics::FlowLifecycleMetricsSnapshot {
+            events_in_total: 0,
+            events_out_total: 0,
+            errors_total: 0,
+        },
+    )
+}
+
+fn replay_of(source: &std::path::Path, verify: bool) -> crate::application::RunMode {
+    crate::application::RunMode::Replay(crate::application::ReplayRunContext {
+        archive_path: source.to_path_buf(),
+        archive_flow_id: None,
+        verify,
+    })
+}
+
+#[tokio::test]
+async fn replay_footer_sealed_source_offers_verify() {
+    let dir = tempfile::tempdir().unwrap();
+    recorded_source(dir.path(), |factory| {
+        vec![factory.pipeline_starting(), completed(factory)]
+    })
+    .await;
+    assert!(replay_verify_offered(&replay_of(dir.path(), false)));
+    let footer = footer_outcome(
+        Some(obzenflow_core::journal::ArchiveStatus::Completed),
+        "flow".into(),
+        Some(CurrentRunLocator::new(std::path::PathBuf::from(
+            "tmp/replay",
+        ))),
+        replay_of(dir.path(), false),
+        ArchiveOffers {
+            replay: true,
+            resume: false,
+            verify: true,
+        },
+    )
+    .default_footer();
+    assert!(
+        footer.contains(&format!(
+            "Verify it against the source archive: re-run with --replay-from {} --verify",
+            shell_path(dir.path())
+        )),
+        "{footer}"
+    );
+}
+
+#[tokio::test]
+async fn replay_footer_unsealed_source_omits_verify() {
+    for lifecycle in [
+        |factory: &obzenflow_core::event::SystemEventFactory| vec![factory.pipeline_starting()],
+        |factory: &obzenflow_core::event::SystemEventFactory| vec![factory.pipeline_not_started()],
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        recorded_source(dir.path(), lifecycle).await;
+        assert!(!replay_verify_offered(&replay_of(dir.path(), false)));
+    }
+    let missing = tempfile::tempdir().unwrap();
+    assert!(!replay_verify_offered(&replay_of(
+        &missing.path().join("gone"),
+        false
+    )));
+}
+
+#[tokio::test]
+async fn replay_footer_comparison_pending_omits_verify() {
+    let dir = tempfile::tempdir().unwrap();
+    recorded_source(dir.path(), |factory| {
+        vec![factory.pipeline_starting(), completed(factory)]
+    })
+    .await;
+    assert!(!replay_verify_offered(&replay_of(dir.path(), true)));
+}
+
+#[test]
+fn footer_unknown_status_reports_stopped() {
+    use obzenflow_core::journal::ArchiveStatus;
+    let first_line = |status| {
+        footer_outcome(
+            status,
+            "flow".into(),
+            None,
+            crate::application::RunMode::Live,
+            ArchiveOffers::default(),
+        )
+        .default_footer()
+    };
+    assert_eq!(
+        first_line(Some(ArchiveStatus::Completed)),
+        "flow completed."
+    );
+    for status in [
+        None,
+        Some(ArchiveStatus::Unknown),
+        Some(ArchiveStatus::NotStarted),
+        Some(ArchiveStatus::Cancelled),
+        Some(ArchiveStatus::Failed),
+    ] {
+        assert_eq!(first_line(status), "flow stopped.", "{status:?}");
+    }
+}

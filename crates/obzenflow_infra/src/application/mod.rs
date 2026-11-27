@@ -22,6 +22,7 @@ pub(crate) mod runtime_config_sources;
 mod web_surface;
 
 pub use config::{ControlPlaneAuthModeArg, CorsModeArg, FlowConfig, OnTerminalArg, StartupMode};
+pub(crate) use error::{archive_open_error, replay_error_text};
 pub use error::{ApplicationError, ResumeAdvice};
 pub use flow_application::{FlowApplication, FlowApplicationBuilder, LogLevel};
 pub use hosted_ingress::HostedIngress;

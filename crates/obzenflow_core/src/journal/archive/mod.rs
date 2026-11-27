@@ -15,6 +15,7 @@ pub enum ArchiveStatus {
     Completed,
     Failed,
     Cancelled,
+    NotStarted,
     Unknown,
 }
 

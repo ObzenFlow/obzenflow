@@ -1158,6 +1158,7 @@ where
                     delivery_order,
                     ai_models: descriptor.ai_model_specs(),
                     max_open_keys: descriptor.max_open_keys(),
+                    source_continuation: descriptor.source_continuation(),
                 },
             );
         }
@@ -1303,6 +1304,7 @@ where
             effective_config: Some(__flow_effective.manifest_evidence()),
             capabilities: manifest_capabilities,
             bounded_direct_fact_admission,
+            cycle_members: __archive_flow_evidence.cycle_members.clone(),
         };
         // FLOWIP-120u: the manifest is a durable-run artifact; ephemeral runs
         // have no location to persist it within.

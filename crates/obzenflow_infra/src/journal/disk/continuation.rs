@@ -211,6 +211,12 @@ pub(crate) fn admit(run: &Path, manifest: &RunManifest) -> Result<bool, ReplayEr
     if has_live_writer(run, manifest)? {
         return Ok(true);
     }
+    admit_stopped(run, manifest)?;
+    refuse_unwritable(run)?;
+    Ok(false)
+}
+
+pub(crate) fn admit_stopped(run: &Path, manifest: &RunManifest) -> Result<(), ReplayError> {
     if read_claim(run)?.is_some() {
         return Err(ReplayError::AlreadyContinued {
             archive: run.to_path_buf(),
@@ -220,8 +226,7 @@ pub(crate) fn admit(run: &Path, manifest: &RunManifest) -> Result<bool, ReplayEr
     if let Some(resume) = &manifest.resume {
         refuse_orphan(run, manifest, &resume.resumed_from)?;
     }
-    refuse_unwritable(run)?;
-    Ok(false)
+    Ok(())
 }
 
 /// The journal writers' OS locks are the evidence of a live run; the OS

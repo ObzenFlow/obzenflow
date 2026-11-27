@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! `archive_actions` admits or refuses a replay or a resume of a run. It uses
-//! the archive evidence of the run and the flow evidence. [`decide`] first
+//! `archive_actions` admits a replay or a resume of a run, with or without a
+//! warning, or refuses it. It uses the archive evidence of the run and the flow
+//! evidence. [`decide`] first
 //! checks the flow for a cycle, and then checks for a live writer. For a resume,
 //! it then checks the no-work-left row and the sources. It checks the archive
 //! rows last.
@@ -107,10 +108,12 @@ pub enum ArchiveRefusal {
         run: PathBuf,
     },
     Failed {
-        verb: ReplayVerb,
         run: PathBuf,
     },
     Interrupted {
+        run: PathBuf,
+    },
+    NotStarted {
         run: PathBuf,
     },
     /// A replay or resume of a flow with a cycle; `members` names the stages
@@ -130,11 +133,11 @@ pub enum ArchiveRefusal {
 impl ArchiveRefusal {
     pub fn verb(&self) -> ReplayVerb {
         match self {
-            Self::StillRunning { verb, .. }
-            | Self::Failed { verb, .. }
-            | Self::Cycle { verb, .. } => *verb,
+            Self::StillRunning { verb, .. } | Self::Cycle { verb, .. } => *verb,
             Self::NoWorkLeft { .. } | Self::Sources { .. } => ReplayVerb::Resume,
-            Self::Interrupted { .. } => ReplayVerb::Replay,
+            Self::Failed { .. } | Self::Interrupted { .. } | Self::NotStarted { .. } => {
+                ReplayVerb::Replay
+            }
         }
     }
 }
@@ -154,16 +157,20 @@ impl fmt::Display for ArchiveRefusal {
                  source is finite. No work remains.",
                 run.display()
             ),
-            Self::Failed { verb, run } => write!(
+            Self::Failed { run } => write!(
                 f,
-                "ObzenFlow cannot {} {}, because the run failed.",
-                verb.word(),
+                "ObzenFlow cannot replay {}, because the run failed.",
                 run.display()
             ),
             Self::Interrupted { run } => write!(
                 f,
                 "ObzenFlow cannot replay {}, because the run is interrupted and has no terminal \
                  record.",
+                run.display()
+            ),
+            Self::NotStarted { run } => write!(
+                f,
+                "ObzenFlow cannot replay {}, because the run did not start.",
                 run.display()
             ),
             Self::Cycle { verb, run, members } => write!(
@@ -180,14 +187,34 @@ impl fmt::Display for ArchiveRefusal {
 
 impl std::error::Error for ArchiveRefusal {}
 
-/// Decide whether `verb` over `run` is admitted.
+/// `ArchiveWarning` tells why [`decide`] admits a resume with a warning. Its
+/// `Display` text is one line that gives only the cause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchiveWarning {
+    Failed { run: PathBuf },
+}
+
+impl fmt::Display for ArchiveWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Failed { run } => write!(
+                f,
+                "ObzenFlow resumes {}, which failed. If the cause of that failure is still \
+                 present, this run fails in the same way.",
+                run.display()
+            ),
+        }
+    }
+}
+
+/// `decide` admits `verb` over `run`, with or without a warning, or refuses it.
 pub fn decide(
     verb: ReplayVerb,
     run: &Path,
     archive: &ArchiveEvidence,
     flow: &FlowEvidence,
     overrides: ArchiveOverrides,
-) -> Result<(), ArchiveRefusal> {
+) -> Result<Option<ArchiveWarning>, ArchiveRefusal> {
     let run = run.to_path_buf();
     if !flow.cycle_members.is_empty() {
         return Err(ArchiveRefusal::Cycle {
@@ -207,22 +234,18 @@ pub fn decide(
         if !refusals.is_empty() {
             return Err(ArchiveRefusal::Sources { run, refusals });
         }
+        let warned = archive.status == ArchiveStatus::Failed
+            && archive.failure != FailureEvidence::DepartedFromArchive;
+        return Ok(warned.then_some(ArchiveWarning::Failed { run }));
     }
-    match (archive.status, verb) {
-        (ArchiveStatus::Completed | ArchiveStatus::Cancelled, _)
-        | (ArchiveStatus::Unknown, ReplayVerb::Resume) => Ok(()),
-        (ArchiveStatus::Unknown, ReplayVerb::Replay) if !overrides.allow_incomplete_archive => {
-            Err(ArchiveRefusal::Interrupted { run })
-        }
-        (ArchiveStatus::Failed, ReplayVerb::Resume)
-            if archive.failure == FailureEvidence::DepartedFromArchive =>
-        {
-            Ok(())
-        }
-        (ArchiveStatus::Failed, _) if !overrides.allow_incomplete_archive => {
-            Err(ArchiveRefusal::Failed { verb, run })
-        }
-        (ArchiveStatus::Unknown | ArchiveStatus::Failed, _) => Ok(()),
+    if overrides.allow_incomplete_archive {
+        return Ok(None);
+    }
+    match archive.status {
+        ArchiveStatus::Completed | ArchiveStatus::Cancelled => Ok(None),
+        ArchiveStatus::Failed => Err(ArchiveRefusal::Failed { run }),
+        ArchiveStatus::NotStarted => Err(ArchiveRefusal::NotStarted { run }),
+        ArchiveStatus::Unknown => Err(ArchiveRefusal::Interrupted { run }),
     }
 }
 
@@ -317,7 +340,7 @@ mod tests {
         archive: &ArchiveEvidence,
         flow: &FlowEvidence,
         overrides: ArchiveOverrides,
-    ) -> Result<(), ArchiveRefusal> {
+    ) -> Result<Option<ArchiveWarning>, ArchiveRefusal> {
         decide(verb, Path::new(RUN), archive, flow, overrides)
     }
 
@@ -410,25 +433,38 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_run_needs_the_override_for_both_verbs() {
+    fn failed_run_plain_replay_refused() {
         let failed = archive(ArchiveStatus::Failed, finished());
-        for (verb, copy) in [
-            (
-                ReplayVerb::Resume,
-                "ObzenFlow cannot resume /runs/r1, because the run failed.",
-            ),
-            (
-                ReplayVerb::Replay,
-                "ObzenFlow cannot replay /runs/r1, because the run failed.",
-            ),
-        ] {
+        let refusal = decided(ReplayVerb::Replay, &failed, &safe_flow(), plain()).unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "ObzenFlow cannot replay /runs/r1, because the run failed."
+        );
+        assert_eq!(refusal.verb(), ReplayVerb::Replay);
+        assert_eq!(
+            decided(ReplayVerb::Replay, &failed, &safe_flow(), incomplete()),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn failed_resume_plain_returns_warning() {
+        let failed = archive(ArchiveStatus::Failed, finished());
+        for overrides in [plain(), incomplete()] {
+            let warning = decided(ReplayVerb::Resume, &failed, &safe_flow(), overrides)
+                .unwrap()
+                .expect("a failed run resumes with a warning");
             assert_eq!(
-                decided(verb, &failed, &safe_flow(), plain())
-                    .unwrap_err()
-                    .to_string(),
-                copy
+                warning,
+                ArchiveWarning::Failed {
+                    run: PathBuf::from(RUN)
+                }
             );
-            assert!(decided(verb, &failed, &safe_flow(), incomplete()).is_ok());
+            assert_eq!(
+                warning.to_string(),
+                "ObzenFlow resumes /runs/r1, which failed. If the cause of that failure is \
+                 still present, this run fails in the same way."
+            );
         }
     }
 
@@ -438,13 +474,14 @@ mod tests {
             failure: FailureEvidence::DepartedFromArchive,
             ..archive(ArchiveStatus::Failed, finished())
         };
-        assert!(decided(ReplayVerb::Resume, &departed, &safe_flow(), plain()).is_ok());
+        assert_eq!(
+            decided(ReplayVerb::Resume, &departed, &safe_flow(), plain()),
+            Ok(None),
+            "a departed resume carries no warning"
+        );
         assert!(matches!(
             decided(ReplayVerb::Replay, &departed, &safe_flow(), plain()),
-            Err(ArchiveRefusal::Failed {
-                verb: ReplayVerb::Replay,
-                ..
-            })
+            Err(ArchiveRefusal::Failed { .. })
         ));
         assert!(decided(ReplayVerb::Replay, &departed, &safe_flow(), incomplete()).is_ok());
         let cyclic = FlowEvidence {
@@ -521,6 +558,7 @@ mod tests {
         for evidence in [
             archive(ArchiveStatus::Completed, finished()),
             archive(ArchiveStatus::Cancelled, finished()),
+            archive(ArchiveStatus::NotStarted, finished()),
             archive(ArchiveStatus::Unknown, finished()),
             archive(ArchiveStatus::Failed, finished()),
             live,
@@ -546,6 +584,46 @@ mod tests {
             source("store_orders", true, Some(EofKind::Truncated)),
             source("web_orders", true, None),
         ]
+    }
+
+    #[test]
+    fn not_started_replay_plain_names_cause() {
+        let idle = archive(ArchiveStatus::NotStarted, Vec::new());
+        let refusal = decided(ReplayVerb::Replay, &idle, &safe_flow(), plain()).unwrap_err();
+        assert_eq!(
+            refusal,
+            ArchiveRefusal::NotStarted {
+                run: PathBuf::from(RUN)
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "ObzenFlow cannot replay /runs/r1, because the run did not start."
+        );
+        assert_eq!(
+            decided(ReplayVerb::Replay, &idle, &safe_flow(), incomplete()),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn not_started_resume_plain_admitted() {
+        let idle = archive(
+            ArchiveStatus::NotStarted,
+            vec![source("store_orders", true, None)],
+        );
+        let rereadable = FlowEvidence {
+            cycle_members: Vec::new(),
+            sources: vec![("store_orders".to_string(), SourceContinuation::RecordedRead)],
+        };
+        assert_eq!(
+            decided(ReplayVerb::Resume, &idle, &rereadable, plain()),
+            Ok(None)
+        );
+        assert!(matches!(
+            decided(ReplayVerb::Resume, &idle, &safe_flow(), plain()),
+            Err(ArchiveRefusal::Sources { .. })
+        ));
     }
 
     #[test]

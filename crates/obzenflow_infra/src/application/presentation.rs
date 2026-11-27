@@ -388,12 +388,14 @@ impl Presentation {
     }
 }
 
-/// The archive verbs admitted as plain commands for the run just written and
-/// the flow just built. The footer prints a verb's line only when it is offered.
+/// `ArchiveOffers` tells which plain commands the footer offers for the run that
+/// it wrote and the flow that it built. The footer offers the verification of a
+/// replay only when verification admits the source of the replay as a baseline.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ArchiveOffers {
     pub replay: bool,
     pub resume: bool,
+    pub verify: bool,
 }
 
 pub enum RunPresentationOutcome {
@@ -458,8 +460,7 @@ impl RunPresentationOutcome {
                 ));
                 lines.push("Archived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.".to_string());
                 lines.push(format!("Replay journal: {location}"));
-                // Under --verify the comparison result follows this footer.
-                if !ctx.verify {
+                if offers.verify {
                     lines.push(format!(
                         "Verify it against the source archive: re-run with --replay-from {} --verify",
                         shell_path(&ctx.archive_path)
@@ -554,7 +555,7 @@ impl RunPresentationOutcome {
                 }
                 match location {
                     Some(location) => {
-                        Footer::new().paragraph(format!("{prefix}: {error}. Journal: {location}"))
+                        Footer::new().paragraph(format!("{prefix}: {error}\nJournal: {location}"))
                     }
                     None => Footer::new().paragraph(format!("{prefix}: {error}")),
                 }
@@ -876,10 +877,17 @@ mod tests {
     const BOTH: ArchiveOffers = ArchiveOffers {
         replay: true,
         resume: true,
+        verify: false,
     };
     const REPLAY_ONLY: ArchiveOffers = ArchiveOffers {
         replay: true,
         resume: false,
+        verify: false,
+    };
+    const REPLAY_AND_VERIFY: ArchiveOffers = ArchiveOffers {
+        replay: true,
+        resume: false,
+        verify: true,
     };
 
     #[test]
@@ -955,7 +963,7 @@ mod tests {
         };
         assert_eq!(
             failed_without_name.default_footer(),
-            "Flow failed: err. Journal: tmp/run"
+            "Flow failed: err\nJournal: tmp/run"
         );
         assert_eq!(failed_without_name.offers(), ArchiveOffers::default());
     }
@@ -972,7 +980,7 @@ mod tests {
             flow_name: "flow".to_string(),
             location: Some(CurrentRunLocator::new(PathBuf::from("tmp/replay-run"))),
             run_mode: replay_mode.clone(),
-            offers: REPLAY_ONLY,
+            offers: REPLAY_AND_VERIFY,
         };
         let footer = completed.default_footer();
         assert!(
@@ -1006,6 +1014,24 @@ mod tests {
             failed.default_footer(),
             "flow failed (strict replay of flow_01SOURCE at tmp/archive): err"
         );
+    }
+
+    #[test]
+    fn failed_footer_trailing_stop_prints_once() {
+        let failed = RunPresentationOutcome::Failed {
+            flow_name: Some("flow".to_string()),
+            error: "ObzenFlow cannot resume tmp/parent, because the run failed. Start a new run."
+                .to_string(),
+            location: Some(CurrentRunLocator::new(PathBuf::from("tmp/run"))),
+            run_mode: RunMode::Live,
+        };
+        let footer = failed.default_footer();
+        assert_eq!(
+            footer,
+            "flow failed: ObzenFlow cannot resume tmp/parent, because the run failed. Start a \
+             new run.\nJournal: tmp/run"
+        );
+        assert!(!footer.contains(".."), "{footer}");
     }
 
     #[test]

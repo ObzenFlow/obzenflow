@@ -11,10 +11,12 @@ mod query;
 pub use input::EventReceived;
 pub use query::{QueryBookmark, QueryError};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SourceContinuation {
     RecordedRead,
     Refuse,
@@ -114,6 +116,38 @@ mod tests {
                 let reattach = SourceContinuation::Reattach { guarantee };
                 assert_eq!(reattach.resume_refusal(recorded_eof), None);
             }
+        }
+    }
+
+    #[test]
+    fn source_continuation_each_variant_round_trips() {
+        for (continuation, recorded) in [
+            (
+                SourceContinuation::RecordedRead,
+                serde_json::json!({"kind": "recorded_read"}),
+            ),
+            (
+                SourceContinuation::Refuse,
+                serde_json::json!({"kind": "refuse"}),
+            ),
+            (
+                SourceContinuation::Reattach {
+                    guarantee: ReattachGuarantee::SenderRedelivers,
+                },
+                serde_json::json!({"kind": "reattach", "guarantee": "sender_redelivers"}),
+            ),
+            (
+                SourceContinuation::Reattach {
+                    guarantee: ReattachGuarantee::AtMostOnce,
+                },
+                serde_json::json!({"kind": "reattach", "guarantee": "at_most_once"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(continuation).unwrap(), recorded);
+            assert_eq!(
+                serde_json::from_value::<SourceContinuation>(recorded).unwrap(),
+                continuation
+            );
         }
     }
 
