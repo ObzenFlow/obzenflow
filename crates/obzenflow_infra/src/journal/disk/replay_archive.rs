@@ -37,7 +37,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// `ResumeEvidence` holds the observed head of a history and the archive
+/// `ResumeEvidence` contains the observed head of a history and the archive
 /// evidence that a plain resume of the head reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeEvidence {
@@ -185,8 +185,8 @@ impl DiskReplayArchive {
     }
 
     /// `written_run_evidence` returns the evidence of `run` as `verb` opens it,
-    /// without the liveness probe or the continuation checks. If the run can
-    /// still be live, the caller probes its liveness.
+    /// without the liveness probe or the continuation checks. If the caller does
+    /// not know that the run stopped, it probes liveness first.
     pub async fn written_run_evidence(
         run: PathBuf,
         verb: ReplayVerb,
@@ -417,7 +417,10 @@ impl DiskReplayArchive {
                         StatusDerivation {
                             terminal_events_found: 0,
                             chosen: ArchiveStatus::Unknown,
-                            warning: Some(format!("system.log missing at {}", path.display())),
+                            warning: Some(format!(
+                                "The archive has no system.log at {}.",
+                                path.display()
+                            )),
                         },
                         None,
                         false,

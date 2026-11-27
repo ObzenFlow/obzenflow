@@ -356,8 +356,8 @@ pub enum FlowBuildError {
     )]
     OrderObserverFanInRequiresDeterministicOrder { stage_name: String },
 
-    /// Archive admission refused the verb. The error also carries the facts of
-    /// the flow that admission read.
+    /// Archive admission refused the verb. The error also contains the flow
+    /// evidence that admission read.
     #[error("{refusal}")]
     ArchiveVerbRefused {
         refusal: obzenflow_core::journal::archive_actions::ArchiveRefusal,

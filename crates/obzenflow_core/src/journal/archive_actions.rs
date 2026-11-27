@@ -2,11 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! `archive_actions` admits or refuses a replay or a resume of a run. It
-//! decides from the archive evidence of the run and from the facts of the flow.
-//! [`decide`] checks the cycle first and a live writer next. For a resume, it
-//! then checks the no-work-left row and the sources. It checks the archive rows
-//! last.
+//! `archive_actions` admits or refuses a replay or a resume of a run. It uses
+//! the archive evidence of the run and the flow evidence. [`decide`] first
+//! checks the flow for a cycle, and then checks for a live writer. For a resume,
+//! it then checks the no-work-left row and the sources. It checks the archive
+//! rows last.
 
 use super::ArchiveStatus;
 use crate::event::payloads::flow_control_payload::EofKind;
@@ -18,9 +18,10 @@ use std::path::{Path, PathBuf};
 /// catches up and continues live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayVerb {
-    /// A bounded replay that drains at the end of its recording.
+    /// `Replay` reconstructs a bounded recording and drains at its end.
     Replay,
-    /// A resume that catches up and continues live.
+    /// `Resume` resumes a recorded run from the last fact that it committed. The
+    /// new run catches up on the recording and then continues with live work.
     Resume,
 }
 
@@ -94,8 +95,8 @@ pub struct ArchiveOverrides {
     pub allow_incomplete_archive: bool,
 }
 
-/// Why an archive verb was refused. Its `Display` gives one line that states
-/// the refusal without a remedy.
+/// `ArchiveRefusal` tells why [`decide`] refuses an archive verb. Its `Display`
+/// text is one line that gives only the cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveRefusal {
     StillRunning {

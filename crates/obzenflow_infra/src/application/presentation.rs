@@ -8,7 +8,7 @@ use std::fmt::Display;
 use std::io::IsTerminal;
 use std::path::Path;
 
-/// `shell_path` renders an archive path as one POSIX shell argument.
+/// `shell_path` makes one POSIX shell argument from a path.
 pub fn shell_path(path: &Path) -> String {
     use std::fmt::Write;
 

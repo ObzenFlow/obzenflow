@@ -1606,6 +1606,13 @@ impl Archive {
             .collect()
     }
 
+    fn store_read(&self, order: &str) -> bool {
+        let order = format!("\"{order}\"");
+        self.rows("store_orders", RunJournalKind::Data)
+            .filter(|row| row.event_type() == "query.answered")
+            .any(|row| serde_json::to_string(&row.payload).is_ok_and(|text| text.contains(&order)))
+    }
+
     fn manifest(&self) -> serde_json::Value {
         serde_json::from_str(
             &std::fs::read_to_string(self.dir.join("run_manifest.json"))
@@ -2504,6 +2511,7 @@ async fn durable_execution_contract() {
     let killed = child.run().await;
     cut(&killed, "S9", |archive| {
         archive.rejections() == 1
+            && archive.store_read(FIRST_AFTER_INVALID)
             && s9.calls().iter().any(|call| call.order_id() == "S-01")
             && !archive
                 .admitted()

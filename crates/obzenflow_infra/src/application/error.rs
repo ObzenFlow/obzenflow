@@ -12,7 +12,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// `ResumeAdvice` holds the admission decision for a plain resume of the
+/// `ResumeAdvice` contains the admission decision for a plain resume of the
 /// observed head of a history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeAdvice {
@@ -687,7 +687,7 @@ mod tests {
             let fact = error.to_string();
             assert!(
                 !fact.contains('\n') && !fact.contains("--"),
-                "Core states the fact without a remedy: {fact}"
+                "{fact} contains a second line or a flag"
             );
             assert_eq!(replay_error_text(&error), expected);
         }

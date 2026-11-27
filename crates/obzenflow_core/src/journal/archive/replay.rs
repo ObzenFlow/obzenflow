@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-/// Why an archive could not be read, opened or continued. Its `Display`
-/// states the fact without a remedy.
+/// `ReplayError` tells why a provider cannot open, read or resume an archive.
+/// Its `Display` text gives only the cause.
 #[derive(Debug, Error)]
 pub enum ReplayError {
     #[error("Replay archive path is not a directory: {path}")]
@@ -95,8 +95,7 @@ pub enum ReplayError {
         source: Box<ReplayError>,
     },
 
-    /// A torn resumed run merges with the archive it resumed from, which has no
-    /// `system.log`.
+    /// The ancestor that a torn resumed run merges with has no `system.log`.
     #[error(
         "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
          from, {}, has no system.log.",

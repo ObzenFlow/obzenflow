@@ -32,8 +32,8 @@ pub enum RuntimeMode {
     Live,
     /// `Replay` reconstructs a bounded recording and drains at its end.
     Replay,
-    /// `Resume` resumes a recorded run from the last fact it committed. The new
-    /// run catches up on the recording first, then continues live.
+    /// `Resume` resumes a recorded run from the last fact that it committed. The
+    /// new run catches up on the recording and then continues with live work.
     Resume,
 }
 

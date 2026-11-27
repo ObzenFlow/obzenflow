@@ -15,8 +15,9 @@ pub enum RunMode {
     Live,
     /// Strict replay of a recorded run (`--replay-from`).
     Replay(ReplayRunContext),
-    /// `Resume` resumes a recorded run (`--resume-from`) from the last fact it
-    /// committed. The new run catches up on the archive first, then continues live.
+    /// `Resume` resumes a recorded run (`--resume-from`) from the last fact that
+    /// it committed. The new run catches up on the archive and then continues
+    /// with live work.
     Resume(ReplayRunContext),
 }
 

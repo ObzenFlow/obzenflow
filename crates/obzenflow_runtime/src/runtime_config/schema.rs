@@ -229,7 +229,7 @@ pub enum Redaction {
 pub enum EnvBinding {
     /// `OBZENFLOW_<KEY_PATH>` uppercased (§2 environment-tier lock).
     Canonical,
-    /// `Named` gives the knob a fixed name for its environment variable.
+    /// `Named` sets the name of the environment variable for the knob.
     Named(&'static str),
     /// No env binding.
     None,
