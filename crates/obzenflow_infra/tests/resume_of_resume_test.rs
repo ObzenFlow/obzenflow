@@ -514,9 +514,10 @@ async fn only_the_head_of_a_history_resumes() -> Result<()> {
     assert_eq!(
         refusal.to_string(),
         format!(
-            "cannot resume {}: it was already resumed by {}, the head of this history.\nResume \
-             {} instead.",
+            "ObzenFlow cannot resume {}, because {} already resumed it. {} is the head of this \
+             history.\nResume {} instead.",
             r0.display(),
+            r1.display(),
             r1.display(),
             r1.display()
         )

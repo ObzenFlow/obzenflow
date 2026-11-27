@@ -61,13 +61,26 @@ enum Command {
     /// Inspect run metadata, stage data journal files and record byte offsets.
     Inspect(InspectArgs),
     /// Verify a candidate run's recorded output against a baseline, or call logs against their lineage.
-    ///
-    /// For runs, exit codes are 0 certified match, 1 divergence, 2 certified region
-    /// matched with uncertified stages and 3 refused. For call logs, 0 every log
-    /// passes, 1 a log breaks a rule, 2 a log is uncertified and 3 refused. Any other
-    /// failure exits 4, and so does a wrong or missing argument.
+    #[command(long_about = VERIFY_LONG_ABOUT)]
     Verify(VerifyArgs),
 }
+
+const VERIFY_LONG_ABOUT: &str = "\
+Verify a candidate run's recorded output against a baseline, or call logs against their lineage.
+
+Exit codes for runs
+  0  The candidate matches the baseline, and every stage is certified.
+  1  The candidate does not match the baseline.
+  2  The certified region matches, and some stages are not certified.
+  3  Verification refused the runs.
+
+Exit codes for call logs
+  0  Every log passes.
+  1  A log breaks a rule.
+  2  A log is not certified.
+  3  Verification refused the logs.
+
+Any other failure exits 4. A wrong or missing argument also exits 4.";
 
 #[derive(Args)]
 struct ShowArgs {
@@ -144,14 +157,14 @@ struct VerifyArgs {
         long,
         required = true,
         value_name = "PATH",
-        help = "The run directory the candidate is compared to"
+        help = "The run directory to compare the candidate with"
     )]
     baseline: Option<PathBuf>,
     #[arg(
         long,
         required = true,
         value_name = "PATH",
-        help = "The run directory under test"
+        help = "The run directory to verify"
     )]
     candidate: Option<PathBuf>,
     #[arg(long, value_name = "PATH", help = "Write the comparison report here")]

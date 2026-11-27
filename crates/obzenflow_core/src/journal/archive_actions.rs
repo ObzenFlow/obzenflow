@@ -144,27 +144,31 @@ impl fmt::Display for ArchiveRefusal {
         match self {
             Self::StillRunning { verb, run } => write!(
                 f,
-                "cannot {} {}: it is still running.",
+                "ObzenFlow cannot {} {}, because the run still has a live writer.",
                 verb.word(),
                 run.display()
             ),
             Self::NoWorkLeft { run } => write!(
                 f,
-                "cannot resume {}: it completed naturally and every source is finite, so there \
-                 is no work left to continue.",
+                "ObzenFlow cannot resume {}, because the run completed naturally and every \
+                 source is finite. No work remains.",
                 run.display()
             ),
-            Self::Failed { verb, run } => {
-                write!(f, "cannot {} {}: it failed.", verb.word(), run.display())
-            }
+            Self::Failed { verb, run } => write!(
+                f,
+                "ObzenFlow cannot {} {}, because the run failed.",
+                verb.word(),
+                run.display()
+            ),
             Self::Interrupted { run } => write!(
                 f,
-                "cannot replay {}: it has no terminal record, so it was interrupted.",
+                "ObzenFlow cannot replay {}, because the run is interrupted and has no terminal \
+                 record.",
                 run.display()
             ),
             Self::Cycle { verb, run, members } => write!(
                 f,
-                "cannot {} {}: cyclic topology includes {}",
+                "ObzenFlow cannot {} {}, because the flow has a cycle through {}.",
                 verb.word(),
                 run.display(),
                 members.join(", ")
@@ -253,8 +257,8 @@ fn unfinished_sources_refusal(archive: &Path, sources: &[String]) -> String {
         ("sources", "their")
     };
     format!(
-        "cannot resume {}: {subject} {named} stopped with {their} input unfinished, and only \
-         the stopped process held that input.",
+        "ObzenFlow cannot resume {}, because {subject} {named} stopped before {their} input \
+         finished, and only the stopped process held that input.",
         archive.display()
     )
 }
@@ -334,11 +338,11 @@ mod tests {
         for (verb, copy) in [
             (
                 ReplayVerb::Resume,
-                "cannot resume /runs/r1: it is still running.",
+                "ObzenFlow cannot resume /runs/r1, because the run still has a live writer.",
             ),
             (
                 ReplayVerb::Replay,
-                "cannot replay /runs/r1: it is still running.",
+                "ObzenFlow cannot replay /runs/r1, because the run still has a live writer.",
             ),
         ] {
             let refusal = decided(verb, &live, &safe_flow(), incomplete()).unwrap_err();
@@ -355,8 +359,8 @@ mod tests {
             decided(ReplayVerb::Resume, &done, &safe_flow(), incomplete())
                 .unwrap_err()
                 .to_string(),
-            "cannot resume /runs/r1: it completed naturally and every source is finite, so \
-             there is no work left to continue."
+            "ObzenFlow cannot resume /runs/r1, because the run completed naturally and every \
+             source is finite. No work remains."
         );
     }
 
@@ -399,7 +403,8 @@ mod tests {
             decided(ReplayVerb::Replay, &killed, &safe_flow(), plain())
                 .unwrap_err()
                 .to_string(),
-            "cannot replay /runs/r1: it has no terminal record, so it was interrupted."
+            "ObzenFlow cannot replay /runs/r1, because the run is interrupted and has no \
+             terminal record."
         );
         assert!(decided(ReplayVerb::Replay, &killed, &safe_flow(), incomplete()).is_ok());
     }
@@ -408,8 +413,14 @@ mod tests {
     fn a_failed_run_needs_the_override_for_both_verbs() {
         let failed = archive(ArchiveStatus::Failed, finished());
         for (verb, copy) in [
-            (ReplayVerb::Resume, "cannot resume /runs/r1: it failed."),
-            (ReplayVerb::Replay, "cannot replay /runs/r1: it failed."),
+            (
+                ReplayVerb::Resume,
+                "ObzenFlow cannot resume /runs/r1, because the run failed.",
+            ),
+            (
+                ReplayVerb::Replay,
+                "ObzenFlow cannot replay /runs/r1, because the run failed.",
+            ),
         ] {
             assert_eq!(
                 decided(verb, &failed, &safe_flow(), plain())
@@ -476,8 +487,8 @@ mod tests {
             decided(ReplayVerb::Resume, &early, &safe_flow(), plain())
                 .unwrap_err()
                 .to_string(),
-            "cannot resume /runs/r1: sources 'store_orders' and 'web_orders' stopped with their \
-             input unfinished, and only the stopped process held that input."
+            "ObzenFlow cannot resume /runs/r1, because sources 'store_orders' and 'web_orders' \
+             stopped before their input finished, and only the stopped process held that input."
         );
     }
 
@@ -486,16 +497,16 @@ mod tests {
         let archive = Path::new("/runs/interrupted");
         assert_eq!(
             unfinished_sources_refusal(archive, &["web_orders".to_string()]),
-            "cannot resume /runs/interrupted: source 'web_orders' stopped with its input \
-             unfinished, and only the stopped process held that input."
+            "ObzenFlow cannot resume /runs/interrupted, because source 'web_orders' stopped \
+             before its input finished, and only the stopped process held that input."
         );
         assert!(unfinished_sources_refusal(
             archive,
             &["a".to_string(), "b".to_string(), "c".to_string()],
         )
         .starts_with(
-            "cannot resume /runs/interrupted: sources 'a', 'b' and 'c' stopped with their \
-             input unfinished"
+            "ObzenFlow cannot resume /runs/interrupted, because sources 'a', 'b' and 'c' \
+             stopped before their input finished"
         ));
     }
 

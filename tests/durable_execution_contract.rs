@@ -2312,9 +2312,9 @@ async fn durable_execution_contract() {
     let refusal = read_log(&log);
     assert!(
         refusal.contains(&format!(
-            "cannot replay {torn}: it has no terminal record, so it was interrupted.\nResume it \
-             with --resume-from {operand}, or pass --allow-incomplete-archive to replay its \
-             recorded prefix.",
+            "ObzenFlow cannot replay {torn}, because the run is interrupted and has no terminal \
+             record.\nResume it with --resume-from {operand}. To replay its recorded prefix \
+             instead, add --allow-incomplete-archive.",
             torn = torn.display(),
             operand = obzenflow_infra::application::shell_path(&torn)
         )),
@@ -2338,8 +2338,10 @@ async fn durable_execution_contract() {
     let refusal = std::fs::read_to_string(log).expect("the refusal is logged");
     assert!(
         refusal.contains(&format!(
-            "cannot resume {}: it was already resumed by {}, the head of this history.",
+            "ObzenFlow cannot resume {}, because {} already resumed it. {} is the head of this \
+             history.",
             killed_copy.display(),
+            rebuilt_head.display(),
             rebuilt_head.display()
         )),
         "{refusal}"
@@ -2408,7 +2410,8 @@ async fn durable_execution_contract() {
             )
         } else {
             format!(
-                "cannot replay {}: it has no terminal record",
+                "ObzenFlow cannot replay {}, because the run is interrupted and has no terminal \
+                 record",
                 killed_copy.display()
             )
         };
@@ -2841,7 +2844,8 @@ async fn a_running_run_refuses_resume_and_replay() {
         let refusal = std::fs::read_to_string(log).expect("the refusal is logged");
         assert!(
             refusal.contains(&format!(
-                "cannot {verb} {}: it is still running.\nStop it, then {verb} it again.",
+                "ObzenFlow cannot {verb} {}, because the run still has a live writer.\nStop the \
+                 run. Then {verb} it again.",
                 running.display()
             )),
             "{refusal}"
@@ -4418,7 +4422,12 @@ mod payment_demo {
         let log = read_log(&log);
         let refusal = log
             .lines()
-            .find(|line| line.starts_with(&format!("cannot resume {}: ", killed.display())))
+            .find(|line| {
+                line.starts_with(&format!(
+                    "ObzenFlow cannot resume {}, because ",
+                    killed.display()
+                ))
+            })
             .unwrap_or_else(|| panic!("{name}: the refusal prints: {log}"));
         assert!(
             refusal.contains("'web_orders'")
@@ -4435,7 +4444,10 @@ mod payment_demo {
         );
         assert_eq!(scenario.runs(), runs, "{name}: no run directory");
         let (_, source_refusal) = log
-            .split_once(&format!("cannot resume {}: ", killed.display()))
+            .split_once(&format!(
+                "ObzenFlow cannot resume {}, because ",
+                killed.display()
+            ))
             .expect("the refusal prints");
         let source_refusal = source_refusal.trim_end();
 
@@ -4448,7 +4460,10 @@ mod payment_demo {
         );
         let log = read_log(&log);
         let (_, replay_refusal) = log
-            .split_once(&format!("cannot replay {}: ", killed.display()))
+            .split_once(&format!(
+                "ObzenFlow cannot replay {}, because ",
+                killed.display()
+            ))
             .unwrap_or_else(|| panic!("{name}: the replay refusal prints: {log}"));
         assert!(
             !replay_refusal.contains("--resume-from"),
@@ -4456,7 +4471,7 @@ mod payment_demo {
         );
         assert!(
             replay_refusal.trim_end().ends_with(&format!(
-                "cannot resume {}: {source_refusal}",
+                "ObzenFlow cannot resume {}, because {source_refusal}",
                 killed.display()
             )),
             "{name}: the replay refusal ends with the source refusal: {replay_refusal}"
@@ -4475,7 +4490,8 @@ mod payment_demo {
         let head = std::fs::canonicalize(&killed).expect("the killed run resolves");
         assert!(
             log.contains(&format!(
-                "a replay never executes an effect.\ncannot resume {}: {source_refusal}",
+                "a replay never executes an effect.\nObzenFlow cannot resume {}, because \
+                 {source_refusal}",
                 head.display()
             )),
             "{name}: the replay stop prints the source refusal: {log}"
@@ -5661,9 +5677,9 @@ mod flash_sale {
         let dir_name = |run: &Path| run.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
             remedy.contains(&format!(
-                "{} recorded, then add: --resume-from ",
+                "{} recorded. Then add --resume-from ",
                 dir_name(&killed)
-            )) && remedy.ends_with(&dir_name(&refused)),
+            )) && remedy.ends_with(&format!("{}.", dir_name(&refused))),
             "{name}: {remedy}"
         );
 
@@ -7213,7 +7229,7 @@ mod csv_register {
             .find(|line| line.starts_with("To continue this run, restore what "))
             .unwrap_or_else(|| panic!("missing recovery instructions: {output}"));
         assert!(
-            remedy.contains(&flow_id(&run)) && remedy.ends_with(&flow_id(&refused)),
+            remedy.contains(&flow_id(&run)) && remedy.ends_with(&format!("{}.", flow_id(&refused))),
             "{remedy}"
         );
         (scenario, refused)

@@ -316,7 +316,7 @@ async fn archive_missing_system_log_requires_flag() {
     assert_eq!(
         err.to_string(),
         format!(
-            "Replay archive system.log missing at {}",
+            "The replay archive has no system.log at {}.",
             system_log.display()
         )
     );
@@ -505,7 +505,10 @@ async fn open_rejects_previous_journal_schema_version_before_typed_parse() {
     );
     assert_eq!(
         err.to_string(),
-        format!("unsupported journal schema version: 2.0 (supported: {JOURNAL_SCHEMA_VERSION})")
+        format!(
+            "This build of ObzenFlow does not support journal schema version 2.0. It supports \
+             version {JOURNAL_SCHEMA_VERSION}."
+        )
     );
 }
 
@@ -626,7 +629,7 @@ async fn open_rejects_previous_journal_format_before_parsing_legacy_retry_rows()
     );
     assert!(
         err.to_string()
-            .contains("unsupported journal schema version"),
+            .contains("does not support journal schema version"),
         "refusal must identify the incompatible record format, got: {err}"
     );
 }
@@ -1083,8 +1086,8 @@ async fn resume_with_missing_ancestor_log_refused() {
     assert_eq!(
         error.to_string(),
         format!(
-            "cannot resume {resumed}: its reconstruction did not complete, and the archive it \
-             resumed from, {parent}, has no system.log.",
+            "ObzenFlow cannot resume {resumed}. Its reconstruction did not complete, and the \
+             archive that it resumed from, {parent}, has no system.log.",
             resumed = resumed.display(),
             parent = parent.display()
         )
@@ -1246,8 +1249,8 @@ async fn replay_completed_head_offers_replay() {
     assert_eq!(
         ApplicationError::from(&refusal).to_string(),
         format!(
-            "cannot resume {head}: it completed naturally and every source is finite, so there \
-             is no work left to continue.\nReplay it with --replay-from {operand}.",
+            "ObzenFlow cannot resume {head}, because the run completed naturally and every \
+             source is finite. No work remains.\nReplay it with --replay-from {operand}.",
             head = head.display(),
             operand = shell_path(&head)
         )

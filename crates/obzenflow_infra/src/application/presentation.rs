@@ -365,7 +365,7 @@ impl Presentation {
         // one run; announce it whether or not the application banner branches.
         if let RunMode::Resume(ctx) = mode {
             rendered.text.push_str(&format!(
-                "Resuming from {}. Recorded facts catch up first, then the run continues live from the last fact the recorded run committed.\n",
+                "This run resumes {}. It catches up on the recorded facts, and then it continues with live work from the last fact that the recorded run committed.\n",
                 ctx.source_label()
             ));
         }
@@ -474,7 +474,7 @@ impl RunPresentationOutcome {
                     "{flow_name} {verb} (resumed from {source}).",
                     source = ctx.source_label()
                 ));
-                lines.push("Recorded facts were caught up with effects suppressed, then the run continued live from the last fact the recorded run committed.".to_string());
+                lines.push("The run caught up on the recorded facts and executed no effects. Then it continued with live work from the last fact that the recorded run committed.".to_string());
                 lines.push(format!("Journal: {location}"));
                 if offers.replay {
                     lines.push(format!("Replay this run with: --replay-from {operand}"));
@@ -1052,8 +1052,8 @@ mod tests {
         );
         assert!(
             footer.contains(
-                "caught up with effects suppressed, then the run continued live from the last \
-                 fact the recorded run committed."
+                "The run caught up on the recorded facts and executed no effects. Then it \
+                 continued with live work from the last fact that the recorded run committed."
             ),
             "resume footer must state catch-up then live continuation: {footer}"
         );
@@ -1106,7 +1106,7 @@ mod tests {
         let rendered = presentation.render_banner(&resume_mode);
         assert!(
             rendered.text.contains(
-                "Resuming from flow_01SOURCE at tmp/archive. Recorded facts catch up first, then the run continues live from the last fact the recorded run committed."
+                "This run resumes flow_01SOURCE at tmp/archive. It catches up on the recorded facts, and then it continues with live work from the last fact that the recorded run committed."
             ),
             "resume banner must announce catch-up then live: {}",
             rendered.text

@@ -455,9 +455,10 @@ impl RuntimeExecution {
                 Arc::new(Replay { incomplete })
             }
             RuntimeMode::Resume => {
-                let archive_ref = archive
-                    .as_deref()
-                    .expect("a resume requires an archive; config layer must reject earlier");
+                let archive_ref = archive.as_deref().expect(
+                    "A resume has an archive, because the config layer refuses a resume \
+                         without one.",
+                );
                 let resume_generation =
                     ReaderGeneration(archive_ref.max_recorded_generation().0 + 1);
                 let state = Arc::new(ResumeState::new(resume_generation));

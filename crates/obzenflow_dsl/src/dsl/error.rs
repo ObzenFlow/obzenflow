@@ -365,11 +365,11 @@ pub enum FlowBuildError {
     },
 
     #[error(
-        "Resume requires a durable current run (FLOWIP-120u F13). The live continuation \
-         records new effect outcomes, and an ephemeral run has no location: the continuation \
-         could never be resumed, and its effects would re-execute on the next resume of the \
-         original archive. Switch `journals:` to `disk_journals(...)`, or replay the archive \
-         for an effect-free bounded rehearsal."
+        "A resume needs a durable current run. The live continuation records new effect \
+         outcomes, and an ephemeral run has no location. Nothing can resume the continuation, \
+         and the next resume of the original archive executes its effects again. Change \
+         `journals:` to `disk_journals(...)`. For a bounded rehearsal that executes no effects, \
+         replay the archive instead."
     )]
     ResumeRefusedEphemeralRun,
 

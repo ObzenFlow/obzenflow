@@ -302,7 +302,7 @@ mod tests {
             unreadable_status(ReplayError::MissingSystemLog {
                 path: PathBuf::from("/runs/r1/system.log"),
             }),
-            "unknown (Replay archive system.log missing at /runs/r1/system.log)"
+            "unknown (The replay archive has no system.log at /runs/r1/system.log.)"
         );
     }
 

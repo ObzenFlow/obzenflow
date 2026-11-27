@@ -142,9 +142,9 @@ impl CycleGuard {
             }
             FlowControlPayload::CatchUpComplete { .. } => {
                 unreachable!(
-                    "FLOWIP-120n F13: a resume rejects cyclic flows at build, so the \
-                     catch-up watermark never reaches a cycle guard; the condensation-frontier \
-                     follow-on adds the SignalKind arm"
+                    "A resume refuses a cyclic flow when the flow builds, so the catch-up \
+                     watermark never reaches a cycle guard. A later change adds the SignalKind \
+                     arm for the condensation frontier."
                 )
             }
         };

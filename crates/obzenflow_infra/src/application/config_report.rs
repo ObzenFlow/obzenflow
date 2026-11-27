@@ -135,7 +135,7 @@ fn remedy_line(
         .is_ok();
     admitted.then(|| {
         format!(
-            "To continue this run, restore what {} recorded, then add: --resume-from {}",
+            "To continue this run, restore what {} recorded. Then add --resume-from {}.",
             resumed_from.display(),
             shell_path(run)
         )
@@ -289,8 +289,8 @@ mod tests {
         assert_eq!(
             line(&failed(FailureEvidence::DepartedFromArchive), &flow).as_deref(),
             Some(
-                "To continue this run, restore what /runs/killed recorded, then add: \
-                 --resume-from runs/refused"
+                "To continue this run, restore what /runs/killed recorded. Then add \
+                 --resume-from runs/refused."
             )
         );
         assert_eq!(line(&failed(FailureEvidence::Other), &flow), None);

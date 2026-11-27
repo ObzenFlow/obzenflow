@@ -123,7 +123,8 @@ impl fmt::Display for ApplicationError {
                     },
                     Some(Err(error)) => f.write_str(&resume_read_error(replayed, error)),
                     None => f.write_str(
-                        "Cannot check whether this history can resume without the flow definition.",
+                        "ObzenFlow cannot check whether this history can resume without the flow \
+                         definition.",
                     ),
                 }
             }
@@ -207,7 +208,7 @@ fn refusal_text(refusal: &ArchiveRefusal) -> String {
             members.join(", ")
         ),
         ArchiveRefusal::StillRunning { verb, .. } => {
-            format!("{refusal}\nStop it, then {} it again.", verb.word())
+            format!("{refusal}\nStop the run. Then {} it again.", verb.word())
         }
         ArchiveRefusal::NoWorkLeft { run } => {
             format!(
@@ -216,11 +217,11 @@ fn refusal_text(refusal: &ArchiveRefusal) -> String {
             )
         }
         ArchiveRefusal::Failed { verb, .. } => format!(
-            "{refusal}\nPass --allow-incomplete-archive to {} it anyway.",
+            "{refusal}\nTo {} it, add --allow-incomplete-archive.",
             verb.word()
         ),
         ArchiveRefusal::Interrupted { .. } => {
-            format!("{refusal}\nPass --allow-incomplete-archive to replay its recorded prefix.")
+            format!("{refusal}\nTo replay its recorded prefix, add --allow-incomplete-archive.")
         }
         ArchiveRefusal::Sources { .. } => format!("{refusal}\nStart a new run."),
     }
@@ -243,20 +244,20 @@ fn interrupted_text(
     };
     if advice.admission.is_ok() && advice.run == run {
         return format!(
-            "{refusal}\nResume it with --resume-from {}, or pass --allow-incomplete-archive to \
-             replay its recorded prefix.",
+            "{refusal}\nResume it with --resume-from {}. To replay its recorded prefix instead, \
+             add --allow-incomplete-archive.",
             shell_path(run)
         );
     }
     let prefix = match &advice.continued_from {
         Some(parent) => format!(
-            "Pass --allow-incomplete-archive to replay the recorded prefix of {}.\n{} continued \
+            "To replay the recorded prefix of {}, add --allow-incomplete-archive.\n{} continued \
              {}.",
             run.display(),
             advice.run.display(),
             parent.display()
         ),
-        None => "Pass --allow-incomplete-archive to replay its recorded prefix.".to_string(),
+        None => "To replay its recorded prefix, add --allow-incomplete-archive.".to_string(),
     };
     let next = match &advice.admission {
         Ok(()) => format!("Resume it with --resume-from {}.", shell_path(&advice.run)),
@@ -269,18 +270,18 @@ pub(super) fn replay_error_text(error: &ReplayError) -> String {
     match error {
         ReplayError::UnsupportedJournalSchemaVersion { .. }
         | ReplayError::UnsupportedArchiveCapability { .. } => {
-            format!("{error}; re-record the run with this build of ObzenFlow")
+            format!("{error}\nRecord the run again with this build.")
         }
         ReplayError::MissingSystemLog { .. } => format!(
-            "{error}.\nRestore it from a copy of the run directory, or pass \
-             --allow-incomplete-archive to open the run as interrupted from its stage journals."
+            "{error}\nRestore system.log from a copy of the run directory. To open the run as \
+             interrupted from its stage journals instead, add --allow-incomplete-archive."
         ),
         ReplayError::AncestorMissing { archive, ancestor }
         | ReplayError::ReplayedRunMissing {
             replay: archive,
             replayed: ancestor,
         } => format!(
-            "{error}\nRestore {}, then resume {} again.",
+            "{error}\nRestore {}. Then resume {} again.",
             ancestor.display(),
             archive.display()
         ),
@@ -289,8 +290,9 @@ pub(super) fn replay_error_text(error: &ReplayError) -> String {
             ancestor,
             source,
         } => format!(
-            "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
-             from, {}, cannot be read: {}.\nRestore {}, then resume {} again.",
+            "ObzenFlow cannot resume {}. Its reconstruction did not complete, and ObzenFlow \
+             cannot read the archive that it resumed from, {}. {}\nRestore {}. Then resume {} \
+             again.",
             archive.display(),
             ancestor.display(),
             replay_error_text(source),
@@ -302,17 +304,18 @@ pub(super) fn replay_error_text(error: &ReplayError) -> String {
             ancestor,
             system_log,
         } => format!(
-            "{error}\nRestore {} from a copy, then resume {} again, or resume it with \
-             --allow-incomplete-archive to open {} as interrupted from its stage journals.",
+            "{error}\nRestore {} from a copy. Then resume {} again. To open {} as interrupted \
+             from its stage journals instead, resume {} with --allow-incomplete-archive.",
             system_log.display(),
             archive.display(),
-            ancestor.display()
+            ancestor.display(),
+            archive.display()
         ),
         ReplayError::AncestorDisagrees {
             archive, ancestor, ..
         }
         | ReplayError::NamespaceDisagrees { archive, ancestor } => format!(
-            "{error}\nRestore {} as it was recorded, then resume {} again.",
+            "{error}\nRestore the original {}. Then resume {} again.",
             ancestor.display(),
             archive.display()
         ),
@@ -326,7 +329,10 @@ pub(super) fn replay_error_text(error: &ReplayError) -> String {
             successor.display()
         ),
         ReplayError::LocationNotWritable { .. } => {
-            format!("{error}\nMake it writable, or copy it elsewhere to start a separate history.")
+            format!(
+                "{error}\nMake the run location writable. To start a separate history instead, \
+                 copy the run to a different location."
+            )
         }
         other => other.to_string(),
     }
@@ -348,7 +354,7 @@ fn resume_read_error(run: &Path, error: &ReplayError) -> String {
             "The ancestor {} is missing.\nRestore it to check whether this history can resume.", ancestor.display()
         ),
         ReplayError::AncestorUnreadable { ancestor, source, .. } => format!(
-            "Cannot read the ancestor {}.\n{}", ancestor.display(), resume_read_error(ancestor, source)
+            "ObzenFlow cannot read the ancestor {}.\n{}", ancestor.display(), resume_read_error(ancestor, source)
         ),
         ReplayError::AncestorDisagrees { archive, ancestor, stage_key } => format!(
             "Source '{stage_key}' in {} disagrees with {}.\nRestore the ancestor to check whether this history can resume.",
@@ -359,9 +365,9 @@ fn resume_read_error(run: &Path, error: &ReplayError) -> String {
              Restore {ancestor} to check whether this history can resume.",
             archive = archive.display(), ancestor = ancestor.display()
         ),
-        ReplayError::Io { message, source } => format!("Cannot check the resume target for {}. {message}: {source}", run.display()),
+        ReplayError::Io { message, source } => format!("ObzenFlow cannot check the resume target for {}. {message}: {source}", run.display()),
         other => format!(
-            "Cannot check the resume target for {}. {}",
+            "ObzenFlow cannot check the resume target for {}. {}",
             run.display(),
             replay_error_text(other)
         ),
@@ -447,40 +453,42 @@ mod tests {
                     verb: ReplayVerb::Resume,
                     run: run(),
                 },
-                "cannot resume /runs/r1: it is still running.\nStop it, then resume it again.",
+                "ObzenFlow cannot resume /runs/r1, because the run still has a live writer.\nStop \
+                 the run. Then resume it again.",
             ),
             (
                 ArchiveRefusal::StillRunning {
                     verb: ReplayVerb::Replay,
                     run: run(),
                 },
-                "cannot replay /runs/r1: it is still running.\nStop it, then replay it again.",
+                "ObzenFlow cannot replay /runs/r1, because the run still has a live writer.\nStop \
+                 the run. Then replay it again.",
             ),
             (
                 ArchiveRefusal::NoWorkLeft { run: run() },
-                "cannot resume /runs/r1: it completed naturally and every source is finite, so \
-                 there is no work left to continue.\nReplay it with --replay-from /runs/r1.",
+                "ObzenFlow cannot resume /runs/r1, because the run completed naturally and every \
+                 source is finite. No work remains.\nReplay it with --replay-from /runs/r1.",
             ),
             (
                 ArchiveRefusal::Failed {
                     verb: ReplayVerb::Resume,
                     run: run(),
                 },
-                "cannot resume /runs/r1: it failed.\nPass --allow-incomplete-archive to resume \
-                 it anyway.",
+                "ObzenFlow cannot resume /runs/r1, because the run failed.\nTo resume it, add \
+                 --allow-incomplete-archive.",
             ),
             (
                 ArchiveRefusal::Failed {
                     verb: ReplayVerb::Replay,
                     run: run(),
                 },
-                "cannot replay /runs/r1: it failed.\nPass --allow-incomplete-archive to replay \
-                 it anyway.",
+                "ObzenFlow cannot replay /runs/r1, because the run failed.\nTo replay it, add \
+                 --allow-incomplete-archive.",
             ),
             (
                 ArchiveRefusal::Interrupted { run: run() },
-                "cannot replay /runs/r1: it has no terminal record, so it was interrupted.\nPass \
-                 --allow-incomplete-archive to replay its recorded prefix.",
+                "ObzenFlow cannot replay /runs/r1, because the run is interrupted and has no \
+                 terminal record.\nTo replay its recorded prefix, add --allow-incomplete-archive.",
             ),
             (
                 ArchiveRefusal::Sources {
@@ -490,9 +498,9 @@ mod tests {
                         ("web_orders".to_string(), ResumeRefusal::UnfinishedInput),
                     ],
                 },
-                "cannot resume /runs/r1: sources 'store_orders' and 'web_orders' stopped with \
-                 their input unfinished, and only the stopped process held that input.\nStart a \
-                 new run.",
+                "ObzenFlow cannot resume /runs/r1, because sources 'store_orders' and \
+                 'web_orders' stopped before their input finished, and only the stopped process \
+                 held that input.\nStart a new run.",
             ),
         ] {
             assert_eq!(ApplicationError::from(&refusal).to_string(), expected);
@@ -507,10 +515,11 @@ mod tests {
                 None,
                 evidence(ArchiveStatus::Unknown, unfinished())
             )),
-            "cannot replay /runs/r1: it has no terminal record, so it was interrupted.\nPass \
-             --allow-incomplete-archive to replay its recorded prefix.\ncannot resume /runs/r1: \
-             sources 'store_orders' and 'web_orders' stopped with their input unfinished, and \
-             only the stopped process held that input.\nStart a new run."
+            "ObzenFlow cannot replay /runs/r1, because the run is interrupted and has no \
+             terminal record.\nTo replay its recorded prefix, add --allow-incomplete-archive.\n\
+             ObzenFlow cannot resume /runs/r1, because sources 'store_orders' and 'web_orders' \
+             stopped before their input finished, and only the stopped process held that input.\n\
+             Start a new run."
         );
         assert_eq!(
             interrupted_refusal(advice(
@@ -518,10 +527,10 @@ mod tests {
                 None,
                 evidence(ArchiveStatus::Completed, finished())
             )),
-            "cannot replay /runs/r1: it has no terminal record, so it was interrupted.\nPass \
-             --allow-incomplete-archive to replay its recorded prefix.\ncannot resume /runs/r0: \
-             it completed naturally and every source is finite, so there is no work left to \
-             continue.\nReplay it with --replay-from /runs/r0."
+            "ObzenFlow cannot replay /runs/r1, because the run is interrupted and has no \
+             terminal record.\nTo replay its recorded prefix, add --allow-incomplete-archive.\n\
+             ObzenFlow cannot resume /runs/r0, because the run completed naturally and every \
+             source is finite. No work remains.\nReplay it with --replay-from /runs/r0."
         );
     }
 
@@ -533,9 +542,9 @@ mod tests {
                 None,
                 evidence(ArchiveStatus::Unknown, finished())
             )),
-            "cannot replay /runs/r1: it has no terminal record, so it was interrupted.\nResume \
-             it with --resume-from /runs/r1, or pass --allow-incomplete-archive to replay its \
-             recorded prefix."
+            "ObzenFlow cannot replay /runs/r1, because the run is interrupted and has no \
+             terminal record.\nResume it with --resume-from /runs/r1. To replay its recorded \
+             prefix instead, add --allow-incomplete-archive."
         );
     }
 
@@ -565,8 +574,8 @@ mod tests {
         for (error, expected) in [
             (
                 schema(),
-                "unsupported journal schema version: 1 (supported: 2); re-record the run with \
-                 this build of ObzenFlow",
+                "This build of ObzenFlow does not support journal schema version 1. It supports \
+                 version 2.\nRecord the run again with this build.",
             ),
             (
                 ReplayError::UnsupportedArchiveCapability {
@@ -574,24 +583,26 @@ mod tests {
                     found: Some(2),
                     supported: 1,
                 },
-                "Replay archive capability 'effect_binding_descriptor' has unsupported version \
-                 Some(2) (supported: 1); re-record the run with this build of ObzenFlow",
+                "This build of ObzenFlow does not support version Some(2) of the archive \
+                 capability 'effect_binding_descriptor'. It supports version 1.\nRecord the run \
+                 again with this build.",
             ),
             (
                 ReplayError::MissingSystemLog {
                     path: path("/runs/r1/system.log"),
                 },
-                "Replay archive system.log missing at /runs/r1/system.log.\nRestore it from a \
-                 copy of the run directory, or pass --allow-incomplete-archive to open the run as \
-                 interrupted from its stage journals.",
+                "The replay archive has no system.log at /runs/r1/system.log.\nRestore \
+                 system.log from a copy of the run directory. To open the run as interrupted \
+                 from its stage journals instead, add --allow-incomplete-archive.",
             ),
             (
                 ReplayError::AncestorMissing {
                     archive: path("/runs/r1"),
                     ancestor: path("/runs/r0"),
                 },
-                "cannot resume /runs/r1: its reconstruction did not complete, and the archive it \
-                 resumed from, /runs/r0, is missing.\nRestore /runs/r0, then resume /runs/r1 again.",
+                "ObzenFlow cannot resume /runs/r1. Its reconstruction did not complete, and the \
+                 archive that it resumed from, /runs/r0, is missing.\nRestore /runs/r0. Then \
+                 resume /runs/r1 again.",
             ),
             (
                 ReplayError::AncestorUnreadable {
@@ -599,10 +610,11 @@ mod tests {
                     ancestor: path("/runs/r0"),
                     source: Box::new(schema()),
                 },
-                "cannot resume /runs/r1: its reconstruction did not complete, and the archive it \
-                 resumed from, /runs/r0, cannot be read: unsupported journal schema version: 1 \
-                 (supported: 2); re-record the run with this build of ObzenFlow.\nRestore \
-                 /runs/r0, then resume /runs/r1 again.",
+                "ObzenFlow cannot resume /runs/r1. Its reconstruction did not complete, and \
+                 ObzenFlow cannot read the archive that it resumed from, /runs/r0. This build of \
+                 ObzenFlow does not support journal schema version 1. It supports version 2.\n\
+                 Record the run again with this build.\nRestore /runs/r0. Then resume /runs/r1 \
+                 again.",
             ),
             (
                 ReplayError::AncestorMissingSystemLog {
@@ -610,10 +622,11 @@ mod tests {
                     ancestor: path("/runs/r0"),
                     system_log: path("/runs/r0/system.log"),
                 },
-                "cannot resume /runs/r1: its reconstruction did not complete, and the archive it \
-                 resumed from, /runs/r0, has no system.log.\nRestore /runs/r0/system.log from a \
-                 copy, then resume /runs/r1 again, or resume it with --allow-incomplete-archive \
-                 to open /runs/r0 as interrupted from its stage journals.",
+                "ObzenFlow cannot resume /runs/r1. Its reconstruction did not complete, and the \
+                 archive that it resumed from, /runs/r0, has no system.log.\nRestore \
+                 /runs/r0/system.log from a copy. Then resume /runs/r1 again. To open /runs/r0 \
+                 as interrupted from its stage journals instead, resume /runs/r1 with \
+                 --allow-incomplete-archive.",
             ),
             (
                 ReplayError::AncestorDisagrees {
@@ -621,26 +634,26 @@ mod tests {
                     ancestor: path("/runs/r0"),
                     stage_key: "orders".to_string(),
                 },
-                "cannot resume /runs/r1: its reconstruction did not complete, and the archive it \
-                 resumed from, /runs/r0, disagrees with it at source 'orders'.\nRestore /runs/r0 \
-                 as it was recorded, then resume /runs/r1 again.",
+                "ObzenFlow cannot resume /runs/r1. Its reconstruction did not complete, and the \
+                 archive that it resumed from, /runs/r0, disagrees with it at source 'orders'.\n\
+                 Restore the original /runs/r0. Then resume /runs/r1 again.",
             ),
             (
                 ReplayError::NamespaceDisagrees {
                     archive: path("/runs/r1"),
                     ancestor: path("/runs/r0"),
                 },
-                "cannot resume /runs/r1: its reconstruction did not complete, and the archive it \
-                 resumed from, /runs/r0, records a different identity namespace.\nRestore \
-                 /runs/r0 as it was recorded, then resume /runs/r1 again.",
+                "ObzenFlow cannot resume /runs/r1. Its reconstruction did not complete, and the \
+                 archive that it resumed from, /runs/r0, records a different identity \
+                 namespace.\nRestore the original /runs/r0. Then resume /runs/r1 again.",
             ),
             (
                 ReplayError::AlreadyContinued {
                     archive: path("/runs/r0"),
                     head: path("/runs/r2"),
                 },
-                "cannot resume /runs/r0: it was already resumed by /runs/r2, the head of this \
-                 history.\nResume /runs/r2 instead.",
+                "ObzenFlow cannot resume /runs/r0, because /runs/r2 already resumed it. /runs/r2 \
+                 is the head of this history.\nResume /runs/r2 instead.",
             ),
             (
                 ReplayError::ContinuationMissing {
@@ -655,8 +668,8 @@ mod tests {
                     archive: path("/runs/r1"),
                     parent: path("/runs/r0"),
                 },
-                "cannot resume /runs/r1: it stopped before taking over /runs/r0.\nResume \
-                 /runs/r0 instead.",
+                "ObzenFlow cannot resume /runs/r1, because it stopped before it took over \
+                 /runs/r0.\nResume /runs/r0 instead.",
             ),
             (
                 ReplayError::ContinuedByAnother {
@@ -664,24 +677,25 @@ mod tests {
                     parent: path("/runs/r0"),
                     head: path("/runs/r2"),
                 },
-                "cannot resume /runs/r1: /runs/r0 was continued by /runs/r2, not by this \
-                 run.\nResume /runs/r2 instead.",
+                "ObzenFlow cannot resume /runs/r1, because /runs/r2 continued /runs/r0 and this \
+                 run did not.\nResume /runs/r2 instead.",
             ),
             (
                 ReplayError::LocationNotWritable {
                     archive: path("/runs/r0"),
                 },
-                "cannot resume /runs/r0: its run location is not writable, so this resume cannot \
-                 record that it continues it.\nMake it writable, or copy it elsewhere to start a \
-                 separate history.",
+                "ObzenFlow cannot resume /runs/r0, because its run location is not writable. The \
+                 resume cannot record that it continues the run.\nMake the run location \
+                 writable. To start a separate history instead, copy the run to a different \
+                 location.",
             ),
             (
                 ReplayError::ReplayedRunMissing {
                     replay: path("/runs/r1"),
                     replayed: path("/runs/r0"),
                 },
-                "cannot resume /runs/r1: the run it replays, /runs/r0, is missing.\nRestore \
-                 /runs/r0, then resume /runs/r1 again.",
+                "ObzenFlow cannot resume /runs/r1, because the run that it replays, /runs/r0, is \
+                 missing.\nRestore /runs/r0. Then resume /runs/r1 again.",
             ),
         ] {
             let fact = error.to_string();
@@ -741,8 +755,8 @@ mod tests {
         let refusal = ArchiveRefusal::Interrupted { run };
         assert_eq!(
             ApplicationError::archive_refusal(&refusal, Some(&Err(error))).to_string(),
-            "cannot replay runs/replay: it has no terminal record, so it was interrupted.\n\
-             Pass --allow-incomplete-archive to replay its recorded prefix.\n\
+            "ObzenFlow cannot replay runs/replay, because the run is interrupted and has no \
+             terminal record.\nTo replay its recorded prefix, add --allow-incomplete-archive.\n\
              runs/replay replays runs/original, but that directory is missing.\n\
              Restore runs/original to check whether this history can resume."
         );
@@ -769,9 +783,10 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "replay of runs/r1 stopped: stage 'authorize_payment' reached the end of its \
-             recording at input 3, and a replay never executes an effect.\ncannot resume \
-             /runs/r1: sources 'store_orders' and 'web_orders' stopped with their input \
-             unfinished, and only the stopped process held that input.\nStart a new run."
+             recording at input 3, and a replay never executes an effect.\nObzenFlow cannot \
+             resume /runs/r1, because sources 'store_orders' and 'web_orders' stopped before \
+             their input finished, and only the stopped process held that input.\nStart a new \
+             run."
         );
     }
 }

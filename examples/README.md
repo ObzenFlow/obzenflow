@@ -42,5 +42,6 @@ The bank example also includes an
 see [managed web authentication](../crates/obzenflow_infra/src/web/README.md) for setup.
 
 To replay a recorded run, add `--replay-from <archive> --verify` to the application
-arguments, after Cargo's `--` separator. Use the archive path printed by the run
-and keep the same configuration, unless a run guide names another.
+arguments, after Cargo's `--` separator. Use the archive path that the run printed
+and keep the same configuration, unless a run guide names another. `--verify` needs
+a recorded run that ended completed or cancelled.

@@ -60,23 +60,23 @@ pub enum OnTerminalArg {
 }
 
 const ADMISSION_TABLE: &str = "\
-Archive admission (the flag is --allow-incomplete-archive):
-Replay uses the named run. Resume follows replay links and reads any
-ancestors needed to finish reconstruction. Apply each column to that run.
+Archive admission (the flag is --allow-incomplete-archive)
+Replay uses the named run. Resume follows replay links and reads the
+ancestors that it needs to finish reconstruction. Apply each column to that run.
 Archive          | --replay-from | --resume-from
 completed, every source finite and ended naturally
-                 | admitted      | refused: no work left
+                 | admitted      | refused, no work left
 completed with a source stopped, or cancelled
                  | admitted      | admitted
 interrupted (no terminal record)
                  | with the flag | admitted
-failed resume: archive departures were its only cause
+failed resume whose only cause was archive departures
                  | with the flag | admitted
 all other failures
                  | with the flag | with the flag
-A still-running run refuses both.
-A cyclic topology refuses both.
-A resume refuses a source whose connector cannot continue its recorded input.";
+ObzenFlow refuses both verbs for a run that still has a live writer.
+ObzenFlow refuses both verbs for a flow with a cycle.
+ObzenFlow refuses a resume when the connector of a source cannot continue its recorded input.";
 
 #[derive(Parser, Debug, Clone)]
 #[command(about = "ObzenFlow Application", after_long_help = ADMISSION_TABLE)]
@@ -174,9 +174,9 @@ pub struct FlowConfig {
         long,
         help = "Replay a recorded run from its archive",
         long_help = "Replay a recorded run from its archive.\n\n\
-            A completed or cancelled run replays as recorded; an interrupted or failed run \
-            replays its recorded prefix with --allow-incomplete-archive.\n\n\
-            The path must be the exact run directory containing `run_manifest.json`.\n\n\
+            A completed or cancelled run replays as recorded. With --allow-incomplete-archive, \
+            an interrupted or failed run replays its recorded prefix.\n\n\
+            The path must be the run directory itself, which contains `run_manifest.json`.\n\n\
             See Archive admission below."
     )]
     pub replay_from: Option<PathBuf>,
@@ -184,16 +184,16 @@ pub struct FlowConfig {
     #[arg(
         long,
         conflicts_with = "replay_from",
-        help = "Resume a recorded run: catch up on its archive with effects suppressed, then \
-            continue live from the last fact it committed",
-        long_help = "Resume a recorded run: catch up on its archive with effects suppressed, \
-            then continue live from the last fact it committed.\n\n\
-            Resume with a build and configuration that act the same on the inputs the run \
-            settled; a stage that departs from its archive refuses the resume. Check a changed \
-            build first with `--replay-from <run> --verify` against a recording that ended \
-            completed or cancelled.\n\n\
-            The path must be the exact run directory containing `run_manifest.json`. Mutually \
-            exclusive with `--replay-from`.\n\n\
+        help = "Resume a recorded run from the last fact that it committed",
+        long_help = "Resume a recorded run from the last fact that it committed. The new run \
+            catches up on the archive and executes no effects. Then it continues with live \
+            work.\n\n\
+            Resume with a build and a configuration that act the same on the inputs that the \
+            run settled. A stage that departs from its archive refuses the resume. Check a \
+            changed build first with `--replay-from <run> --verify` against a recording that \
+            ended completed or cancelled.\n\n\
+            The path must be the run directory itself, which contains `run_manifest.json`. Do \
+            not use it with `--replay-from`.\n\n\
             See Archive admission below."
     )]
     pub resume_from: Option<PathBuf>,
@@ -205,9 +205,10 @@ pub struct FlowConfig {
             --resume-from",
         long_help = "Admit an interrupted or failed run to --replay-from, and a failed run to \
             --resume-from.\n\n\
-            Verify refuses such a run, so its output is for inspection, not comparison. The flag \
-            opens a missing system.log as interrupted. A torn final append leaves the committed \
-            prefix readable. Damage followed by a valid frame is refused.\n\n\
+            Verify refuses such a run. Use its output only for inspection. With the flag, \
+            ObzenFlow opens a run whose system.log is missing as an interrupted run. A torn \
+            final append leaves the committed prefix readable. ObzenFlow refuses damage that a \
+            valid frame follows.\n\n\
             See Archive admission below."
     )]
     pub allow_incomplete_archive: bool,
@@ -217,12 +218,13 @@ pub struct FlowConfig {
         action = ArgAction::SetTrue,
         help = "Verify the replay output against the source archive after completion",
         long_help = "Verify the replay output against the source archive after completion.\n\n\
-            Requires `--replay-from`. The source archive must remain present through completion; \
-            on a fully certified match the run prints \"output matched the original run, 0 \
-            differences\" and exits 0. The source archive and the replay must both end completed \
-            or cancelled, and a replay admitted with --allow-incomplete-archive is refused. The \
-            run exits non-zero on every other outcome. Run `obzenflow verify --baseline \
-            <archive> --candidate <replay>` to get an exit code for each verdict."
+            This flag needs `--replay-from`. Keep the source archive until the replay \
+            completes. When the output matches and every stage is certified, the run prints \
+            \"output matched the original run, 0 differences\" and exits 0. The source archive \
+            and the replay must both end completed or cancelled. Verification refuses a replay \
+            that --allow-incomplete-archive admitted. The run exits non-zero for every other \
+            result. To get an exit code for each verdict, run `obzenflow verify --baseline \
+            <archive> --candidate <replay>`."
     )]
     pub verify: bool,
 
@@ -1169,13 +1171,13 @@ impl FlowConfig {
         if replay_from.is_some() && resume_from.is_some() {
             return Err(ConfigError::at(
                 "archive.resume_from",
-                "mutually exclusive with archive.replay_from",
+                "Set only one of archive.resume_from and archive.replay_from.",
             ));
         }
         if verify && resume_from.is_some() {
             return Err(ConfigError::at(
                 "archive.verify",
-                "requires archive.replay_from; a resume continues live and cannot be verified as a bounded replay",
+                "It needs archive.replay_from. A resume continues with live work, so verification cannot compare it as a bounded replay.",
             ));
         }
 
@@ -1201,12 +1203,12 @@ impl FlowConfig {
         } else if allow_incomplete_archive {
             return Err(ConfigError::at(
                 "archive.allow_incomplete_archive",
-                "cannot be true without archive.replay_from or archive.resume_from",
+                "It needs archive.replay_from or archive.resume_from.",
             ));
         } else if verify {
             return Err(ConfigError::at(
                 "archive.verify",
-                "cannot be true without archive.replay_from",
+                "It needs archive.replay_from.",
             ));
         }
 
@@ -2558,7 +2560,8 @@ resume_from = "/tmp/recorded"
         let err = cli.resolve(None, false).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "config error at archive.resume_from: mutually exclusive with archive.replay_from"
+            "config error at archive.resume_from: Set only one of archive.resume_from and \
+             archive.replay_from."
         );
     }
 
@@ -2570,7 +2573,8 @@ resume_from = "/tmp/recorded"
         let err = cli.resolve(None, false).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "config error at archive.verify: requires archive.replay_from; a resume continues live and cannot be verified as a bounded replay"
+            "config error at archive.verify: It needs archive.replay_from. A resume continues \
+             with live work, so verification cannot compare it as a bounded replay."
         );
     }
 
@@ -2620,7 +2624,7 @@ resume_from = "/tmp/recorded"
         use clap::CommandFactory;
         let long = FlowConfig::command().render_long_help().to_string();
         assert_eq!(
-            long.matches("Archive admission (the flag is --allow-incomplete-archive):")
+            long.matches("Archive admission (the flag is --allow-incomplete-archive)")
                 .count(),
             1,
             "{long}"
@@ -2633,14 +2637,15 @@ resume_from = "/tmp/recorded"
         );
         for text in [
             "Replay a recorded run from its archive.",
-            "Resume a recorded run: catch up on its archive with effects suppressed, then \
-             continue live from the last fact it committed.",
+            "Resume a recorded run from the last fact that it committed. The new run catches up \
+             on the archive and executes no effects. Then it continues with live work.",
             "against a recording that ended completed or cancelled.",
-            "Verify refuses such a run, so its output is for inspection, not comparison. The flag \
-             opens a missing system.log as interrupted. A torn final append leaves the committed \
-             prefix readable. Damage followed by a valid frame is refused.",
-            "The run exits non-zero on every other outcome. Run `obzenflow verify --baseline \
-             <archive> --candidate <replay>` to get an exit code for each verdict.",
+            "Verify refuses such a run. Use its output only for inspection. With the flag, \
+             ObzenFlow opens a run whose system.log is missing as an interrupted run. A torn \
+             final append leaves the committed prefix readable. ObzenFlow refuses damage that a \
+             valid frame follows.",
+            "The run exits non-zero for every other result. To get an exit code for each \
+             verdict, run `obzenflow verify --baseline <archive> --candidate <replay>`.",
         ] {
             assert!(long.contains(text), "missing {text:?} in {long}");
         }
@@ -2649,8 +2654,7 @@ resume_from = "/tmp/recorded"
         assert!(!short.contains("Archive admission"), "{short}");
         for summary in [
             "Replay a recorded run from its archive\n",
-            "Resume a recorded run: catch up on its archive with effects suppressed, then \
-             continue live from the last fact it committed\n",
+            "Resume a recorded run from the last fact that it committed\n",
             "Verify the replay output against the source archive after completion\n",
         ] {
             assert!(short.contains(summary), "missing {summary:?} in {short}");
@@ -2714,8 +2718,8 @@ resume_from = "/tmp/recorded"
         let (as_recorded, prefix) = admission_groups(ReplayVerb::Replay);
         let (_, resume_with_flag) = admission_groups(ReplayVerb::Resume);
         let replay_detail = format!(
-            "A {as_recorded} run replays as recorded; an {prefix} run \
-            replays its recorded prefix with --allow-incomplete-archive."
+            "A {as_recorded} run replays as recorded. With --allow-incomplete-archive, an \
+            {prefix} run replays its recorded prefix."
         );
         let flag_summary = format!(
             "Admit an {prefix} run to --replay-from, and a {resume_with_flag} \
@@ -3178,7 +3182,7 @@ port = "abc"
             "completed, every source finite and ended naturally",
             "completed with a source stopped, or cancelled",
             "interrupted (no terminal record)",
-            "failed resume: archive departures were its only cause",
+            "failed resume whose only cause was archive departures",
             "all other failures",
         ];
 
@@ -3273,7 +3277,7 @@ port = "abc"
                 (
                     Err(ArchiveRefusal::NoWorkLeft { .. }),
                     Err(ArchiveRefusal::NoWorkLeft { .. }),
-                ) => "refused: no work left".to_string(),
+                ) => "refused, no work left".to_string(),
                 (plain, flagged) => panic!(
                     "{}: --{verb}-from {RUN}: {plain:?}; --{verb}-from {RUN} \
                      --allow-incomplete-archive: {flagged:?}",
@@ -3331,10 +3335,10 @@ port = "abc"
                 plain
             };
             match (refused(ReplayVerb::Replay), refused(ReplayVerb::Resume)) {
-                (true, true) => format!("A {subject} refuses both."),
-                (false, true) => format!("A resume refuses {subject}."),
-                (true, false) => format!("A replay refuses {subject}."),
-                (false, false) => format!("No verb refuses {subject}."),
+                (true, true) => format!("ObzenFlow refuses both verbs for {subject}."),
+                (false, true) => format!("ObzenFlow refuses a resume when {subject}."),
+                (true, false) => format!("ObzenFlow refuses a replay when {subject}."),
+                (false, false) => format!("ObzenFlow refuses no verb for {subject}."),
             }
         }
 
@@ -3369,9 +3373,9 @@ port = "abc"
             }
 
             let mut lines = vec![
-                "Archive admission (the flag is --allow-incomplete-archive):".to_string(),
-                "Replay uses the named run. Resume follows replay links and reads any".to_string(),
-                "ancestors needed to finish reconstruction. Apply each column to that run."
+                "Archive admission (the flag is --allow-incomplete-archive)".to_string(),
+                "Replay uses the named run. Resume follows replay links and reads the".to_string(),
+                "ancestors that it needs to finish reconstruction. Apply each column to that run."
                     .to_string(),
                 "Archive          | --replay-from | --resume-from".to_string(),
             ];
@@ -3383,7 +3387,7 @@ port = "abc"
             let mut live = archive(ArchiveStatus::Cancelled, finished());
             live.live_writer = true;
             lines.push(check_line(
-                "still-running run",
+                "a run that still has a live writer",
                 &live,
                 &continuing,
                 |refusal| matches!(refusal, ArchiveRefusal::StillRunning { .. }),
@@ -3393,13 +3397,13 @@ port = "abc"
                 ..continuing.clone()
             };
             lines.push(check_line(
-                "cyclic topology",
+                "a flow with a cycle",
                 &archive(ArchiveStatus::Cancelled, finished()),
                 &cyclic,
                 |refusal| matches!(refusal, ArchiveRefusal::Cycle { .. }),
             ));
             lines.push(check_line(
-                "a source whose connector cannot continue its recorded input",
+                "the connector of a source cannot continue its recorded input",
                 &archive(ArchiveStatus::Cancelled, unfinished()),
                 &flow(SourceContinuation::Refuse),
                 |refusal| matches!(refusal, ArchiveRefusal::Sources { .. }),

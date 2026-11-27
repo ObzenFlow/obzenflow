@@ -41,8 +41,9 @@ cargo run -p obzenflow --features cli --bin obzenflow -- \
   verify calls --run <archive> --run <resumed-archive> target/gateway-calls.jsonl
 ```
 
-The feeds are fixed lists, which cannot continue a partial read, so a run
-killed before they finish refuses to resume. Replay it instead.
+The feeds are fixed lists, which cannot continue a partial read. ObzenFlow refuses
+to resume a run that stopped before the feeds finished. Replay that run instead with
+`--allow-incomplete-archive`.
 
 To kill a run while a call is in flight, run the night on which the processor
 takes five minutes to answer one payment, and kill it while it waits:

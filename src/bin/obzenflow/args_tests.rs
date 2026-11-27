@@ -210,21 +210,27 @@ fn verify_long_help_lists_exit_codes() {
         .find_subcommand_mut("verify")
         .expect("verify subcommand");
     let long = verify.render_long_help().to_string();
-    assert!(
-        long.contains(
-            "For runs, exit codes are 0 certified match, 1 divergence, 2 certified region matched \
-         with uncertified stages and 3 refused. For call logs, 0 every log passes, 1 a log \
-         breaks a rule, 2 a log is uncertified and 3 refused. Any other failure exits 4, and so \
-         does a wrong or missing argument."
-        ),
-        "{long}"
-    );
+    for line in [
+        "Exit codes for runs\n",
+        "  0  The candidate matches the baseline, and every stage is certified.\n",
+        "  1  The candidate does not match the baseline.\n",
+        "  2  The certified region matches, and some stages are not certified.\n",
+        "  3  Verification refused the runs.\n",
+        "Exit codes for call logs\n",
+        "  0  Every log passes.\n",
+        "  1  A log breaks a rule.\n",
+        "  2  A log is not certified.\n",
+        "  3  Verification refused the logs.\n",
+        "Any other failure exits 4. A wrong or missing argument also exits 4.",
+    ] {
+        assert!(long.contains(line), "missing {line:?} in {long}");
+    }
     let short = verify.render_help().to_string();
     for text in [
         "--baseline <PATH>",
-        "The run directory the candidate is compared to",
+        "The run directory to compare the candidate with",
         "--candidate <PATH>",
-        "The run directory under test",
+        "The run directory to verify",
         "--report-path <PATH>",
         "Write the comparison report here",
         "--max-divergences <N>",
