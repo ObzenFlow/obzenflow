@@ -166,7 +166,7 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
         "obzenflow_version": "test", "flow_id": id(10),
         "pipeline_writer_id": source.run.pipeline_writer_id,
         "flow_name": "sensors", "created_at": "2026-09-23T00:00:00Z",
-        "system_journal_file": "system.log", "metrics_journals": null,
+        "system_journal_file": "system.log", "metrics_journals": null, "cycle_members": [],
         "stages": {stage.key.clone(): {
             "dsl_var": stage.key, "stage_type": stage.stage_type, "is_effectful": false,
             "stage_id": stage.id.to_string(), "stage_logic_version": "1",
@@ -297,7 +297,8 @@ fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
         "created_at": "2026-09-23T00:00:00Z",
         "stages": stages,
         "system_journal_file": "system.log",
-        "metrics_journals": null
+        "metrics_journals": null,
+        "cycle_members": []
     }))
     .unwrap();
     for width in [40, 90] {
@@ -2155,7 +2156,8 @@ fn manifest_for(records: &[&RunRecord]) -> RunManifest {
         "created_at": "2026-09-23T00:00:00Z",
         "stages": stages,
         "system_journal_file": "system.log",
-        "metrics_journals": null
+        "metrics_journals": null,
+        "cycle_members": []
     }))
     .unwrap()
 }
