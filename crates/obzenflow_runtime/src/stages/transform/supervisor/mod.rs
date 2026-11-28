@@ -156,6 +156,9 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
                 on TransformEvent::ReceivedEOF => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: TransformState::Draining, actions: vec![] }) })
                 };
+                on TransformEvent::RecordingEnded => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: TransformState::Held, actions: vec![TransformAction::ForwardEOF, TransformAction::ReportHold] }) })
+                };
                 on TransformEvent::BeginDrain => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: TransformState::Draining, actions: vec![] }) })
                 };
@@ -178,6 +181,9 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
                 };
                 on TransformEvent::CycleDrained => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: TransformState::ClosingCycle, actions: vec![TransformAction::DrainHandler, TransformAction::ForwardEOF] }) })
+                };
+                on TransformEvent::RecordingEnded => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: TransformState::Held, actions: vec![TransformAction::ForwardEOF, TransformAction::ReportHold] }) })
                 };
                 on TransformEvent::Error => |_state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                     let TransformEvent::Error(cause) = event else { unreachable!() };
@@ -219,6 +225,17 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
 
             state TransformState::Drained {
 
+            }
+
+            state TransformState::Held {
+                on TransformEvent::Error => |_state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    let TransformEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: TransformState::failure(cause.clone()),
+                        actions: vec![TransformAction::SendFailure { message: cause }, TransformAction::Cleanup, TransformAction::Host(SupervisorAction::CloseMailbox), TransformAction::Host(SupervisorAction::SettlePublications), TransformAction::Host(SupervisorAction::Emit(TransformEvent::TerminationSettled))],
+                    }) })
+                };
             }
 
             state TransformState::Failing {
@@ -264,7 +281,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
                 let event = event.clone();
                 Box::pin(async move {
                     if matches!(event, TransformEvent::Initialize | TransformEvent::Ready | TransformEvent::BeginDrain)
-                        || matches!(state, TransformState::Failing(_) | TransformState::Cancelling(_) | TransformState::Failed(_) | TransformState::Cancelled(_) | TransformState::Drained)
+                        || matches!(state, TransformState::Failing(_) | TransformState::Cancelling(_) | TransformState::Failed(_) | TransformState::Cancelled(_) | TransformState::Drained | TransformState::Held)
                     {
                         return Ok(());
                     }
@@ -417,7 +434,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
                 Ok(EventLoopDirective::Continue)
             }
 
-            TransformState::Initialized => Ok(EventLoopDirective::Continue),
+            TransformState::Initialized | TransformState::Held => Ok(EventLoopDirective::Continue),
 
             TransformState::Running => {
                 running::dispatch_running(self, state, ctx.resources_mut()?).await
@@ -452,7 +469,10 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Externa
     for TransformSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
-        if matches!(state, TransformState::Created | TransformState::Initialized) {
+        if matches!(
+            state,
+            TransformState::Created | TransformState::Initialized | TransformState::Held
+        ) {
             ExternalEventMode::Block
         } else {
             ExternalEventMode::Poll

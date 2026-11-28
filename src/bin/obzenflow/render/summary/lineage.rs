@@ -114,6 +114,7 @@ fn lineage_lines(
             });
             lines.push(("Replayed", format!("{}{ended}", replayed.display())));
         }
+        Standing::Rebuild { rebuilt } => lines.push(("Rebuilt", rebuilt.display().to_string())),
         Standing::Orphan { resume } => lines.push((
             "Orphan",
             format!("not part of a history; resume {} instead", resume.display()),
@@ -354,6 +355,17 @@ mod tests {
                 "Rebuild    complete; resume needs no earlier run",
             ]
         );
+    }
+
+    #[test]
+    fn lineage_rebuild_standing_renders_rebuilt_line() {
+        let rebuild = RunLineage {
+            standing: Standing::Rebuild {
+                rebuilt: "/runs/r1".into(),
+            },
+            ..RunLineage::default()
+        };
+        assert_eq!(rendered(&rebuild, None), ["Rebuilt    /runs/r1"]);
     }
 
     #[test]

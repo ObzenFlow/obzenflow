@@ -45,7 +45,9 @@ impl StartupMode {
 
 pub use obzenflow_core::journal::archive_actions::ReplayVerb;
 
-/// Replay settings needed to bootstrap a flow from an existing run archive.
+/// `ReplayBootstrap` holds the settings that bootstrap a flow from an existing
+/// run archive. In `stages`, a rebuild names the sink stages whose destinations
+/// it writes. A replay or a resume names none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayBootstrap {
     /// Path to a run archive directory containing `run_manifest.json`.
@@ -53,6 +55,7 @@ pub struct ReplayBootstrap {
     pub allow_incomplete_archive: bool,
     /// Which verb selected the archive.
     pub verb: ReplayVerb,
+    pub stages: Vec<String>,
 }
 
 /// A resolved bootstrap snapshot shared across infra, DSL, adapters, and runtime.
@@ -163,10 +166,10 @@ pub fn install_bootstrap_config(config: BootstrapConfig) -> BootstrapConfigGuard
 /// the currently-installed bootstrap unchanged.
 pub fn try_install_bootstrap_config(
     config: BootstrapConfig,
-) -> Result<BootstrapConfigGuard, BootstrapConfig> {
+) -> Result<BootstrapConfigGuard, Box<BootstrapConfig>> {
     let active_install = match ActiveInstallLease::try_acquire() {
         Some(lease) => lease,
-        None => return Err(config),
+        None => return Err(Box::new(config)),
     };
 
     let previous = {
@@ -327,6 +330,7 @@ mod tests {
                     archive_path: PathBuf::from("/tmp/archive"),
                     allow_incomplete_archive: true,
                     verb: ReplayVerb::Replay,
+                    stages: Vec::new(),
                 }),
                 replay_archive: None,
                 archive_evidence: None,

@@ -313,6 +313,7 @@ async fn record_and_interrupt(journal_base: &Path) -> Result<(PathBuf, PathBuf)>
                 archive_path: r0.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -380,6 +381,7 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -513,6 +515,7 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -629,6 +632,7 @@ async fn resuming_a_torn_resume_continues_the_prefix_its_ancestor_committed() ->
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -727,7 +731,9 @@ async fn a_torn_resume_without_an_agreeing_ancestor_refuses() -> Result<()> {
         stranger.join("run_continuation.json"),
     )?;
     match DiskReplayArchive::open_for_resume(r1.clone(), true).await {
-        Err(ReplayError::NamespaceDisagrees { archive, ancestor }) => {
+        Err(ReplayError::NamespaceDisagrees {
+            archive, ancestor, ..
+        }) => {
             assert_eq!((archive, ancestor), (torn.clone(), stranger.clone()));
         }
         Err(other) => panic!("expected the stranger's namespace to refuse: {other}"),
@@ -750,6 +756,7 @@ async fn a_torn_resume_without_an_agreeing_ancestor_refuses() -> Result<()> {
             archive,
             ancestor,
             stage_key,
+            ..
         }) => {
             assert_eq!((archive, ancestor), (torn.clone(), stranger));
             assert_eq!(stage_key, "src");
@@ -769,7 +776,7 @@ async fn a_torn_resume_without_an_agreeing_ancestor_refuses() -> Result<()> {
     assert!(
         matches!(
             &refusal,
-            ReplayError::AncestorMissing { archive, ancestor: missing }
+            ReplayError::AncestorMissing { archive, ancestor: missing, .. }
                 if archive == &torn && missing == &ancestor
         ),
         "{message}"

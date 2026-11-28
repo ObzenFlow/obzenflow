@@ -33,6 +33,7 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
             archive_path: std::path::PathBuf::from("/nonexistent/archive"),
             allow_incomplete_archive: true,
             verb: ReplayVerb::Resume,
+            stages: Vec::new(),
         }),
         replay_archive: None,
         ..Default::default()

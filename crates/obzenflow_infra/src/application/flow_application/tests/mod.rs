@@ -217,6 +217,7 @@ async fn recorded_source(
         flow_name: "flow".into(),
         created_at: chrono::Utc::now(),
         replay: None,
+        rebuild: None,
         resume: None,
         interrupted_appends: Vec::new(),
         stages: Default::default(),

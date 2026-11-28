@@ -730,3 +730,60 @@ pub async fn failure_during_graceful_stop_aborts_by_the_graceful_deadline(
     assert!(error.to_string().contains("failure during graceful stop"));
     assert!(probe.request_abort_count.load(Ordering::Relaxed) > 0);
 }
+
+pub async fn pipeline_recording_ended_records_cancelled(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    use crate::stages::common::stage_handle::STOP_REASON_RECORDING_ENDED;
+    use obzenflow_core::event::payloads::system_payload::{
+        PipelineCancellationCause, PipelineStopAdmission,
+    };
+    let _lock = bootstrap_test_lock_async().await;
+    let _guard = install_bootstrap_config(BootstrapConfig {
+        startup_mode: StartupMode::Auto,
+        ..Default::default()
+    });
+    let mut journals = make_journals();
+    let system_id = SystemId::new();
+    let journal = new_system_journal(&mut *journals, system_id);
+    let (topology, source, sink) = source_sink_topology_with_source();
+    let mut ctx = test_context(topology, system_id, journal.clone());
+    let (ended, recording_end) = tokio::sync::mpsc::unbounded_channel();
+    ctx.recording_end = Some(recording_end);
+    ctx.source_supervisors.insert(
+        source,
+        Arc::new(owned_test_stage(source, StageType::FiniteSource, None)),
+    );
+    ctx.stage_supervisors.insert(
+        sink,
+        Arc::new(owned_test_stage(sink, StageType::Sink, None)),
+    );
+    let (_sender, receiver, watcher) = ChannelBuilder::new().build(S::Created);
+    let mut states = watcher.subscribe();
+    let task = spawn_supervisor_loop(S::Created, system_id, ctx, receiver, watcher);
+    wait_for_state(&mut states, "Running", |s| matches!(s, S::Running)).await;
+
+    ended.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&*states.borrow(), S::Cancelled { reason } if reason == STOP_REASON_RECORDING_ENDED)
+    );
+    let rows = journal.read_all_unordered().await.unwrap();
+    assert!(rows.iter().any(|row| matches!(
+        &row.payload,
+        SystemFact::PipelineLifecycle(PipelineFact::StopAdmitted {
+            admission: PipelineStopAdmission::Cancel {
+                cause: PipelineCancellationCause::Requested
+            }
+        })
+    )));
+    assert!(rows.iter().any(|row| matches!(
+        &row.payload,
+        SystemFact::PipelineLifecycle(PipelineFact::Cancelled { reason, .. })
+            if reason == STOP_REASON_RECORDING_ENDED
+    )));
+}

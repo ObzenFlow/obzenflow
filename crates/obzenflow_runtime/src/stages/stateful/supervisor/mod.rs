@@ -43,6 +43,23 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 
+fn rebuild_holds<H: UnifiedStatefulHandler>(
+    ctx: &mut StatefulResources<H>,
+    fatal: &crate::stages::common::handler_error::StageFatal,
+) -> bool {
+    if ctx.runtime_execution.rebuild_control().is_none()
+        || fatal.reason != obzenflow_core::event::StageFatalReason::RecordingEnded
+    {
+        return false;
+    }
+    ctx.terminal_eof_kind = Some(
+        ctx.terminal_eof_kind
+            .unwrap_or(obzenflow_core::event::payloads::flow_control_payload::EofKind::Natural)
+            .worst(obzenflow_core::event::payloads::flow_control_payload::EofKind::Truncated),
+    );
+    true
+}
+
 fn contract_violation_directive<H>(
     error: &HandlerError,
     phase: &str,
@@ -161,6 +178,9 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
             }
 
             state StatefulState::Accumulating {
+                on StatefulEvent::RecordingEnded => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: StatefulState::Held, actions: vec![StatefulAction::ForwardEOF, StatefulAction::ReportHold] }) })
+                };
                 on StatefulEvent::Ready => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -223,6 +243,9 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
             }
 
             state StatefulState::Emitting {
+                on StatefulEvent::RecordingEnded => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: StatefulState::Held, actions: vec![StatefulAction::ForwardEOF, StatefulAction::ReportHold] }) })
+                };
                 on StatefulEvent::Ready => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -272,6 +295,9 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
             }
 
             state StatefulState::EmittingDuringDrain {
+                on StatefulEvent::RecordingEnded => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: StatefulState::Held, actions: vec![StatefulAction::ForwardEOF, StatefulAction::ReportHold] }) })
+                };
                 on StatefulEvent::EmitComplete => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: StatefulState::Draining, actions: vec![] }) })
                 };
@@ -288,6 +314,9 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
             }
 
             state StatefulState::Draining {
+                on StatefulEvent::RecordingEnded => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: StatefulState::Held, actions: vec![StatefulAction::ForwardEOF, StatefulAction::ReportHold] }) })
+                };
                 on StatefulEvent::ShouldEmit => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: StatefulState::EmittingDuringDrain, actions: vec![] }) })
                 };
@@ -336,6 +365,19 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
 
             // Drained: terminal on success; still handle Error like from_any
             state StatefulState::Drained {}
+
+            state StatefulState::Held {
+                on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
+                    let StatefulEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: StatefulState::failure(cause.clone()),
+                        actions: vec![StatefulAction::SendFailure { message: cause }, StatefulAction::Cleanup,
+                            StatefulAction::Host(SupervisorAction::CloseMailbox), StatefulAction::Host(SupervisorAction::SettlePublications),
+                            StatefulAction::Host(SupervisorAction::Emit(StatefulEvent::TerminationSettled))],
+                    }) })
+                };
+            }
 
             // Failed: receiving Error again should be idempotent (no extra cleanup)
             state StatefulState::Failed {}
@@ -459,7 +501,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
 
             unhandled => |state: &StatefulState<H>, event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
                 let ignored = matches!(event, StatefulEvent::Initialize | StatefulEvent::Ready | StatefulEvent::BeginDrain)
-                    || matches!(state, StatefulState::Failing(_) | StatefulState::Cancelling(_) | StatefulState::Failed(_) | StatefulState::Cancelled(_) | StatefulState::Drained);
+                    || matches!(state, StatefulState::Failing(_) | StatefulState::Cancelling(_) | StatefulState::Failed(_) | StatefulState::Cancelled(_) | StatefulState::Drained | StatefulState::Held);
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
 
@@ -650,7 +692,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> HandlerS
                 // Wait for explicit initialization from pipeline.
                 Ok(EventLoopDirective::Continue)
             }
-            StatefulState::Initialized => Ok(EventLoopDirective::Continue),
+            StatefulState::Initialized | StatefulState::Held => Ok(EventLoopDirective::Continue),
 
             StatefulState::Accumulating => {
                 running::dispatch_accumulating(self, state, ctx.resources_mut()?).await
@@ -678,7 +720,10 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> External
     for StatefulSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
-        if matches!(state, StatefulState::Created | StatefulState::Initialized) {
+        if matches!(
+            state,
+            StatefulState::Created | StatefulState::Initialized | StatefulState::Held
+        ) {
             ExternalEventMode::Block
         } else {
             ExternalEventMode::Poll

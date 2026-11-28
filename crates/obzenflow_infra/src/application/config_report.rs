@@ -6,9 +6,10 @@ use super::presentation::shell_path;
 use crate::journal::disk::inspect::load_manifest;
 use crate::journal::disk::replay_archive::DiskReplayArchive;
 use crate::journal::read::{
-    compare_with_runs, read_configuration_refusals, read_logic_version_changes, ConfigChanges,
-    LogicVersionChange, RunConfigChanges,
+    compare_with_runs, read_configuration_refusals, read_logic_version_changes, read_stage_stops,
+    ConfigChanges, LogicVersionChange, RunConfigChanges,
 };
+use obzenflow_core::event::StageFatalReason;
 use obzenflow_core::journal::archive_actions::{
     decide, ArchiveEvidence, ArchiveOverrides, ArchiveWarning, FailureEvidence, FlowEvidence,
     ReplayVerb,
@@ -113,18 +114,20 @@ pub(super) async fn resume_remedy(
 ) -> Option<String> {
     let run = locator.path();
     let manifest = load_manifest(run).ok()?;
-    if crate::journal::disk::replay_archive::replayed_run(&manifest).is_some() {
+    if crate::journal::disk::replay_archive::run_link(&manifest).is_some() {
         return None;
     }
     let resumed_from = manifest.resume.map(|resume| resume.resumed_from);
     let evidence = DiskReplayArchive::written_run_evidence(run.to_path_buf(), ReplayVerb::Resume)
         .await
         .ok()?;
+    let stops = read_stage_stops(run).await.unwrap_or_default();
     remedy_line(
         &evidence,
         flow.archive_flow_evidence(),
         resumed_from.as_deref(),
         run,
+        &stops,
     )
 }
 
@@ -133,6 +136,7 @@ fn remedy_line(
     flow: &FlowEvidence,
     resumed_from: Option<&Path>,
     run: &Path,
+    stops: &[(String, StageFatalReason)],
 ) -> Option<String> {
     let command = shell_path(run);
     match decide(
@@ -141,6 +145,7 @@ fn remedy_line(
         evidence,
         flow,
         ArchiveOverrides::default(),
+        &[],
     ) {
         Ok(Some(ArchiveWarning::Failed { .. })) => Some(format!(
             "To continue this run, remove the cause of the failure. Then add --resume-from \
@@ -149,14 +154,83 @@ fn remedy_line(
         Ok(None) if evidence.failure == FailureEvidence::DepartedFromArchive => {
             resumed_from.map(|parent| {
                 format!(
-                    "To continue this run, restore what {} recorded. Then add --resume-from \
+                    "To continue this run, restore what {} recorded{}. Then add --resume-from \
                      {command}.",
-                    parent.display()
+                    parent.display(),
+                    rebuild_clause(evidence, flow, run, stops)
                 )
             })
         }
         Ok(None) | Err(_) => None,
     }
+}
+
+fn rebuild_clause(
+    evidence: &ArchiveEvidence,
+    flow: &FlowEvidence,
+    run: &Path,
+    stops: &[(String, StageFatalReason)],
+) -> String {
+    let mut stages: Vec<String> = stops
+        .iter()
+        .filter(|(_, reason)| *reason == StageFatalReason::DestinationChanged)
+        .map(|(stage, _)| stage.clone())
+        .collect();
+    stages.sort();
+    stages.dedup();
+    if stages.is_empty()
+        || decide(
+            ReplayVerb::Rebuild,
+            run,
+            evidence,
+            flow,
+            ArchiveOverrides::default(),
+            &stages,
+        )
+        .is_err()
+    {
+        return String::new();
+    }
+    let flags: Vec<String> = stages
+        .iter()
+        .map(|stage| format!("--stage {stage}"))
+        .collect();
+    format!(
+        ", or rebuild {} with --rebuild-from {} {}",
+        and_list(&stages),
+        shell_path(run),
+        flags.join(" ")
+    )
+}
+
+fn and_list(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+pub(super) fn rebuild_stop_lines(
+    stops: &[(String, StageFatalReason)],
+    named: &[String],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (stage, reason) in stops.iter().filter(|(stage, _)| named.contains(stage)) {
+        if reason.departs_from_archive() {
+            lines.push(
+                "The destination holds only what this rebuild wrote before it stopped.".to_string(),
+            );
+            lines.push(format!(
+                "Rebuild {stage} with the build and configuration that recorded this call."
+            ));
+        } else if *reason == StageFatalReason::DestinationUnwritable {
+            lines.push(format!(
+                "Fix what made it fail. Then rebuild {stage} again."
+            ));
+        }
+    }
+    lines
 }
 
 fn footer_lines(changes: &[RunConfigChanges], logic: &[LogicVersionChange]) -> Vec<String> {
@@ -293,6 +367,8 @@ mod tests {
             live_writer: false,
             sources: Vec::new(),
             failure,
+            sinks: Vec::new(),
+            guarantees: Vec::new(),
         };
         let line = |evidence: &ArchiveEvidence, flow: &FlowEvidence, parent: Option<&str>| {
             remedy_line(
@@ -300,6 +376,7 @@ mod tests {
                 flow,
                 parent.map(Path::new),
                 Path::new("runs/refused"),
+                &[],
             )
         };
         let flow = FlowEvidence::default();
@@ -335,5 +412,144 @@ mod tests {
                 "a command Core refuses is never offered"
             );
         }
+    }
+
+    fn departed_register_run() -> (ArchiveEvidence, FlowEvidence) {
+        use obzenflow_core::journal::archive::EffectGuarantee;
+        use obzenflow_core::journal::ArchiveStatus;
+        let guarantees = vec![
+            (
+                "case_register".to_string(),
+                vec![EffectGuarantee::ExactlyOnce],
+            ),
+            (
+                "totals_report".to_string(),
+                vec![EffectGuarantee::AtLeastOnce],
+            ),
+            (
+                "unopened_alerts".to_string(),
+                vec![EffectGuarantee::ExactlyOnce],
+            ),
+        ];
+        let evidence = ArchiveEvidence {
+            status: ArchiveStatus::Failed,
+            live_writer: false,
+            sources: Vec::new(),
+            failure: FailureEvidence::DepartedFromArchive,
+            sinks: vec![
+                "case_register".to_string(),
+                "totals_report".to_string(),
+                "unopened_alerts".to_string(),
+            ],
+            guarantees: guarantees.clone(),
+        };
+        let flow = FlowEvidence {
+            guarantees,
+            ..FlowEvidence::default()
+        };
+        (evidence, flow)
+    }
+
+    fn departed_line(stops: &[(&str, StageFatalReason)]) -> Option<String> {
+        let (evidence, flow) = departed_register_run();
+        let stops: Vec<(String, StageFatalReason)> = stops
+            .iter()
+            .map(|(stage, reason)| (stage.to_string(), *reason))
+            .collect();
+        remedy_line(
+            &evidence,
+            &flow,
+            Some(Path::new("/runs/killed")),
+            Path::new("runs/refused"),
+            &stops,
+        )
+    }
+
+    #[test]
+    fn rebuild_remedy_two_sinks_lists_stages() {
+        assert_eq!(
+            departed_line(&[
+                ("unopened_alerts", StageFatalReason::DestinationChanged),
+                ("case_register", StageFatalReason::DestinationChanged),
+            ])
+            .as_deref(),
+            Some(
+                "To continue this run, restore what /runs/killed recorded, or rebuild \
+                 case_register and unopened_alerts with --rebuild-from runs/refused --stage \
+                 case_register --stage unopened_alerts. Then add --resume-from runs/refused."
+            )
+        );
+    }
+
+    #[test]
+    fn remedy_at_least_once_stage_omits_rebuild() {
+        assert_eq!(
+            departed_line(&[("totals_report", StageFatalReason::DestinationChanged)]).as_deref(),
+            Some(
+                "To continue this run, restore what /runs/killed recorded. Then add \
+                 --resume-from runs/refused."
+            ),
+            "a rebuild that decide refuses is never offered"
+        );
+    }
+
+    #[test]
+    fn rebuild_clause_requires_destination_changed() {
+        for reason in [
+            StageFatalReason::DescriptorMismatch,
+            StageFatalReason::MissingRecordedEffect,
+            StageFatalReason::UnusedEffectHistory,
+            StageFatalReason::MissingRecordedFact,
+            StageFatalReason::UnusedFactHistory,
+            StageFatalReason::DestinationChanged,
+        ] {
+            assert!(reason.departs_from_archive());
+            let line = departed_line(&[("case_register", reason)]).unwrap();
+            assert_eq!(
+                line.contains("--rebuild-from"),
+                reason == StageFatalReason::DestinationChanged,
+                "{reason:?}: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn rebuild_unused_history_prints_stop_lines() {
+        let named = ["case_register".to_string()];
+        assert_eq!(
+            rebuild_stop_lines(
+                &[(
+                    "case_register".to_string(),
+                    StageFatalReason::UnusedEffectHistory
+                )],
+                &named
+            ),
+            [
+                "The destination holds only what this rebuild wrote before it stopped.",
+                "Rebuild case_register with the build and configuration that recorded this call.",
+            ]
+        );
+        assert!(
+            rebuild_stop_lines(
+                &[("score".to_string(), StageFatalReason::UnusedEffectHistory)],
+                &named
+            )
+            .is_empty(),
+            "a stage outside the named sinks prints no rebuild line"
+        );
+    }
+
+    #[test]
+    fn unwritable_rebuild_stop_omits_departure_lines() {
+        assert_eq!(
+            rebuild_stop_lines(
+                &[(
+                    "case_register".to_string(),
+                    StageFatalReason::DestinationUnwritable
+                )],
+                &["case_register".to_string()]
+            ),
+            ["Fix what made it fail. Then rebuild case_register again."]
+        );
     }
 }

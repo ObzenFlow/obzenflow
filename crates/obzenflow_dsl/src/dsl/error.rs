@@ -356,6 +356,14 @@ pub enum FlowBuildError {
     )]
     OrderObserverFanInRequiresDeterministicOrder { stage_name: String },
 
+    /// A rebuild named one or more keys that name no sink stage of the flow.
+    #[error("{}", unknown_sinks_text(run, keys, sinks))]
+    UnknownSinks {
+        run: std::path::PathBuf,
+        keys: Vec<String>,
+        sinks: Vec<String>,
+    },
+
     /// Archive admission refused the verb. The error also contains the flow
     /// evidence that admission read.
     #[error("{refusal}")]
@@ -377,6 +385,49 @@ pub enum FlowBuildError {
     /// B12); its run directory remains as an orphan that ran no stage.
     #[error(transparent)]
     ResumeRefusedClaim(obzenflow_core::journal::archive::ReplayError),
+}
+
+fn and_list(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+fn unknown_sinks_text(run: &std::path::Path, keys: &[String], sinks: &[String]) -> String {
+    let quoted: Vec<String> = keys.iter().map(|key| format!("'{key}'")).collect();
+    let cause = match keys {
+        [_] => format!("the flow has no sink {}", and_list(&quoted)),
+        _ => format!("the flow has no sinks {}", and_list(&quoted)),
+    };
+    let known = match sinks {
+        [] => "This flow has no sink.".to_string(),
+        [_] => format!("The sink of this flow is {}.", and_list(sinks)),
+        _ => format!("The sinks of this flow are {}.", and_list(sinks)),
+    };
+    let near: Vec<(String, &str)> = keys
+        .iter()
+        .filter_map(|key| {
+            obzenflow_runtime::runtime_config::error::closest_match(key, sinks)
+                .map(|sink| (key.clone(), sink))
+        })
+        .collect();
+    let hint = match near.as_slice() {
+        [] => String::new(),
+        [(_, sink)] if keys.len() == 1 => format!(" Did you mean '{sink}'?"),
+        _ => {
+            let pairs: Vec<String> = near
+                .iter()
+                .map(|(key, sink)| format!("'{sink}' for '{key}'"))
+                .collect();
+            format!(" Did you mean {}?", and_list(&pairs))
+        }
+    };
+    format!(
+        "ObzenFlow cannot rebuild from {}, because {cause}.\nName a sink with --stage. {known}{hint}",
+        run.display()
+    )
 }
 
 impl FlowBuildError {

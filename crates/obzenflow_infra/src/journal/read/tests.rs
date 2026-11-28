@@ -65,6 +65,7 @@ impl Run {
             flow_name: "reader_test".into(),
             created_at: chrono::Utc::now(),
             replay: None,
+            rebuild: None,
             resume: None,
             interrupted_appends: Vec::new(),
             effective_config: None,
@@ -86,6 +87,7 @@ impl Run {
                     source_continuation: Some(
                         obzenflow_core::source::SourceContinuation::RecordedRead,
                     ),
+                    guarantees: Vec::new(),
                 },
             )]
             .into(),
@@ -870,4 +872,70 @@ async fn shown_repeats(shown: &Run, earlier: &[&Run]) -> Vec<Option<u64>> {
         }
     }
     repeats
+}
+
+fn rebuild_link(run: &mut Run, rebuilt: &Path) {
+    let rebuilt = rebuilt.display().to_string();
+    run.manifest.replay = Some(obzenflow_core::journal::RunManifestReplayConfig {
+        replay_from: rebuilt.clone(),
+        allow_incomplete_archive: false,
+    });
+    run.manifest.rebuild = Some(obzenflow_core::journal::archive::RunManifestRebuildConfig {
+        rebuilt_from: rebuilt,
+        stages: vec!["case_register".to_string()],
+    });
+    run.save_manifest();
+}
+
+#[tokio::test]
+async fn lineage_rebuild_run_returns_rebuild_standing() {
+    let original = Run::new();
+    let original_dir = std::fs::canonicalize(original.dir.path()).unwrap();
+    let mut rebuild = Run::new();
+    rebuild_link(&mut rebuild, &original_dir);
+    let lineage = read_run_lineage(rebuild.dir.path()).unwrap();
+    assert_eq!(
+        lineage.standing,
+        Standing::Rebuild {
+            rebuilt: original_dir.clone()
+        }
+    );
+    assert_eq!(
+        lineage
+            .evidence
+            .iter()
+            .map(|holder| holder.run.clone())
+            .collect::<Vec<_>>(),
+        vec![original_dir]
+    );
+}
+
+#[tokio::test]
+async fn lineage_replayed_rebuild_skips_rebuild_run() {
+    let original = Run::new();
+    let original_dir = std::fs::canonicalize(original.dir.path()).unwrap();
+    let mut rebuild = Run::new();
+    rebuild_link(&mut rebuild, &original_dir);
+    let rebuild_dir = std::fs::canonicalize(rebuild.dir.path()).unwrap();
+    let mut replay = Run::new();
+    replay.manifest.replay = Some(obzenflow_core::journal::RunManifestReplayConfig {
+        replay_from: rebuild_dir.display().to_string(),
+        allow_incomplete_archive: false,
+    });
+    replay.save_manifest();
+    let lineage = read_run_lineage(replay.dir.path()).unwrap();
+    assert_eq!(
+        lineage.standing,
+        Standing::Replay {
+            replayed: rebuild_dir
+        }
+    );
+    assert_eq!(
+        lineage
+            .evidence
+            .iter()
+            .map(|holder| holder.run.clone())
+            .collect::<Vec<_>>(),
+        vec![original_dir]
+    );
 }

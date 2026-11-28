@@ -440,6 +440,31 @@ where
 
         let __archive_flow_evidence = crate::dsl::typing::archive_flow_evidence(&topology, &descriptors);
         if let Some(replay) = obzenflow_runtime::bootstrap::replay_bootstrap() {
+            if replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Rebuild {
+                let mut sinks: Vec<String> = descriptors
+                    .values()
+                    .filter(|descriptor| {
+                        descriptor.stage_type() == obzenflow_core::event::context::StageType::Sink
+                    })
+                    .map(|descriptor| descriptor.name().to_string())
+                    .collect();
+                sinks.sort();
+                let mut keys: Vec<String> = replay
+                    .stages
+                    .iter()
+                    .filter(|key| !sinks.contains(key))
+                    .cloned()
+                    .collect();
+                keys.sort();
+                keys.dedup();
+                if !keys.is_empty() {
+                    return Err(FlowBuildError::UnknownSinks {
+                        run: replay.archive_path.clone(),
+                        keys,
+                        sinks,
+                    });
+                }
+            }
             let evidence = obzenflow_runtime::bootstrap::archive_evidence().ok_or_else(|| {
                 FlowBuildError::StageResourcesFailed(format!(
                     "replay/resume bootstrap is installed (verb {:?}) but no opened archive \
@@ -456,6 +481,7 @@ where
                 obzenflow_core::journal::archive_actions::ArchiveOverrides {
                     allow_incomplete_archive: replay.allow_incomplete_archive,
                 },
+                &replay.stages,
             )
             .map_err(|refusal| FlowBuildError::ArchiveVerbRefused {
                 refusal,
@@ -1055,6 +1081,7 @@ where
         let mut stage_journals = HashMap::new();
         let mut error_journals = HashMap::new();
         let mut manifest_stages: HashMap<String, obzenflow_core::journal::archive::manifest::RunManifestStage> = HashMap::new();
+        let recorded_archive = obzenflow_runtime::bootstrap::replay_archive();
         let mut bounded_direct_fact_admission = Vec::new();
         let manifest_delivery_metadata = crate::dsl::typing::derive_manifest_delivery_metadata(
             &topology,
@@ -1159,6 +1186,13 @@ where
                     ai_models: descriptor.ai_model_specs(),
                     max_open_keys: descriptor.max_open_keys(),
                     source_continuation: descriptor.source_continuation(),
+                    guarantees: crate::dsl::typing::manifest_guarantees(
+                        crate::dsl::typing::stage_guarantees(descriptor.as_ref()),
+                        recorded_archive
+                            .as_ref()
+                            .map(|archive| archive.recorded_guarantees(descriptor.name()))
+                            .unwrap_or_default(),
+                    ),
                 },
             );
         }
@@ -1207,6 +1241,19 @@ where
                 allow_incomplete_archive: replay.allow_incomplete_archive,
             }
         });
+
+        let rebuild_manifest = obzenflow_runtime::bootstrap::replay_bootstrap()
+            .filter(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Rebuild)
+            .zip(replay_archive.as_ref())
+            .map(|(replay, archive)| {
+                let mut stages = replay.stages.clone();
+                stages.sort();
+                stages.dedup();
+                obzenflow_core::journal::archive::manifest::RunManifestRebuildConfig {
+                    rebuilt_from: archive.archive_path().to_string_lossy().to_string(),
+                    stages,
+                }
+            });
 
         // FLOWIP-120n: a resume run records the archive it resumed from and the
         // generation it enters; FLOWIP-134i B6: and the ancestors it merged.
@@ -1291,6 +1338,7 @@ where
             flow_name: flow_name.to_string(),
             created_at: obzenflow_core::chrono::Utc::now(),
             replay: replay_manifest,
+            rebuild: rebuild_manifest,
             resume: resume_manifest,
             interrupted_appends,
             stages: manifest_stages,

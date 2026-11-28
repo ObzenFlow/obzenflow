@@ -144,7 +144,7 @@ impl SinkGroupSystem<CsvRow> for CsvRegister {
                 RegisterState::Closed => unreachable!("the code above opens a closed register"),
             };
             if let Some(reason) = &register.poisoned {
-                return Err(EffectError::DestinationChanged {
+                return Err(EffectError::DestinationUnwritable {
                     message: reason.clone(),
                 });
             }
@@ -156,7 +156,7 @@ impl SinkGroupSystem<CsvRow> for CsvRegister {
                         layout.path.display()
                     );
                     register.poisoned = Some(reason.clone());
-                    Err(EffectError::DestinationChanged { message: reason })
+                    Err(EffectError::DestinationUnwritable { message: reason })
                 }
             }
         })
@@ -177,7 +177,7 @@ impl OpenRegister {
                 .create(true)
                 .truncate(false)
                 .open(&layout.path)
-                .map_err(|error| io_failure(&layout.path, error))?;
+                .map_err(|error| cannot_open(&layout.path, &error))?;
             hold(&file, &layout.path)?;
             if !continues_history {
                 file.set_len(0)
@@ -207,7 +207,10 @@ impl OpenRegister {
             .read(true)
             .write(true)
             .open(&layout.path)
-            .map_err(|_| no_longer_matches(&layout.path, recorded))?;
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::NotFound => no_longer_matches(&layout.path, recorded),
+                _ => cannot_open(&layout.path, &error),
+            })?;
         hold(&file, &layout.path)?;
         let actual = file
             .metadata()
@@ -307,7 +310,7 @@ fn hold(file: &File, path: &Path) -> Result<(), EffectError> {
             path.display()
         ),
     };
-    Err(EffectError::DestinationChanged { message })
+    Err(EffectError::DestinationUnwritable { message })
 }
 
 fn set_aside_tail(file: &mut File, path: &Path, length: u64) -> Result<(), EffectError> {
@@ -322,11 +325,18 @@ fn set_aside_tail(file: &mut File, path: &Path, length: u64) -> Result<(), Effec
     io::copy(file, &mut out)
         .and_then(|_| out.sync_all())
         .map_err(|error| io_failure(&damage, error))?;
+    let directory = damage
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_failure(directory, error))?;
     file.set_len(length)
         .and_then(|()| file.sync_all())
         .map_err(|error| io_failure(path, error))?;
     tracing::warn!(
-        "the CSV register moved the bytes after offset {length} of {} into {}. The history of this run has no record of these bytes.",
+        "the CSV register moved the bytes after offset {length} of {} into {}. Before this write, the history of this run records {length} bytes of this file.",
         path.display(),
         damage.display()
     );
@@ -380,13 +390,21 @@ fn register_port(layout: CsvLayout) -> Port<dyn CsvRegisterPort> {
 }
 
 fn poisoned_lock() -> EffectError {
-    EffectError::DestinationChanged {
+    EffectError::DestinationUnwritable {
         message: "the lock of the CSV register is poisoned".to_string(),
     }
 }
 
 fn io_failure(path: &Path, error: io::Error) -> EffectError {
-    EffectError::Execution(format!("CSV register {} failed: {error}", path.display()))
+    EffectError::DestinationUnwritable {
+        message: format!("CSV register {} failed: {error}", path.display()),
+    }
+}
+
+fn cannot_open(path: &Path, error: &io::Error) -> EffectError {
+    EffectError::DestinationUnwritable {
+        message: format!("The CSV sink cannot open {} ({error}).", path.display()),
+    }
 }
 
 fn no_longer_matches(path: &Path, recorded: &Appended) -> EffectError {
@@ -770,7 +788,7 @@ mod tests {
             .err()
             .expect("a held file is refused");
         assert!(
-            matches!(error, EffectError::DestinationChanged { .. }),
+            matches!(error, EffectError::DestinationUnwritable { .. }),
             "{error}"
         );
         drop(first);
@@ -794,7 +812,7 @@ mod tests {
             .err()
             .expect("a held file is refused");
         assert!(
-            matches!(error, EffectError::DestinationChanged { .. }),
+            matches!(error, EffectError::DestinationUnwritable { .. }),
             "{error}"
         );
         drop(first);
@@ -833,7 +851,7 @@ mod tests {
         };
         let error = second.append(&row(9), &ctx).await.unwrap_err();
         assert!(
-            matches!(error, EffectError::DestinationChanged { .. }),
+            matches!(error, EffectError::DestinationUnwritable { .. }),
             "{error}"
         );
         drop(first);
@@ -894,9 +912,106 @@ mod tests {
         let ctx = EffectContext::for_test(FlowId::new(), "register", 1);
         for id in 1..=2 {
             let error = register.append(&row(id), &ctx).await.unwrap_err();
-            assert!(matches!(error, EffectError::DestinationChanged { .. }));
+            assert!(matches!(error, EffectError::DestinationUnwritable { .. }));
         }
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn register_unopenable_file_returns_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
+        let recorded = register
+            .append_group(&layout(&path), &[row(1)])
+            .unwrap()
+            .remove(0);
+        drop(register);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        for (recorded, continues_history) in [(None, false), (None, true), (Some(&recorded), true)]
+        {
+            let error = OpenRegister::open(&layout(&path), recorded, continues_history)
+                .err()
+                .expect("a directory at the register's path is refused");
+            assert!(
+                matches!(&error, EffectError::DestinationUnwritable { message }
+                    if message.starts_with("The CSV sink cannot open")),
+                "{error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn register_blocked_set_aside_returns_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
+        let recorded = register
+            .append_group(&layout(&path), &[row(1)])
+            .unwrap()
+            .remove(0);
+        register.append_group(&layout(&path), &[row(2)]).unwrap();
+        drop(register);
+        let before = std::fs::read(&path).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("missing"),
+            dir.path().join("register.csv.16.damage"),
+        )
+        .unwrap();
+        let error = OpenRegister::open(&layout(&path), Some(&recorded), true)
+            .err()
+            .expect("a set-aside that cannot create its damage file is refused");
+        assert!(
+            matches!(error, EffectError::DestinationUnwritable { .. }),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn register_removed_file_returns_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
+        let recorded = register
+            .append_group(&layout(&path), &[row(1)])
+            .unwrap()
+            .remove(0);
+        drop(register);
+        std::fs::remove_file(&path).unwrap();
+        let error = OpenRegister::open(&layout(&path), Some(&recorded), true)
+            .err()
+            .expect("a removed file is refused");
+        assert!(
+            matches!(error, EffectError::DestinationChanged { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rebuild_register_matches_recorded_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("register.csv");
+        let mut register = OpenRegister::open(&layout(&path), None, false).unwrap();
+        let recorded = register
+            .append_group(&layout(&path), &[row(1), row(2)])
+            .unwrap();
+        drop(register);
+        let written = std::fs::read(&path).unwrap();
+        std::fs::write(&path, "id,name\n9,row-9\n").unwrap();
+
+        let mut rebuilt = OpenRegister::open(&layout(&path), None, true).unwrap();
+        let replies = rebuilt
+            .append_group(&layout(&path), &[row(1), row(2)])
+            .unwrap();
+        assert_eq!(replies, recorded);
+        assert_eq!(std::fs::read(&path).unwrap(), written);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("register.csv.0.damage")).unwrap(),
+            "id,name\n9,row-9\n"
+        );
     }
 
     #[tokio::test]

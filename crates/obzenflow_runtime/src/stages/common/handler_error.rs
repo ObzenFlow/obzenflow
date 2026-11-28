@@ -204,6 +204,13 @@ impl From<EffectError> for HandlerError {
                     message,
                 ));
             }
+            EffectError::DestinationUnwritable { message } => {
+                return Self::Fatal(StageFatal::new(
+                    StageFatalCode::Resource,
+                    StageFatalReason::DestinationUnwritable,
+                    message,
+                ));
+            }
             EffectError::RateLimited { retry_after, .. } => Some(*retry_after),
             _ => None,
         };

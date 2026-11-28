@@ -341,6 +341,14 @@ pub(super) async fn dispatch_accumulating<
                         .await;
                     if let Err(err) = &accumulate_result {
                         if let Some(fatal) = err.as_fatal() {
+                            if super::rebuild_holds(ctx, fatal) {
+                                ctx.instrumentation
+                                    .in_flight_count
+                                    .fetch_sub(1, Ordering::Relaxed);
+                                return Ok(EventLoopDirective::Transition(
+                                    StatefulEvent::RecordingEnded,
+                                ));
+                            }
                             let duration = start.elapsed();
                             ctx.instrumentation
                                 .in_flight_count

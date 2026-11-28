@@ -9,7 +9,7 @@
 use super::JournalReadError;
 use crate::journal::disk::continuation::{history_head, read_claim, takeover, Takeover};
 use crate::journal::disk::inspect::{load_manifest, JournalInspectError};
-use crate::journal::disk::replay_archive::{recorded_reconstruction_completion, replayed_run};
+use crate::journal::disk::replay_archive::{recorded_reconstruction_completion, run_link, RunLink};
 use obzenflow_core::journal::{RunManifest, TailKind};
 use std::path::{Path, PathBuf};
 
@@ -54,6 +54,8 @@ pub enum Standing {
     Orphan { resume: PathBuf },
     /// A replay reproduces `replayed` and is never a head.
     Replay { replayed: PathBuf },
+    /// A rebuild run rebuilt destinations from `rebuilt` and is never a head.
+    Rebuild { rebuilt: PathBuf },
 }
 
 /// A journal that ends at an interrupted append, whose bytes after the
@@ -167,8 +169,10 @@ fn recorded_tails(manifest: &RunManifest) -> Vec<InterruptedTail> {
 }
 
 fn standing(run: &Path, manifest: &RunManifest) -> Result<Standing, JournalReadError> {
-    if let Some(replayed) = replayed_run(manifest) {
-        return Ok(Standing::Replay { replayed });
+    match run_link(manifest) {
+        Some(RunLink::Replay(replayed)) => return Ok(Standing::Replay { replayed }),
+        Some(RunLink::Rebuild(rebuilt)) => return Ok(Standing::Rebuild { rebuilt }),
+        None => {}
     }
     if read_claim(run)?.is_some() {
         return Ok(Standing::Continued {
@@ -209,8 +213,6 @@ fn required_ancestors(parent: &Path) -> Vec<PathBuf> {
     requires
 }
 
-/// Earlier runs reached by replay and resume links that a resume of this run
-/// does not require. Replays are skipped: they add nothing a resume reads.
 fn evidence_holders(
     run: &Path,
     manifest: &RunManifest,
@@ -225,10 +227,10 @@ fn evidence_holders(
         }
         visited.push(linked.clone());
         let manifest = load_manifest(&linked).ok();
-        let replay = manifest
+        let linking = manifest
             .as_ref()
-            .is_some_and(|manifest| replayed_run(manifest).is_some());
-        if !replay && !required.contains(&linked) {
+            .is_some_and(|manifest| run_link(manifest).is_some());
+        if !linking && !required.contains(&linked) {
             holders.push(EvidenceHolder {
                 generation: manifest
                     .as_ref()
@@ -248,7 +250,7 @@ fn evidence_holders(
 /// next one. A resume that merged ancestors continued a torn parent, which may
 /// not have crossed its generation.
 fn link(manifest: &RunManifest) -> Option<(PathBuf, Option<u64>)> {
-    match (&manifest.resume, replayed_run(manifest)) {
+    match (&manifest.resume, run_link(manifest)) {
         (Some(resume), _) => {
             let generation = if resume.merged_from.is_empty() {
                 resume.resume_generation.checked_sub(1)
@@ -257,7 +259,7 @@ fn link(manifest: &RunManifest) -> Option<(PathBuf, Option<u64>)> {
             };
             Some((resume.resumed_from.clone(), generation))
         }
-        (None, Some(replayed)) => Some((replayed, None)),
+        (None, Some(link)) => Some((link.into_run(), None)),
         (None, None) => None,
     }
 }

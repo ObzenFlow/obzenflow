@@ -637,6 +637,9 @@ fn durable_execution_contract_child() {
         Graph::AtMostOnce => app.run_blocking(at_most_once::build_flow(scenario, plan.hold)),
         Graph::CsvRegister => app.run_blocking(csv_register::build_flow(scenario, plan.hold)),
         Graph::CsvRegisterFanIn => app.run_blocking(csv_register::fan_in_flow(scenario, plan.hold)),
+        Graph::PaymentRegister => {
+            app.run_blocking(csv_register::payment_flow(scenario, plan.hold, plan.fix))
+        }
         Graph::SourcePortReplay => app.run_blocking(source_ports::replay_flow(scenario)),
         Graph::SourcePortChanged => app
             .with_config_file(source_ports::ticks_config(scenario))
@@ -732,6 +735,7 @@ enum Graph {
     AtMostOnce,
     CsvRegister,
     CsvRegisterFanIn,
+    PaymentRegister,
     SourcePortReplay,
     SourcePortChanged,
     SourcePortLimited,
@@ -957,6 +961,14 @@ fn resume(archive: &Path) -> Vec<String> {
 
 fn replay(archive: &Path) -> Vec<String> {
     vec!["--replay-from".into(), archive.display().to_string()]
+}
+
+fn rebuild(archive: &Path, stages: &[&str]) -> Vec<String> {
+    let mut args = vec!["--rebuild-from".into(), archive.display().to_string()];
+    for stage in stages {
+        args.extend(["--stage".into(), (*stage).to_string()]);
+    }
+    args
 }
 
 struct Child {
@@ -2332,10 +2344,9 @@ async fn durable_execution_contract() {
     let refusal = std::fs::read_to_string(log).expect("the refusal is logged");
     assert!(
         refusal.contains(&format!(
-            "ObzenFlow cannot resume {}, because {} already resumed it. {} is the head of this \
+            "ObzenFlow cannot resume {}, because another run resumed it. {} is the head of this \
              history.",
             killed_copy.display(),
-            rebuilt_head.display(),
             rebuilt_head.display()
         )),
         "{refusal}"
@@ -2780,29 +2791,37 @@ fn read_log(log: &Path) -> String {
     strip_ansi(&std::fs::read_to_string(log).expect("the child log is readable"))
 }
 
-fn inspected_verdicts(run: &Path) -> (String, String) {
+fn inspected(run: &Path) -> String {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
         .arg("inspect")
         .arg(run)
         .output()
         .expect("obzenflow inspect runs");
     assert!(output.status.success(), "{output:?}");
-    let text = String::from_utf8(output.stdout).expect("inspect prints UTF-8");
-    let verdict = |label: &str| {
-        let mut lines = text.lines().skip_while(|line| !line.starts_with(label));
-        let first = lines
-            .next()
-            .unwrap_or_else(|| panic!("inspect prints {label}: {text}"));
-        std::iter::once(&first[12..])
-            .chain(
-                lines
-                    .take_while(|line| line.starts_with("            "))
-                    .map(|line| &line[12..]),
-            )
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    (verdict("replay:"), verdict("resume:"))
+    String::from_utf8(output.stdout).expect("inspect prints UTF-8")
+}
+
+fn inspected_verdict(text: &str, label: &str) -> String {
+    let mut lines = text.lines().skip_while(|line| !line.starts_with(label));
+    let first = lines
+        .next()
+        .unwrap_or_else(|| panic!("inspect prints {label}: {text}"));
+    std::iter::once(&first[12..])
+        .chain(
+            lines
+                .take_while(|line| line.starts_with("            "))
+                .map(|line| &line[12..]),
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn inspected_verdicts(run: &Path) -> (String, String) {
+    let text = inspected(run);
+    (
+        inspected_verdict(&text, "replay:"),
+        inspected_verdict(&text, "resume:"),
+    )
 }
 
 fn copy_run(run: &Path, into: &Scenario) -> PathBuf {
@@ -6886,6 +6905,33 @@ mod at_most_once {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn partner_rebuild_at_most_once_refused() {
+        let scenario = fresh("partner_rebuild");
+        let run = Child::spawn(&scenario, Vec::new(), None).completed().await;
+        let acted = read_lines::<String>(&partner_log(&scenario));
+        let runs = scenario.runs();
+        let child = Child::spawn(&scenario, rebuild(&run, &["partner"]), None);
+        let log = child.log.clone();
+        assert!(!child.exit().await.success());
+        assert_eq!(
+            scenario.runs(),
+            runs,
+            "the refusal creates no run directory"
+        );
+        assert_eq!(
+            read_lines::<String>(&partner_log(&scenario)),
+            acted,
+            "the partner gets no call"
+        );
+        let output = read_log(&log);
+        assert!(
+            output.contains("because its port method declares at_most_once, not exactly_once.")
+                && output.contains("Restore what 'partner' wrote from your own copy."),
+            "{output}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn at_most_once_resume_abandons_held_call() {
         let name = "at_most_once";
         let scenario = fresh(name);
@@ -7156,6 +7202,183 @@ mod csv_register {
         })
     }
 
+    const ORDERS: [&str; 4] = ["O-1", "O-2", "O-3", "O-4"];
+
+    #[derive(Clone, Debug)]
+    struct PaymentRow;
+    impl CsvProjection for PaymentRow {
+        type Input = PaymentAuthorized;
+        type Row = Receipt;
+        fn project(&self, payment: PaymentAuthorized) -> Result<Receipt, HandlerError> {
+            Ok(Receipt {
+                order_id: payment.order_id,
+                authorization_id: payment.authorization_id,
+            })
+        }
+    }
+
+    #[obzenflow::command]
+    #[derive(Clone, Debug)]
+    struct Pay {
+        #[port]
+        gateway: Port<Gateway>,
+        fix: bool,
+    }
+
+    #[async_trait]
+    impl EffectfulTransformHandler for Pay {
+        type Input = CustomerOrderPlaced;
+        type Output = obzenflow::schema::outcome![PaymentAuthorized | PaymentDeclined];
+
+        async fn process(
+            &self,
+            order: CustomerOrderPlaced,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            fx.call(AuthorizationRequest {
+                order: order.clone(),
+            })
+            .await
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
+            if self.fix {
+                fx.call(AuthorizationRequest { order })
+                    .await
+                    .map_err(|error| HandlerError::Other(error.to_string()))?;
+            }
+            Ok(fx.complete()?)
+        }
+
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    fn payment_input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("orders.yaml")
+    }
+
+    fn fresh_payments(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::PaymentRegister);
+        let orders: String = ORDERS
+            .iter()
+            .map(|order| order_yaml(order, "Web", "1000", "Valid"))
+            .collect();
+        std::fs::write(payment_input(&scenario), format!("orders:\n{orders}"))
+            .expect("write the orders");
+        scenario
+    }
+
+    pub(super) fn payment_flow(
+        scenario: &Scenario,
+        hold: Option<Hold>,
+        fix: bool,
+    ) -> FlowDefinition {
+        let orders_input = orders(payment_input(scenario), "/orders");
+        let pay = Pay {
+            gateway: Port::to(Gateway {
+                calls: CallLog::open(scenario.ledger()).expect("the gateway's call log opens"),
+                hold: match hold {
+                    Some(Hold::Gateway(order)) => Some(order),
+                    _ => None,
+                },
+                release: scenario.release(),
+            }),
+            fix,
+        };
+        let register_csv = CsvSink::builder(PaymentRow)
+            .path(register_file(scenario))
+            .build()
+            .expect("the register is configured");
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            Ok(flow! {
+                name: "durable_execution_contract_payment_register",
+                journals: disk_journals(journals),
+
+                stages: {
+                    orders = source!(CustomerOrderPlaced => orders_input);
+                    authorize_payment = effectful_transform!(
+                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined } => pay
+                    );
+                    register = sink!(PaymentAuthorized => register_csv);
+                },
+
+                topology: {
+                    orders |> authorize_payment;
+                    authorize_payment |> register;
+                }
+            })
+        })
+    }
+
+    fn payment_rows(orders: &[&str]) -> String {
+        orders
+            .iter()
+            .fold("authorization_id,order_id\n".to_string(), |rows, order| {
+                rows + &format!("AUTH-{order},{order}\n")
+            })
+    }
+
+    fn gateway_calls(scenario: &Scenario) -> Vec<GatewayCall> {
+        read_lines(&scenario.ledger())
+    }
+
+    fn decided(scenario: &Scenario) -> BTreeMap<String, usize> {
+        let mut decided = BTreeMap::new();
+        for call in gateway_calls(scenario) {
+            if call.result == CallResult::Decided {
+                *decided.entry(call.order_id().to_string()).or_default() += 1;
+            }
+        }
+        decided
+    }
+
+    fn held_resume_config(scenario: &Scenario) -> Vec<String> {
+        let path = scenario.root.join("held-resume.toml");
+        std::fs::write(
+            &path,
+            "[runtime]\nshutdown_timeout_secs = 1\n\n[runtime.sink_batches.flow]\nsize = 1\n\
+             max_wait_ms = 30000\n",
+        )
+        .unwrap();
+        vec!["--config".into(), path.display().to_string()]
+    }
+
+    async fn kill_held_payment(scenario: &Scenario, size: usize, held: &str) -> PathBuf {
+        let child = Child::spawn(
+            scenario,
+            sink_group_config(scenario, size),
+            Some(Hold::Gateway(held.into())),
+        );
+        let killed = child.run().await;
+        until(&killed, "held payment", |archive| {
+            appended(archive) == 2
+                && gateway_calls(scenario)
+                    .iter()
+                    .any(|call| call.order_id() == held)
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success());
+        killed
+    }
+
+    fn last_register_length(archive: &Archive) -> u64 {
+        archive
+            .rows("register", RunJournalKind::Data)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) => {
+                    match &record.outcome {
+                        EffectOutcomePayload::Succeeded { output } => output["length"].as_u64(),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .last()
+            .expect("the history records a register write")
+    }
+
     fn appended(archive: &Archive) -> usize {
         archive
             .rows("register", RunJournalKind::Data)
@@ -7424,6 +7647,526 @@ mod csv_register {
             .completed()
             .await;
         assert_eq!(std::fs::read_to_string(file).unwrap(), rows(&ENTRIES));
+        assert_eq!(appended(&Archive::read(&resumed).await), ENTRIES.len());
+    }
+
+    fn run_files(run: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        std::fs::read_dir(run)
+            .expect("read the run directory")
+            .map(|entry| entry.expect("a run file").path())
+            .filter(|path| path.is_file())
+            .map(|path| {
+                let bytes = std::fs::read(&path).expect("read a run file");
+                (path, bytes)
+            })
+            .collect()
+    }
+
+    async fn refuse_removed_register(scenario: &Scenario) -> (PathBuf, PathBuf) {
+        let file = register_file(scenario);
+        let child = Child::spawn(
+            scenario,
+            sink_group_config(scenario, 1),
+            Some(Hold::RegisterWrite(3)),
+        );
+        let killed = child.run().await;
+        until(&killed, "removed register", |archive| {
+            appended(archive) == 2
+                && std::fs::read_to_string(&file).unwrap_or_default() == rows(&ENTRIES[..3])
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success());
+        std::fs::remove_file(&file).unwrap();
+        let child = Child::spawn(
+            scenario,
+            [resume(&killed), sink_group_config(scenario, 4)].concat(),
+            None,
+        );
+        let refused = child.run().await;
+        let log = child.log.clone();
+        assert!(!child.exit().await.success());
+        let output = read_log(&log);
+        let remedy = output
+            .lines()
+            .find(|line| line.starts_with("To continue this run, restore what "))
+            .unwrap_or_else(|| panic!("missing recovery instructions: {output}"));
+        assert!(
+            remedy.contains(&format!(
+                ", or rebuild register with --rebuild-from {} --stage register. Then add \
+                 --resume-from {}.",
+                refused.display(),
+                refused.display()
+            )),
+            "the footer names both remedies with no flag: {remedy}"
+        );
+        assert!(!remedy.contains("--allow-incomplete-archive"), "{remedy}");
+        (killed, refused)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuilt_register_resume_completes() {
+        let scenario = fresh_payments("rebuilt_register");
+        let file = register_file(&scenario);
+        let held = ORDERS[3];
+        let killed = kill_held_payment(&scenario, 2, held).await;
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            payment_rows(&ORDERS[..2])
+        );
+        std::fs::remove_file(&file).unwrap();
+        let child = Child::spawn(
+            &scenario,
+            [resume(&killed), held_resume_config(&scenario)].concat(),
+            Some(Hold::Gateway(held.into())),
+        );
+        let refused = child.run().await;
+        let log = child.log.clone();
+        assert!(!child.exit().await.success());
+        let output = read_log(&log);
+        let remedy = output
+            .lines()
+            .find(|line| line.starts_with("To continue this run, restore what "))
+            .unwrap_or_else(|| panic!("missing recovery instructions: {output}"));
+        assert!(
+            remedy.contains(&format!(
+                ", or rebuild register with --rebuild-from {} --stage register. Then add \
+                 --resume-from {}.",
+                refused.display(),
+                refused.display()
+            )),
+            "the footer names both remedies with no flag: {remedy}"
+        );
+        assert!(!remedy.contains("--allow-incomplete-archive"), "{remedy}");
+
+        let recorded_files = [run_files(&killed), run_files(&refused)];
+        let calls = gateway_calls(&scenario).len();
+        let child = Child::spawn(
+            &scenario,
+            [
+                rebuild(&refused, &["register"]),
+                sink_group_config(&scenario, 4),
+            ]
+            .concat(),
+            None,
+        );
+        let rebuilt = child.run().await;
+        let log = child.log.clone();
+        assert!(child.exit().await.success(), "{}", log_tail(&log));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            payment_rows(&ORDERS[..2]),
+            "the rebuild writes the history's two recorded rows"
+        );
+        assert_eq!(
+            gateway_calls(&scenario).len(),
+            calls,
+            "the rebuild makes no payment"
+        );
+        let archive = Archive::read(&rebuilt).await;
+        assert_eq!(archive.status(), "cancelled (recording_ended)");
+        assert_eq!(
+            archive
+                .facts::<PaymentAuthorized>("authorize_payment")
+                .count(),
+            3
+        );
+        assert_eq!(
+            archive.eof("authorize_payment"),
+            Some(EofKind::Truncated),
+            "the held payment stage ends its output with a truncated end"
+        );
+        let manifest = archive.manifest();
+        assert_eq!(
+            manifest["recorded_flow_id"],
+            Archive::read(&killed).await.manifest()["recorded_flow_id"],
+            "the rebuild mints identities in the recorded run's namespace"
+        );
+        assert_eq!(
+            manifest["rebuild"]["stages"],
+            serde_json::json!(["register"])
+        );
+        assert_eq!(
+            [run_files(&killed), run_files(&refused)],
+            recorded_files,
+            "the rebuild writes nothing to the recorded runs"
+        );
+        let output = read_log(&log);
+        assert!(
+            output.contains(
+                "The recording has a result for 2 calls of register. The rebuild made these \
+                 calls again."
+            ),
+            "{output}"
+        );
+
+        Child::spawn(&scenario, resume(&refused), None)
+            .completed()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            payment_rows(&ORDERS)
+        );
+        assert!(
+            damage_files(&scenario).is_empty(),
+            "neither the rebuild of a missing file nor the resume moves bytes aside"
+        );
+        assert_eq!(
+            decided(&scenario),
+            ORDERS
+                .iter()
+                .map(|order| (order.to_string(), 1))
+                .collect::<BTreeMap<_, _>>(),
+            "the gateway authorizes each payment once"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_torn_resume_matches_history_prefix() {
+        let scenario = fresh_payments("torn_rebuild");
+        let file = register_file(&scenario);
+        let held = ORDERS[2];
+        let killed = kill_held_payment(&scenario, 1, held).await;
+        let recorded = std::fs::read(&file).unwrap();
+        assert_eq!(
+            recorded.len() as u64,
+            last_register_length(&Archive::read(&killed).await)
+        );
+        let child = Child::spawn_with(&scenario, resume(&killed), None, true);
+        let torn = child.run().await;
+        assert!(!child.exit().await.success());
+        let torn_archive = Archive::read(&torn).await;
+        assert!(
+            torn_archive.status().starts_with("failed"),
+            "{}",
+            torn_archive.status()
+        );
+        assert!(
+            !torn_archive.reconstruction_completed(),
+            "the resume stops during its catch-up"
+        );
+        std::fs::remove_file(&file).unwrap();
+        let rebuilt = Child::spawn(&scenario, rebuild(&torn, &["register"]), None)
+            .completed()
+            .await;
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            recorded,
+            "the register holds the bytes of the history's last recorded write"
+        );
+        assert_eq!(
+            Archive::read(&rebuilt).await.status(),
+            "cancelled (recording_ended)"
+        );
+        Child::spawn(&scenario, resume(&torn), None)
+            .completed()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            payment_rows(&ORDERS)
+        );
+        assert!(
+            damage_files(&scenario).is_empty(),
+            "the resume finds the recorded length and SHA-256"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_held_upstream_short_sink_fails() {
+        let scenario = fresh_payments("held_upstream");
+        let file = register_file(&scenario);
+        let killed = kill_held_payment(&scenario, 1, ORDERS[2]).await;
+        std::fs::remove_file(&file).unwrap();
+        let calls = gateway_calls(&scenario).len();
+        let child = Child::spawn_with(
+            &scenario,
+            [
+                rebuild(&killed, &["register"]),
+                sink_group_config(&scenario, 1),
+            ]
+            .concat(),
+            None,
+            true,
+        );
+        let rebuilt = child.run().await;
+        let log = child.log.clone();
+        assert!(!child.exit().await.success(), "the rebuild stops by itself");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            payment_rows(&ORDERS[..1]),
+            "the register makes again only the call whose input came before the hold"
+        );
+        assert_eq!(gateway_calls(&scenario).len(), calls);
+        let archive = Archive::read(&rebuilt).await;
+        assert_eq!(
+            archive
+                .facts::<PaymentAuthorized>("authorize_payment")
+                .count(),
+            1
+        );
+        assert_eq!(archive.eof("authorize_payment"), Some(EofKind::Truncated));
+        assert!(
+            archive.status().starts_with("failed"),
+            "{}",
+            archive.status()
+        );
+        let fatal = archive
+            .rows("register", RunJournalKind::Error)
+            .find_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) => {
+                    Some(fatal.reason)
+                }
+                _ => None,
+            });
+        assert_eq!(
+            fatal,
+            Some(obzenflow_core::event::StageFatalReason::UnusedEffectHistory),
+            "{}",
+            log_tail(&log)
+        );
+        assert!(
+            read_log(&log)
+                .contains("The destination holds only what this rebuild wrote before it stopped."),
+            "{}",
+            log_tail(&log)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn changed_register_rebuild_keeps_bytes() {
+        let (scenario, refused) = refuse_changed_register("changed_register_rebuild").await;
+        let file = register_file(&scenario);
+        let changed = std::fs::read_to_string(&file).unwrap();
+        Child::spawn(
+            &scenario,
+            [
+                rebuild(&refused, &["register"]),
+                sink_group_config(&scenario, 4),
+            ]
+            .concat(),
+            None,
+        )
+        .completed()
+        .await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rows(&ENTRIES[..2]));
+        let damage = PathBuf::from(format!("{}.0.damage", file.display()));
+        assert_eq!(
+            damage_files(&scenario).as_slice(),
+            std::slice::from_ref(&damage)
+        );
+        assert_eq!(std::fs::read_to_string(&damage).unwrap(), changed);
+        Child::spawn(&scenario, resume(&refused), None)
+            .completed()
+            .await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rows(&ENTRIES));
+        assert_eq!(
+            damage_files(&scenario),
+            [damage],
+            "the resume moves nothing aside"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_run_resume_continues_head() {
+        let scenario = fresh("rebuild_run_resume");
+        let file = register_file(&scenario);
+        let (_, refused) = refuse_removed_register(&scenario).await;
+        let rebuilt = Child::spawn(
+            &scenario,
+            [
+                rebuild(&refused, &["register"]),
+                sink_group_config(&scenario, 4),
+            ]
+            .concat(),
+            None,
+        )
+        .completed()
+        .await;
+        let child = Child::spawn(&scenario, resume(&rebuilt), None);
+        let resumed = child.run().await;
+        let log = child.log.clone();
+        assert!(child.exit().await.success(), "{}", log_tail(&log));
+        let output = read_log(&log);
+        let refused = std::fs::canonicalize(&refused).unwrap();
+        let rebuilt = std::fs::canonicalize(&rebuilt).unwrap();
+        assert!(
+            output.contains(&format!(
+                "Resuming {}, the run that {} rebuilt.",
+                refused.display(),
+                rebuilt.display()
+            )),
+            "{output}"
+        );
+        assert_eq!(
+            Archive::read(&resumed).await.manifest()["resume"]["resumed_from"],
+            serde_json::json!(refused.display().to_string())
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rows(&ENTRIES));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_continued_run_refused() {
+        let scenario = fresh("rebuild_continued");
+        let file = register_file(&scenario);
+        let child = Child::spawn(
+            &scenario,
+            sink_group_config(&scenario, 1),
+            Some(Hold::RegisterWrite(3)),
+        );
+        let killed = child.run().await;
+        until(&killed, "continued run", |archive| appended(archive) == 2).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success());
+        let head = Child::spawn(&scenario, resume(&killed), None)
+            .completed()
+            .await;
+        std::fs::remove_file(&file).unwrap();
+        let runs = scenario.runs();
+        let child = Child::spawn(
+            &scenario,
+            [
+                rebuild(&killed, &["register"]),
+                sink_group_config(&scenario, 4),
+            ]
+            .concat(),
+            None,
+        );
+        let log = child.log.clone();
+        assert!(!child.exit().await.success());
+        assert_eq!(
+            scenario.runs(),
+            runs,
+            "the refusal creates no run directory"
+        );
+        let output = read_log(&log);
+        let killed_dir = std::fs::canonicalize(&killed).unwrap();
+        let head_dir = std::fs::canonicalize(&head).unwrap();
+        assert!(
+            output.contains(&format!(
+                "ObzenFlow cannot rebuild from {}, because another run resumed it. {} is the head \
+                 of this history.\nRebuild from {} instead.",
+                killed_dir.display(),
+                head_dir.display(),
+                head_dir.display()
+            )),
+            "{output}"
+        );
+        assert!(!file.exists(), "a refused rebuild writes no register");
+        assert_eq!(
+            inspected_verdict(&inspected(&killed), "rebuild:"),
+            format!(
+                "ObzenFlow cannot rebuild from {}, because another run resumed it. {} is the head \
+                 of this history.\nRebuild from {} instead.",
+                killed_dir.display(),
+                head_dir.display(),
+                head_dir.display()
+            ),
+            "inspect prints the refusal that the flow binary prints"
+        );
+        Child::spawn(
+            &scenario,
+            [
+                rebuild(&head, &["register"]),
+                sink_group_config(&scenario, 4),
+            ]
+            .concat(),
+            None,
+        )
+        .completed()
+        .await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rows(&ENTRIES));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn held_register_resume_omits_restore_remedy() {
+        let scenario = fresh("held_register");
+        let file = register_file(&scenario);
+        let child = Child::spawn(
+            &scenario,
+            sink_group_config(&scenario, 1),
+            Some(Hold::RegisterWrite(3)),
+        );
+        let killed = child.run().await;
+        until(&killed, "held register", |archive| appended(archive) == 2).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success());
+        let held = std::fs::read(&file).unwrap();
+        let lock = std::fs::File::open(&file).unwrap();
+        lock.try_lock().expect("the test holds the register");
+        let child = Child::spawn(&scenario, resume(&killed), None);
+        let refused = child.run().await;
+        let log = child.log.clone();
+        assert!(!child.exit().await.success());
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            held,
+            "a held file keeps its bytes"
+        );
+        let output = read_log(&log);
+        assert!(
+            output.contains("Another CSV sink or another run writes"),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "To continue this run, remove the cause of the failure. Then add --resume-from"
+            ),
+            "{output}"
+        );
+        assert!(!output.contains("restore what"), "{output}");
+        assert!(!output.contains("--rebuild-from"), "{output}");
+        let fatal = Archive::read(&refused)
+            .await
+            .rows("register", RunJournalKind::Error)
+            .find_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) => {
+                    Some(fatal.reason)
+                }
+                _ => None,
+            });
+        assert_eq!(
+            fatal,
+            Some(obzenflow_core::event::StageFatalReason::DestinationUnwritable)
+        );
+        drop(lock);
+        let child = Child::spawn(&scenario, resume(&refused), None);
+        let log = child.log.clone();
+        let resumed = child.completed().await;
+        assert!(
+            read_log(&log).contains("which failed. If the cause of that failure is still present"),
+            "the resume of a failed run prints the warning"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rows(&ENTRIES));
+        assert_eq!(appended(&Archive::read(&resumed).await), ENTRIES.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unopenable_register_resume_holds_every_row() {
+        let scenario = fresh("unopenable_register");
+        let file = register_file(&scenario);
+        std::fs::create_dir_all(&file).unwrap();
+        let child = Child::spawn(&scenario, sink_group_config(&scenario, 1), None);
+        let failed = child.run().await;
+        let log = child.log.clone();
+        assert!(!child.exit().await.success());
+        let output = read_log(&log);
+        assert!(output.contains("The CSV sink cannot open"), "{output}");
+        assert!(
+            output.contains(
+                "To continue this run, remove the cause of the failure. Then add --resume-from"
+            ),
+            "{output}"
+        );
+        let archive = Archive::read(&failed).await;
+        assert_eq!(appended(&archive), 0, "the register records no outcome");
+        assert!(archive
+            .rows("register", RunJournalKind::Error)
+            .all(|row| row.event_type() != "runtime.stage.processing_failed"));
+        std::fs::remove_dir(&file).unwrap();
+        let resumed = Child::spawn(&scenario, resume(&failed), None)
+            .completed()
+            .await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rows(&ENTRIES));
         assert_eq!(appended(&Archive::read(&resumed).await), ENTRIES.len());
     }
 

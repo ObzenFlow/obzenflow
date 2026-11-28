@@ -555,6 +555,11 @@ impl<H: Send + Sync + 'static> InfiniteSourceAction<H> {
 
                 // An operator stop is `Truncated`, never `Poison` (134i B5).
                 let cause = ctx.completion.cause();
+                if cause == crate::stages::source::strategies::SourceCompletionCause::Stopped {
+                    if let Some(control) = ctx.runtime_execution.rebuild_control() {
+                        control.record_source_stop();
+                    }
+                }
                 let eof_kind =
                     cause.eof_kind(ctx.control_strategy.as_ref(), &mut ctx.control_context);
 

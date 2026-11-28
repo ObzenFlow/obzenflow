@@ -10,6 +10,15 @@ pub(crate) enum RunMode {
     Live,
     Replay(ReplayRunContext),
     Resume(ReplayRunContext),
+    Rebuild(RebuildRunContext),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RebuildRunContext {
+    pub source: ReplayRunContext,
+    pub stages: Vec<String>,
+    pub tally: Option<crate::journal::read::RebuildTally>,
+    pub advice: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +35,23 @@ impl RunMode {
             archive_path,
             archive_flow_id,
             verify,
+        })
+    }
+
+    pub(crate) fn rebuild_from_archive(archive_path: PathBuf, stages: &[String]) -> Self {
+        let archive_flow_id = peek_archive_flow_id(&archive_path);
+        let mut stages = stages.to_vec();
+        stages.sort();
+        stages.dedup();
+        RunMode::Rebuild(RebuildRunContext {
+            source: ReplayRunContext {
+                archive_path,
+                archive_flow_id,
+                verify: false,
+            },
+            stages,
+            tally: None,
+            advice: None,
         })
     }
 

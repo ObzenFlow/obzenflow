@@ -7,6 +7,7 @@ use crate::journal::disk::inspect::load_manifest;
 use crate::journal::disk::replay_archive::departs_from_archive;
 use obzenflow_core::config::EffectiveConfigEvidence;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::stage_fatal_payload::{StageFatalReason, StageFatalSeverity};
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::archive::manifest::RunManifestStage;
 use obzenflow_core::journal::read::{RunRecordData, RunStage};
@@ -96,6 +97,28 @@ pub async fn read_configuration_refusals(
         }
     }
     Ok(refused)
+}
+
+pub(crate) async fn read_stage_stops(
+    run_dir: &Path,
+) -> Result<Vec<(String, StageFatalReason)>, JournalReadError> {
+    let mut snapshot = open_disk_run(run_dir).await?;
+    let mut stops = Vec::new();
+    while let Some(record) = snapshot.next().await? {
+        let RunRecordData::Chain(row) = &record.record else {
+            continue;
+        };
+        let ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) = &row.payload
+        else {
+            continue;
+        };
+        if fatal.severity == StageFatalSeverity::Primary {
+            stops.push((fatal.stage_key.clone(), fatal.reason));
+        }
+    }
+    stops.sort_by(|(left, _), (right, _)| left.cmp(right));
+    stops.dedup();
+    Ok(stops)
 }
 
 fn configuration_refusal<'a>(
@@ -225,6 +248,7 @@ mod tests {
                 ai_models: Vec::new(),
                 max_open_keys: None,
                 source_continuation: None,
+                guarantees: Vec::new(),
             },
         )
     }
@@ -259,6 +283,7 @@ mod tests {
         for code_only in [
             fatal("score", StageFatalReason::ReplayDivergence),
             fatal("score", StageFatalReason::RecordingEnded),
+            fatal("case_register", StageFatalReason::DestinationUnwritable),
             source_failed(SourceDiagnosticReason::RemoteFailed),
         ] {
             assert_eq!(

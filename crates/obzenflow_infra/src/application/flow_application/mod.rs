@@ -163,6 +163,31 @@ fn resolve_startup_config(
     result.map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
 }
 
+fn followed_link_line(
+    verb: obzenflow_runtime::bootstrap::ReplayVerb,
+    opened: &std::path::Path,
+    requested: &std::path::Path,
+    rebuilt_by: Option<&std::path::Path>,
+) -> String {
+    let start = match verb {
+        obzenflow_runtime::bootstrap::ReplayVerb::Rebuild => "Rebuilding from",
+        obzenflow_runtime::bootstrap::ReplayVerb::Replay
+        | obzenflow_runtime::bootstrap::ReplayVerb::Resume => "Resuming",
+    };
+    match rebuilt_by {
+        Some(rebuild) => format!(
+            "{start} {}, the run that {} rebuilt.",
+            opened.display(),
+            rebuild.display()
+        ),
+        None => format!(
+            "{start} {}, the run that {} replays.",
+            opened.display(),
+            requested.display()
+        ),
+    }
+}
+
 fn replay_verify_offered(run_mode: &super::run_mode::RunMode) -> bool {
     match run_mode {
         super::run_mode::RunMode::Replay(ctx) => {
@@ -674,6 +699,12 @@ impl FlowApplication {
                 obzenflow_runtime::bootstrap::ReplayVerb::Resume => {
                     super::run_mode::RunMode::resume_from_archive(replay.from.clone())
                 }
+                obzenflow_runtime::bootstrap::ReplayVerb::Rebuild => {
+                    super::run_mode::RunMode::rebuild_from_archive(
+                        replay.from.clone(),
+                        &replay.stages,
+                    )
+                }
             },
             None => super::run_mode::RunMode::Live,
         };
@@ -758,6 +789,13 @@ impl FlowApplication {
                             )
                             .await
                         }
+                        obzenflow_runtime::bootstrap::ReplayVerb::Rebuild => {
+                            DiskReplayArchive::open_for_rebuild(
+                                replay.archive_path.clone(),
+                                replay.allow_incomplete_archive,
+                            )
+                            .await
+                        }
                         obzenflow_runtime::bootstrap::ReplayVerb::Replay => {
                             DiskReplayArchive::open(
                                 replay.archive_path.clone(),
@@ -770,10 +808,11 @@ impl FlowApplication {
                     if std::fs::canonicalize(&replay.archive_path)
                         .is_ok_and(|requested| requested != archive.archive_path())
                     {
-                        resumed_replayed_run = Some(format!(
-                            "Resuming {}, the run that {} replays.",
-                            archive.archive_path().display(),
-                            replay.archive_path.display()
+                        resumed_replayed_run = Some(followed_link_line(
+                            replay.verb,
+                            archive.archive_path(),
+                            &replay.archive_path,
+                            archive.rebuilt_by(),
                         ));
                     }
                     if let Some(admitted) = bootstrap_config.replay.as_mut() {
@@ -901,6 +940,7 @@ impl FlowApplication {
                     obzenflow_core::journal::archive_actions::ArchiveOverrides {
                         allow_incomplete_archive: replay.allow_incomplete_archive,
                     },
+                    &replay.stages,
                 ) {
                     println!("{warning}");
                 }
@@ -1139,7 +1179,19 @@ impl FlowApplication {
             let result = application.run_standalone(flow_handle).await;
             if result.is_ok() && !presentation_enabled {
                 if let Some(locator) = run_state.as_ref().and_then(|s| s.locator()) {
-                    if Self::written_run_footer(&footer_flow, locator)
+                    if matches!(run_mode, super::run_mode::RunMode::Rebuild(_)) {
+                        let mut footer_mode = run_mode.clone();
+                        Self::read_rebuild_report(&mut footer_mode, locator, &footer_flow).await;
+                        let footer = footer_outcome(
+                            footer_flow.terminal_status(),
+                            flow_name.clone(),
+                            Some(locator.clone()),
+                            footer_mode,
+                            ArchiveOffers::default(),
+                        )
+                        .footer();
+                        println!("{footer}");
+                    } else if Self::written_run_footer(&footer_flow, locator)
                         .await
                         .1
                         .replay
@@ -1171,9 +1223,12 @@ impl FlowApplication {
                         (None, _) => (None, ArchiveOffers::default()),
                     };
                     offers.verify = replay_verify_offered(&run_mode);
+                    let mut footer_mode = run_mode.clone();
+                    if let (Some(locator), Some(flow)) = (&location, &built_flow) {
+                        Self::read_rebuild_report(&mut footer_mode, locator, flow).await;
+                    }
                     let footer =
-                        footer_outcome(status, flow_name, location, run_mode.clone(), offers)
-                            .footer();
+                        footer_outcome(status, flow_name, location, footer_mode, offers).footer();
                     println!();
                     println!("{footer}");
                 }
@@ -1212,7 +1267,9 @@ impl FlowApplication {
                 };
                 let refused = matches!(
                     err,
-                    ApplicationError::ResumeRefused(_) | ApplicationError::ReplayRefused(_)
+                    ApplicationError::ResumeRefused(_)
+                        | ApplicationError::ReplayRefused(_)
+                        | ApplicationError::RebuildRefused(_)
                 );
                 if presentation.is_some() && !refused {
                     let footer = RunPresentationOutcome::Failed {
@@ -1224,6 +1281,16 @@ impl FlowApplication {
                     .footer();
                     println!();
                     println!("{footer}");
+                }
+                if let (super::run_mode::RunMode::Rebuild(rebuild), Some(locator)) =
+                    (&run_mode, run_state.as_ref().and_then(|s| s.locator()))
+                {
+                    let stops = crate::journal::read::read_stage_stops(locator.path())
+                        .await
+                        .unwrap_or_default();
+                    for line in super::config_report::rebuild_stop_lines(&stops, &rebuild.stages) {
+                        println!("{line}");
+                    }
                 }
                 for line in refusal_footer {
                     println!("{line}");
@@ -1238,6 +1305,27 @@ impl FlowApplication {
                 Err(err)
             }
         }
+    }
+
+    async fn read_rebuild_report(
+        run_mode: &mut super::run_mode::RunMode,
+        locator: &CurrentRunLocator,
+        flow: &FlowHandle,
+    ) {
+        let super::run_mode::RunMode::Rebuild(rebuild) = run_mode else {
+            return;
+        };
+        rebuild.tally = crate::journal::read::read_rebuild_tally(locator.path(), &rebuild.stages)
+            .await
+            .ok();
+        let requested = rebuild.source.archive_path.clone();
+        let advice = super::ResumeAdvice::for_replay_refusal(
+            &requested,
+            &requested,
+            flow.archive_flow_evidence(),
+        )
+        .await;
+        rebuild.advice = Some(super::error::resume_advice_text(&requested, &advice));
     }
 
     async fn written_run_footer(
@@ -1269,11 +1357,13 @@ impl FlowApplication {
                 &evidence,
                 flow.archive_flow_evidence(),
                 ArchiveOverrides::default(),
+                &[],
             )
             .is_ok();
             match verb {
                 ReplayVerb::Replay => offers.replay = admitted,
                 ReplayVerb::Resume => offers.resume = admitted,
+                ReplayVerb::Rebuild => {}
             }
         }
         (status, offers)

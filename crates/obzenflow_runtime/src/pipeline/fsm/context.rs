@@ -114,6 +114,7 @@ pub(crate) struct PipelineContext {
     pub(crate) completed_stages: HashSet<StageId>,
     /// `None` outside resume and once completion is published.
     pub(crate) reconstruction: Option<ReconstructionProgress>,
+    pub(crate) recording_end: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
     pub(crate) metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
     pub(crate) metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>>,
     pub(crate) stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,

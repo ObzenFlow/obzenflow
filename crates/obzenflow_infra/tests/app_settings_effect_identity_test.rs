@@ -385,6 +385,7 @@ fn archive(path: PathBuf, verb: ReplayVerb) -> ReplayBootstrap {
         archive_path: path,
         allow_incomplete_archive: false,
         verb,
+        stages: Vec::new(),
     }
 }
 
@@ -392,6 +393,9 @@ async fn failure(run: &Path, verb: ReplayVerb) -> Result<FailureEvidence> {
     let opened = match verb {
         ReplayVerb::Resume => DiskReplayArchive::open_for_resume(run.to_path_buf(), false).await?,
         ReplayVerb::Replay => DiskReplayArchive::open(run.to_path_buf(), false).await?,
+        ReplayVerb::Rebuild => {
+            DiskReplayArchive::open_for_rebuild(run.to_path_buf(), false).await?
+        }
     };
     Ok(opened.evidence().failure)
 }

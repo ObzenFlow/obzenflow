@@ -349,6 +349,15 @@ impl PipelineBuilder {
                     crossings,
                 }
             });
+        let recording_end = self
+            .runtime_execution
+            .as_ref()
+            .and_then(|execution| execution.rebuild_control())
+            .map(|control| {
+                let (observer, ended) = tokio::sync::mpsc::unbounded_channel();
+                control.observe_recording_end(observer);
+                ended
+            });
         let mut pipeline_context = PipelineContext {
             system_id,
             topology: self.topology.clone(),
@@ -359,6 +368,7 @@ impl PipelineBuilder {
             source_supervisors: source_map,
             completed_stages: Default::default(),
             reconstruction,
+            recording_end,
             outstanding_milestones: Default::default(),
             outstanding_children: Default::default(),
             cleanup_deadline: None,

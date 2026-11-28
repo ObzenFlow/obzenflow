@@ -2,13 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Execution modes for live runs, replay and resume.
+//! `execution` holds the execution modes of a live run, a replay, a resume and
+//! a rebuild.
 //!
 //! At startup, [`RuntimeExecution`] selects a strategy from the operator's
 //! [`RuntimeMode`]. [`Live`](RuntimeMode::Live) processes new work.
 //! [`Replay`](RuntimeMode::Replay) reconstructs the recording and drains at its
 //! end. [`Resume`](RuntimeMode::Resume) catches up to the recorded position
-//! for each stage, then continues live.
+//! for each stage, then continues live. [`Rebuild`](RuntimeMode::Rebuild)
+//! reconstructs the recording and calls again only the recorded successes of
+//! the sink stages that the operator names.
 
 use crate::metrics::observations::ObservationRegistry;
 use obzenflow_core::event::observability::ObservationRecorder;
@@ -27,7 +30,7 @@ use obzenflow_core::journal::archive::ReplayArchive;
 ///
 /// Distinct from the presentation `obzenflow_infra::RunMode`, which is a
 /// banner-and-footer surface and is never read for a runtime decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeMode {
     /// No replay verb: do live work, reconstruct nothing.
     Live,
@@ -36,6 +39,9 @@ pub enum RuntimeMode {
     /// `Resume` resumes a recorded run from the last fact that it committed. The
     /// new run catches up on the recording and then continues with live work.
     Resume,
+    /// `Rebuild` reconstructs a recording and calls again the recorded successes
+    /// of the sink stages in `stages`.
+    Rebuild { stages: Vec<StageId> },
 }
 
 /// A positioned point of execution: a stage plus the merged delivery rank of
@@ -106,6 +112,17 @@ pub enum UnrecordedEffect {
     RecordingEnded,
 }
 
+/// `RecordedSuccess` tells what a cursor whose recording holds a success means
+/// at a position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedSuccess {
+    /// The position answers the call from its record.
+    Reproduce,
+    /// The position makes the call again and compares its request and its reply
+    /// with the record.
+    Execute,
+}
+
 /// `StageRecording` tells whether a stage's recording continues past a cursor
 /// that holds no recorded attempt, or ended before that cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +169,11 @@ pub trait ExecutionStrategy: std::fmt::Debug + Send + Sync {
     /// continues past the cursor.
     fn missing_outcome(&self, at: ExecutionPosition, recording: StageRecording)
         -> UnrecordedEffect;
+    /// `recorded_success` tells what a cursor whose recording holds a success
+    /// means at this position.
+    fn recorded_success(&self, _at: ExecutionPosition) -> RecordedSuccess {
+        RecordedSuccess::Reproduce
+    }
     /// Whether a durable Start without a terminal authorizes a new
     /// at-least-once attempt; otherwise the recording ends there.
     fn in_doubt_authorizes_attempt(&self) -> bool;
@@ -264,6 +286,122 @@ impl ExecutionStrategy for Replay {
     }
     fn heartbeat_policy_for(&self, _stage: StageId) -> HeartbeatExecutionPolicy {
         HeartbeatExecutionPolicy::Suppressed
+    }
+}
+
+#[derive(Debug)]
+struct Rebuild {
+    state: Arc<RebuildState>,
+}
+
+impl ExecutionStrategy for Rebuild {
+    fn scope_at(&self, _at: ExecutionPosition) -> MiddlewareExecutionScope {
+        MiddlewareExecutionScope::StrictReplayHandler
+    }
+    fn stage_scope(&self, _stage: StageId) -> MiddlewareExecutionScope {
+        MiddlewareExecutionScope::StrictReplayHandler
+    }
+    fn missing_outcome(
+        &self,
+        _at: ExecutionPosition,
+        _recording: StageRecording,
+    ) -> UnrecordedEffect {
+        UnrecordedEffect::RecordingEnded
+    }
+    fn recorded_success(&self, at: ExecutionPosition) -> RecordedSuccess {
+        if self.state.named.contains(&at.stage_id) {
+            RecordedSuccess::Execute
+        } else {
+            RecordedSuccess::Reproduce
+        }
+    }
+    fn in_doubt_authorizes_attempt(&self) -> bool {
+        false
+    }
+    fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy {
+        EffectPortRegistrationPolicy::Required
+    }
+    fn source_phase_for(&self, _stage: StageId) -> SourceExecutionPhase {
+        SourceExecutionPhase::Replaying
+    }
+    fn heartbeat_policy_for(&self, _stage: StageId) -> HeartbeatExecutionPolicy {
+        HeartbeatExecutionPolicy::Suppressed
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RebuildState {
+    named: std::collections::HashSet<StageId>,
+    progress: Mutex<RebuildProgress>,
+}
+
+#[derive(Debug, Default)]
+struct RebuildProgress {
+    reached: std::collections::HashSet<StageId>,
+    held: bool,
+    source_stopped: bool,
+    ended: bool,
+    observer: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+}
+
+impl RebuildProgress {
+    fn tell_if_ended(&mut self, named: &std::collections::HashSet<StageId>) {
+        if self.ended || !self.held || !named.is_subset(&self.reached) {
+            return;
+        }
+        if let Some(observer) = &self.observer {
+            self.ended = true;
+            if observer.send(()).is_err() {
+                self.observer = None;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RebuildControl(Arc<RebuildState>);
+
+impl RebuildControl {
+    pub(crate) fn is_named(&self, stage: StageId) -> bool {
+        self.0.named.contains(&stage)
+    }
+
+    fn update(&self, change: impl FnOnce(&mut RebuildProgress)) {
+        let mut progress = self
+            .0
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        change(&mut progress);
+        progress.tell_if_ended(&self.0.named);
+    }
+
+    pub(crate) fn record_share_end(&self, stage: StageId) {
+        if self.is_named(stage) {
+            self.update(|progress| {
+                progress.reached.insert(stage);
+            });
+        }
+    }
+
+    pub(crate) fn record_hold(&self) {
+        self.update(|progress| progress.held = true);
+    }
+
+    pub(crate) fn record_source_stop(&self) {
+        self.update(|progress| progress.source_stopped = true);
+    }
+
+    pub(crate) fn source_stopped(&self) -> bool {
+        self.0
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .source_stopped
+    }
+
+    pub(crate) fn observe_recording_end(&self, observer: tokio::sync::mpsc::UnboundedSender<()>) {
+        self.update(|progress| progress.observer = Some(observer));
     }
 }
 
@@ -465,6 +603,7 @@ pub struct RuntimeExecution {
     observations: Arc<ObservationRegistry>,
     /// Present only under `RuntimeMode::Resume` (FLOWIP-120n).
     resume: Option<ResumeControl>,
+    rebuild: Option<RebuildControl>,
 }
 
 impl std::fmt::Debug for RuntimeExecution {
@@ -489,6 +628,7 @@ impl RuntimeExecution {
     /// where the recording ends.
     pub fn new(mode: RuntimeMode, archive: Option<Arc<dyn ReplayArchive>>) -> Self {
         let mut resume = None;
+        let mut rebuild = None;
         let strategy: Arc<dyn ExecutionStrategy> = match mode {
             RuntimeMode::Live => Arc::new(Live),
             RuntimeMode::Replay => {
@@ -508,6 +648,14 @@ impl RuntimeExecution {
                 resume = Some(ResumeControl(Arc::clone(&state)));
                 Arc::new(Resume { state })
             }
+            RuntimeMode::Rebuild { stages } => {
+                let state = Arc::new(RebuildState {
+                    named: stages.into_iter().collect(),
+                    progress: Mutex::new(RebuildProgress::default()),
+                });
+                rebuild = Some(RebuildControl(Arc::clone(&state)));
+                Arc::new(Rebuild { state })
+            }
         };
         Self {
             strategy,
@@ -515,6 +663,7 @@ impl RuntimeExecution {
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             observations: Arc::new(ObservationRegistry::default()),
             resume,
+            rebuild,
         }
     }
 
@@ -530,6 +679,7 @@ impl RuntimeExecution {
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             observations: Arc::new(ObservationRegistry::default()),
             resume: Some(ResumeControl(state)),
+            rebuild: None,
         }
     }
 
@@ -556,6 +706,10 @@ impl RuntimeExecution {
 
     pub fn resume_control(&self) -> Option<&ResumeControl> {
         self.resume.as_ref()
+    }
+
+    pub(crate) fn rebuild_control(&self) -> Option<&RebuildControl> {
+        self.rebuild.as_ref()
     }
 
     /// Migration bridge from the legacy `EffectRuntimeMode`, for unit tests
@@ -589,6 +743,7 @@ impl RuntimeExecution {
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             observations: Arc::new(ObservationRegistry::default()),
             resume,
+            rebuild: None,
         }
     }
 
@@ -668,6 +823,12 @@ impl RuntimeExecution {
         recording: StageRecording,
     ) -> UnrecordedEffect {
         self.strategy.missing_outcome(at, recording)
+    }
+
+    /// `recorded_success` tells what a cursor whose recording holds a success
+    /// means at this position.
+    pub fn recorded_success(&self, at: ExecutionPosition) -> RecordedSuccess {
+        self.strategy.recorded_success(at)
     }
 
     /// Whether an in-doubt attempt authorizes a new at-least-once attempt.
@@ -992,5 +1153,52 @@ mod tests {
             exec.handler_scope_for(ExecutionPositionSource::StageLifecycle { stage_id: sid }),
             Scope::LiveHandler
         );
+    }
+
+    #[test]
+    fn rebuild_held_stage_requests_cancel() {
+        for hold_first in [true, false] {
+            let (case_register, unopened_alerts) = (StageId::new(), StageId::new());
+            let execution = RuntimeExecution::new(
+                RuntimeMode::Rebuild {
+                    stages: vec![case_register, unopened_alerts],
+                },
+                None,
+            );
+            let control = execution.rebuild_control().unwrap().clone();
+            let (observer, mut ended) = tokio::sync::mpsc::unbounded_channel();
+            control.observe_recording_end(observer);
+            if hold_first {
+                control.record_hold();
+            }
+            control.record_share_end(case_register);
+            assert!(ended.try_recv().is_err(), "a named sink has not ended");
+            control.record_share_end(unopened_alerts);
+            if !hold_first {
+                assert!(ended.try_recv().is_err(), "no stage holds yet");
+                control.record_hold();
+            }
+            assert!(ended.try_recv().is_ok());
+            control.record_hold();
+            control.record_share_end(case_register);
+            assert!(ended.try_recv().is_err(), "the pipeline is told once");
+        }
+    }
+
+    #[test]
+    fn rebuild_unheld_omits_cancel() {
+        let case_register = StageId::new();
+        let execution = RuntimeExecution::new(
+            RuntimeMode::Rebuild {
+                stages: vec![case_register],
+            },
+            None,
+        );
+        let control = execution.rebuild_control().unwrap().clone();
+        let (observer, mut ended) = tokio::sync::mpsc::unbounded_channel();
+        control.observe_recording_end(observer);
+        control.record_share_end(case_register);
+        control.record_share_end(StageId::new());
+        assert!(ended.try_recv().is_err());
     }
 }

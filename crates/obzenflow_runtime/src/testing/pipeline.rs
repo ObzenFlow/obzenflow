@@ -26,6 +26,7 @@ pub use crate::pipeline::tests::shutdown::{
     failure_during_graceful_stop_aborts_by_the_graceful_deadline,
     failure_remains_observable_while_child_cleanup_is_blocked,
     graceful_stop_racing_source_completion_is_not_a_failure,
+    pipeline_recording_ended_records_cancelled,
     terminal_publication_is_owned_until_settlement_and_failure_is_retained,
 };
 pub use crate::pipeline::tests::startup::{

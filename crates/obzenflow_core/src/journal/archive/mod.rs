@@ -31,7 +31,8 @@ pub mod certification;
 pub mod manifest;
 pub mod replay;
 pub use manifest::{
-    DeliveryOrder, RunManifest, RunManifestInterruptedAppend, RunManifestReplayConfig,
-    RunManifestStage, TailKind, JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
+    DeliveryOrder, EffectGuarantee, RunManifest, RunManifestInterruptedAppend,
+    RunManifestRebuildConfig, RunManifestReplayConfig, RunManifestStage, TailKind,
+    JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 pub use replay::{ReplayArchive, ReplayError};

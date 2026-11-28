@@ -63,6 +63,25 @@ impl SinkBatch {
     }
 }
 
+pub(super) fn rebuild_holds<H: UnifiedTransformHandler>(
+    ctx: &mut TransformResources<H>,
+    fatal: &StageFatal,
+) -> bool {
+    let Some(control) = ctx.runtime_execution.rebuild_control() else {
+        return false;
+    };
+    if fatal.reason != obzenflow_core::event::StageFatalReason::RecordingEnded {
+        return false;
+    }
+    control.record_share_end(ctx.stage_id);
+    ctx.terminal_eof_kind = Some(
+        ctx.terminal_eof_kind
+            .unwrap_or(obzenflow_core::event::payloads::flow_control_payload::EofKind::Natural)
+            .worst(obzenflow_core::event::payloads::flow_control_payload::EofKind::Truncated),
+    );
+    true
+}
+
 pub(super) async fn enqueue<H: UnifiedTransformHandler>(
     ctx: &mut TransformResources<H>,
     flow: &FlowContext,
@@ -70,7 +89,7 @@ pub(super) async fn enqueue<H: UnifiedTransformHandler>(
     position: StageInputPosition,
     upstream: Option<StageId>,
     generation: Option<obzenflow_core::ReaderGeneration>,
-) -> Result<(), DispatchError> {
+) -> Result<bool, DispatchError> {
     if ctx.sink_batch.as_ref().is_some_and(|batch| {
         batch
             .group
@@ -120,6 +139,10 @@ pub(super) async fn enqueue<H: UnifiedTransformHandler>(
         Ok(close) => close,
         Err(error) => {
             if let Some(fatal) = error.as_fatal() {
+                if rebuild_holds(ctx, fatal) {
+                    flush(ctx, flow).await?;
+                    return Ok(true);
+                }
                 record_fatal(ctx, fatal, position, &parent).await?;
             }
             return Err(error.into());
@@ -136,7 +159,7 @@ pub(super) async fn enqueue<H: UnifiedTransformHandler>(
     if probe || batch.inputs.len() >= batch.size || batch.expired() {
         flush(ctx, flow).await?;
     }
-    Ok(())
+    Ok(false)
 }
 
 pub(super) async fn flush<H: UnifiedTransformHandler>(

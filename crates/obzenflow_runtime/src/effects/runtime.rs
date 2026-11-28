@@ -7,7 +7,7 @@ mod sink_group;
 use super::boundary::PhysicalCallOutcome;
 use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
 use super::*;
-use crate::execution::{ExecutionPosition, StageRecording, UnrecordedEffect};
+use crate::execution::{ExecutionPosition, RecordedSuccess, StageRecording, UnrecordedEffect};
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use obzenflow_core::event::payloads::effect_payload::{
     CallKind, CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
@@ -182,6 +182,48 @@ struct PreparedLiveEffect {
     descriptor: EffectDescriptor,
     binding_context: EffectContext,
     committed_waits: u32,
+    expected_reply: Option<ExpectedReply>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ExpectedReply(Vec<(Option<obzenflow_core::EventType>, Value)>);
+
+impl ExpectedReply {
+    fn recorded(records: &[&EffectRecord]) -> Self {
+        Self(
+            records
+                .iter()
+                .filter_map(|record| match &record.outcome {
+                    EffectOutcomePayload::Succeeded { output } => Some((None, output.clone())),
+                    EffectOutcomePayload::SucceededFact {
+                        event_type, output, ..
+                    } => Some((Some(event_type.clone()), output.clone())),
+                    EffectOutcomePayload::Failed { .. } => None,
+                })
+                .collect(),
+        )
+    }
+
+    fn matches(&self, success: &PreparedEffectSuccess) -> bool {
+        match success {
+            PreparedEffectSuccess::RecordedReply(output) => {
+                matches!(self.0.as_slice(), [(None, recorded)] if recorded == output)
+            }
+            PreparedEffectSuccess::DomainFacts(facts) => {
+                facts.len() == self.0.len()
+                    && facts
+                        .iter()
+                        .zip(&self.0)
+                        .all(|(fact, (event_type, output))| {
+                            event_type.as_ref() == Some(&fact.event_type)
+                                && fact
+                                    .payload
+                                    .contract_body()
+                                    .is_ok_and(|body| &body == output)
+                        })
+            }
+        }
+    }
 }
 
 struct LiveCall {
@@ -393,6 +435,14 @@ impl AuthoringHalt {
                 }
             }
             Self::Crossing(fatal)
+                if fatal.reason
+                    == obzenflow_core::event::StageFatalReason::DestinationUnwritable =>
+            {
+                EffectError::DestinationUnwritable {
+                    message: fatal.detail.clone(),
+                }
+            }
+            Self::Crossing(fatal)
                 if fatal.code == obzenflow_core::event::StageFatalCode::Journal =>
             {
                 EffectError::Journal(fatal.detail.clone())
@@ -599,7 +649,49 @@ impl EffectsCore {
             .as_ref()
             .is_some_and(|flow| flow.stage_type == obzenflow_core::event::context::StageType::Sink)
             && self.ctx.stage.runtime_execution.resume_control().is_none()
+            && !self.executes_recorded_success()
             && self.is_replaying()
+    }
+
+    fn executes_recorded_success(&self) -> bool {
+        self.ctx
+            .stage
+            .runtime_execution
+            .recorded_success(ExecutionPosition {
+                stage_id: self.ctx.stage.stage_id,
+                position: self.ctx.input_seq,
+                generation: None,
+            })
+            == RecordedSuccess::Execute
+    }
+
+    fn check_rebuilt_reply(
+        &mut self,
+        cursor: &EffectCursor,
+        expected: &ExpectedReply,
+        reply: Result<&PreparedEffectSuccess, &EffectError>,
+    ) {
+        use crate::stages::common::handler_error::StageFatal;
+        use obzenflow_core::event::{StageFatalCode, StageFatalReason};
+        let fatal = match reply {
+            Ok(success) if expected.matches(success) => return,
+            Ok(_) => StageFatal::new(
+                StageFatalCode::Replay,
+                StageFatalReason::DestinationChanged,
+                format!(
+                    "effect {}#{}/{}: the destination's reply differs from the recording",
+                    cursor.stage_key.as_str(),
+                    cursor.input_seq,
+                    cursor.effect_ordinal
+                ),
+            ),
+            Err(error) => StageFatal::new(
+                StageFatalCode::Resource,
+                StageFatalReason::DestinationUnwritable,
+                error.semantic_reason(),
+            ),
+        };
+        self.halt.get_or_insert(AuthoringHalt::Crossing(fatal));
     }
 
     async fn record_replay_rejection<T>(
@@ -791,6 +883,7 @@ impl EffectsCore {
             self.ctx.stage.runtime_execution.resume_control(),
             self.ctx.stage.effect_history.as_ref(),
         ) {
+            (None, Some(history)) if self.executes_recorded_success() => history.actions().clone(),
             (None, _) => return Ok(ActionPlan::Unchecked),
             (Some(control), Some(history)) if !control.stage_is_live(self.ctx.stage.stage_id) => {
                 history.actions().clone()
@@ -1342,12 +1435,23 @@ impl EffectsCore {
         result: Result<T, EffectError>,
     ) -> Result<T, EffectError> {
         if let Err(error) = &result {
-            if let EffectError::DestinationChanged { message } = error {
+            let stop = match error {
+                EffectError::DestinationChanged { message } => Some((
+                    obzenflow_core::event::StageFatalCode::Replay,
+                    obzenflow_core::event::StageFatalReason::DestinationChanged,
+                    message,
+                )),
+                EffectError::DestinationUnwritable { message } => Some((
+                    obzenflow_core::event::StageFatalCode::Resource,
+                    obzenflow_core::event::StageFatalReason::DestinationUnwritable,
+                    message,
+                )),
+                _ => None,
+            };
+            if let Some((code, reason, message)) = stop {
                 self.halt.get_or_insert_with(|| {
                     AuthoringHalt::Crossing(crate::stages::common::handler_error::StageFatal::new(
-                        obzenflow_core::event::StageFatalCode::Replay,
-                        obzenflow_core::event::StageFatalReason::DestinationChanged,
-                        message,
+                        code, reason, message,
                     ))
                 });
             }
@@ -1480,6 +1584,7 @@ impl EffectsCore {
         if let Some(refusal) = action_plan_mismatch(plan, &selection, &cursor) {
             return Err(self.refuse(refusal));
         }
+        let mut expected_reply = None;
         match selection {
             EffectHistorySelection::Hit(records) => {
                 let differs = selected.attempts.iter().any(|started| {
@@ -1532,10 +1637,61 @@ impl EffectsCore {
                 {
                     return output_result.map(SelectedCall::Reproduced);
                 }
-                if let (ActionPlan::Reproduce, Err(error), [record]) =
-                    (plan, &output_result, records.as_slice())
-                {
-                    if self.query_request.is_some() && is_query_failure(error) {
+                let rebuilt = output_result.is_ok()
+                    && selected.abandonment.is_none()
+                    && self.executes_recorded_success();
+                if rebuilt {
+                    expected_reply = Some(ExpectedReply::recorded(&record_refs));
+                } else {
+                    if let (ActionPlan::Reproduce, Err(error), [record]) =
+                        (plan, &output_result, records.as_slice())
+                    {
+                        if self.query_request.is_some() && is_query_failure(error) {
+                            for (wait, rows) in &selected.progress_batches {
+                                self.commit_replayed_progress_group(
+                                    &cursor,
+                                    *wait,
+                                    rows.clone(),
+                                    &selected,
+                                )
+                                .await?;
+                            }
+                            let attempt =
+                                selected.terminal_attempt.flatten().unwrap_or_else(|| {
+                                    EffectAttemptOrdinal::new(
+                                        u32::try_from(selected.progress_batches.len())
+                                            .unwrap_or(u32::MAX)
+                                            .saturating_add(1),
+                                    )
+                                });
+                            self.reauthor_recorded_crossing(super::ActionRow::Effect {
+                                cursor: cursor.clone(),
+                                attempt: Some(attempt),
+                            })
+                            .await?;
+                            self.commit_query_attempt_group(
+                                record.clone(),
+                                attempt,
+                                Duration::ZERO,
+                                RowLineage::Reproduced(None),
+                            )
+                            .await?;
+                            return output_result.map(SelectedCall::Reproduced);
+                        }
+                    }
+                    let materialization =
+                        self.history_shape(effect_record_group_materialization(&record_refs))?;
+                    if selected.attempts.is_empty()
+                        && selected.abandonment.is_none()
+                        && selected.terminal_group_events.is_empty()
+                    {
+                        // Records supplied through the legacy record-only history
+                        // API carry no physical-group envelope. Reconstruct them
+                        // through the existing per-record path rather than
+                        // inventing an atomic cut the archive never proved.
+                        if let Some(key) = &selected.idempotency_key {
+                            self.call_keys.insert(cursor.clone(), key.clone());
+                        }
                         for (wait, rows) in &selected.progress_batches {
                             self.commit_replayed_progress_group(
                                 &cursor,
@@ -1545,77 +1701,34 @@ impl EffectsCore {
                             )
                             .await?;
                         }
-                        let attempt = selected.terminal_attempt.flatten().unwrap_or_else(|| {
-                            EffectAttemptOrdinal::new(
-                                u32::try_from(selected.progress_batches.len())
-                                    .unwrap_or(u32::MAX)
-                                    .saturating_add(1),
-                            )
-                        });
-                        self.reauthor_recorded_crossing(super::ActionRow::Effect {
-                            cursor: cursor.clone(),
-                            attempt: Some(attempt),
-                        })
-                        .await?;
-                        self.commit_query_attempt_group(
-                            record.clone(),
-                            attempt,
-                            Duration::ZERO,
-                            RowLineage::Reproduced(None),
+                        self.append_replayed_records(
+                            cursor.clone(),
+                            descriptor_hash,
+                            descriptor,
+                            materialization,
                         )
                         .await?;
-                        return output_result.map(SelectedCall::Reproduced);
-                    }
-                }
-                let materialization =
-                    self.history_shape(effect_record_group_materialization(&record_refs))?;
-                if selected.attempts.is_empty()
-                    && selected.abandonment.is_none()
-                    && selected.terminal_group_events.is_empty()
-                {
-                    // Records supplied through the legacy record-only history
-                    // API carry no physical-group envelope. Reconstruct them
-                    // through the existing per-record path rather than
-                    // inventing an atomic cut the archive never proved.
-                    if let Some(key) = &selected.idempotency_key {
-                        self.call_keys.insert(cursor.clone(), key.clone());
-                    }
-                    for (wait, rows) in &selected.progress_batches {
-                        self.commit_replayed_progress_group(
-                            &cursor,
-                            *wait,
-                            rows.clone(),
+                    } else {
+                        self.append_replayed_history(
                             &selected,
+                            cursor.clone(),
+                            descriptor_hash,
+                            descriptor,
+                            materialization,
                         )
                         .await?;
                     }
-                    self.append_replayed_records(
-                        cursor.clone(),
-                        descriptor_hash,
-                        descriptor,
-                        materialization,
-                    )
-                    .await?;
-                } else {
-                    self.append_replayed_history(
-                        &selected,
-                        cursor.clone(),
-                        descriptor_hash,
-                        descriptor,
-                        materialization,
-                    )
-                    .await?;
+                    if let Some(abandoned) = selected.abandonment.as_ref() {
+                        return Err(EffectError::RecoveryAbandoned {
+                            last_started_attempt: abandoned.highest_started_attempt,
+                            failure_source: abandoned.cause.source.clone(),
+                            code: abandoned.cause.code.clone(),
+                            message: abandoned.message.clone(),
+                            boundary_retry: abandoned.retry,
+                        });
+                    }
+                    return output_result.map(SelectedCall::Reproduced);
                 }
-                if let Some(abandoned) = selected.abandonment.as_ref() {
-                    return Err(EffectError::RecoveryAbandoned {
-                        last_started_attempt: abandoned.highest_started_attempt,
-                        failure_source: abandoned.cause.source.clone(),
-                        code: abandoned.cause.code.clone(),
-                        message: abandoned.message.clone(),
-                        boundary_retry: abandoned.retry,
-                    });
-                }
-                return output_result.map(SelectedCall::Reproduced);
             }
             EffectHistorySelection::InDoubt(attempts) => {
                 if !is_affine(safety) {
@@ -1715,6 +1828,9 @@ impl EffectsCore {
                 prior_attempts = attempts;
             }
             EffectHistorySelection::Miss => match plan {
+                ActionPlan::Live if self.executes_recorded_success() => {
+                    return Err(self.latch(AuthoringHalt::RecordingEnded(cursor)));
+                }
                 ActionPlan::Live => self.cross_before_live_action().await?,
                 ActionPlan::Unchecked | ActionPlan::Reproduce => {
                     if self.rejects_in_replay() {
@@ -1766,6 +1882,7 @@ impl EffectsCore {
             descriptor,
             binding_context,
             committed_waits,
+            expected_reply,
         };
         if let Some(key) = &prepared.identity.first.idempotency_key {
             self.call_keys.insert(prepared.cursor.clone(), key.clone());
@@ -1825,6 +1942,7 @@ impl EffectsCore {
             descriptor,
             binding_context,
             committed_waits,
+            ..
         } = prepared;
 
         let Some(boundary) = self.ctx.effect_boundary.clone() else {
@@ -2070,6 +2188,7 @@ impl EffectsCore {
             descriptor,
             binding_context,
             committed_waits,
+            ..
         } = prepared;
         let highest_prior_attempt = u32::try_from(prior_attempts.len()).map_err(|_| {
             EffectError::EffectProvenanceMismatch(
@@ -2988,7 +3107,7 @@ impl EffectsCore {
             descriptor_hash,
             descriptor,
             binding_context: mut effect_ctx,
-            committed_waits: _,
+            ..
         } = prepared;
         let output_ordinal = match E::OutcomeSemantics::KIND {
             EffectOutcomeKind::DomainFacts => Some(self.reserve_output_ordinal()?),

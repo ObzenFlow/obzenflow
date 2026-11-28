@@ -260,6 +260,7 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
                 archive_path: r0.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -280,6 +281,7 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -353,6 +355,7 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Replay,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -394,6 +397,7 @@ fn bootstrap(archive: &Path, verb: ReplayVerb) -> ReplayBootstrap {
         archive_path: archive.to_path_buf(),
         allow_incomplete_archive: true,
         verb,
+        stages: Vec::new(),
     }
 }
 
@@ -467,6 +471,7 @@ fn assert_continued(refusal: ReplayError, archive: &Path, head: &Path) {
         ReplayError::AlreadyContinued {
             archive: refused,
             head: named,
+            ..
         } => assert_eq!((refused.as_path(), named.as_path()), (archive, head)),
         other => panic!("expected the head refusal: {other}"),
     }
@@ -514,10 +519,9 @@ async fn only_the_head_of_a_history_resumes() -> Result<()> {
     assert_eq!(
         refusal.to_string(),
         format!(
-            "ObzenFlow cannot resume {}, because {} already resumed it. {} is the head of this \
+            "ObzenFlow cannot resume {}, because another run resumed it. {} is the head of this \
              history.\nResume {} instead.",
             r0.display(),
-            r1.display(),
             r1.display(),
             r1.display()
         )
@@ -622,6 +626,7 @@ async fn racing_resumes_of_one_archive_cannot_both_proceed() -> Result<()> {
             FlowBuildError::ResumeRefusedClaim(ReplayError::AlreadyContinued {
                 archive,
                 head: named,
+                ..
             }) => assert_eq!((archive, named), (&r0, &head)),
             other => panic!("the loser must name the winner: {other}"),
         }
@@ -650,6 +655,7 @@ async fn racing_resumes_of_one_archive_cannot_both_proceed() -> Result<()> {
             archive,
             parent,
             head: named,
+            ..
         } => assert_eq!((archive, parent, named), (orphan, r0, head)),
         other => panic!("the orphan must name the head: {other}"),
     }
@@ -694,6 +700,7 @@ async fn a_run_still_being_written_refuses_until_its_process_stops() -> Result<(
             ArchiveOverrides {
                 allow_incomplete_archive: true,
             },
+            &[],
         )
         .expect_err("a live run must refuse");
         assert_eq!(
@@ -789,7 +796,9 @@ async fn an_orphan_and_its_staged_claim_never_block_the_parent() -> Result<()> {
     )?;
 
     match resume_refusal(&orphan).await {
-        ReplayError::StoppedBeforeTakeover { archive, parent } => {
+        ReplayError::StoppedBeforeTakeover {
+            archive, parent, ..
+        } => {
             assert_eq!((archive, parent), (orphan.clone(), r0.clone()))
         }
         other => panic!("the orphan must name its parent: {other}"),
@@ -805,6 +814,7 @@ async fn an_orphan_and_its_staged_claim_never_block_the_parent() -> Result<()> {
             archive,
             parent,
             head,
+            ..
         } => assert_eq!((archive, parent, head), (orphan.clone(), r0, r1.clone())),
         other => panic!("the orphan must name the head: {other}"),
     }
@@ -884,6 +894,7 @@ async fn resuming_a_replay_resumes_the_run_it_reproduces() -> Result<()> {
             ReplayError::ReplayedRunMissing {
                 replay,
                 replayed: missing,
+                ..
             } => {
                 assert_eq!((&replay, &missing), (&replayed, &r0))
             }

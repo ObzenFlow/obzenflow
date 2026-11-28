@@ -81,6 +81,11 @@ pub enum StatefulState<H> {
     /// All events processed, final state emitted, EOF forwarded downstream
     Drained,
 
+    /// The stage reached the end of its recording in a rebuild. It wrote a
+    /// truncated end after its committed output and ran no finalization. It
+    /// reads no more input until the pipeline cancels it.
+    Held,
+
     /// Unrecoverable error occurred
     Failed(String),
 
@@ -111,6 +116,7 @@ impl<H> Clone for StatefulState<H> {
             Self::EmittingDuringDrain => Self::EmittingDuringDrain,
             Self::Draining => Self::Draining,
             Self::Drained => Self::Drained,
+            Self::Held => Self::Held,
             Self::Failed(msg) => Self::Failed(msg.clone()),
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -138,6 +144,7 @@ impl<H> std::fmt::Debug for StatefulState<H> {
             Self::Emitting => write!(f, "Emitting"),
             Self::EmittingDuringDrain => write!(f, "EmittingDuringDrain"),
             Self::Draining => write!(f, "Draining"),
+            Self::Held => write!(f, "Held"),
             Self::Drained => write!(f, "Drained"),
             Self::Failed(msg) => write!(f, "Failed({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
@@ -167,6 +174,7 @@ impl<H: Send + Sync> PartialEq for StatefulState<H> {
             (Self::EmittingDuringDrain, Self::EmittingDuringDrain) => true,
             (StatefulState::Draining, StatefulState::Draining) => true,
             (StatefulState::Drained, StatefulState::Drained) => true,
+            (StatefulState::Held, StatefulState::Held) => true,
             (StatefulState::Failed(a), StatefulState::Failed(b)) => a == b,
             _ => false,
         }
@@ -191,7 +199,7 @@ impl<H> StatefulState<H> {
         match self {
             Self::Initializing => Phase::Initializing,
             Self::Initialized => Phase::Initialized,
-            Self::Accumulating | Self::Emitting => Phase::Active,
+            Self::Accumulating | Self::Emitting | Self::Held => Phase::Active,
             Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
@@ -244,6 +252,9 @@ pub enum StatefulEvent<H> {
     /// Draining complete
     DrainComplete,
 
+    /// A rebuild reached the end of the recording of this stage.
+    RecordingEnded,
+
     /// Unrecoverable error occurred
     Error(String),
 
@@ -274,6 +285,7 @@ impl<H> Clone for StatefulEvent<H> {
             Self::ReceivedEOF => Self::ReceivedEOF,
             Self::BeginDrain => Self::BeginDrain,
             Self::DrainComplete => Self::DrainComplete,
+            Self::RecordingEnded => Self::RecordingEnded,
             Self::Error(msg) => Self::Error(msg.clone()),
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -302,6 +314,7 @@ impl<H> std::fmt::Debug for StatefulEvent<H> {
             Self::ReceivedEOF => write!(f, "ReceivedEOF"),
             Self::BeginDrain => write!(f, "BeginDrain"),
             Self::DrainComplete => write!(f, "DrainComplete"),
+            Self::RecordingEnded => write!(f, "RecordingEnded"),
             Self::Error(msg) => write!(f, "Error({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -335,7 +348,8 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             | Self::EmitComplete
             | Self::ReceivedEOF
             | Self::BeginDrain
-            | Self::DrainComplete => None,
+            | Self::DrainComplete
+            | Self::RecordingEnded => None,
             Self::_Phantom(_) => unreachable!("PhantomData variant"),
         })
     }
@@ -382,6 +396,9 @@ pub enum StatefulAction<H> {
         message: String,
     },
 
+    /// The stage tells the rebuild that it holds its input.
+    ReportHold,
+
     /// Clean up all resources
     Cleanup,
 
@@ -413,6 +430,7 @@ impl<H> Clone for StatefulAction<H> {
             Self::SendFailure { message } => Self::SendFailure {
                 message: message.clone(),
             },
+            Self::ReportHold => Self::ReportHold,
             Self::Cleanup => Self::Cleanup,
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -442,6 +460,7 @@ impl<H> std::fmt::Debug for StatefulAction<H> {
             Self::ForwardEOF => write!(f, "ForwardEOF"),
             Self::SendCompletion => write!(f, "SendCompletion"),
             Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
+            Self::ReportHold => write!(f, "ReportHold"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -986,6 +1005,17 @@ impl<H: UnifiedStatefulHandler + Clone + Send + Sync + 'static> StatefulAction<H
                             },
                         )
                     },
+                );
+                Ok(())
+            }
+
+            StatefulAction::ReportHold => {
+                if let Some(control) = ctx.runtime_execution.rebuild_control() {
+                    control.record_hold();
+                }
+                tracing::info!(
+                    stage_name = %ctx.stage_name,
+                    "stateful stage holds an input that its recording does not answer"
                 );
                 Ok(())
             }

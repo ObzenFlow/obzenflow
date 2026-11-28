@@ -18,6 +18,13 @@ pub async fn bootstrap_with_archive(replay: ReplayBootstrap) -> BootstrapConfig 
             )
             .await
         }
+        ReplayVerb::Rebuild => {
+            DiskReplayArchive::open_for_rebuild(
+                replay.archive_path.clone(),
+                replay.allow_incomplete_archive,
+            )
+            .await
+        }
         ReplayVerb::Replay => {
             DiskReplayArchive::open(replay.archive_path.clone(), replay.allow_incomplete_archive)
                 .await

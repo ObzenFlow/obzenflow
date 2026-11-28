@@ -107,6 +107,7 @@ mod strict_replay_tests {
             archive_path: "archive".into(),
             allow_incomplete_archive: false,
             verb,
+            stages: Vec::new(),
         }
     }
 

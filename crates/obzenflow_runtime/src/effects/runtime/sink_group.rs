@@ -85,8 +85,16 @@ impl EffectsCore {
             cursor,
             descriptor_hash,
             descriptor,
+            expected_reply,
             ..
         } = effect;
+        if let Some(expected) = &expected_reply {
+            let checked = cursor.clone();
+            match &prepared {
+                Ok(success) => self.check_rebuilt_reply(&checked, expected, Ok(success)),
+                Err(failure) => self.check_rebuilt_reply(&checked, expected, Err(&failure.1)),
+            }
+        }
         match (prepared, attempt) {
             (Ok(success), Some(n)) => {
                 self.append_affine_success(
@@ -370,14 +378,23 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> SinkGroup<C, In>
                         guards.push((guard, effect.cursor.clone()));
                         let result = match &physical.outcome {
                             EffectBoundaryOutcome::Aborted(reason) => {
-                                core.sink_refused(
-                                    &effect,
-                                    &prior_attempts,
-                                    physical.start,
-                                    reason.clone(),
-                                    controls,
-                                )
-                                .await
+                                let refused = core
+                                    .sink_refused(
+                                        &effect,
+                                        &prior_attempts,
+                                        physical.start,
+                                        reason.clone(),
+                                        controls,
+                                    )
+                                    .await;
+                                if let Some(expected) = &effect.expected_reply {
+                                    core.check_rebuilt_reply(
+                                        &effect.cursor,
+                                        expected,
+                                        Err(&EffectError::Execution(reason.message.clone())),
+                                    );
+                                }
+                                refused
                             }
                             EffectBoundaryOutcome::Executed(outcome) => {
                                 let reply = match outcome {
@@ -406,16 +423,40 @@ impl<C: SinkRole<In>, In: TypedPayload + Send + Sync + 'static> SinkGroup<C, In>
                     *input = p.index;
                     let core = &mut cores[p.index];
                     let LiveCall {
-                        effect: live,
+                        effect: mut live,
                         prior_attempts,
                         guard,
                     } = p.live;
                     guards.push((guard, live.cursor.clone()));
-                    let result = core
-                        .execute_live(call, live, prior_attempts)
-                        .await
-                        .map(drop);
-                    if let Err(error @ EffectError::DestinationChanged { .. }) = result {
+                    let expected = live.expected_reply.take();
+                    let cursor = live.cursor.clone();
+                    let result = core.execute_live(call, live, prior_attempts).await;
+                    if let Some(expected) = &expected {
+                        let prepared = result.as_ref().map(prepare_reply::<C::Request>);
+                        let failure = match &prepared {
+                            Ok(Ok(success)) => {
+                                core.check_rebuilt_reply(&cursor, expected, Ok(success));
+                                None
+                            }
+                            Ok(Err(error)) => Some(error),
+                            Err(error) => Some(*error),
+                        };
+                        if let Some(error) = failure.filter(|error| {
+                            !matches!(
+                                error,
+                                EffectError::DestinationChanged { .. }
+                                    | EffectError::DestinationUnwritable { .. }
+                            )
+                        }) {
+                            core.check_rebuilt_reply(&cursor, expected, Err(error));
+                        }
+                    }
+                    let result = result.map(drop);
+                    if let Err(
+                        error @ (EffectError::DestinationChanged { .. }
+                        | EffectError::DestinationUnwritable { .. }),
+                    ) = result
+                    {
                         return Err(error.into());
                     }
                     results[p.index] = core
@@ -674,7 +715,13 @@ async fn shared_call<R: SinkRequest>(
         (_, Some(Ok(replies))) if replies.len() == pending.len() => {
             (EffectBoundaryOutcome::Executed(Ok(Vec::new())), replies)
         }
-        (_, Some(Err(e @ EffectError::DestinationChanged { .. }))) => return Err(e),
+        (
+            _,
+            Some(Err(
+                e @ (EffectError::DestinationChanged { .. }
+                | EffectError::DestinationUnwritable { .. }),
+            )),
+        ) => return Err(e),
         (_, Some(Err(e))) => (EffectBoundaryOutcome::Executed(Err(e)), Vec::new()),
         (EffectBoundaryOutcome::Aborted(reason), None) => {
             (EffectBoundaryOutcome::Aborted(reason), vec![])

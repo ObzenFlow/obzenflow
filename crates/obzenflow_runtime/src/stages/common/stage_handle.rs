@@ -67,6 +67,10 @@ pub const FORCE_SHUTDOWN_MESSAGE: &str = "Force shutdown requested";
 /// Stable stop/cancel reason labels used across lifecycle events.
 pub const STOP_REASON_USER_STOP: &str = "user_stop";
 pub const STOP_REASON_TIMEOUT: &str = "stop_timeout";
+/// `STOP_REASON_RECORDING_ENDED` is the stop reason when a rebuild reaches the
+/// end of its recording. At that point, a stage holds an input that its
+/// recording does not answer.
+pub const STOP_REASON_RECORDING_ENDED: &str = "recording_ended";
 
 /// Preserve the error text while distinguishing the existing cancellation
 /// protocol from an unexpected failure delivered after stage termination.

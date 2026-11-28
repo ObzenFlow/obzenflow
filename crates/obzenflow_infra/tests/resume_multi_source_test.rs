@@ -380,6 +380,7 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -575,6 +576,7 @@ async fn a_source_torn_before_crossing_crosses_its_skipped_generation_vacuously(
         archive_path: archive,
         allow_incomplete_archive: true,
         verb: ReplayVerb::Resume,
+        stages: Vec::new(),
     };
 
     // R0 records a 1..=4 and b 101..=104.

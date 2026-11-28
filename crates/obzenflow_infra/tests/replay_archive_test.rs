@@ -69,6 +69,7 @@ fn write_manifest_of(
             ai_models: Vec::new(),
             max_open_keys: None,
             source_continuation: Some(obzenflow_core::source::SourceContinuation::Refuse),
+            guarantees: Vec::new(),
         },
     );
 
@@ -83,6 +84,7 @@ fn write_manifest_of(
         flow_name: "test_flow".to_string(),
         created_at: Utc::now(),
         replay: None,
+        rebuild: None,
         resume,
         interrupted_appends: Vec::new(),
         stages,
@@ -486,6 +488,7 @@ async fn open_reports_a_failed_status_for_core_to_refuse() {
             &evidence,
             &FlowEvidence::default(),
             ArchiveOverrides::default(),
+            &[],
         ),
         Err(ArchiveRefusal::Failed { .. })
     ));
@@ -1210,6 +1213,7 @@ async fn torn_resume_evidence_merges_ancestor() {
             "returns".to_string(),
             obzenflow_core::source::SourceContinuation::Refuse,
         )],
+        guarantees: Vec::new(),
     };
 
     let evidence = DiskReplayArchive::open(torn.clone(), false)
@@ -1223,7 +1227,8 @@ async fn torn_resume_evidence_merges_ancestor() {
             &torn,
             &evidence,
             &flow,
-            ArchiveOverrides::default()
+            ArchiveOverrides::default(),
+            &[]
         ),
         Err(ArchiveRefusal::Interrupted { run: torn.clone() })
     );
@@ -1239,7 +1244,8 @@ async fn torn_resume_evidence_merges_ancestor() {
             &resume.run,
             &resume.archive,
             &flow,
-            ArchiveOverrides::default()
+            ArchiveOverrides::default(),
+            &[]
         ),
         Ok(None)
     );
@@ -1273,6 +1279,7 @@ async fn replay_completed_head_offers_replay() {
             &archive,
             &FlowEvidence::default(),
             ArchiveOverrides::default(),
+            &[],
         ),
         Err(ArchiveRefusal::Interrupted {
             run: parent.clone()
@@ -1289,6 +1296,7 @@ async fn replay_completed_head_offers_replay() {
         &target.archive,
         &FlowEvidence::default(),
         ArchiveOverrides::default(),
+        &[],
     )
     .unwrap_err();
     assert_eq!(refusal, ArchiveRefusal::NoWorkLeft { run: head.clone() });
@@ -1349,6 +1357,7 @@ async fn resume_locked_head_reports_writer() {
             &target.archive,
             &FlowEvidence::default(),
             ArchiveOverrides::default(),
+            &[],
         ),
         Err(ArchiveRefusal::StillRunning {
             verb: ReplayVerb::Resume,
@@ -1433,6 +1442,7 @@ async fn linked_resume_names_replayed_run() {
             &evidence,
             &FlowEvidence::default(),
             ArchiveOverrides::default(),
+            &[],
         ),
         Err(ArchiveRefusal::Interrupted {
             run: replay.clone()
@@ -1447,6 +1457,7 @@ async fn linked_resume_names_replayed_run() {
             &resume.archive,
             &FlowEvidence::default(),
             ArchiveOverrides::default(),
+            &[],
         ),
         Err(ArchiveRefusal::NoWorkLeft { run: original })
     );
@@ -1488,4 +1499,89 @@ async fn archive_read_moved_carrier_names_journal() {
         )),
         "{error}"
     );
+}
+
+fn record_rebuild_of(dir: &Path, rebuilt: &Path) {
+    record_replay_of(dir, rebuilt);
+    let path = dir.join(RUN_MANIFEST_FILENAME);
+    let mut manifest: RunManifest =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    manifest.rebuild = Some(
+        obzenflow_core::journal::archive::manifest::RunManifestRebuildConfig {
+            rebuilt_from: rebuilt.display().to_string(),
+            stages: vec!["source".to_string()],
+        },
+    );
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn resume_replayed_rebuild_selects_rebuilt_run() {
+    const REBUILD_ID: &str = "flow_01H00000000000000000000002";
+    const REPLAY_ID: &str = "flow_01H00000000000000000000003";
+    let base = tempdir().unwrap();
+    let (interrupted, rebuild, replay) = (
+        base.path().join("interrupted"),
+        base.path().join("rebuild"),
+        base.path().join("replay"),
+    );
+    for dir in [&interrupted, &rebuild, &replay] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    write_stopped_run(&interrupted, FLOW_ID, None, &[source_fact(1)]).await;
+    let interrupted = std::fs::canonicalize(&interrupted).unwrap();
+    write_stopped_run(&rebuild, REBUILD_ID, None, &[source_fact(1)]).await;
+    record_rebuild_of(&rebuild, &interrupted);
+    let rebuild = std::fs::canonicalize(&rebuild).unwrap();
+    write_stopped_run(&replay, REPLAY_ID, None, &[source_fact(1)]).await;
+    record_replay_of(&replay, &rebuild);
+
+    let resume = DiskReplayArchive::resume_evidence(&replay).await.unwrap();
+    assert_eq!(resume.run, interrupted);
+    let opened = DiskReplayArchive::open_for_resume(replay.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(opened.archive_path(), interrupted.as_path());
+}
+
+#[tokio::test]
+async fn rebuild_link_missing_target_refused() {
+    const REBUILD_ID: &str = "flow_01H00000000000000000000002";
+    let base = tempdir().unwrap();
+    let rebuild = base.path().join("rebuild");
+    std::fs::create_dir_all(&rebuild).unwrap();
+    write_stopped_run(&rebuild, REBUILD_ID, None, &[source_fact(1)]).await;
+    let missing = base.path().join("missing");
+    record_rebuild_of(&rebuild, &missing);
+    let error = DiskReplayArchive::open_for_resume(rebuild.clone(), false)
+        .await
+        .err()
+        .expect("a missing rebuilt run refuses the resume");
+    let rebuild = std::fs::canonicalize(&rebuild).unwrap();
+    assert!(
+        matches!(&error, ReplayError::RebuiltRunMissing {
+            verb: obzenflow_core::journal::archive_actions::ReplayVerb::Resume,
+            rebuild: named,
+            rebuilt,
+        } if named == &rebuild && rebuilt == &missing),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn rebuild_aliased_cycle_refused() {
+    let base = tempdir().unwrap();
+    let rebuild = base.path().join("rebuild");
+    std::fs::create_dir(&rebuild).unwrap();
+    write_stopped_run(&rebuild, FLOW_ID, None, &[]).await;
+    record_rebuild_of(&rebuild, &rebuild.join("..").join("rebuild"));
+    let error = DiskReplayArchive::resume_evidence(&rebuild)
+        .await
+        .unwrap_err();
+    let rebuild = std::fs::canonicalize(rebuild).unwrap();
+    assert!(matches!(error, ReplayError::Parse { message }
+    if message == format!(
+        "the replay and rebuild links from {0} return to {0}",
+        rebuild.display()
+    )));
 }

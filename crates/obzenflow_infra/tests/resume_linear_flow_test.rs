@@ -285,6 +285,7 @@ async fn memory_replay_from_disk_archive_is_ephemeral() -> Result<()> {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Replay,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -316,6 +317,7 @@ async fn memory_resume_from_disk_archive_is_refused_at_build() -> Result<()> {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -371,6 +373,7 @@ async fn resume_manifest_records_interrupted_appends() -> Result<()> {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -524,6 +527,7 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );

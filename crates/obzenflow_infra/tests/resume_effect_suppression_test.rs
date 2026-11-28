@@ -330,6 +330,7 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -467,6 +468,7 @@ async fn a_torn_resume_reuses_effects_only_its_ancestor_still_holds() -> Result<
         archive_path: archive,
         allow_incomplete_archive: true,
         verb: ReplayVerb::Resume,
+        stages: Vec::new(),
     };
     let r1_calls = {
         let _bootstrap = install_bootstrap_config(
@@ -569,6 +571,7 @@ async fn resuming_through_a_replay_of_a_torn_resume_reuses_ancestor_effects() ->
         archive_path: archive,
         allow_incomplete_archive: true,
         verb,
+        stages: Vec::new(),
     };
     {
         let _bootstrap = install_bootstrap_config(
@@ -726,6 +729,7 @@ async fn a_replay_reads_only_the_journals_of_stages_with_an_effect_runtime() -> 
             archive_path: recorded,
             allow_incomplete_archive: true,
             verb: ReplayVerb::Replay,
+            stages: Vec::new(),
         }),
         archive_evidence: Some(archive.evidence()),
         replay_archive: Some(Arc::new(HistoryReads {

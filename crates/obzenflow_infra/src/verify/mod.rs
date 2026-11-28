@@ -546,6 +546,7 @@ mod tests {
                     ai_models: Vec::new(),
                     max_open_keys: None,
                     source_continuation: None,
+                    guarantees: Vec::new(),
                 },
             );
         }
@@ -560,6 +561,7 @@ mod tests {
             flow_name: "test_flow".to_string(),
             created_at: obzenflow_core::chrono::Utc::now(),
             replay,
+            rebuild: None,
             resume: None,
             interrupted_appends: Vec::new(),
             stages: map,

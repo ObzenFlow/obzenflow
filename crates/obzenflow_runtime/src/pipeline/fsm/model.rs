@@ -65,6 +65,7 @@ pub(crate) enum PipelineFsmEvent {
     ChildExited(StageExit),
     /// A stage of a resumed run crossed into the resume generation.
     StagesCrossed,
+    RecordingEnded,
     MetricsReady(crate::stages::common::stage_lifecycle::MilestoneAck),
     MetricsExited(crate::stages::common::stage_lifecycle::LifecycleExit),
     ReadyPublished,

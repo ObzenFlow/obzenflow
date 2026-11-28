@@ -83,6 +83,11 @@ async fn graceful_stop_racing_source_completion_is_not_a_failure() {
 }
 
 #[tokio::test]
+async fn pipeline_recording_ended_records_cancelled() {
+    pipeline::pipeline_recording_ended_records_cancelled(journals).await;
+}
+
+#[tokio::test]
 async fn failure_during_graceful_stop_aborts_by_the_graceful_deadline() {
     pipeline::failure_during_graceful_stop_aborts_by_the_graceful_deadline(journals).await;
 }

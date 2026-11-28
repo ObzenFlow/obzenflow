@@ -344,8 +344,11 @@ async fn dispatch_running_inner<
                         }
                         ControlAction::ForwardAndDrain => {
                             if envelope.is_eof()
-                                && ctx.terminal_eof_kind.unwrap_or(EofKind::Natural)
-                                    == EofKind::Natural
+                                && crate::stages::common::supervision::catch_up::checks_input_end(
+                                    &ctx.runtime_execution,
+                                    ctx.stage_id,
+                                    ctx.terminal_eof_kind.unwrap_or(EofKind::Natural),
+                                )
                             {
                                 let disposition =
                                     ctx.catch_up.send(CatchUpEvent::InputsEnded).await;
@@ -435,7 +438,7 @@ async fn dispatch_running_inner<
                 payload if payload.consumes_data_credit() && ctx.sink_batch.is_some() => {
                     let position =
                         stage_input_position.ok_or("sink input lacks a stage input position")?;
-                    super::sink_batch::enqueue(
+                    if super::sink_batch::enqueue(
                         ctx,
                         flow_context,
                         envelope,
@@ -443,7 +446,12 @@ async fn dispatch_running_inner<
                         upstream_stage,
                         delivered_generation,
                     )
-                    .await?;
+                    .await?
+                    {
+                        return Ok(EventLoopDirective::Transition(
+                            TransformEvent::RecordingEnded,
+                        ));
+                    }
                     EventLoopDirective::Continue
                 }
                 payload if payload.consumes_data_credit() => {
@@ -680,6 +688,11 @@ async fn dispatch_running_inner<
                                 crate::stages::common::handler_error::HandlerError,
                             >() {
                                 if let Some(fatal) = handler_error.as_fatal() {
+                                    if super::sink_batch::rebuild_holds(ctx, fatal) {
+                                        return Ok(EventLoopDirective::Transition(
+                                            TransformEvent::RecordingEnded,
+                                        ));
+                                    }
                                     let writer_id = ctx.writer_id.ok_or_else(|| {
                                         "fatal transform input has no stage writer id".to_string()
                                     })?;

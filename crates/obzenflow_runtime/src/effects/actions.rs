@@ -368,6 +368,15 @@ impl RecordedActions {
         self.actions.get(self.position()).cloned()
     }
 
+    pub(crate) fn next_unreproduced_settled(&self) -> Option<RecordedAction> {
+        self.actions
+            .get(self.position()..)
+            .unwrap_or_default()
+            .iter()
+            .find(|action| !matches!(action, RecordedAction::Effect { in_doubt: true, .. }))
+            .cloned()
+    }
+
     pub(crate) fn reproducing(&self, next_effect: &EffectCursor) -> bool {
         match self.actions.get(self.position().min(self.actions.len())..) {
             None | Some([]) => false,

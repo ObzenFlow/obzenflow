@@ -1808,7 +1808,7 @@ fn check_transform_state<H>(state: &TransformState<H>) -> crate::stage_handle_ad
         TransformState::Cancelling(_) => StageStatus::Cancelling,
         TransformState::Cancelled(_) => StageStatus::Cancelled,
         TransformState::Initialized => StageStatus::Ready,
-        TransformState::Running => StageStatus::Running,
+        TransformState::Running | TransformState::Held => StageStatus::Running,
         TransformState::Draining | TransformState::ClosingCycle => StageStatus::Draining,
         TransformState::Drained => StageStatus::Drained,
         TransformState::Failed(_) => StageStatus::Failed,
@@ -2217,7 +2217,9 @@ fn check_stateful_state<H>(state: &StatefulState<H>) -> crate::stage_handle_adap
         StatefulState::Cancelling(_) => StageStatus::Cancelling,
         StatefulState::Cancelled(_) => StageStatus::Cancelled,
         StatefulState::Initialized => StageStatus::Ready,
-        StatefulState::Accumulating | StatefulState::Emitting => StageStatus::Running,
+        StatefulState::Accumulating | StatefulState::Emitting | StatefulState::Held => {
+            StageStatus::Running
+        }
         StatefulState::Draining | StatefulState::EmittingDuringDrain => StageStatus::Draining,
         StatefulState::Drained => StageStatus::Drained,
         StatefulState::Failed(_) => StageStatus::Failed,

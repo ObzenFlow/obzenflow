@@ -68,6 +68,27 @@ pub struct DiskReplayArchive {
     live_writer: bool,
     failure: FailureEvidence,
     interrupted_appends: Vec<RunManifestInterruptedAppend>,
+    rebuilt_by: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunLink {
+    Replay(PathBuf),
+    Rebuild(PathBuf),
+}
+
+impl RunLink {
+    pub(crate) fn into_run(self) -> PathBuf {
+        match self {
+            Self::Replay(run) | Self::Rebuild(run) => run,
+        }
+    }
+}
+
+pub(crate) struct LinkedRun {
+    pub(crate) path: PathBuf,
+    pub(crate) manifest: RunManifest,
+    pub(crate) rebuilt_by: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,7 +203,13 @@ impl DiskReplayArchive {
                 })
                 .collect(),
             failure: self.failure,
+            sinks: recorded_sinks(&self.manifest),
+            guarantees: recorded_guarantees(&self.manifest),
         }
+    }
+
+    pub(crate) fn rebuilt_by(&self) -> Option<&Path> {
+        self.rebuilt_by.as_deref()
     }
 
     /// `written_run_evidence` returns the evidence of `run` as `verb` opens it,
@@ -196,8 +223,9 @@ impl DiskReplayArchive {
             ReplayVerb::Replay => {
                 Self::open_replay(run, false, Liveness::Stopped, ScanPurpose::Recovery).await?
             }
-            ReplayVerb::Resume => {
-                Self::open_resume(run, false, Liveness::Stopped, ScanPurpose::Recovery).await?
+            ReplayVerb::Resume | ReplayVerb::Rebuild => {
+                Self::open_resume(run, verb, false, Liveness::Stopped, ScanPurpose::Recovery)
+                    .await?
             }
         };
         Ok(archive.evidence())
@@ -211,8 +239,8 @@ impl DiskReplayArchive {
             ReplayVerb::Replay => {
                 Self::open_replay(run, false, Liveness::Probed, ScanPurpose::Recovery).await?
             }
-            ReplayVerb::Resume => {
-                Self::open_resume(run, false, Liveness::Probed, ScanPurpose::Recovery).await?
+            ReplayVerb::Resume | ReplayVerb::Rebuild => {
+                Self::open_resume(run, verb, false, Liveness::Probed, ScanPurpose::Recovery).await?
             }
         };
         Ok((archive.archive_path.clone(), archive.evidence()))
@@ -222,7 +250,11 @@ impl DiskReplayArchive {
     pub async fn resume_evidence(run: &Path) -> Result<ResumeEvidence, ReplayError> {
         use super::continuation::{has_live_writer, read_claim, takeover, Takeover};
 
-        let mut next = Self::resolve_replayed_run(run.to_path_buf())?;
+        let linked = |run: PathBuf| {
+            Self::resolve_linked_run(run, ReplayVerb::Resume)
+                .map(|linked| (linked.path, linked.manifest))
+        };
+        let mut next = linked(run.to_path_buf())?;
         let mut visited = HashSet::new();
         let mut continued_from = None;
         loop {
@@ -244,7 +276,7 @@ impl DiskReplayArchive {
             let live_writer = has_live_writer(&path, &manifest)?;
             if let (false, Some(resume)) = (live_writer, &manifest.resume) {
                 if takeover(&path, &manifest, &resume.resumed_from)? != Takeover::Held {
-                    next = Self::resolve_replayed_run(resume.resumed_from.clone())?;
+                    next = linked(resume.resumed_from.clone())?;
                     continued_from = None;
                     continue;
                 }
@@ -252,7 +284,7 @@ impl DiskReplayArchive {
             let head =
                 Self::open_manifest(path, manifest, false, live_writer, ScanPurpose::Recovery)
                     .await?
-                    .with_ancestors(ScanPurpose::Recovery)
+                    .with_ancestors(ReplayVerb::Resume, ScanPurpose::Recovery)
                     .await?;
             return Ok(ResumeEvidence {
                 run: head.archive_path.clone(),
@@ -266,19 +298,25 @@ impl DiskReplayArchive {
         let Ok((path, manifest)) = Self::read_manifest(run.to_owned()) else {
             return [None, None];
         };
-        let original = replayed_run(&manifest);
+        let original = run_link(&manifest).map(RunLink::into_run);
         let purpose = ScanPurpose::WrittenFooter;
         let head = Self::open_manifest(path, manifest, false, false, purpose)
             .await
             .ok();
         let replay = head.as_ref().map(Self::evidence);
         let resume = if let Some(original) = original {
-            Self::open_resume(original, false, Liveness::Stopped, purpose)
-                .await
-                .ok()
-                .map(|head| head.evidence())
+            Self::open_resume(
+                original,
+                ReplayVerb::Resume,
+                false,
+                Liveness::Stopped,
+                purpose,
+            )
+            .await
+            .ok()
+            .map(|head| head.evidence())
         } else if let Some(head) = head.filter(|head| head.unfinished_parent().is_some()) {
-            head.with_ancestors(purpose)
+            head.with_ancestors(ReplayVerb::Resume, purpose)
                 .await
                 .ok()
                 .map(|head| head.evidence())
@@ -412,6 +450,7 @@ impl DiskReplayArchive {
                 live_writer,
                 failure: Default::default(),
                 interrupted_appends: Vec::new(),
+                rebuilt_by: None,
             });
         }
 
@@ -489,6 +528,7 @@ impl DiskReplayArchive {
             live_writer,
             failure,
             interrupted_appends: Vec::new(),
+            rebuilt_by: None,
         })
     }
 
@@ -501,6 +541,27 @@ impl DiskReplayArchive {
     ) -> Result<Self, ReplayError> {
         let mut head = Self::open_resume(
             archive_path,
+            ReplayVerb::Resume,
+            allow_incomplete_archive,
+            Liveness::Probe,
+            ScanPurpose::Recovery,
+        )
+        .await?;
+        head.record_interrupted_appends();
+        Ok(head)
+    }
+
+    /// `open_for_rebuild` opens the head of a history for a rebuild of
+    /// destinations, and refuses a run that is not the head. The rebuild reads
+    /// the history that a resume of the run reads. The rebuild takes no
+    /// continuation claim, so it needs no writable run location.
+    pub async fn open_for_rebuild(
+        archive_path: PathBuf,
+        allow_incomplete_archive: bool,
+    ) -> Result<Self, ReplayError> {
+        let mut head = Self::open_resume(
+            archive_path,
+            ReplayVerb::Rebuild,
             allow_incomplete_archive,
             Liveness::Probe,
             ScanPurpose::Recovery,
@@ -512,20 +573,25 @@ impl DiskReplayArchive {
 
     async fn open_resume(
         archive_path: PathBuf,
+        verb: ReplayVerb,
         allow_incomplete_archive: bool,
         liveness: Liveness,
         purpose: ScanPurpose,
     ) -> Result<Self, ReplayError> {
-        let (archive_path, manifest) = Self::resolve_replayed_run(archive_path)?;
+        let LinkedRun {
+            path: archive_path,
+            manifest,
+            rebuilt_by,
+        } = Self::resolve_linked_run(archive_path, verb)?;
         let live_writer = match liveness {
-            Liveness::Probe => super::continuation::admit(&archive_path, &manifest)?,
+            Liveness::Probe => super::continuation::admit(&archive_path, &manifest, verb)?,
             Liveness::Probed => {
-                super::continuation::admit_stopped(&archive_path, &manifest)?;
+                super::continuation::admit_stopped(&archive_path, &manifest, verb)?;
                 false
             }
             Liveness::Stopped => false,
         };
-        let head = Self::open_manifest(
+        let mut head = Self::open_manifest(
             archive_path,
             manifest,
             allow_incomplete_archive,
@@ -533,10 +599,15 @@ impl DiskReplayArchive {
             purpose,
         )
         .await?;
-        head.with_ancestors(purpose).await
+        head.rebuilt_by = rebuilt_by;
+        head.with_ancestors(verb, purpose).await
     }
 
-    async fn with_ancestors(mut self, purpose: ScanPurpose) -> Result<Self, ReplayError> {
+    async fn with_ancestors(
+        mut self,
+        verb: ReplayVerb,
+        purpose: ScanPurpose,
+    ) -> Result<Self, ReplayError> {
         if self.live_writer {
             return Ok(self);
         }
@@ -544,6 +615,7 @@ impl DiskReplayArchive {
         let mut parent = self.unfinished_parent();
         while let Some(ancestor) = parent {
             let unreadable = |error| ReplayError::AncestorUnreadable {
+                verb,
                 archive: self.archive_path.clone(),
                 ancestor: ancestor.clone(),
                 source: Box::new(error),
@@ -554,6 +626,7 @@ impl DiskReplayArchive {
                         if source.kind() == std::io::ErrorKind::NotFound =>
                     {
                         ReplayError::AncestorMissing {
+                            verb,
                             archive: self.archive_path.clone(),
                             ancestor: ancestor.clone(),
                         }
@@ -579,6 +652,7 @@ impl DiskReplayArchive {
             .await
             .map_err(|error| match error {
                 ReplayError::MissingSystemLog { path } => ReplayError::AncestorMissingSystemLog {
+                    verb,
                     archive: self.archive_path.clone(),
                     ancestor: ancestor.clone(),
                     system_log: path,
@@ -588,34 +662,51 @@ impl DiskReplayArchive {
             parent = opened.unfinished_parent();
             ancestors.push(Arc::new(opened));
         }
-        self.merge_lineage(ancestors)?;
+        self.merge_lineage(verb, ancestors)?;
         Ok(self)
     }
 
-    /// The first run a chain of replays reproduces (B13): a replay adds
-    /// nothing a resume reads.
-    pub(crate) fn resolve_replayed_run(
+    pub(crate) fn resolve_linked_run(
         archive_path: PathBuf,
-    ) -> Result<(PathBuf, RunManifest), ReplayError> {
+        verb: ReplayVerb,
+    ) -> Result<LinkedRun, ReplayError> {
         let (mut path, mut manifest) = Self::read_manifest(archive_path)?;
         let mut visited = vec![path.clone()];
-        while let Some(replayed) = replayed_run(&manifest) {
+        let mut rebuilt_by = None;
+        while let Some(link) = run_link(&manifest) {
+            let linking = path.clone();
+            let missing = match &link {
+                RunLink::Replay(replayed) => ReplayError::ReplayedRunMissing {
+                    verb,
+                    replay: linking.clone(),
+                    replayed: replayed.clone(),
+                },
+                RunLink::Rebuild(rebuilt) => {
+                    rebuilt_by = Some(linking.clone());
+                    ReplayError::RebuiltRunMissing {
+                        verb,
+                        rebuild: linking.clone(),
+                        rebuilt: rebuilt.clone(),
+                    }
+                }
+            };
             (path, manifest) =
-                Self::read_manifest(replayed.clone()).map_err(|error| match error {
+                Self::read_manifest(link.into_run()).map_err(|error| match error {
                     ReplayError::Io { ref source, .. }
                         if source.kind() == std::io::ErrorKind::NotFound =>
                     {
-                        ReplayError::ReplayedRunMissing {
-                            replay: path,
-                            replayed,
-                        }
+                        missing
                     }
                     error => error,
                 })?;
             if visited.contains(&path) {
+                let links = match rebuilt_by {
+                    Some(_) => "replay and rebuild links",
+                    None => "replays",
+                };
                 return Err(ReplayError::Parse {
                     message: format!(
-                        "the replays from {} return to {}",
+                        "the {links} from {} return to {}",
                         visited[0].display(),
                         path.display()
                     ),
@@ -623,7 +714,11 @@ impl DiskReplayArchive {
             }
             visited.push(path.clone());
         }
-        Ok((path, manifest))
+        Ok(LinkedRun {
+            path,
+            manifest,
+            rebuilt_by,
+        })
     }
 
     /// The run this one resumed from, while this run has not recorded its
@@ -639,7 +734,11 @@ impl DiskReplayArchive {
     /// lineage, which every shorter member must prefix by recorded event id.
     /// A tie keeps the ancestor: its descendant added nothing, so the torn
     /// run's own EOF is dropped.
-    fn merge_lineage(&mut self, ancestors: Vec<Arc<Self>>) -> Result<(), ReplayError> {
+    fn merge_lineage(
+        &mut self,
+        verb: ReplayVerb,
+        ancestors: Vec<Arc<Self>>,
+    ) -> Result<(), ReplayError> {
         if ancestors.is_empty() {
             return Ok(());
         }
@@ -655,6 +754,7 @@ impl DiskReplayArchive {
             match recorded {
                 Some((first, _)) if first != namespace => {
                     return Err(ReplayError::NamespaceDisagrees {
+                        verb,
                         archive: self.archive_path.clone(),
                         ancestor: ancestor.archive_path.clone(),
                     });
@@ -690,7 +790,7 @@ impl DiskReplayArchive {
             };
             for member in &members {
                 if !std::ptr::eq(*member, longest) {
-                    verify_source_prefix(member, longest, &stage_key, &self.archive_path)?;
+                    verify_source_prefix(member, longest, &stage_key, &self.archive_path, verb)?;
                 }
             }
             if let Some(kind) = longest.recorded_source_eof.get(&stage_key) {
@@ -940,6 +1040,17 @@ impl ReplayArchive for DiskReplayArchive {
             .unwrap_or_default()
     }
 
+    fn recorded_guarantees(
+        &self,
+        stage_key: &str,
+    ) -> Vec<obzenflow_core::journal::archive::EffectGuarantee> {
+        self.manifest
+            .stages
+            .get(stage_key)
+            .map(|stage| stage.guarantees.clone())
+            .unwrap_or_default()
+    }
+
     fn recorded_max_open_keys(&self, stage_key: &str) -> Option<u64> {
         self.manifest
             .stages
@@ -979,6 +1090,7 @@ impl DiskReplayArchive {
             ai_models: Vec::new(),
             max_open_keys: None,
             source_continuation: Some(obzenflow_core::source::SourceContinuation::RecordedRead),
+            guarantees: Vec::new(),
         };
         Self {
             archive_path,
@@ -991,6 +1103,7 @@ impl DiskReplayArchive {
                 flow_name: "source_prefix".into(),
                 created_at: chrono::Utc::now(),
                 replay: None,
+                rebuild: None,
                 resume: None,
                 interrupted_appends: Vec::new(),
                 stages: HashMap::from([("src".to_string(), stage)]),
@@ -1017,6 +1130,7 @@ impl DiskReplayArchive {
             live_writer: false,
             failure: Default::default(),
             interrupted_appends: Vec::new(),
+            rebuilt_by: None,
         }
     }
 }
@@ -1037,8 +1151,10 @@ pub(super) fn verify_source_prefix(
     longest: &DiskReplayArchive,
     stage_key: &str,
     head: &Path,
+    verb: ReplayVerb,
 ) -> Result<(), ReplayError> {
     let disagrees = || ReplayError::AncestorDisagrees {
+        verb,
         archive: head.to_path_buf(),
         ancestor: if shorter.archive_path == head {
             longest.archive_path.clone()
@@ -1548,12 +1664,44 @@ pub(crate) fn recorded_reconstruction_completion(run: &Path, manifest: &RunManif
         .is_ok_and(|scan| scan.reconstruction_completed.is_some())
 }
 
-/// The run a replay reproduces; `None` for a live or resumed run.
-pub(crate) fn replayed_run(manifest: &RunManifest) -> Option<PathBuf> {
-    match (&manifest.replay, &manifest.resume) {
-        (Some(replay), None) => Some(PathBuf::from(&replay.replay_from)),
-        _ => None,
+pub(crate) fn run_link(manifest: &RunManifest) -> Option<RunLink> {
+    if manifest.resume.is_some() {
+        return None;
     }
+    if let Some(rebuild) = &manifest.rebuild {
+        return Some(RunLink::Rebuild(PathBuf::from(&rebuild.rebuilt_from)));
+    }
+    manifest
+        .replay
+        .as_ref()
+        .map(|replay| RunLink::Replay(PathBuf::from(&replay.replay_from)))
+}
+
+fn recorded_sinks(manifest: &RunManifest) -> Vec<String> {
+    let mut sinks: Vec<String> = manifest
+        .stages
+        .iter()
+        .filter(|(_, stage)| stage.stage_type == StageType::Sink)
+        .map(|(stage_key, _)| stage_key.clone())
+        .collect();
+    sinks.sort();
+    sinks
+}
+
+fn recorded_guarantees(
+    manifest: &RunManifest,
+) -> Vec<(
+    String,
+    Vec<obzenflow_core::journal::archive::EffectGuarantee>,
+)> {
+    let mut guarantees: Vec<_> = manifest
+        .stages
+        .iter()
+        .filter(|(_, stage)| !stage.guarantees.is_empty())
+        .map(|(stage_key, stage)| (stage_key.clone(), stage.guarantees.clone()))
+        .collect();
+    guarantees.sort();
+    guarantees
 }
 
 pub(crate) fn admission_run(requested: &Path, continued: &Path) -> PathBuf {
@@ -1626,6 +1774,7 @@ mod tests {
                 fatal(StageFatalReason::MissingRecordedEffect),
                 fatal(StageFatalReason::UnusedFactHistory),
             ],
+            vec![fatal(StageFatalReason::DestinationChanged)],
             vec![input_changed.clone()],
         ] {
             assert_eq!(
@@ -1654,6 +1803,11 @@ mod tests {
                 SourceDiagnosticReason::InputChanged,
             )],
             vec![fatal(StageFatalReason::RecordingEnded)],
+            vec![fatal(StageFatalReason::DestinationUnwritable)],
+            vec![
+                fatal(StageFatalReason::DestinationChanged),
+                fatal(StageFatalReason::DestinationUnwritable),
+            ],
         ] {
             assert_eq!(folded(&other, false), FailureEvidence::Other, "{other:?}");
         }

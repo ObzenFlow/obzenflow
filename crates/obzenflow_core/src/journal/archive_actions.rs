@@ -2,21 +2,22 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! `archive_actions` admits a replay or a resume of a run, with or without a
-//! warning, or refuses it. It uses the archive evidence of the run and the flow
-//! evidence. [`decide`] first
-//! checks the flow for a cycle, and then checks for a live writer. For a resume,
-//! it then checks the no-work-left row and the sources. It checks the archive
-//! rows last.
+//! `archive_actions` admits a replay, a resume or a rebuild of a run, with or
+//! without a warning, or refuses it. It uses the archive evidence of the run and
+//! the flow evidence. [`decide`] first checks the flow for a cycle, and then
+//! checks for a live writer. For a resume, it then checks the no-work-left row
+//! and the sources. For a rebuild, it then checks each named sink stage and
+//! admits every archive row. It checks the archive rows of a replay and a resume
+//! last.
 
+use super::archive::EffectGuarantee;
 use super::ArchiveStatus;
 use crate::event::payloads::flow_control_payload::EofKind;
 use crate::source::{ResumeRefusal, SourceContinuation};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// The operator's archive verb, a bounded replay that drains or a resume that
-/// catches up and continues live.
+/// `ReplayVerb` is the archive verb that an operator gives for a recorded run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayVerb {
     /// `Replay` reconstructs a bounded recording and drains at its end.
@@ -24,14 +25,27 @@ pub enum ReplayVerb {
     /// `Resume` resumes a recorded run from the last fact that it committed. The
     /// new run catches up on the recording and then continues with live work.
     Resume,
+    /// `Rebuild` reconstructs a recorded run and writes the destinations of the
+    /// sink stages that the operator names. It answers every other effect from
+    /// the recording.
+    Rebuild,
 }
 
 impl ReplayVerb {
-    /// The verb as operators write it, `replay` or `resume`.
+    /// `word` returns the verb as operators write it, for example `rebuild`.
     pub const fn word(self) -> &'static str {
         match self {
             Self::Replay => "replay",
             Self::Resume => "resume",
+            Self::Rebuild => "rebuild",
+        }
+    }
+
+    pub(crate) const fn phrase(self) -> &'static str {
+        match self {
+            Self::Replay => "replay",
+            Self::Resume => "resume",
+            Self::Rebuild => "rebuild from",
         }
     }
 }
@@ -54,8 +68,8 @@ pub enum FailureEvidence {
     DepartedFromArchive,
 }
 
-/// What an archive records about its status, live writers, sources and how a
-/// failed resume failed.
+/// `ArchiveEvidence` holds what an archive records about its status, live
+/// writers, sources, sinks and guarantees, and about how a failed resume failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveEvidence {
     pub status: ArchiveStatus,
@@ -63,6 +77,8 @@ pub struct ArchiveEvidence {
     pub sources: Vec<SourceEvidence>,
     /// Consulted only when resuming a `Failed` archive.
     pub failure: FailureEvidence,
+    pub sinks: Vec<String>,
+    pub guarantees: Vec<(String, Vec<EffectGuarantee>)>,
 }
 
 impl ArchiveEvidence {
@@ -88,6 +104,7 @@ pub struct FlowEvidence {
     pub cycle_members: Vec<String>,
     /// Each source's declared continuation, by stage key.
     pub sources: Vec<(String, SourceContinuation)>,
+    pub guarantees: Vec<(String, Vec<EffectGuarantee>)>,
 }
 
 /// The operator's overrides for one command.
@@ -116,8 +133,7 @@ pub enum ArchiveRefusal {
     NotStarted {
         run: PathBuf,
     },
-    /// A replay or resume of a flow with a cycle; `members` names the stages
-    /// on it.
+    /// The flow has a cycle. `members` names the stages on that cycle.
     Cycle {
         verb: ReplayVerb,
         run: PathBuf,
@@ -128,6 +144,25 @@ pub enum ArchiveRefusal {
         run: PathBuf,
         refusals: Vec<(String, ResumeRefusal)>,
     },
+    /// A rebuild cannot call one or more of the sink stages that it names.
+    /// `sinks` lists the sink stages that the run recorded.
+    Destinations {
+        run: PathBuf,
+        refusals: Vec<(String, DestinationRefusal)>,
+        sinks: Vec<String>,
+    },
+}
+
+/// `DestinationRefusal` tells why a rebuild cannot call a named sink stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationRefusal {
+    /// The run's manifest does not list the stage as a sink stage.
+    Unrecorded,
+    /// This build's port method declares a guarantee other than `exactly_once`.
+    Declares { guarantee: EffectGuarantee },
+    /// The history recorded the stage's calls under a guarantee other than
+    /// `exactly_once`.
+    Recorded { guarantee: EffectGuarantee },
 }
 
 impl ArchiveRefusal {
@@ -135,6 +170,7 @@ impl ArchiveRefusal {
         match self {
             Self::StillRunning { verb, .. } | Self::Cycle { verb, .. } => *verb,
             Self::NoWorkLeft { .. } | Self::Sources { .. } => ReplayVerb::Resume,
+            Self::Destinations { .. } => ReplayVerb::Rebuild,
             Self::Failed { .. } | Self::Interrupted { .. } | Self::NotStarted { .. } => {
                 ReplayVerb::Replay
             }
@@ -148,7 +184,7 @@ impl fmt::Display for ArchiveRefusal {
             Self::StillRunning { verb, run } => write!(
                 f,
                 "ObzenFlow cannot {} {}, because the run still has a live writer.",
-                verb.word(),
+                verb.phrase(),
                 run.display()
             ),
             Self::NoWorkLeft { run } => write!(
@@ -176,11 +212,16 @@ impl fmt::Display for ArchiveRefusal {
             Self::Cycle { verb, run, members } => write!(
                 f,
                 "ObzenFlow cannot {} {}, because the flow has a cycle through {}.",
-                verb.word(),
+                verb.phrase(),
                 run.display(),
                 members.join(", ")
             ),
             Self::Sources { run, refusals } => f.write_str(&sources_refusal(run, refusals)),
+            Self::Destinations {
+                run,
+                refusals,
+                sinks,
+            } => f.write_str(&destinations_refusal(run, refusals, sinks)),
         }
     }
 }
@@ -208,12 +249,15 @@ impl fmt::Display for ArchiveWarning {
 }
 
 /// `decide` admits `verb` over `run`, with or without a warning, or refuses it.
+/// `stages` names the sink stages of a rebuild, and a replay or a resume names
+/// none.
 pub fn decide(
     verb: ReplayVerb,
     run: &Path,
     archive: &ArchiveEvidence,
     flow: &FlowEvidence,
     overrides: ArchiveOverrides,
+    stages: &[String],
 ) -> Result<Option<ArchiveWarning>, ArchiveRefusal> {
     let run = run.to_path_buf();
     if !flow.cycle_members.is_empty() {
@@ -225,6 +269,17 @@ pub fn decide(
     }
     if archive.live_writer {
         return Err(ArchiveRefusal::StillRunning { verb, run });
+    }
+    if verb == ReplayVerb::Rebuild {
+        let refusals = destination_refusals(archive, flow, stages);
+        if !refusals.is_empty() {
+            return Err(ArchiveRefusal::Destinations {
+                run,
+                refusals,
+                sinks: archive.sinks.clone(),
+            });
+        }
+        return Ok(None);
     }
     if verb == ReplayVerb::Resume {
         if archive.completed_naturally() {
@@ -249,6 +304,89 @@ pub fn decide(
     }
 }
 
+fn not_exactly_once(
+    guarantees: &[(String, Vec<EffectGuarantee>)],
+    stage: &str,
+) -> Option<EffectGuarantee> {
+    let mut declared: Vec<EffectGuarantee> = guarantees
+        .iter()
+        .filter(|(stage_key, _)| stage_key == stage)
+        .flat_map(|(_, guarantees)| guarantees.iter().copied())
+        .collect();
+    declared.sort();
+    declared
+        .into_iter()
+        .find(|guarantee| *guarantee != EffectGuarantee::ExactlyOnce)
+}
+
+fn destination_refusals(
+    archive: &ArchiveEvidence,
+    flow: &FlowEvidence,
+    stages: &[String],
+) -> Vec<(String, DestinationRefusal)> {
+    let mut named: Vec<&String> = stages.iter().collect();
+    named.sort();
+    named.dedup();
+    named
+        .into_iter()
+        .filter_map(|stage| {
+            let refusal = if !archive.sinks.contains(stage) {
+                DestinationRefusal::Unrecorded
+            } else if let Some(guarantee) = not_exactly_once(&flow.guarantees, stage) {
+                DestinationRefusal::Declares { guarantee }
+            } else {
+                DestinationRefusal::Recorded {
+                    guarantee: not_exactly_once(&archive.guarantees, stage)?,
+                }
+            };
+            Some((stage.clone(), refusal))
+        })
+        .collect()
+}
+
+fn quoted_list(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|name| format!("'{name}'")).collect();
+    match quoted.as_slice() {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+fn destinations_refusal(
+    run: &Path,
+    refusals: &[(String, DestinationRefusal)],
+    sinks: &[String],
+) -> String {
+    let recorded = match sinks {
+        [] => "The run recorded no sink stage.".to_string(),
+        [_] => format!("The run recorded the sink stage {}.", quoted_list(sinks)),
+        _ => format!("The run recorded the sink stages {}.", quoted_list(sinks)),
+    };
+    refusals
+        .iter()
+        .map(|(stage, refusal)| match refusal {
+            DestinationRefusal::Unrecorded => format!(
+                "ObzenFlow cannot rebuild '{stage}' from {}, because the run did not record that \
+                 sink stage. {recorded}",
+                run.display()
+            ),
+            DestinationRefusal::Declares { guarantee } => format!(
+                "ObzenFlow cannot rebuild '{stage}' from {}, because its port method declares \
+                 {guarantee}, not exactly_once.",
+                run.display()
+            ),
+            DestinationRefusal::Recorded { guarantee } => format!(
+                "ObzenFlow cannot rebuild '{stage}' from {}, because the history of {} recorded \
+                 its calls under {guarantee}, not exactly_once.",
+                run.display(),
+                run.display()
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn source_refusals(archive: &ArchiveEvidence, flow: &FlowEvidence) -> Vec<(String, ResumeRefusal)> {
     let mut refusals: Vec<(String, ResumeRefusal)> = flow
         .sources
@@ -268,12 +406,7 @@ fn source_refusals(archive: &ArchiveEvidence, flow: &FlowEvidence) -> Vec<(Strin
 }
 
 fn unfinished_sources_refusal(archive: &Path, sources: &[String]) -> String {
-    let quoted: Vec<String> = sources.iter().map(|source| format!("'{source}'")).collect();
-    let named = match quoted.as_slice() {
-        [] => String::new(),
-        [only] => only.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    };
+    let named = quoted_list(sources);
     let (subject, their) = if sources.len() == 1 {
         ("source", "its")
     } else {
@@ -315,6 +448,17 @@ mod tests {
             live_writer: false,
             sources,
             failure: FailureEvidence::Other,
+            sinks: vec!["case_register".to_string(), "totals_report".to_string()],
+            guarantees: vec![
+                (
+                    "case_register".to_string(),
+                    vec![EffectGuarantee::ExactlyOnce],
+                ),
+                (
+                    "totals_report".to_string(),
+                    vec![EffectGuarantee::AtLeastOnce],
+                ),
+            ],
         }
     }
 
@@ -332,6 +476,16 @@ mod tests {
                 ("store_orders".to_string(), SourceContinuation::Refuse),
                 ("web_orders".to_string(), SourceContinuation::Refuse),
             ],
+            guarantees: vec![
+                (
+                    "case_register".to_string(),
+                    vec![EffectGuarantee::ExactlyOnce],
+                ),
+                (
+                    "totals_report".to_string(),
+                    vec![EffectGuarantee::AtLeastOnce],
+                ),
+            ],
         }
     }
 
@@ -341,7 +495,27 @@ mod tests {
         flow: &FlowEvidence,
         overrides: ArchiveOverrides,
     ) -> Result<Option<ArchiveWarning>, ArchiveRefusal> {
-        decide(verb, Path::new(RUN), archive, flow, overrides)
+        let stages = match verb {
+            ReplayVerb::Rebuild => vec!["case_register".to_string()],
+            ReplayVerb::Replay | ReplayVerb::Resume => Vec::new(),
+        };
+        decide(verb, Path::new(RUN), archive, flow, overrides, &stages)
+    }
+
+    fn rebuilt(
+        archive: &ArchiveEvidence,
+        flow: &FlowEvidence,
+        stages: &[&str],
+    ) -> Result<Option<ArchiveWarning>, ArchiveRefusal> {
+        let stages: Vec<String> = stages.iter().map(|stage| stage.to_string()).collect();
+        decide(
+            ReplayVerb::Rebuild,
+            Path::new(RUN),
+            archive,
+            flow,
+            ArchiveOverrides::default(),
+            &stages,
+        )
     }
 
     fn plain() -> ArchiveOverrides {
@@ -355,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn live_writer_both_verbs_refused() {
+    fn live_writer_every_verb_refused() {
         let mut live = archive(ArchiveStatus::Failed, finished());
         live.live_writer = true;
         for (verb, copy) in [
@@ -366,6 +540,10 @@ mod tests {
             (
                 ReplayVerb::Replay,
                 "ObzenFlow cannot replay /runs/r1, because the run still has a live writer.",
+            ),
+            (
+                ReplayVerb::Rebuild,
+                "ObzenFlow cannot rebuild from /runs/r1, because the run still has a live writer.",
             ),
         ] {
             let refusal = decided(verb, &live, &safe_flow(), incomplete()).unwrap_err();
@@ -563,7 +741,7 @@ mod tests {
             archive(ArchiveStatus::Failed, finished()),
             live,
         ] {
-            for verb in [ReplayVerb::Replay, ReplayVerb::Resume] {
+            for verb in [ReplayVerb::Replay, ReplayVerb::Resume, ReplayVerb::Rebuild] {
                 for overrides in [plain(), incomplete()] {
                     assert_eq!(
                         decided(verb, &evidence, &cyclic, overrides),
@@ -613,8 +791,8 @@ mod tests {
             vec![source("store_orders", true, None)],
         );
         let rereadable = FlowEvidence {
-            cycle_members: Vec::new(),
             sources: vec![("store_orders".to_string(), SourceContinuation::RecordedRead)],
+            ..safe_flow()
         };
         assert_eq!(
             decided(ReplayVerb::Resume, &idle, &rereadable, plain()),
@@ -634,6 +812,114 @@ mod tests {
                 decided(ReplayVerb::Resume, &failed, &safe_flow(), overrides),
                 Err(ArchiveRefusal::Sources { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn rebuild_unrecorded_stage_refused() {
+        let done = archive(ArchiveStatus::Completed, finished());
+        let refusal = rebuilt(&done, &safe_flow(), &["alert_log"]).unwrap_err();
+        assert_eq!(
+            refusal,
+            ArchiveRefusal::Destinations {
+                run: PathBuf::from(RUN),
+                refusals: vec![("alert_log".to_string(), DestinationRefusal::Unrecorded)],
+                sinks: done.sinks.clone(),
+            }
+        );
+        assert_eq!(refusal.verb(), ReplayVerb::Rebuild);
+        assert_eq!(
+            refusal.to_string(),
+            "ObzenFlow cannot rebuild 'alert_log' from /runs/r1, because the run did not record \
+             that sink stage. The run recorded the sink stages 'case_register' and \
+             'totals_report'."
+        );
+    }
+
+    #[test]
+    fn rebuild_declared_at_most_once_refused() {
+        let done = archive(ArchiveStatus::Completed, finished());
+        let flow = FlowEvidence {
+            guarantees: vec![(
+                "case_register".to_string(),
+                vec![EffectGuarantee::AtMostOnce],
+            )],
+            ..safe_flow()
+        };
+        let refusal = rebuilt(&done, &flow, &["case_register"]).unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "ObzenFlow cannot rebuild 'case_register' from /runs/r1, because its port method \
+             declares at_most_once, not exactly_once."
+        );
+    }
+
+    #[test]
+    fn rebuild_declared_at_least_once_refused() {
+        let done = archive(ArchiveStatus::Completed, finished());
+        let refusal = rebuilt(&done, &safe_flow(), &["totals_report"]).unwrap_err();
+        assert!(matches!(
+            refusal,
+            ArchiveRefusal::Destinations { ref refusals, .. }
+                if refusals == &[(
+                    "totals_report".to_string(),
+                    DestinationRefusal::Declares {
+                        guarantee: EffectGuarantee::AtLeastOnce,
+                    },
+                )]
+        ));
+        assert_eq!(
+            refusal.to_string(),
+            "ObzenFlow cannot rebuild 'totals_report' from /runs/r1, because its port method \
+             declares at_least_once, not exactly_once."
+        );
+    }
+
+    #[test]
+    fn rebuild_recorded_at_most_once_refused() {
+        let mut done = archive(ArchiveStatus::Completed, finished());
+        done.guarantees = vec![(
+            "case_register".to_string(),
+            vec![EffectGuarantee::AtMostOnce],
+        )];
+        let refusal = rebuilt(&done, &safe_flow(), &["case_register"]).unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "ObzenFlow cannot rebuild 'case_register' from /runs/r1, because the history of \
+             /runs/r1 recorded its calls under at_most_once, not exactly_once."
+        );
+    }
+
+    #[test]
+    fn rebuild_exactly_once_destination_admitted() {
+        let done = archive(ArchiveStatus::Completed, finished());
+        assert_eq!(
+            rebuilt(&done, &safe_flow(), &["case_register", "case_register"]),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn rebuild_every_archive_status_admitted() {
+        let departed = ArchiveEvidence {
+            failure: FailureEvidence::DepartedFromArchive,
+            ..archive(ArchiveStatus::Failed, finished())
+        };
+        for evidence in [
+            archive(ArchiveStatus::Completed, finished()),
+            archive(ArchiveStatus::Cancelled, unfinished()),
+            archive(ArchiveStatus::Unknown, unfinished()),
+            archive(ArchiveStatus::NotStarted, Vec::new()),
+            archive(ArchiveStatus::Failed, finished()),
+            departed,
+        ] {
+            for overrides in [plain(), incomplete()] {
+                assert_eq!(
+                    decided(ReplayVerb::Rebuild, &evidence, &safe_flow(), overrides),
+                    Ok(None),
+                    "{evidence:?}"
+                );
+            }
         }
     }
 }
