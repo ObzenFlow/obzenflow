@@ -251,8 +251,8 @@ fn completed(
     )
 }
 
-fn replay_of(source: &std::path::Path) -> crate::application::RunMode {
-    crate::application::RunMode::Replay(crate::application::ReplayRunContext {
+fn replay_of(source: &std::path::Path) -> crate::application::run_mode::RunMode {
+    crate::application::run_mode::RunMode::Replay(crate::application::run_mode::ReplayRunContext {
         archive_path: source.to_path_buf(),
         archive_flow_id: None,
         verify: false,
@@ -313,11 +313,13 @@ async fn replay_footer_comparison_pending_omits_verify() {
         vec![factory.pipeline_starting(), completed(factory)]
     })
     .await;
-    let verifying = crate::application::RunMode::Replay(crate::application::ReplayRunContext {
-        archive_path: dir.path().to_path_buf(),
-        archive_flow_id: None,
-        verify: true,
-    });
+    let verifying = crate::application::run_mode::RunMode::Replay(
+        crate::application::run_mode::ReplayRunContext {
+            archive_path: dir.path().to_path_buf(),
+            archive_flow_id: None,
+            verify: true,
+        },
+    );
     assert!(!replay_verify_offered(&verifying));
 }
 
@@ -329,7 +331,7 @@ fn footer_unknown_status_reports_stopped() {
             status,
             "flow".into(),
             None,
-            crate::application::RunMode::Live,
+            crate::application::run_mode::RunMode::Live,
             ArchiveOffers::default(),
         )
         .footer()

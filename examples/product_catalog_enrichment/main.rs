@@ -8,7 +8,7 @@ mod support;
 use obzenflow::application::{FlowApplication, LogLevel, Presentation};
 
 fn main() -> anyhow::Result<()> {
-    let presentation = Presentation::for_mode(presentation::banner_for);
+    let presentation = Presentation::new(presentation::banner());
 
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)

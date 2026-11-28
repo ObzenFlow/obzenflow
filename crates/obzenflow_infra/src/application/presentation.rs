@@ -234,38 +234,17 @@ pub struct RenderedBanner {
     pub warnings: Vec<String>,
 }
 
-enum BannerSource {
-    Static(Banner),
-    ForMode(Box<dyn Fn(&RunMode) -> Banner + Send + Sync + 'static>),
-}
-
 pub struct Presentation {
-    banner: BannerSource,
+    banner: Banner,
 }
 
 impl Presentation {
     pub fn new(banner: Banner) -> Self {
-        Self {
-            banner: BannerSource::Static(banner),
-        }
-    }
-
-    /// A banner that branches on the resolved run mode, so a strict replay
-    /// announces itself instead of reprinting live-run guidance (FLOWIP-120i).
-    pub fn for_mode<F>(banner: F) -> Self
-    where
-        F: Fn(&RunMode) -> Banner + Send + Sync + 'static,
-    {
-        Self {
-            banner: BannerSource::ForMode(Box::new(banner)),
-        }
+        Self { banner }
     }
 
     pub(crate) fn render_banner(&self, mode: &RunMode) -> RenderedBanner {
-        let mut rendered = match &self.banner {
-            BannerSource::Static(banner) => banner.render_for_stdout(),
-            BannerSource::ForMode(banner) => banner(mode).render_for_stdout(),
-        };
+        let mut rendered = self.banner.render_for_stdout();
         match mode {
             RunMode::Live => {}
             RunMode::Replay(ctx) => rendered.text.push_str(&format!(

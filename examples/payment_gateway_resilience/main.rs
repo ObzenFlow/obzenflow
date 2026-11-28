@@ -23,38 +23,27 @@ mod flow;
 mod gateway;
 mod validation;
 
-use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation, RunMode};
+use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
 
-fn banner_for(mode: &RunMode) -> Banner {
-    match mode {
-        RunMode::Replay(_) => Banner::new("Payment Gateway Resilience Demo (strict replay)")
-            .description("Reconstructing recorded outcomes with gateway calls suppressed.")
-            .bullets(
-                "What this replay does",
-                [
-                    "Retry, circuit breaker, and rate limiter are configured for topology validation only; no live state moves",
-                    "Replay prints no sink lines, since it makes no sink calls",
-                ],
+fn main() -> std::process::ExitCode {
+    let presentation = Presentation::new(
+        Banner::new("Payment Gateway Resilience Demo")
+            .description(
+                "authorize_payment calls a simulated payment gateway. A circuit breaker, a retry \
+                 and a rate limiter control each call.",
             )
-            .config("journal_dir", "target/payment-gateway-logs"),
-        _ => Banner::new("Payment Gateway Resilience Demo")
-            .description("The gateway call is a replay-suppressed effect; retry, a circuit breaker, and a per-attempt limiter form the second layer.")
             .bullets(
-                "What to watch",
+                "Outcomes",
                 [
-                    "validate_order classifies once and authors multiple named facts; InvalidOrder goes to invalid_orders for intake review and CancelledOrder carries the order's fate",
-                    "Gateway declines are payment outcomes, not cancellations; PaymentDeclined reaches its own delivery",
-                    "Transient gateway failures receive bounded retry; sustained outages open the circuit breaker (obzenflow_circuit_breaker_*), and terminal unavailability does not cancel",
-                    "Re-run with --replay-from target/payment-gateway-logs/flows/<flow_id> to replay with zero gateway calls",
+                    "For an order that fails validation, validate_order sends InvalidOrder to invalid_orders and CancelledOrder to cancelled_orders",
+                    "When the gateway authorizes a payment, authorize_payment sends PaymentAuthorized to paid_orders",
+                    "When the gateway declines a payment, authorize_payment sends PaymentDeclined to declined_orders and does not cancel the order",
+                    "When a gateway call fails, authorize_payment sends PaymentAuthorizationUnavailable to manual_review and does not cancel the order",
                 ],
             )
             .config("flow_name", "payment_gateway_resilience_demo")
             .config("journal_dir", "target/payment-gateway-logs"),
-    }
-}
-
-fn main() -> std::process::ExitCode {
-    let presentation = Presentation::for_mode(banner_for);
+    );
 
     let config_file = concat!(
         env!("CARGO_MANIFEST_DIR"),
