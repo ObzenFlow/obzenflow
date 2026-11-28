@@ -206,7 +206,8 @@ fn join_or_none(names: &[String]) -> String {
 
 /// The closest known name to a typo, when one is within a small edit distance,
 /// so `web_order` suggests `web_orders`. `None` when nothing is close enough.
-fn closest_match<'a>(target: &str, candidates: &'a [String]) -> Option<&'a str> {
+#[doc(hidden)]
+pub fn closest_match<'a>(target: &str, candidates: &'a [String]) -> Option<&'a str> {
     let budget = 2.max(target.len() / 3);
     candidates
         .iter()

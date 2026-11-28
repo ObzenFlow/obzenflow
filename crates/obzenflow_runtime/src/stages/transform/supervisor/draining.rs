@@ -201,7 +201,7 @@ async fn dispatch_draining_inner<
                 ctx.runtime_execution
                     .dispatch_scope(ctx.stage_id, stage_input_position, None);
             if ctx.sink_batch.is_some() {
-                super::sink_batch::enqueue(
+                if super::sink_batch::enqueue(
                     ctx,
                     flow_context,
                     envelope,
@@ -209,7 +209,12 @@ async fn dispatch_draining_inner<
                     upstream_stage,
                     None,
                 )
-                .await?;
+                .await?
+                {
+                    return Ok(EventLoopDirective::Transition(
+                        TransformEvent::RecordingEnded,
+                    ));
+                }
                 return Ok(EventLoopDirective::Continue);
             }
             if super::direct_fact_continuation::start_if_eligible(
@@ -303,6 +308,11 @@ async fn dispatch_draining_inner<
                         error.downcast_ref::<crate::stages::common::handler_error::HandlerError>()
                     {
                         if let Some(fatal) = handler_error.as_fatal() {
+                            if super::sink_batch::rebuild_holds(ctx, fatal) {
+                                return Ok(EventLoopDirective::Transition(
+                                    TransformEvent::RecordingEnded,
+                                ));
+                            }
                             let writer_id = ctx.writer_id.ok_or_else(|| {
                                 "fatal transform drain input has no stage writer id".to_string()
                             })?;

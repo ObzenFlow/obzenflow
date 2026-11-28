@@ -237,6 +237,14 @@ pub(super) async fn dispatch_draining<
                         .await;
                     if let Err(err) = &accumulate_result {
                         if let Some(fatal) = err.as_fatal() {
+                            if super::rebuild_holds(ctx, fatal) {
+                                ctx.instrumentation
+                                    .in_flight_count
+                                    .fetch_sub(1, Ordering::Relaxed);
+                                return Ok(EventLoopDirective::Transition(
+                                    StatefulEvent::RecordingEnded,
+                                ));
+                            }
                             let duration = start.elapsed();
                             ctx.instrumentation
                                 .in_flight_count
@@ -439,6 +447,11 @@ pub(super) async fn dispatch_draining<
                                 }
                             }
                             Err(fatal) => {
+                                if super::rebuild_holds(ctx, &fatal) {
+                                    return Ok(EventLoopDirective::Transition(
+                                        StatefulEvent::RecordingEnded,
+                                    ));
+                                }
                                 let writer_id = ctx.writer_id.ok_or_else(|| {
                                     "fatal stateful drain emission has no stage writer id"
                                         .to_string()
@@ -1369,6 +1382,57 @@ mod tests {
                 "the failed input is acknowledged"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stateful_rebuild_hold_writes_truncated_eof() {
+        use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+        let mut total = draining_total().await;
+        let execution = RuntimeExecution::new(RuntimeMode::Rebuild { stages: Vec::new() }, None);
+        let (observer, mut ended) = tokio::sync::mpsc::unbounded_channel();
+        execution
+            .rebuild_control()
+            .unwrap()
+            .observe_recording_end(observer);
+        let resources = total.context.resources_mut().unwrap();
+        resources.runtime_execution = execution;
+        let fatal = crate::stages::common::handler_error::StageFatal::new(
+            StageFatalCode::Replay,
+            StageFatalReason::RecordingEnded,
+            "replay reached the end of its recording at stage 'total', input 1",
+        );
+        assert!(super::super::rebuild_holds(resources, &fatal));
+        StatefulAction::<Total>::ForwardEOF
+            .execute_resources(resources)
+            .await
+            .unwrap();
+        assert!(
+            ended.try_recv().is_err(),
+            "the hold is reported after the end"
+        );
+        StatefulAction::<Total>::ReportHold
+            .execute_resources(resources)
+            .await
+            .unwrap();
+        assert!(ended.try_recv().is_ok());
+        let written = total.data_journal.read_causally_ordered().await.unwrap();
+        let ends: Vec<EofKind> = written
+            .iter()
+            .filter_map(|record| match &record.payload {
+                ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends, vec![EofKind::Truncated]);
+        assert!(
+            total
+                .error_journal
+                .read_causally_ordered()
+                .await
+                .unwrap()
+                .is_empty(),
+            "a hold records no failure"
+        );
     }
 
     #[tokio::test]

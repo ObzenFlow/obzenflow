@@ -255,6 +255,14 @@ impl Presentation {
                 "This run resumes {}. It catches up on the recorded facts, and then it continues with live work from the last fact that the recorded run committed.\n",
                 ctx.source_label()
             )),
+            RunMode::Rebuild(ctx) => rendered.text.push_str(&format!(
+                "This run rebuilds the {} of {} from {}. It calls only the {} of {}, and it answers every other effect from the recording.\n",
+                destinations(&ctx.stages),
+                and_list(&ctx.stages),
+                ctx.source.source_label(),
+                systems(&ctx.stages),
+                and_list(&ctx.stages),
+            )),
         }
         rendered
     }
@@ -320,6 +328,45 @@ impl RunPresentationOutcome {
                 }
                 if offers.replay {
                     lines.push(format!("Replay this replay with: --replay-from {operand}"));
+                }
+            }
+            RunMode::Rebuild(ctx) => {
+                let source = ctx.source.archive_path.display();
+                match &ctx.tally {
+                    Some(tally) if tally.reached_last_settled_action => {
+                        let stages = and_list(&ctx.stages);
+                        lines.push(format!(
+                            "{flow_name} rebuilt the {} of {stages} from {source}.",
+                            destinations(&ctx.stages)
+                        ));
+                        lines.push(format!(
+                            "The rebuild called only the {} of {stages}. It answered every other effect from the recording.",
+                            systems(&ctx.stages)
+                        ));
+                        for sink in &tally.sinks {
+                            lines.push(format!(
+                                "The recording has a result for {} of {}. The rebuild made {} again.",
+                                count(sink.made, "call", "calls"),
+                                sink.stage,
+                                if sink.made == 1 { "this call" } else { "these calls" }
+                            ));
+                            if sink.unsettled > 0 {
+                                lines.push(format!(
+                                    "The recording has no result for {} of {}. A rebuild does not make these calls.",
+                                    count(sink.unsettled, "more input", "more inputs"),
+                                    sink.stage
+                                ));
+                            }
+                        }
+                        if tally.sinks.iter().any(|sink| sink.unsettled > 0) {
+                            lines.extend(ctx.advice.clone());
+                        }
+                        lines.push(format!("Journal: {location}"));
+                    }
+                    _ => {
+                        lines.push(format!("{flow_name} {verb} (rebuild from {source})."));
+                        lines.push(format!("Journal: {location}"));
+                    }
                 }
             }
             RunMode::Resume(ctx) => {
@@ -399,7 +446,10 @@ impl RunPresentationOutcome {
                     RunMode::Resume(ctx) => {
                         prefix = format!("{prefix} (resumed from {})", ctx.source_label());
                     }
-                    _ => {}
+                    RunMode::Rebuild(ctx) => {
+                        prefix = format!("{prefix} (rebuild from {})", ctx.source.source_label());
+                    }
+                    RunMode::Live => {}
                 }
                 match location {
                     Some(location) => format!("{prefix}: {error}\nJournal: {location}"),
@@ -407,6 +457,34 @@ impl RunPresentationOutcome {
                 }
             }
         }
+    }
+}
+
+pub(crate) fn and_list(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+fn count(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn destinations(stages: &[String]) -> &'static str {
+    if stages.len() == 1 {
+        "destination"
+    } else {
+        "destinations"
+    }
+}
+
+fn systems(stages: &[String]) -> &'static str {
+    if stages.len() == 1 {
+        "system"
+    } else {
+        "systems"
     }
 }
 
@@ -771,6 +849,58 @@ mod tests {
         assert_eq!(
             failed_without_name.footer(),
             "Flow failed: err\nJournal: tmp/run"
+        );
+    }
+
+    #[test]
+    fn unfinished_rebuild_prints_stopped_footer() {
+        use crate::journal::read::RebuildTally;
+        let rebuild = |reached| {
+            RunMode::Rebuild(super::super::run_mode::RebuildRunContext {
+                source: super::super::run_mode::ReplayRunContext {
+                    archive_path: PathBuf::from("runs/r1"),
+                    archive_flow_id: None,
+                    verify: false,
+                },
+                stages: vec!["case_register".to_string()],
+                tally: Some(RebuildTally {
+                    reached_last_settled_action: reached,
+                    sinks: vec![crate::journal::read::SinkTally {
+                        stage: "case_register".to_string(),
+                        made: 3,
+                        unsettled: 2,
+                    }],
+                }),
+                advice: Some("Resume runs/r1 to finish this run's work.".to_string()),
+            })
+        };
+        let stopped = RunPresentationOutcome::Stopped {
+            flow_name: "aml_overnight_monitoring".to_string(),
+            location: Some(CurrentRunLocator::new(PathBuf::from("runs/b"))),
+            run_mode: rebuild(false),
+            offers: ArchiveOffers::default(),
+        };
+        assert_eq!(
+            stopped.footer(),
+            "aml_overnight_monitoring stopped (rebuild from runs/r1).\nJournal: runs/b"
+        );
+        let ended = RunPresentationOutcome::Stopped {
+            flow_name: "aml_overnight_monitoring".to_string(),
+            location: Some(CurrentRunLocator::new(PathBuf::from("runs/b"))),
+            run_mode: rebuild(true),
+            offers: ArchiveOffers::default(),
+        };
+        assert_eq!(
+            ended.footer(),
+            "aml_overnight_monitoring rebuilt the destination of case_register from runs/r1.\n\
+             The rebuild called only the system of case_register. It answered every other effect \
+             from the recording.\n\
+             The recording has a result for 3 calls of case_register. The rebuild made these \
+             calls again.\n\
+             The recording has no result for 2 more inputs of case_register. A rebuild does not \
+             make these calls.\n\
+             Resume runs/r1 to finish this run's work.\n\
+             Journal: runs/b"
         );
     }
 

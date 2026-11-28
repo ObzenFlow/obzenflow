@@ -1952,8 +1952,9 @@ pub fn validate_stage_typing_metadata(
     Ok(())
 }
 
-/// The facts archive admission reads from the flow itself, namely its cycle
-/// members and each source's declared continuation.
+/// `archive_flow_evidence` returns the facts that archive admission reads from
+/// the flow itself. These facts are the cycle members, the declared continuation
+/// of each source and the guarantees of each effectful stage.
 pub fn archive_flow_evidence(
     topology: &obzenflow_topology::Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
@@ -1978,10 +1979,51 @@ pub(crate) fn flow_evidence_with_cycle(
         }
     }
     sources.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut guarantees = Vec::new();
+    for descriptor in descriptors.values() {
+        let declared = stage_guarantees(descriptor.as_ref());
+        if !declared.is_empty() {
+            guarantees.push((descriptor.name().to_string(), declared));
+        }
+    }
+    guarantees.sort();
     obzenflow_core::journal::archive_actions::FlowEvidence {
         cycle_members,
         sources,
+        guarantees,
     }
+}
+
+pub(crate) fn manifest_guarantees(
+    declared: Vec<obzenflow_core::journal::archive::EffectGuarantee>,
+    recorded: Vec<obzenflow_core::journal::archive::EffectGuarantee>,
+) -> Vec<obzenflow_core::journal::archive::EffectGuarantee> {
+    let mut guarantees = declared;
+    guarantees.extend(recorded);
+    guarantees.sort();
+    guarantees.dedup();
+    guarantees
+}
+
+pub(crate) fn stage_guarantees(
+    descriptor: &dyn StageDescriptor,
+) -> Vec<obzenflow_core::journal::archive::EffectGuarantee> {
+    use obzenflow_core::journal::archive::EffectGuarantee;
+    use obzenflow_runtime::effects::EffectSafety;
+    let mut guarantees: Vec<EffectGuarantee> = descriptor
+        .effect_declarations()
+        .iter()
+        .map(|declaration| match declaration.safety() {
+            EffectSafety::NonIdempotentAtLeastOnce => EffectGuarantee::AtLeastOnce,
+            EffectSafety::NonIdempotentAtMostOnce => EffectGuarantee::AtMostOnce,
+            EffectSafety::Idempotent
+            | EffectSafety::NonIdempotentRequiresKey
+            | EffectSafety::Transactional => EffectGuarantee::ExactlyOnce,
+        })
+        .collect();
+    guarantees.sort();
+    guarantees.dedup();
+    guarantees
 }
 
 /// Validate edge typing across forward edges in a built topology.

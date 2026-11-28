@@ -14,7 +14,9 @@ use super::{
 use crate::pipeline::metrics::compute_flow_lifecycle_metrics;
 use crate::pipeline::termination::ExecutionOutcome;
 use crate::pipeline::FlowStopMode;
-use crate::stages::common::stage_handle::{StageError, StageMilestone, STOP_REASON_TIMEOUT};
+use crate::stages::common::stage_handle::{
+    StageError, StageMilestone, STOP_REASON_RECORDING_ENDED, STOP_REASON_TIMEOUT,
+};
 use crate::stages::common::stage_lifecycle::{LifecycleExit, StageSnapshot};
 use crate::supervised_base::handler_supervised::SupervisorAction as H;
 use crate::supervised_base::publication;
@@ -113,6 +115,7 @@ pub(super) fn unhandled<'a>(
             | E::RunningPublished
             | E::TerminalPublished
             | E::StagesCrossed
+            | E::RecordingEnded
             | E::MetricsExited(_) => Ok(()),
             _ => Err(invalid_input(state, event)),
         }
@@ -331,6 +334,10 @@ pub(super) fn stop<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'
         let (mode, reason) = match event {
             E::GracefulStop { timeout } => (FlowStopMode::Graceful { timeout: *timeout }, None),
             E::Cancel => (FlowStopMode::Cancel, None),
+            E::RecordingEnded => (
+                FlowStopMode::Cancel,
+                Some(STOP_REASON_RECORDING_ENDED.to_owned()),
+            ),
             E::GracefulStopExpired if ctx.stop_intent.timeout_due() => {
                 (FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.to_owned()))
             }

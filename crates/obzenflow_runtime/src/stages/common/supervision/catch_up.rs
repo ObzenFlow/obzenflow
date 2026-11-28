@@ -72,6 +72,7 @@ pub(crate) enum CatchUpAction {
     RecordBoundary {
         generation: ReaderGeneration,
     },
+    RecordShareEnd,
 }
 
 pub(crate) struct MarkerWriter {
@@ -194,6 +195,20 @@ impl CatchUpContext {
         Some(ActionDeparture::skipped(self.stage_key.clone(), None, expected).stage_fatal())
     }
 
+    fn rebuilds(&self) -> bool {
+        self.execution
+            .rebuild_control()
+            .is_some_and(|control| control.is_named(self.stage_id))
+    }
+
+    fn unreproduced_settled(&self) -> Option<StageFatal> {
+        let Recorded::Actions(history) = &self.recorded else {
+            return None;
+        };
+        let expected = history.actions().next_unreproduced_settled()?;
+        Some(ActionDeparture::skipped(self.stage_key.clone(), None, expected).stage_fatal())
+    }
+
     fn failure(&self, error: FsmError) -> StageFatal {
         match error {
             FsmError::UnhandledEvent { state, event } => StageFatal::new(
@@ -299,6 +314,18 @@ impl CatchUpContext {
     }
 }
 
+pub(crate) fn checks_input_end(
+    execution: &RuntimeExecution,
+    stage_id: StageId,
+    kind: obzenflow_core::event::payloads::flow_control_payload::EofKind,
+) -> bool {
+    let natural = kind == obzenflow_core::event::payloads::flow_control_payload::EofKind::Natural;
+    match execution.rebuild_control() {
+        Some(control) if control.is_named(stage_id) => natural || !control.source_stopped(),
+        _ => natural,
+    }
+}
+
 fn to(next_state: CatchUpState) -> Transition<CatchUpState, CatchUpAction> {
     Transition {
         next_state,
@@ -341,6 +368,15 @@ fn step(
             match ctx.unreproduced() {
                 Some(fatal) => to(CatchUpState::Refused { fatal }),
                 None => to(state.clone()),
+            }
+        }
+        (CatchUpState::Rebuilding { .. }, CatchUpEvent::InputsEnded) if ctx.rebuilds() => {
+            match ctx.unreproduced_settled() {
+                Some(fatal) => to(CatchUpState::Refused { fatal }),
+                None => Transition {
+                    next_state: state.clone(),
+                    actions: vec![CatchUpAction::RecordShareEnd],
+                },
             }
         }
         _ => to(state.clone()),
@@ -415,6 +451,12 @@ impl FsmAction for CatchUpAction {
             Self::RecordBoundary { generation } => {
                 if let Some(control) = ctx.execution.resume_control() {
                     control.record_generation_boundary(ctx.stage_id, *generation);
+                }
+                Ok(())
+            }
+            Self::RecordShareEnd => {
+                if let Some(control) = ctx.execution.rebuild_control() {
+                    control.record_share_end(ctx.stage_id);
                 }
                 Ok(())
             }
@@ -1012,5 +1054,132 @@ mod tests {
             CatchUpDisposition::Consumed
         ));
         assert_eq!(stage.journal.markers(), vec![1, 2]);
+    }
+
+    fn rebuild(named: bool) -> Stage {
+        let id = StageId::new();
+        let execution = RuntimeExecution::new(
+            crate::execution::RuntimeMode::Rebuild {
+                stages: if named { vec![id] } else { Vec::new() },
+            },
+            None,
+        );
+        let journal = RecordingJournal::new();
+        let catch_up =
+            CatchUpHandle::with_context(context(id, "allocate_stock", execution.clone(), None));
+        Stage {
+            id,
+            journal,
+            execution,
+            catch_up,
+        }
+    }
+
+    fn in_doubt(input: u64) -> RecordedAction {
+        RecordedAction::Effect {
+            cursor: EffectCursor::new("flow_k", "allocate_stock", input, EffectOrdinal::new(0)),
+            effect_type: EffectType::from("allocation.reserve_stock"),
+            in_doubt: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_sink_short_input_refused() {
+        use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+        for kind in [EofKind::Natural, EofKind::Truncated, EofKind::Poison] {
+            let stage = rebuild(true);
+            with_actions(&stage, vec![effect(4)]).await;
+            assert!(checks_input_end(&stage.execution, stage.id, kind));
+            match stage.catch_up.send(CatchUpEvent::InputsEnded).await {
+                CatchUpDisposition::Refused(fatal) => {
+                    assert_eq!(fatal.reason, StageFatalReason::UnusedEffectHistory);
+                    assert!(fatal
+                        .departure
+                        .is_some_and(|departure| departure.offered.is_none()));
+                }
+                other => panic!("{kind:?}: a short input must refuse: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_sink_stopped_end_consumed() {
+        use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+        let stage = rebuild(true);
+        stage
+            .execution
+            .rebuild_control()
+            .unwrap()
+            .record_source_stop();
+        assert!(!checks_input_end(
+            &stage.execution,
+            stage.id,
+            EofKind::Truncated
+        ));
+        assert!(!checks_input_end(
+            &stage.execution,
+            stage.id,
+            EofKind::Poison
+        ));
+        assert!(checks_input_end(
+            &stage.execution,
+            stage.id,
+            EofKind::Natural
+        ));
+    }
+
+    #[tokio::test]
+    async fn rebuild_sink_in_doubt_tail_consumed() {
+        let stage = rebuild(true);
+        with_actions(&stage, vec![in_doubt(4)]).await;
+        let (observer, mut ended) = tokio::sync::mpsc::unbounded_channel();
+        let control = stage.execution.rebuild_control().unwrap().clone();
+        control.observe_recording_end(observer);
+        control.record_hold();
+        assert!(matches!(
+            stage.catch_up.send(CatchUpEvent::InputsEnded).await,
+            CatchUpDisposition::Consumed
+        ));
+        assert!(
+            ended.try_recv().is_ok(),
+            "the named sink reached its share end"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_unnamed_stage_short_input_consumed() {
+        use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+        let stage = rebuild(false);
+        with_actions(&stage, vec![effect(4)]).await;
+        assert!(!checks_input_end(
+            &stage.execution,
+            stage.id,
+            EofKind::Truncated
+        ));
+        assert!(matches!(
+            stage.catch_up.send(CatchUpEvent::InputsEnded).await,
+            CatchUpDisposition::Consumed
+        ));
+    }
+
+    #[tokio::test]
+    async fn resume_truncated_input_end_consumed() {
+        use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+        let stage = stage(resumed(1), true);
+        assert!(!checks_input_end(
+            &stage.execution,
+            stage.id,
+            EofKind::Truncated
+        ));
+        assert!(!checks_input_end(
+            &stage.execution,
+            stage.id,
+            EofKind::Poison
+        ));
+        assert!(checks_input_end(
+            &stage.execution,
+            stage.id,
+            EofKind::Natural
+        ));
     }
 }

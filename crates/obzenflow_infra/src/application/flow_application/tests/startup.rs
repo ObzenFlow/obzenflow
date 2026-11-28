@@ -776,3 +776,28 @@ shutdown_timeout_secs = 2
 
     phonebook_task.abort();
 }
+
+#[test]
+fn banner_followed_link_names_link_kind() {
+    use obzenflow_runtime::bootstrap::ReplayVerb;
+    use std::path::Path;
+    let opened = Path::new("/runs/r1");
+    let requested = Path::new("runs/p");
+    let rebuild = Path::new("/runs/b");
+    assert_eq!(
+        followed_link_line(ReplayVerb::Resume, opened, requested, None),
+        "Resuming /runs/r1, the run that runs/p replays."
+    );
+    assert_eq!(
+        followed_link_line(ReplayVerb::Rebuild, opened, requested, None),
+        "Rebuilding from /runs/r1, the run that runs/p replays."
+    );
+    assert_eq!(
+        followed_link_line(ReplayVerb::Resume, opened, requested, Some(rebuild)),
+        "Resuming /runs/r1, the run that /runs/b rebuilt."
+    );
+    assert_eq!(
+        followed_link_line(ReplayVerb::Rebuild, opened, requested, Some(rebuild)),
+        "Rebuilding from /runs/r1, the run that /runs/b rebuilt."
+    );
+}

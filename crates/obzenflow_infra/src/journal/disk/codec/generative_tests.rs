@@ -462,6 +462,7 @@ proptest! {
             longest,
             "src",
             &directory.path().join("head"),
+            obzenflow_core::journal::archive_actions::ReplayVerb::Resume,
         );
         if prefix {
             prop_assert!(verdict.is_ok(), "{:?}", verdict.err());

@@ -49,6 +49,9 @@ pub enum StageFatalReason {
     UnusedFactHistory,
     /// The destination cannot continue from its last recorded state.
     DestinationChanged,
+    /// This run cannot write to the destination. This stop does not show a
+    /// change to the destination.
+    DestinationUnwritable,
     ConfigurationInvariant,
     EffectTargetAssertionMismatch,
     EffectPortRegistrationMissing,

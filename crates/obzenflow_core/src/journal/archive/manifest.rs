@@ -17,7 +17,7 @@ pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
 /// One version for the journal records, physical frames, and run manifest.
 /// Breaking any of these contracts requires a bump here and fresh archives.
 /// Framework package versions are provenance only, never archive admission gates.
-pub const JOURNAL_SCHEMA_VERSION: &str = "28.0";
+pub const JOURNAL_SCHEMA_VERSION: &str = "29.0";
 pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 /// Every persisted effect descriptor carries an explicit portless/named binding identity.
@@ -42,6 +42,8 @@ pub struct RunManifest {
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<RunManifestReplayConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuild: Option<RunManifestRebuildConfig>,
     /// Present when this run is a resume of a recorded archive (FLOWIP-120n).
     /// Omission is the current schema's representation of a non-resume run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,6 +97,14 @@ pub struct RunManifestReplayConfig {
     /// The archive this run read, canonicalized (FLOWIP-134i B16).
     pub replay_from: String,
     pub allow_incomplete_archive: bool,
+}
+
+/// `RunManifestRebuildConfig` names the run that a rebuild rebuilt, by its
+/// canonical path, and the sink stages whose destinations the rebuild wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunManifestRebuildConfig {
+    pub rebuilt_from: String,
+    pub stages: Vec<String>,
 }
 
 /// Present when this run is a resume of a recorded archive (FLOWIP-120n).
@@ -183,6 +193,36 @@ pub struct RunManifestStage {
     pub max_open_keys: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_continuation: Option<crate::source::SourceContinuation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guarantees: Vec<EffectGuarantee>,
+}
+
+/// `EffectGuarantee` is the guarantee that a port method declares for the
+/// calls that it makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectGuarantee {
+    ExactlyOnce,
+    AtLeastOnce,
+    AtMostOnce,
+}
+
+impl EffectGuarantee {
+    /// `word` returns the guarantee as a port method declares it, for example
+    /// `exactly_once`.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::ExactlyOnce => "exactly_once",
+            Self::AtLeastOnce => "at_least_once",
+            Self::AtMostOnce => "at_most_once",
+        }
+    }
+}
+
+impl std::fmt::Display for EffectGuarantee {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.word())
+    }
 }
 
 /// How a stage's input delivery order is fixed.
@@ -225,6 +265,7 @@ mod tests {
             flow_name: "test".to_string(),
             created_at: Utc::now(),
             replay: None,
+            rebuild: None,
             resume: None,
             interrupted_appends: Vec::new(),
             stages: HashMap::new(),

@@ -8,6 +8,7 @@
 
 use obzenflow_core::journal::archive::manifest::{RunManifest, JOURNAL_SCHEMA_VERSION};
 use obzenflow_core::journal::archive::ReplayError;
+use obzenflow_core::journal::archive_actions::ReplayVerb;
 use obzenflow_core::FlowId;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, TryLockError};
@@ -199,6 +200,7 @@ pub(crate) fn publish_claim(
             .map_err(|error| io_error(failed(), error)),
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
             Err(ReplayError::AlreadyContinued {
+                verb: ReplayVerb::Resume,
                 archive: run.to_path_buf(),
                 head: history_head(run)?,
             })
@@ -207,24 +209,35 @@ pub(crate) fn publish_claim(
     }
 }
 
-pub(crate) fn admit(run: &Path, manifest: &RunManifest) -> Result<bool, ReplayError> {
+pub(crate) fn admit(
+    run: &Path,
+    manifest: &RunManifest,
+    verb: ReplayVerb,
+) -> Result<bool, ReplayError> {
     if has_live_writer(run, manifest)? {
         return Ok(true);
     }
-    admit_stopped(run, manifest)?;
-    refuse_unwritable(run)?;
+    admit_stopped(run, manifest, verb)?;
+    if verb == ReplayVerb::Resume {
+        refuse_unwritable(run)?;
+    }
     Ok(false)
 }
 
-pub(crate) fn admit_stopped(run: &Path, manifest: &RunManifest) -> Result<(), ReplayError> {
+pub(crate) fn admit_stopped(
+    run: &Path,
+    manifest: &RunManifest,
+    verb: ReplayVerb,
+) -> Result<(), ReplayError> {
     if read_claim(run)?.is_some() {
         return Err(ReplayError::AlreadyContinued {
+            verb,
             archive: run.to_path_buf(),
             head: history_head(run)?,
         });
     }
     if let Some(resume) = &manifest.resume {
-        refuse_orphan(run, manifest, &resume.resumed_from)?;
+        refuse_orphan(run, manifest, &resume.resumed_from, verb)?;
     }
     Ok(())
 }
@@ -296,14 +309,21 @@ pub(crate) fn takeover(
 
 /// A resumed run that never took over its parent is an orphan that ran no
 /// stage; resuming it names the run to resume instead.
-fn refuse_orphan(run: &Path, manifest: &RunManifest, parent: &Path) -> Result<(), ReplayError> {
+fn refuse_orphan(
+    run: &Path,
+    manifest: &RunManifest,
+    parent: &Path,
+    verb: ReplayVerb,
+) -> Result<(), ReplayError> {
     match takeover(run, manifest, parent)? {
         Takeover::Held => Ok(()),
         Takeover::StoppedBefore => Err(ReplayError::StoppedBeforeTakeover {
+            verb,
             archive: run.to_path_buf(),
             parent: parent.to_path_buf(),
         }),
         Takeover::Lost { head } => Err(ReplayError::ContinuedByAnother {
+            verb,
             archive: run.to_path_buf(),
             parent: parent.to_path_buf(),
             head,
@@ -365,7 +385,7 @@ mod tests {
             })
         );
         match publish_claim(&runs[0], FlowId::new(), &runs[2]) {
-            Err(ReplayError::AlreadyContinued { archive, head }) => {
+            Err(ReplayError::AlreadyContinued { archive, head, .. }) => {
                 assert_eq!((archive, head), (runs[0].clone(), runs[1].clone()));
             }
             other => panic!("a second successor must lose the claim: {other:?}"),

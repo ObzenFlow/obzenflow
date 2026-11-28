@@ -22,7 +22,9 @@ mod config_changes;
 mod earlier;
 mod lineage;
 mod merge;
+mod rebuild;
 mod rejections;
+pub(crate) use config_changes::read_stage_stops;
 pub use config_changes::{
     compare_with_runs, read_config_changes, read_configuration_refusals,
     read_logic_version_changes, ConfigChanges, LogicVersionChange, RunConfigChanges,
@@ -32,6 +34,9 @@ pub use lineage::{
     read_run_lineage, EvidenceHolder, InterruptedTail, Rebuild, ResumedFrom, RunLineage, Standing,
 };
 pub use obzenflow_runtime::runtime_config::ConfigDifference;
+#[cfg(test)]
+pub(crate) use rebuild::SinkTally;
+pub(crate) use rebuild::{read_rebuild_tally, RebuildTally};
 pub use rejections::RecordedAt;
 
 #[derive(Debug, thiserror::Error)]

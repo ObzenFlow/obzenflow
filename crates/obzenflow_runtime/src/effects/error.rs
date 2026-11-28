@@ -16,6 +16,12 @@ pub enum EffectError {
     #[error("{message}")]
     DestinationChanged { message: String },
 
+    /// This run cannot write to the destination. This error does not show a
+    /// change to the destination. The stage stops before the call settles, so a
+    /// later run makes the call.
+    #[error("{message}")]
+    DestinationUnwritable { message: String },
+
     #[error("effect serialization failed: {0}")]
     Serialization(String),
 
@@ -320,7 +326,9 @@ fn descriptor_mismatch_message(
 impl EffectError {
     pub(super) fn ensure_recordable_failure(&self) -> Result<(), Self> {
         match self {
-            Self::DestinationChanged { .. } => Err(self.clone()),
+            Self::DestinationChanged { .. } | Self::DestinationUnwritable { .. } => {
+                Err(self.clone())
+            }
             _ => Ok(()),
         }
     }
@@ -386,7 +394,9 @@ impl EffectError {
 
     fn recovery_eligible_by_default(&self) -> bool {
         match self {
-            EffectError::BindingAuthority { .. } | EffectError::DestinationChanged { .. } => false,
+            EffectError::BindingAuthority { .. }
+            | EffectError::DestinationChanged { .. }
+            | EffectError::DestinationUnwritable { .. } => false,
             EffectError::RecordedFailure { retry, .. }
             | EffectError::BoundaryRejected { retry, .. }
             | EffectError::DependencyFailed { retry, .. } => retry.is_retryable(),
@@ -437,6 +447,7 @@ impl EffectError {
             | "other"
             | "binding_authority_fault"
             | "destination_changed"
+            | "destination_unwritable"
             | "serialization"
             | "journal"
             | "missing_recorded_effect"
@@ -467,6 +478,7 @@ impl EffectError {
         match self {
             EffectError::BindingAuthority { .. } => "binding_authority_fault",
             EffectError::DestinationChanged { .. } => "destination_changed",
+            EffectError::DestinationUnwritable { .. } => "destination_unwritable",
             EffectError::Serialization(_) => "serialization",
             EffectError::Journal(_) => "journal",
             EffectError::MissingRecordedEffect { .. } => "missing_recorded_effect",
@@ -513,6 +525,7 @@ impl EffectError {
     pub fn semantic_reason(&self) -> std::borrow::Cow<'_, str> {
         match self {
             EffectError::DestinationChanged { message }
+            | EffectError::DestinationUnwritable { message }
             | EffectError::Execution(message)
             | EffectError::Timeout(message)
             | EffectError::Transport(message)

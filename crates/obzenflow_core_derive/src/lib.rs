@@ -70,6 +70,11 @@ pub fn runtime_command(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// versions the request's shape, and `records = reply` makes the method's
 /// answer a reply the runtime records and returns, which writes no fact.
 ///
+/// In a rebuild that `--rebuild-from` starts, the runtime compares each new
+/// reply with the recorded reply. The first new reply that differs stops the
+/// rebuild. A reply with a value that changes at each call, such as the time
+/// of the call, never equals the recorded reply.
+///
 /// Every sink or effectful row using the method inherits its guarantee.
 /// The guarantee describes the call at the other end:
 ///

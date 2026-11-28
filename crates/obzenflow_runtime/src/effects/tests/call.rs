@@ -962,3 +962,415 @@ fn nested_request_hash_matches_recording() {
         "13674e8b3703710250cfe837b12a4919c0d457d364e07a0c25e7497d8741dfa7"
     );
 }
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct UnwritableAppend(u64);
+
+struct UnwritableRegister;
+
+#[crate::effects::port]
+impl UnwritableRegister {
+    #[effect(type = "test.unwritable_append", exactly_once, records = reply)]
+    fn append(&self, _: &UnwritableAppend) -> Result<(), EffectError> {
+        Err(EffectError::DestinationUnwritable {
+            message: "another run writes the register".into(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn unwritable_destination_records_no_outcome() {
+    for boundary in [
+        test_allow_all_effect_boundary(),
+        recording_entry_point_boundary().0,
+    ] {
+        let stage = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+        let port = Port::to(UnwritableRegister);
+        let declaration = declaration_for::<Call<UnwritableAppend>, _>(&port);
+        let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+            .unwrap()
+            .into_run_registry();
+        let ctx = ledger_context(
+            journal.clone(),
+            stage,
+            registry,
+            vec![declaration.runtime_projection()],
+            None,
+        );
+        let role = perform(|row: &LedgerWritten| UnwritableAppend(row.value)).through(port);
+        let mut group = Box::new(super::super::runtime::SinkGroup::new(
+            Arc::new(role),
+            boundary,
+        ));
+        admit_ledger_rows(group.as_mut(), &ctx, stage, 2).await;
+        let (index, error) = group.finish().await.unwrap_err();
+        assert_eq!(index, 0);
+        assert_eq!(
+            error.as_fatal().unwrap().reason,
+            obzenflow_core::event::StageFatalReason::DestinationUnwritable
+        );
+        assert!(journal.events().is_empty());
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct RebuildRow {
+    value: u64,
+}
+
+struct RebuildRegister {
+    calls: Arc<AtomicUsize>,
+    offset: u64,
+    fails: bool,
+}
+
+#[crate::effects::port]
+impl RebuildRegister {
+    #[effect(type = "test.rebuild_append", exactly_once, records = reply)]
+    fn append(&self, row: &RebuildRow) -> Result<u64, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fails {
+            return Err(EffectError::Execution("the register write failed".into()));
+        }
+        Ok(row.value + self.offset)
+    }
+}
+
+fn rebuild_register(calls: &Arc<AtomicUsize>, offset: u64, fails: bool) -> Port<RebuildRegister> {
+    Port::to(RebuildRegister {
+        calls: calls.clone(),
+        offset,
+        fails,
+    })
+}
+
+async fn recorded_register(stage: StageId, rows: u64) -> Arc<EffectHistory> {
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let port = rebuild_register(&calls, 0, false);
+    let declaration = declaration_for::<Call<RebuildRow>, _>(&port);
+    let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+        .unwrap()
+        .into_run_registry();
+    let ctx = ledger_context(
+        journal.clone(),
+        stage,
+        registry,
+        vec![declaration.runtime_projection()],
+        None,
+    );
+    let role = perform(|row: &LedgerWritten| RebuildRow { value: row.value }).through(port);
+    let mut group = Box::new(super::super::runtime::SinkGroup::new(
+        Arc::new(role),
+        test_allow_all_effect_boundary(),
+    ));
+    admit_ledger_rows(group.as_mut(), &ctx, stage, rows).await;
+    assert!(group.finish().await.unwrap().iter().all(Result::is_ok));
+    let records = effect_records(&journal);
+    Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("the live history indexes"),
+    )
+}
+
+struct Rebuilt {
+    journal: Arc<MemoryJournal<ChainEvent>>,
+    calls: Arc<AtomicUsize>,
+    outcome: Result<Vec<Result<(), HandlerError>>, (usize, HandlerError)>,
+}
+
+async fn rebuild_rows(
+    stage: StageId,
+    history: Arc<EffectHistory>,
+    named: bool,
+    register: (u64, bool),
+    rows: u64,
+    request: fn(&LedgerWritten) -> RebuildRow,
+) -> Rebuilt {
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let port = rebuild_register(&calls, register.0, register.1);
+    let declaration = declaration_for::<Call<RebuildRow>, _>(&port);
+    let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+        .unwrap()
+        .into_run_registry();
+    let mut ctx = ledger_context(
+        journal.clone(),
+        stage,
+        registry,
+        vec![declaration.runtime_projection()],
+        Some(history),
+    );
+    let stages = if named {
+        vec![ctx.stage.stage_id]
+    } else {
+        Vec::new()
+    };
+    stage_mut(&mut ctx).runtime_execution = crate::execution::RuntimeExecution::new(
+        crate::execution::RuntimeMode::Rebuild { stages },
+        None,
+    );
+    let role = perform(request).through(port);
+    let mut group = Box::new(super::super::runtime::SinkGroup::new(
+        Arc::new(role),
+        test_allow_all_effect_boundary(),
+    ));
+    let mut halted = None;
+    for n in 1..=rows {
+        let parent = crate::testing::causal_fixture::committed_input(
+            JournalWriterId::new(),
+            ChainEventFactory::data_event(
+                WriterId::from(stage),
+                LedgerWritten::EVENT_TYPE,
+                std::num::NonZeroU32::MIN,
+                json!({"value":n}),
+            ),
+        );
+        if let Err(error) = group
+            .admit(EffectInvocationContext {
+                stage: ctx.stage.clone(),
+                input_seq: StageInputPosition(n),
+                parent: parent.into(),
+                backpressure_writer: ctx.backpressure_writer.clone(),
+                emit_enabled: false,
+                effect_boundary: None,
+            })
+            .await
+        {
+            halted = Some((n as usize - 1, error));
+            break;
+        }
+    }
+    let outcome = match halted {
+        Some(halted) => Err(halted),
+        None => group.finish().await,
+    };
+    Rebuilt {
+        journal,
+        calls,
+        outcome,
+    }
+}
+
+fn same_row(row: &LedgerWritten) -> RebuildRow {
+    RebuildRow { value: row.value }
+}
+
+fn fatal_reason(rebuilt: &Rebuilt) -> Option<obzenflow_core::event::StageFatalReason> {
+    match &rebuilt.outcome {
+        Err((_, error)) => error.as_fatal().map(|fatal| fatal.reason),
+        Ok(results) => results
+            .iter()
+            .find_map(|result| result.as_ref().err().and_then(HandlerError::as_fatal))
+            .map(|fatal| fatal.reason),
+    }
+}
+
+#[tokio::test]
+async fn rebuild_unnamed_sink_reaches_no_port() {
+    let stage = StageId::new();
+    let history = recorded_register(stage, 3).await;
+    let rebuilt = rebuild_rows(stage, history, false, (0, false), 3, same_row).await;
+    assert_eq!(rebuilt.calls.load(Ordering::SeqCst), 0);
+    assert!(rebuilt.outcome.unwrap().iter().all(Result::is_ok));
+}
+
+#[tokio::test]
+async fn rebuild_named_sink_repeats_recorded_successes() {
+    let stage = StageId::new();
+    let history = recorded_register(stage, 3).await;
+    let rebuilt = rebuild_rows(stage, history, true, (0, false), 3, same_row).await;
+    assert_eq!(rebuilt.calls.load(Ordering::SeqCst), 3);
+    assert!(rebuilt.outcome.unwrap().iter().all(Result::is_ok));
+    let records = effect_records(&rebuilt.journal);
+    assert_eq!(records.len(), 3);
+    assert!(rebuilt
+        .journal
+        .events()
+        .iter()
+        .all(|event| event.authored().replay_context.is_none()));
+}
+
+#[tokio::test]
+async fn rebuild_changed_request_refused() {
+    let stage = StageId::new();
+    let history = recorded_register(stage, 3).await;
+    let rebuilt = rebuild_rows(stage, history, true, (0, false), 3, |row| RebuildRow {
+        value: row.value + 100,
+    })
+    .await;
+    assert_eq!(rebuilt.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fatal_reason(&rebuilt),
+        Some(obzenflow_core::event::StageFatalReason::DescriptorMismatch)
+    );
+}
+
+#[tokio::test]
+async fn rebuild_changed_reply_fails() {
+    let stage = StageId::new();
+    let history = recorded_register(stage, 2).await;
+    let rebuilt = rebuild_rows(stage, history, true, (1, false), 2, same_row).await;
+    assert_eq!(rebuilt.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        effect_records(&rebuilt.journal).len(),
+        2,
+        "the group records its outcomes"
+    );
+    let fatal = match &rebuilt.outcome {
+        Ok(results) => results[0].as_ref().unwrap_err().as_fatal().unwrap().clone(),
+        Err((_, error)) => error.as_fatal().unwrap().clone(),
+    };
+    assert_eq!(
+        fatal.reason,
+        obzenflow_core::event::StageFatalReason::DestinationChanged
+    );
+    assert!(
+        fatal
+            .detail
+            .ends_with("#1/0: the destination's reply differs from the recording"),
+        "{}",
+        fatal.detail
+    );
+}
+
+#[tokio::test]
+async fn rebuild_failed_call_fails() {
+    let stage = StageId::new();
+    let history = recorded_register(stage, 1).await;
+    let rebuilt = rebuild_rows(stage, history, true, (0, true), 1, same_row).await;
+    assert_eq!(rebuilt.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fatal_reason(&rebuilt),
+        Some(obzenflow_core::event::StageFatalReason::DestinationUnwritable)
+    );
+}
+
+#[tokio::test]
+async fn rebuild_unsettled_call_reaches_no_port() {
+    let stage = StageId::new();
+    let history = recorded_register(stage, 2).await;
+    let rebuilt = rebuild_rows(stage, history, true, (0, false), 3, same_row).await;
+    let Err((index, error)) = &rebuilt.outcome else {
+        panic!(
+            "the third input is beyond the recording: {:?}",
+            rebuilt.outcome
+        );
+    };
+    assert_eq!(*index, 2);
+    assert_eq!(
+        error.as_fatal().unwrap().reason,
+        obzenflow_core::event::StageFatalReason::RecordingEnded
+    );
+    assert_eq!(
+        rebuilt.calls.load(Ordering::SeqCst),
+        0,
+        "the open group makes its calls only when it closes"
+    );
+}
+
+#[tokio::test]
+async fn rebuild_recorded_failure_reaches_no_port() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let port = Port::to(FailEveryWrite(calls.clone()));
+    let declaration = declaration_for::<Call<FailedWrite>, _>(&port);
+    let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+        .unwrap()
+        .into_run_registry();
+    let ctx = ledger_context(
+        journal.clone(),
+        stage,
+        registry.clone(),
+        vec![declaration.runtime_projection()],
+        None,
+    );
+    let role =
+        perform(|row: &LedgerWritten| FailedWrite { value: row.value }).through(port.clone());
+    let mut group = Box::new(super::super::runtime::SinkGroup::new(
+        Arc::new(role),
+        test_allow_all_effect_boundary(),
+    ));
+    admit_ledger_rows(group.as_mut(), &ctx, stage, 1).await;
+    group.finish().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let records = effect_records(&journal);
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("the live history indexes"),
+    );
+    let mut rebuild = ledger_context(
+        Arc::new(MemoryJournal::new(JournalOwner::stage(stage))),
+        stage,
+        registry,
+        vec![declaration.runtime_projection()],
+        Some(history),
+    );
+    let named = rebuild.stage.stage_id;
+    stage_mut(&mut rebuild).runtime_execution = crate::execution::RuntimeExecution::new(
+        crate::execution::RuntimeMode::Rebuild {
+            stages: vec![named],
+        },
+        None,
+    );
+    let role = perform(|row: &LedgerWritten| FailedWrite { value: row.value }).through(port);
+    let mut group = Box::new(super::super::runtime::SinkGroup::new(
+        Arc::new(role),
+        test_allow_all_effect_boundary(),
+    ));
+    admit_ledger_rows(group.as_mut(), &rebuild, stage, 1).await;
+    let results = group.finish().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the rebuild makes no call");
+    assert!(results[0].is_err(), "the recorded failure reproduces");
+}
+
+#[tokio::test]
+async fn rebuild_upstream_effect_reads_recording() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let system: Port<dyn LedgerPort> = Port::to(counting_ledger(&calls));
+    let declaration = declaration_for::<Call<LedgerWrite>, _>(&system);
+    let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+        .unwrap()
+        .into_run_registry();
+    let mut live = Effects::<LedgerWritten, Allowed<(LedgerWrite, ())>>::new(ledger_context(
+        journal.clone(),
+        stage,
+        registry.clone(),
+        vec![declaration.runtime_projection()],
+        None,
+    ));
+    let recorded = live
+        .call(LedgerWrite { value: 4 })
+        .await
+        .expect("the live call succeeds");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let records = effect_records(&journal);
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("the live history indexes"),
+    );
+    let mut ctx = ledger_context(
+        Arc::new(MemoryJournal::new(JournalOwner::stage(stage))),
+        stage,
+        registry,
+        vec![declaration.runtime_projection()],
+        Some(history),
+    );
+    stage_mut(&mut ctx).runtime_execution = crate::execution::RuntimeExecution::new(
+        crate::execution::RuntimeMode::Rebuild {
+            stages: vec![StageId::new()],
+        },
+        None,
+    );
+    let mut rebuild = Effects::<LedgerWritten, Allowed<(LedgerWrite, ())>>::new(ctx);
+    let answered = rebuild
+        .call(LedgerWrite { value: 4 })
+        .await
+        .expect("the recording answers the call");
+    assert_eq!(answered, recorded);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the rebuild makes no call");
+}

@@ -617,6 +617,69 @@ mod tests {
     }
 
     #[test]
+    fn flow_evidence_console_sink_lists_at_least_once() {
+        use obzenflow_core::journal::archive::EffectGuarantee;
+        let console = obzenflow_adapters::sinks::ConsoleSink::<OutputEvent, _>::new(
+            obzenflow_adapters::sinks::JsonFormatter,
+        );
+        let discard = DiscardSink::<OutputEvent>::new();
+        let descriptors = std::collections::HashMap::from([
+            (
+                "console".to_string(),
+                crate::sink!(name: "console", OutputEvent => console),
+            ),
+            (
+                "discard".to_string(),
+                crate::sink!(name: "discard", OutputEvent => discard),
+            ),
+        ]);
+        let evidence = crate::dsl::typing::flow_evidence_with_cycle(Vec::new(), &descriptors);
+        let console = evidence
+            .guarantees
+            .iter()
+            .find(|(stage, _)| stage == "console")
+            .map(|(_, guarantees)| guarantees.clone());
+        assert_eq!(console, Some(vec![EffectGuarantee::AtLeastOnce]));
+    }
+
+    #[test]
+    fn resume_manifest_changed_guarantee_keeps_recorded() {
+        use obzenflow_core::journal::archive::EffectGuarantee;
+        assert_eq!(
+            crate::dsl::typing::manifest_guarantees(
+                vec![EffectGuarantee::ExactlyOnce],
+                vec![EffectGuarantee::AtMostOnce],
+            ),
+            vec![EffectGuarantee::ExactlyOnce, EffectGuarantee::AtMostOnce]
+        );
+    }
+
+    #[test]
+    fn rebuild_non_sink_stage_refused() {
+        let sinks = [
+            "case_register",
+            "cleared",
+            "totals_report",
+            "unopened_alerts",
+            "unscored",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let refusal = crate::dsl::FlowBuildError::UnknownSinks {
+            run: std::path::PathBuf::from("/runs/r1"),
+            keys: vec!["case_registr".to_string()],
+            sinks,
+        };
+        assert_eq!(
+            refusal.to_string(),
+            "ObzenFlow cannot rebuild from /runs/r1, because the flow has no sink \
+             'case_registr'.\nName a sink with --stage. The sinks of this flow are \
+             case_register, cleared, totals_report, unopened_alerts and unscored. Did you mean \
+             'case_register'?"
+        );
+    }
+
+    #[test]
     fn typed_macros_attach_metadata_for_exact_handlers() {
         let sync_exact = SyncExactSource;
         let async_exact = AsyncExactSource;

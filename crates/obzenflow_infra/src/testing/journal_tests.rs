@@ -142,6 +142,7 @@ async fn archive_observation_rewrite_preserves_both_metrics_consumers() {
         flow_name: "rewrite_regression".into(),
         created_at: chrono::Utc::now(),
         replay: None,
+        rebuild: None,
         resume: None,
         interrupted_appends: Vec::new(),
         stages: Default::default(),
@@ -286,6 +287,7 @@ async fn observation_archive() -> ObservationArchive {
         flow_name: "observation_preservation".into(),
         created_at: chrono::Utc::now(),
         replay: None,
+        rebuild: None,
         resume: None,
         interrupted_appends: Vec::new(),
         stages: [
@@ -316,6 +318,7 @@ async fn observation_archive() -> ObservationArchive {
                     source_continuation: stage_type
                         .is_source()
                         .then_some(obzenflow_core::source::SourceContinuation::RecordedRead),
+                    guarantees: Vec::new(),
                 },
             )
         })

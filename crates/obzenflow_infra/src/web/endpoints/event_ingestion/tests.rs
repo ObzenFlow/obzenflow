@@ -1388,6 +1388,7 @@ async fn a_strict_replay_refuses_ingress_throughout() {
             archive_path: archive,
             allow_incomplete_archive: true,
             verb: ReplayVerb::Replay,
+            stages: Vec::new(),
         }),
         ..BootstrapConfig::default()
     });

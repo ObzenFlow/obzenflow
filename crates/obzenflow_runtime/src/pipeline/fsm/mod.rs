@@ -106,6 +106,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineFsmState) -> Pipe
         state PipelineFsmState::Running {
             on PipelineFsmEvent::PhaseSatisfied => transitions::sources_completed;
             on PipelineFsmEvent::StagesCrossed => transitions::stages_crossed;
+            on PipelineFsmEvent::RecordingEnded => transitions::stop;
             on PipelineFsmEvent::ChildExited => transitions::child_exited;
             on PipelineFsmEvent::ChildFailed => transitions::failure;
             on PipelineFsmEvent::OperationalFailure => transitions::failure;
@@ -116,6 +117,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineFsmState) -> Pipe
         state PipelineFsmState::Draining {
             on PipelineFsmEvent::PhaseSatisfied => transitions::children_settled;
             on PipelineFsmEvent::StagesCrossed => transitions::stages_crossed;
+            on PipelineFsmEvent::RecordingEnded => transitions::stop;
             on PipelineFsmEvent::GracefulStopExpired => transitions::stop;
             on PipelineFsmEvent::ChildExited => transitions::child_exited;
             on PipelineFsmEvent::ChildFailed => transitions::failure;

@@ -550,10 +550,14 @@ impl<H: Send + Sync + 'static> FiniteSourceAction<H> {
                     .load(std::sync::atomic::Ordering::Relaxed);
 
                 // Natural EOF requires recorded exhaustion (134i B5).
-                let eof_kind = ctx
-                    .completion
-                    .cause()
-                    .eof_kind(ctx.control_strategy.as_ref(), &mut ctx.control_context);
+                let cause = ctx.completion.cause();
+                if cause == crate::stages::source::strategies::SourceCompletionCause::Stopped {
+                    if let Some(control) = ctx.runtime_execution.rebuild_control() {
+                        control.record_source_stop();
+                    }
+                }
+                let eof_kind =
+                    cause.eof_kind(ctx.control_strategy.as_ref(), &mut ctx.control_context);
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.capture_accounting();
@@ -1534,6 +1538,61 @@ pub(crate) mod tests {
                 })
                 .collect();
             assert_eq!(kinds, vec![expected], "causes {causes:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_source_stop_marks_control() {
+        for (cause, stopped) in [
+            (SourceCompletionCause::Stopped, true),
+            (
+                SourceCompletionCause::ReplayExhausted {
+                    recorded_kind: Some(EofKind::Natural),
+                },
+                false,
+            ),
+        ] {
+            let stage_id = CoreStageId::new();
+            let data_journal: Arc<dyn Journal<ChainEvent>> =
+                Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+            let runtime_execution = crate::execution::RuntimeExecution::new(
+                crate::execution::RuntimeMode::Rebuild { stages: Vec::new() },
+                None,
+            );
+            let mut ctx = FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
+                stage_id,
+                stage_name: "finite_source".to_string(),
+                observers: crate::stages::observer::StageObserverBundle::default(),
+                flow_name: "test_flow".to_string(),
+                flow_id: FlowId::new(),
+                data_journal,
+                error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+                runtime_execution: runtime_execution.clone(),
+                bus: Arc::new(FsmMessageBus::new()),
+                instrumentation: Arc::new(StageInstrumentation::new()),
+                control_strategy: Arc::new(
+                    crate::stages::source::strategies::JonestownSourceStrategy,
+                ),
+                backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
+                output_contract: OutcomeContract::empty(),
+            });
+            FiniteSourceAction::<DummySource>::AllocateResources
+                .execute(&mut ctx)
+                .await
+                .unwrap();
+            ctx.resources_mut().unwrap().completion.record(cause);
+            FiniteSourceAction::<DummySource>::SendEOF
+                .execute(&mut ctx)
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime_execution
+                    .rebuild_control()
+                    .unwrap()
+                    .source_stopped(),
+                stopped,
+                "{cause:?}"
+            );
         }
     }
 }

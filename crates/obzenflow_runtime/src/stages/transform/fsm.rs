@@ -422,6 +422,11 @@ pub enum TransformState<H> {
     /// All events processed, EOF forwarded downstream
     Drained,
 
+    /// The stage reached the end of its recording in a rebuild. It wrote a
+    /// truncated end after its committed output. It reads no more input until
+    /// the pipeline cancels it.
+    Held,
+
     /// Unrecoverable error occurred
     Failed(String),
 
@@ -446,6 +451,7 @@ impl<H> Clone for TransformState<H> {
             Self::Draining => Self::Draining,
             Self::ClosingCycle => Self::ClosingCycle,
             Self::Drained => Self::Drained,
+            Self::Held => Self::Held,
             Self::Failed(msg) => Self::Failed(msg.clone()),
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -468,6 +474,7 @@ impl<H> std::fmt::Debug for TransformState<H> {
             Self::Draining => write!(f, "Draining"),
             Self::ClosingCycle => write!(f, "ClosingCycle"),
             Self::Drained => write!(f, "Drained"),
+            Self::Held => write!(f, "Held"),
             Self::Failed(msg) => write!(f, "Failed({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -490,6 +497,7 @@ impl<H: Send + Sync> PartialEq for TransformState<H> {
             (TransformState::Draining, TransformState::Draining) => true,
             (TransformState::ClosingCycle, TransformState::ClosingCycle) => true,
             (TransformState::Drained, TransformState::Drained) => true,
+            (TransformState::Held, TransformState::Held) => true,
             (TransformState::Failed(a), TransformState::Failed(b)) => a == b,
             _ => false,
         }
@@ -514,7 +522,7 @@ impl<H> TransformState<H> {
         match self {
             Self::Initializing => Phase::Initializing,
             Self::Initialized => Phase::Initialized,
-            Self::Running => Phase::Active,
+            Self::Running | Self::Held => Phase::Active,
             Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
@@ -558,6 +566,9 @@ pub enum TransformEvent<H> {
     /// Every input from inside the cycle reached its end
     CycleClosed,
 
+    /// A rebuild reached the end of the recording of this stage.
+    RecordingEnded,
+
     /// Unrecoverable error occurred
     Error(String),
 
@@ -581,6 +592,7 @@ impl<H> Clone for TransformEvent<H> {
             Self::DrainComplete => Self::DrainComplete,
             Self::CycleDrained => Self::CycleDrained,
             Self::CycleClosed => Self::CycleClosed,
+            Self::RecordingEnded => Self::RecordingEnded,
             Self::Error(msg) => Self::Error(msg.clone()),
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -602,6 +614,7 @@ impl<H> std::fmt::Debug for TransformEvent<H> {
             Self::DrainComplete => write!(f, "DrainComplete"),
             Self::CycleDrained => write!(f, "CycleDrained"),
             Self::CycleClosed => write!(f, "CycleClosed"),
+            Self::RecordingEnded => write!(f, "RecordingEnded"),
             Self::Error(msg) => write!(f, "Error({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -629,7 +642,8 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             | Self::BeginDrain
             | Self::DrainComplete
             | Self::CycleDrained
-            | Self::CycleClosed => None,
+            | Self::CycleClosed
+            | Self::RecordingEnded => None,
             Self::_Phantom(_) => unreachable!("PhantomData variant"),
         })
     }
@@ -662,6 +676,8 @@ pub(crate) enum TransformAction<H> {
         message: String,
     },
 
+    ReportHold,
+
     /// Clean up all resources
     Cleanup,
 
@@ -683,6 +699,7 @@ impl<H> Clone for TransformAction<H> {
             Self::SendFailure { message } => Self::SendFailure {
                 message: message.clone(),
             },
+            Self::ReportHold => Self::ReportHold,
             Self::Cleanup => Self::Cleanup,
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -700,6 +717,7 @@ impl<H> std::fmt::Debug for TransformAction<H> {
             Self::DrainHandler => write!(f, "DrainHandler"),
             Self::SendCompletion => write!(f, "SendCompletion"),
             Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
+            Self::ReportHold => write!(f, "ReportHold"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -1201,6 +1219,18 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                             },
                         )
                     },
+                );
+                Ok(())
+            }
+
+            TransformAction::ReportHold => {
+                if let Some(control) = ctx.runtime_execution.rebuild_control() {
+                    control.record_hold();
+                }
+                tracing::info!(
+                    stage_name = %ctx.stage_name,
+                    "{} holds an input that its recording does not answer",
+                    ctx.stage_label()
                 );
                 Ok(())
             }

@@ -1024,6 +1024,109 @@ async fn binding_fatal_records_once_and_redacted_in_running_and_draining() {
 }
 
 #[tokio::test]
+async fn transform_rebuild_hold_writes_truncated_eof() {
+    use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+    let fatal = StageFatal::new(
+        StageFatalCode::Replay,
+        StageFatalReason::RecordingEnded,
+        "replay reached the end of its recording at stage 't', input 1",
+    );
+    let (mut supervisor, mut ctx, registry, s, t, _k, upstream_journal, data_journal) =
+        build_transform_harness(
+            |_| BindingFatalHandler {
+                fatal: fatal.clone(),
+            },
+            1,
+            1,
+        )
+        .await;
+    TransformHandler::install_writer_id(
+        ctx.resources_mut().unwrap().handler.as_mut().unwrap(),
+        WriterId::from(t),
+    );
+    let execution = crate::execution::RuntimeExecution::new(
+        crate::execution::RuntimeMode::Rebuild { stages: Vec::new() },
+        None,
+    );
+    let (observer, mut ended) = tokio::sync::mpsc::unbounded_channel();
+    execution
+        .rebuild_control()
+        .unwrap()
+        .observe_recording_end(observer);
+    ctx.resources_mut().unwrap().runtime_execution = execution;
+
+    registry
+        .writer(s)
+        .reserve(1)
+        .expect("seed reserve")
+        .commit(1);
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(
+                WriterId::from(s),
+                "test.rebuild_hold_input",
+                std::num::NonZeroU32::MIN,
+                json!({ "value": 1 }),
+            ),
+            Default::default(),
+        )
+        .await
+        .expect("append the held input");
+
+    let directive = supervisor
+        .dispatch_state(&TransformState::Running, &mut ctx)
+        .await
+        .expect("dispatch the held input");
+    assert!(
+        matches!(
+            directive,
+            EventLoopDirective::Transition(TransformEvent::RecordingEnded)
+        ),
+        "{directive:?}"
+    );
+    let errors = ctx
+        .resources_mut()
+        .unwrap()
+        .error_journal
+        .read_causally_ordered()
+        .await
+        .unwrap();
+    assert!(errors.is_empty(), "a hold records no failure");
+
+    let resources = ctx.resources_mut().unwrap();
+    TransformAction::<BindingFatalHandler>::ForwardEOF
+        .execute_resources(resources)
+        .await
+        .unwrap();
+    assert!(
+        ended.try_recv().is_err(),
+        "the hold is reported after the end"
+    );
+    TransformAction::<BindingFatalHandler>::ReportHold
+        .execute_resources(resources)
+        .await
+        .unwrap();
+    assert!(ended.try_recv().is_ok());
+
+    let written = data_journal.read_causally_ordered().await.unwrap();
+    let ends: Vec<EofKind> = written
+        .iter()
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, vec![EofKind::Truncated]);
+    assert!(
+        matches!(
+            &written.last().unwrap().payload,
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
+        ),
+        "nothing follows the truncated end"
+    );
+}
+
+#[tokio::test]
 async fn transport_filtered_data_completes_one_physical_credit_without_handler_delivery() {
     let calls = Arc::new(AtomicU64::new(0));
     let handler_calls = calls.clone();

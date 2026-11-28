@@ -558,10 +558,8 @@ impl StageResourcesBuilder {
         // FLOWIP-120u: the verb and the opened archive travel as separate
         // bootstrap fields, so an installed verb without an archive must fail
         // loud here rather than silently selecting Live.
-        let runtime_mode = match (
-            &self.replay_archive,
-            crate::bootstrap::bootstrap_config().replay.map(|r| r.verb),
-        ) {
+        let replay = crate::bootstrap::bootstrap_config().replay;
+        let runtime_mode = match (&self.replay_archive, replay.as_ref().map(|r| r.verb)) {
             (None, Some(verb)) => {
                 return Err(format!(
                     "replay/resume bootstrap is installed (verb {verb:?}) but no opened archive \
@@ -571,10 +569,21 @@ impl StageResourcesBuilder {
             }
             (None, None) => RuntimeMode::Live,
             (Some(_), Some(crate::bootstrap::ReplayVerb::Resume)) => RuntimeMode::Resume,
+            (Some(_), Some(crate::bootstrap::ReplayVerb::Rebuild)) => {
+                let named = replay.map(|replay| replay.stages).unwrap_or_default();
+                RuntimeMode::Rebuild {
+                    stages: self
+                        .topology
+                        .stages()
+                        .filter(|stage| named.iter().any(|key| key == stage.name.as_str()))
+                        .map(|stage| StageId::from_topology_id(stage.id))
+                        .collect(),
+                }
+            }
             (Some(_), _) => RuntimeMode::Replay,
         };
         let flow_runtime_execution =
-            RuntimeExecution::new(runtime_mode, self.replay_archive.clone());
+            RuntimeExecution::new(runtime_mode.clone(), self.replay_archive.clone());
 
         // Build stage resources for each stage
         let mut stage_resources = HashMap::new();
@@ -868,7 +877,7 @@ impl StageResourcesBuilder {
                     stage_key: stage_info.name.clone(),
                     archive: flow_runtime_execution.archive_for_io().cloned(),
                     after: match runtime_mode {
-                        RuntimeMode::Replay => AfterRecord::Canonical,
+                        RuntimeMode::Replay | RuntimeMode::Rebuild { .. } => AfterRecord::Canonical,
                         RuntimeMode::Live | RuntimeMode::Resume => AfterRecord::Record,
                     },
                 });

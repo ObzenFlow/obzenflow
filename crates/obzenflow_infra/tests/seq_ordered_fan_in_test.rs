@@ -555,6 +555,7 @@ async fn replay(journal_base: &Path, archive: &Path, flow: FlowDefinition) -> Re
                 archive_path: archive.to_path_buf(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Replay,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -573,6 +574,7 @@ fn resume_bootstrap(archive: &Path) -> ReplayBootstrap {
         archive_path: archive.to_path_buf(),
         allow_incomplete_archive: true,
         verb: ReplayVerb::Resume,
+        stages: Vec::new(),
     }
 }
 

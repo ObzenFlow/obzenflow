@@ -388,6 +388,7 @@ mod tests {
             flow_name: "aml_overnight_monitoring".to_string(),
             created_at: Utc::now(),
             replay: None,
+            rebuild: None,
             resume: resumed.then(|| RunManifestResumeConfig {
                 resumed_from: PathBuf::from("killed"),
                 resume_generation: 1,

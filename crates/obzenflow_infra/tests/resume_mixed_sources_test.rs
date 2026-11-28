@@ -390,6 +390,7 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -535,6 +536,7 @@ async fn mixed_sources_resume_flips_when_the_eof_arrives_after_the_watermark() -
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -708,6 +710,7 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             })
             .await,
         );
@@ -989,6 +992,7 @@ async fn resume_csv_run(
             archive_path: archive.to_path_buf(),
             allow_incomplete_archive: true,
             verb: ReplayVerb::Resume,
+            stages: Vec::new(),
         })
         .await,
     );
@@ -1132,6 +1136,7 @@ fn resume_bootstrap(archive: &Path) -> ReplayBootstrap {
         archive_path: archive.to_path_buf(),
         allow_incomplete_archive: true,
         verb: ReplayVerb::Resume,
+        stages: Vec::new(),
     }
 }
 
@@ -1197,6 +1202,7 @@ async fn a_changed_decoder_output_type_fails_at_re_admission() -> Result<()> {
             archive_path: recorded_run.clone(),
             allow_incomplete_archive: true,
             verb: ReplayVerb::Resume,
+            stages: Vec::new(),
         })
         .await,
     );

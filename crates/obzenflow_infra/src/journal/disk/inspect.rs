@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
 use obzenflow_core::journal::archive::manifest::{
-    RunManifest, JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
+    EffectGuarantee, RunManifest, JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_core::journal::archive_actions::{
@@ -103,8 +103,9 @@ pub fn export_jsonl(run_dir: &Path, output: Option<&Path>) -> Result<(), Journal
 
 /// `inspect` writes a summary of a run to `out`, and then a filtered list of the
 /// stage data journals of the run. The summary gives the state of the run and the
-/// answers of the recorded flow to a plain replay and a plain resume. `stage`
-/// selects one stage key, and `event_type` selects rows.
+/// answers of the recorded flow to a plain replay, a plain resume and a rebuild.
+/// It also lists the sink stages that a rebuild can name. `stage` selects one
+/// stage key, and `event_type` selects rows.
 pub async fn inspect<W: Write>(
     run_dir: &Path,
     stage: Option<&str>,
@@ -116,7 +117,7 @@ pub async fn inspect<W: Write>(
     let state = RunState::read(run_dir, &manifest)?;
     let flow = recorded_flow_evidence(run_dir, &manifest);
     let mut verdicts = Vec::new();
-    for verb in [ReplayVerb::Replay, ReplayVerb::Resume] {
+    for verb in [ReplayVerb::Replay, ReplayVerb::Resume, ReplayVerb::Rebuild] {
         verdicts.push((verb, verdict(verb, run_dir, &flow, &state).await));
     }
 
@@ -229,6 +230,8 @@ async fn verdict(
                 live_writer: true,
                 sources: Vec::new(),
                 failure: FailureEvidence::Other,
+                sinks: Vec::new(),
+                guarantees: Vec::new(),
             },
         ),
         RunState::UnprobedWriter { verdict, .. } => return verdict.clone(),
@@ -246,7 +249,19 @@ async fn verdict(
         &evidence,
         flow,
         ArchiveOverrides::default(),
+        &[],
     ) {
+        Ok(None) if verb == ReplayVerb::Rebuild => {
+            let sinks = rebuildable_sinks(&evidence);
+            format!(
+                "admitted: {command} --stage <sink>\nsinks: {}",
+                if sinks.is_empty() {
+                    "none".to_string()
+                } else {
+                    sinks.join(", ")
+                }
+            )
+        }
         Ok(None) => format!("admitted: {command}"),
         Ok(Some(_)) => format!("admitted, with a warning: {command}"),
         Err(refusal) => {
@@ -266,9 +281,26 @@ async fn verdict(
 fn opener_text(error: ApplicationError) -> String {
     match error {
         ApplicationError::InvalidConfiguration(message)
-        | ApplicationError::ResumeRefused(message) => message,
+        | ApplicationError::ResumeRefused(message)
+        | ApplicationError::RebuildRefused(message) => message,
         other => other.to_string(),
     }
+}
+
+fn rebuildable_sinks(evidence: &ArchiveEvidence) -> Vec<String> {
+    evidence
+        .sinks
+        .iter()
+        .filter(|sink| {
+            evidence
+                .guarantees
+                .iter()
+                .filter(|(stage_key, _)| stage_key == *sink)
+                .flat_map(|(_, guarantees)| guarantees)
+                .all(|guarantee| *guarantee == EffectGuarantee::ExactlyOnce)
+        })
+        .cloned()
+        .collect()
 }
 
 fn recorded_flow_evidence(
@@ -292,9 +324,17 @@ fn recorded_flow_evidence(
     sources.sort_by(|(left, _), (right, _)| left.cmp(right));
     let mut cycle_members = manifest.cycle_members.clone();
     cycle_members.sort();
+    let mut guarantees: Vec<_> = manifest
+        .stages
+        .iter()
+        .filter(|(_, stage)| !stage.guarantees.is_empty())
+        .map(|(stage_key, stage)| (stage_key.clone(), stage.guarantees.clone()))
+        .collect();
+    guarantees.sort();
     Ok(FlowEvidence {
         cycle_members,
         sources,
+        guarantees,
     })
 }
 
@@ -823,6 +863,7 @@ mod tests {
             flow_name: "inspected".into(),
             created_at: chrono::Utc::now(),
             replay: None,
+            rebuild: None,
             resume: None,
             interrupted_appends: Vec::new(),
             stages: Default::default(),
@@ -1053,6 +1094,7 @@ mod tests {
             ai_models: Vec::new(),
             max_open_keys: None,
             source_continuation,
+            guarantees: Vec::new(),
         };
         let manifest: RunManifest = serde_json::from_value(serde_json::json!({
             "journal_schema_version": JOURNAL_SCHEMA_VERSION,
@@ -1112,6 +1154,7 @@ mod tests {
                 ai_models: Vec::new(),
                 max_open_keys: None,
                 source_continuation: None,
+                guarantees: Vec::new(),
             },
         );
         let error = recorded_flow_evidence(Path::new("/runs/r1"), &manifest).unwrap_err();

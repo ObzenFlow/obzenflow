@@ -61,22 +61,25 @@ pub enum OnTerminalArg {
 
 const ADMISSION_TABLE: &str = "\
 Archive admission (the flag is --allow-incomplete-archive)
-Replay uses the named run. Resume follows replay links and reads the
-ancestors that it needs to finish reconstruction. Apply each column to that run.
-Archive          | --replay-from | --resume-from
+Replay uses the named run. Resume and rebuild follow replay and rebuild links
+and read the ancestors that they need to finish reconstruction. Apply each
+column to that run.
+Archive          | --replay-from | --resume-from            | --rebuild-from
 completed, every source finite and ended naturally
-                 | admitted      | refused, no work left
+                 | admitted      | refused, no work left    | admitted
 completed with a source stopped, or cancelled
-                 | admitted      | admitted
+                 | admitted      | admitted                 | admitted
 interrupted (no terminal record), or stopped before it started
-                 | with the flag | admitted
+                 | with the flag | admitted                 | admitted
 failed resume whose only cause was archive departures
-                 | with the flag | admitted
+                 | with the flag | admitted                 | admitted
 all other failures
-                 | with the flag | admitted, with a warning
-ObzenFlow refuses both verbs for a run that still has a live writer.
-ObzenFlow refuses both verbs for a flow with a cycle.
-ObzenFlow refuses a resume when the connector of a source cannot continue its recorded input.";
+                 | with the flag | admitted, with a warning | admitted
+ObzenFlow refuses all three verbs for a run that still has a live writer.
+ObzenFlow refuses all three verbs for a flow with a cycle.
+ObzenFlow refuses a resume when the connector of a source cannot continue its recorded input.
+ObzenFlow refuses a rebuild of a sink stage that the run did not record.
+ObzenFlow refuses a rebuild of a stage whose port method is not exactly_once, in this build or in the history of the run.";
 
 #[derive(Parser, Debug, Clone)]
 #[command(about = "ObzenFlow Application", after_long_help = ADMISSION_TABLE)]
@@ -183,7 +186,7 @@ pub struct FlowConfig {
 
     #[arg(
         long,
-        conflicts_with = "replay_from",
+        conflicts_with_all = ["replay_from", "rebuild_from"],
         help = "Resume a recorded run from the last fact that it committed",
         long_help = "Resume a recorded run from the last fact that it committed. The new run \
             catches up on the archive and executes no effects. Then it continues with live \
@@ -197,6 +200,26 @@ pub struct FlowConfig {
             See Archive admission below."
     )]
     pub resume_from: Option<PathBuf>,
+
+    #[arg(
+        long,
+        conflicts_with = "replay_from",
+        requires = "stage",
+        help = "Rebuild the destinations of the named sinks from a recorded run",
+        long_help = "Rebuild the destinations of the named sinks from a recorded run.\n\n\
+            A rebuild reads a run that completed, was cancelled, was interrupted, failed or did \
+            not start. Use --allow-incomplete-archive only to open a run whose system.log is \
+            missing.\n\n\
+            See Archive admission below."
+    )]
+    pub rebuild_from: Option<PathBuf>,
+
+    #[arg(
+        long,
+        requires = "rebuild_from",
+        help = "Name a sink whose destination the rebuild writes. Repeat the flag for each sink"
+    )]
+    pub stage: Vec<String>,
 
     #[arg(
         long,
@@ -333,6 +356,7 @@ pub(crate) struct ResolvedReplayConfig {
     /// FLOWIP-120n: which verb selected the archive (replay drains, resume
     /// continues live).
     pub verb: ReplayVerb,
+    pub stages: Vec<String>,
 }
 
 impl ResolvedStartupConfig {
@@ -349,6 +373,7 @@ impl ResolvedStartupConfig {
                     archive_path: replay.from.clone(),
                     allow_incomplete_archive: replay.allow_incomplete_archive,
                     verb: replay.verb,
+                    stages: replay.stages.clone(),
                 }
             }),
             // The host opens the archive at launch and fills this in before the
@@ -1172,28 +1197,58 @@ impl FlowConfig {
                 "Set only one of archive.resume_from and archive.replay_from.",
             ));
         }
+        let rebuild_from = self.rebuild_from;
+        if rebuild_from.is_some() {
+            if let Some(key) = [
+                ("archive.replay_from", replay_from.is_some()),
+                ("archive.resume_from", resume_from.is_some()),
+            ]
+            .into_iter()
+            .find_map(|(key, set)| set.then_some(key))
+            {
+                return Err(ConfigError::at(
+                    key,
+                    "Do not set it with --rebuild-from. A rebuild is a run of its own.",
+                ));
+            }
+        }
         if verify && resume_from.is_some() {
             return Err(ConfigError::at(
                 "archive.verify",
                 "It needs archive.replay_from. A resume continues with live work, so verification cannot compare it as a bounded replay.",
             ));
         }
+        if verify && rebuild_from.is_some() {
+            return Err(ConfigError::at(
+                "archive.verify",
+                "It needs archive.replay_from. A rebuild writes destinations, so verification cannot compare it as a bounded replay.",
+            ));
+        }
 
-        let replay = match (replay_from, resume_from) {
-            (Some(from), None) => Some(ResolvedReplayConfig {
+        let replay = match (replay_from, resume_from, rebuild_from) {
+            (Some(from), None, None) => Some(ResolvedReplayConfig {
                 from,
                 allow_incomplete_archive,
                 verify,
                 verb: ReplayVerb::Replay,
+                stages: Vec::new(),
             }),
-            (None, Some(from)) => Some(ResolvedReplayConfig {
+            (None, Some(from), None) => Some(ResolvedReplayConfig {
                 from,
                 allow_incomplete_archive,
                 verify: false,
                 verb: ReplayVerb::Resume,
+                stages: Vec::new(),
             }),
-            (None, None) => None,
-            (Some(_), Some(_)) => unreachable!("rejected above"),
+            (None, None, Some(from)) => Some(ResolvedReplayConfig {
+                from,
+                allow_incomplete_archive,
+                verify: false,
+                verb: ReplayVerb::Rebuild,
+                stages: self.stage,
+            }),
+            (None, None, None) => None,
+            _ => unreachable!("rejected above"),
         };
 
         if let Some(replay) = &replay {
@@ -1201,7 +1256,7 @@ impl FlowConfig {
         } else if allow_incomplete_archive {
             return Err(ConfigError::at(
                 "archive.allow_incomplete_archive",
-                "It needs archive.replay_from or archive.resume_from.",
+                "It needs archive.replay_from, archive.resume_from or --rebuild-from.",
             ));
         } else if verify {
             return Err(ConfigError::at(
@@ -1464,6 +1519,7 @@ fn validate_replay(replay: &ResolvedReplayConfig) -> Result<(), ConfigError> {
     let key = match replay.verb {
         ReplayVerb::Replay => "archive.replay_from",
         ReplayVerb::Resume => "archive.resume_from",
+        ReplayVerb::Rebuild => "--rebuild-from",
     };
     if !replay.from.is_dir() {
         return Err(ConfigError::at(
@@ -2519,6 +2575,57 @@ port = 9876
     }
 
     #[test]
+    fn stage_without_rebuild_from_fails() {
+        let error = FlowConfig::try_parse_from(["obzenflow", "--stage", "case_register"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--rebuild-from <REBUILD_FROM>"), "{error}");
+    }
+
+    #[test]
+    fn rebuild_from_without_stage_fails() {
+        let error = FlowConfig::try_parse_from(["obzenflow", "--rebuild-from", "/tmp/recorded"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("the following required arguments were not provided")
+                && error.contains("--stage <STAGE>"),
+            "{error}"
+        );
+        let cli = FlowConfig::try_parse_from([
+            "obzenflow",
+            "--rebuild-from",
+            "/tmp/recorded",
+            "--stage",
+            "case_register",
+            "--stage",
+            "unopened_alerts",
+        ])
+        .unwrap();
+        assert_eq!(cli.stage, ["case_register", "unopened_alerts"]);
+    }
+
+    #[test]
+    fn rebuild_from_config_key_refused() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(
+            &config_path,
+            r#"
+[archive]
+rebuild_from = "/tmp/recorded"
+"#,
+        )
+        .unwrap();
+        let cli = FlowConfig::try_parse_from(["obzenflow"]).unwrap();
+        let error = cli
+            .resolve(Some(config_path), false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("rebuild_from"), "{error}");
+    }
+
+    #[test]
     fn replay_from_and_resume_from_conflict_at_the_cli() {
         let err = FlowConfig::try_parse_from([
             "obzenflow",
@@ -2630,7 +2737,7 @@ resume_from = "/tmp/recorded"
         assert!(long.trim_end().ends_with(ADMISSION_TABLE), "{long}");
         assert_eq!(
             long.matches("See Archive admission below.").count(),
-            3,
+            4,
             "{long}"
         );
         for text in [
@@ -2688,6 +2795,12 @@ resume_from = "/tmp/recorded"
                         recorded_eof: Some(EofKind::Natural),
                     }],
                     failure: FailureEvidence::Other,
+                    sinks: vec!["register".into()],
+                    guarantees: Vec::new(),
+                };
+                let stages = match verb {
+                    ReplayVerb::Rebuild => vec!["register".to_string()],
+                    ReplayVerb::Replay | ReplayVerb::Resume => Vec::new(),
                 };
                 let admits = |allow_incomplete_archive| {
                     decide(
@@ -2698,6 +2811,7 @@ resume_from = "/tmp/recorded"
                         ArchiveOverrides {
                             allow_incomplete_archive,
                         },
+                        &stages,
                     )
                     .is_ok()
                 };
@@ -2719,6 +2833,12 @@ resume_from = "/tmp/recorded"
             resume_with_flag, "",
             "decide admits every resume without the flag"
         );
+        let (rebuilt, rebuild_with_flag) = admission_groups(ReplayVerb::Rebuild);
+        assert_eq!(
+            (rebuilt.as_str(), rebuild_with_flag.as_str()),
+            ("completed or cancelled or interrupted or failed", ""),
+            "decide admits every rebuild without the flag"
+        );
         let replay_detail = format!(
             "A {as_recorded} run replays as recorded. With --allow-incomplete-archive, an \
             {prefix} run replays its recorded prefix."
@@ -2738,6 +2858,13 @@ resume_from = "/tmp/recorded"
         assert!(
             short.contains(&format!("{flag_summary}\n")),
             "expected {flag_summary:?} in {short}"
+        );
+        let rebuild_detail = "A rebuild reads a run that completed, was cancelled, was \
+            interrupted, failed or did not start. Use --allow-incomplete-archive only to open a \
+            run whose system.log is missing.";
+        assert!(
+            long.contains(rebuild_detail),
+            "expected {rebuild_detail:?} in {long}"
         );
     }
 
@@ -3167,9 +3294,10 @@ port = "abc"
     mod admission_table {
         use crate::application::config::ADMISSION_TABLE;
         use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+        use obzenflow_core::journal::archive::EffectGuarantee;
         use obzenflow_core::journal::archive_actions::{
             decide, ArchiveEvidence, ArchiveOverrides, ArchiveRefusal, ArchiveWarning,
-            FailureEvidence, FlowEvidence, ReplayVerb, SourceEvidence,
+            DestinationRefusal, FailureEvidence, FlowEvidence, ReplayVerb, SourceEvidence,
         };
         use obzenflow_core::journal::ArchiveStatus;
         use obzenflow_core::source::SourceContinuation;
@@ -3199,6 +3327,17 @@ port = "abc"
                 live_writer: false,
                 sources,
                 failure: FailureEvidence::Other,
+                sinks: vec!["case_register".to_string(), "totals_report".to_string()],
+                guarantees: vec![
+                    (
+                        "case_register".to_string(),
+                        vec![EffectGuarantee::ExactlyOnce],
+                    ),
+                    (
+                        "totals_report".to_string(),
+                        vec![EffectGuarantee::ExactlyOnce],
+                    ),
+                ],
             }
         }
 
@@ -3223,6 +3362,16 @@ port = "abc"
                     ("store_orders".to_string(), continuation),
                     ("web_orders".to_string(), continuation),
                 ],
+                guarantees: vec![
+                    (
+                        "case_register".to_string(),
+                        vec![EffectGuarantee::ExactlyOnce],
+                    ),
+                    (
+                        "totals_report".to_string(),
+                        vec![EffectGuarantee::AtLeastOnce],
+                    ),
+                ],
             }
         }
 
@@ -3231,7 +3380,12 @@ port = "abc"
             evidence: &ArchiveEvidence,
             flow: &FlowEvidence,
             allow_incomplete_archive: bool,
+            stage: &str,
         ) -> Result<Option<ArchiveWarning>, ArchiveRefusal> {
+            let stages = match verb {
+                ReplayVerb::Rebuild => vec![stage.to_string()],
+                ReplayVerb::Replay | ReplayVerb::Resume => Vec::new(),
+            };
             decide(
                 verb,
                 Path::new(RUN),
@@ -3240,6 +3394,7 @@ port = "abc"
                 ArchiveOverrides {
                     allow_incomplete_archive,
                 },
+                &stages,
             )
         }
 
@@ -3265,8 +3420,8 @@ port = "abc"
 
         fn cell(verb: ReplayVerb, evidence: &ArchiveEvidence, flow: &FlowEvidence) -> String {
             match (
-                decided(verb, evidence, flow, false),
-                decided(verb, evidence, flow, true),
+                decided(verb, evidence, flow, false, "case_register"),
+                decided(verb, evidence, flow, true, "case_register"),
             ) {
                 (Ok(None), Ok(None)) => "admitted".to_string(),
                 (
@@ -3314,6 +3469,7 @@ port = "abc"
             subject: &str,
             evidence: &ArchiveEvidence,
             flow: &FlowEvidence,
+            stage: &str,
             triggered: fn(&ArchiveRefusal) -> bool,
         ) -> String {
             let refused = |verb: ReplayVerb| {
@@ -3322,6 +3478,7 @@ port = "abc"
                     evidence,
                     flow,
                     allow_incomplete_archive,
+                    stage,
                 ) {
                     Ok(_) => false,
                     Err(refusal) if triggered(&refusal) => true,
@@ -3341,18 +3498,25 @@ port = "abc"
                 );
                 plain
             };
-            match (refused(ReplayVerb::Replay), refused(ReplayVerb::Resume)) {
-                (true, true) => format!("ObzenFlow refuses both verbs for {subject}."),
-                (false, true) => format!("ObzenFlow refuses a resume when {subject}."),
-                (true, false) => format!("ObzenFlow refuses a replay when {subject}."),
-                (false, false) => format!("ObzenFlow refuses no verb for {subject}."),
+            match (
+                refused(ReplayVerb::Replay),
+                refused(ReplayVerb::Resume),
+                refused(ReplayVerb::Rebuild),
+            ) {
+                (true, true, true) => format!("ObzenFlow refuses all three verbs for {subject}."),
+                (false, true, false) => format!("ObzenFlow refuses a resume when {subject}."),
+                (true, false, false) => format!("ObzenFlow refuses a replay when {subject}."),
+                (false, false, true) => format!("ObzenFlow refuses a rebuild of {subject}."),
+                (replay, resume, rebuild) => panic!(
+                    "{subject}: replay {replay}, resume {resume}, rebuild {rebuild} has no line"
+                ),
             }
         }
 
         #[test]
         fn admission_table_all_rows_match() {
             let continuing = flow(SourceContinuation::RecordedRead);
-            let mut cells: Vec<Option<(String, String)>> = vec![None; ROWS.len()];
+            let mut cells: Vec<Option<(String, String, String)>> = vec![None; ROWS.len()];
             for status in [
                 ArchiveStatus::Completed,
                 ArchiveStatus::Cancelled,
@@ -3371,6 +3535,7 @@ port = "abc"
                         let rendered = (
                             cell(ReplayVerb::Replay, &evidence, &continuing),
                             cell(ReplayVerb::Resume, &evidence, &continuing),
+                            cell(ReplayVerb::Rebuild, &evidence, &continuing),
                         );
                         match &cells[index] {
                             Some(first) => assert_eq!(first, &rendered, "{row}: {evidence:?}"),
@@ -3382,15 +3547,21 @@ port = "abc"
 
             let mut lines = vec![
                 "Archive admission (the flag is --allow-incomplete-archive)".to_string(),
-                "Replay uses the named run. Resume follows replay links and reads the".to_string(),
-                "ancestors that it needs to finish reconstruction. Apply each column to that run."
+                "Replay uses the named run. Resume and rebuild follow replay and rebuild links"
                     .to_string(),
-                "Archive          | --replay-from | --resume-from".to_string(),
+                "and read the ancestors that they need to finish reconstruction. Apply each"
+                    .to_string(),
+                "column to that run.".to_string(),
+                "Archive          | --replay-from | --resume-from            | --rebuild-from"
+                    .to_string(),
             ];
             for (label, rendered) in ROWS.iter().zip(cells) {
-                let (replay, resume) = rendered.expect("every row has evidence");
+                let (replay, resume, rebuild) = rendered.expect("every row has evidence");
                 lines.push((*label).to_string());
-                lines.push(format!("{:17}| {replay:<13} | {resume}", ""));
+                lines.push(format!(
+                    "{:17}| {replay:<13} | {resume:<24} | {rebuild}",
+                    ""
+                ));
             }
             let mut live = archive(ArchiveStatus::Cancelled, finished());
             live.live_writer = true;
@@ -3398,6 +3569,7 @@ port = "abc"
                 "a run that still has a live writer",
                 &live,
                 &continuing,
+                "case_register",
                 |refusal| matches!(refusal, ArchiveRefusal::StillRunning { .. }),
             ));
             let cyclic = FlowEvidence {
@@ -3408,13 +3580,50 @@ port = "abc"
                 "a flow with a cycle",
                 &archive(ArchiveStatus::Cancelled, finished()),
                 &cyclic,
+                "case_register",
                 |refusal| matches!(refusal, ArchiveRefusal::Cycle { .. }),
             ));
             lines.push(check_line(
                 "the connector of a source cannot continue its recorded input",
                 &archive(ArchiveStatus::Cancelled, unfinished()),
                 &flow(SourceContinuation::Refuse),
+                "case_register",
                 |refusal| matches!(refusal, ArchiveRefusal::Sources { .. }),
+            ));
+            lines.push(check_line(
+                "a sink stage that the run did not record",
+                &archive(ArchiveStatus::Cancelled, finished()),
+                &continuing,
+                "alert_log",
+                |refusal| {
+                    matches!(
+                        refusal,
+                        ArchiveRefusal::Destinations { refusals, .. }
+                            if refusals.iter().all(|(_, refusal)| {
+                                *refusal == DestinationRefusal::Unrecorded
+                            })
+                    )
+                },
+            ));
+            lines.push(check_line(
+                "a stage whose port method is not exactly_once, in this build or in the history \
+                 of the run",
+                &archive(ArchiveStatus::Cancelled, finished()),
+                &continuing,
+                "totals_report",
+                |refusal| {
+                    matches!(
+                        refusal,
+                        ArchiveRefusal::Destinations { refusals, .. }
+                            if refusals.iter().all(|(_, refusal)| {
+                                matches!(
+                                    refusal,
+                                    DestinationRefusal::Declares { .. }
+                                        | DestinationRefusal::Recorded { .. }
+                                )
+                            })
+                    )
+                },
             ));
 
             assert_eq!(lines.join("\n"), ADMISSION_TABLE);
