@@ -74,12 +74,7 @@ fn main() -> Result<()> {
                 "Usage",
                 "Default:     cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nVolume:      set event_count under [app] in a copy of the config, then pass the copy with --config\nCustom port: cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host -- --server-port 8080",
             ),
-    )
-    .with_footer(|outcome| {
-        outcome
-            .into_footer()
-            .paragraph("Run with the default config and visit /metrics for Prometheus metrics.")
-    });
+    );
 
     // Use FlowApplication builder - handles runtime, observability, and features automatically.
     FlowApplication::builder()

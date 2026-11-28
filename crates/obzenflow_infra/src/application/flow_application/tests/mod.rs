@@ -280,7 +280,7 @@ async fn replay_footer_sealed_source_offers_verify() {
             verify: true,
         },
     )
-    .default_footer();
+    .footer();
     assert!(
         footer.contains(&format!(
             "Verify it against the source archive: re-run with --replay-from {} --verify",
@@ -332,7 +332,7 @@ fn footer_unknown_status_reports_stopped() {
             crate::application::RunMode::Live,
             ArchiveOffers::default(),
         )
-        .default_footer()
+        .footer()
     };
     assert_eq!(
         first_line(Some(ArchiveStatus::Completed)),

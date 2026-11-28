@@ -234,81 +234,6 @@ pub struct RenderedBanner {
     pub warnings: Vec<String>,
 }
 
-#[derive(Default)]
-pub struct Footer {
-    blocks: Vec<FooterBlock>,
-}
-
-enum FooterBlock {
-    Paragraph(String),
-    Section { title: String, body: String },
-    Bullets { title: String, items: Vec<String> },
-}
-
-impl Footer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn paragraph(mut self, text: impl Display) -> Self {
-        self.blocks.push(FooterBlock::Paragraph(text.to_string()));
-        self
-    }
-
-    pub fn section(mut self, title: impl Into<String>, body: impl Display) -> Self {
-        self.blocks.push(FooterBlock::Section {
-            title: title.into(),
-            body: body.to_string(),
-        });
-        self
-    }
-
-    pub fn bullets<I, S>(mut self, title: impl Into<String>, items: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.blocks.push(FooterBlock::Bullets {
-            title: title.into(),
-            items: items.into_iter().map(Into::into).collect(),
-        });
-        self
-    }
-
-    pub fn finish(self) -> String {
-        let mut out = String::new();
-        let mut first = true;
-
-        for block in self.blocks {
-            if !first {
-                out.push_str("\n\n");
-            }
-            render_footer_block(&mut out, block);
-            first = false;
-        }
-
-        while out.ends_with('\n') {
-            out.pop();
-        }
-
-        out
-    }
-}
-
-impl From<String> for Footer {
-    fn from(value: String) -> Self {
-        Footer::new().paragraph(value)
-    }
-}
-
-impl From<&str> for Footer {
-    fn from(value: &str) -> Self {
-        Footer::new().paragraph(value)
-    }
-}
-
-/// The startup banner is either fixed or branches on the resolved run mode
-/// (FLOWIP-120i), mirroring the footer's closure pattern.
 enum BannerSource {
     Static(Banner),
     ForMode(Box<dyn Fn(&RunMode) -> Banner + Send + Sync + 'static>),
@@ -316,16 +241,12 @@ enum BannerSource {
 
 pub struct Presentation {
     banner: BannerSource,
-    footer_banner: Option<Banner>,
-    footer: Option<Box<dyn Fn(RunPresentationOutcome) -> Footer + Send + Sync + 'static>>,
 }
 
 impl Presentation {
     pub fn new(banner: Banner) -> Self {
         Self {
             banner: BannerSource::Static(banner),
-            footer_banner: None,
-            footer: None,
         }
     }
 
@@ -337,23 +258,7 @@ impl Presentation {
     {
         Self {
             banner: BannerSource::ForMode(Box::new(banner)),
-            footer_banner: None,
-            footer: None,
         }
-    }
-
-    pub fn with_footer_banner(mut self, banner: Banner) -> Self {
-        self.footer_banner = Some(banner);
-        self
-    }
-
-    pub fn with_footer<F, T>(mut self, footer: F) -> Self
-    where
-        F: Fn(RunPresentationOutcome) -> T + Send + Sync + 'static,
-        T: Into<Footer>,
-    {
-        self.footer = Some(Box::new(move |outcome| footer(outcome).into()));
-        self
     }
 
     pub(crate) fn render_banner(&self, mode: &RunMode) -> RenderedBanner {
@@ -361,44 +266,29 @@ impl Presentation {
             BannerSource::Static(banner) => banner.render_for_stdout(),
             BannerSource::ForMode(banner) => banner(mode).render_for_stdout(),
         };
-        // FLOWIP-120n: a resume mixes recorded catch-up with a live tail in
-        // one run; announce it whether or not the application banner branches.
-        if let RunMode::Resume(ctx) = mode {
-            rendered.text.push_str(&format!(
+        match mode {
+            RunMode::Live => {}
+            RunMode::Replay(ctx) => rendered.text.push_str(&format!(
+                "This run replays {}. It reads the recorded facts, executes no effects and ignores the source settings.\n",
+                ctx.source_label()
+            )),
+            RunMode::Resume(ctx) => rendered.text.push_str(&format!(
                 "This run resumes {}. It catches up on the recorded facts, and then it continues with live work from the last fact that the recorded run committed.\n",
                 ctx.source_label()
-            ));
+            )),
         }
         rendered
     }
-
-    pub fn footer_banner(&self) -> Option<&Banner> {
-        self.footer_banner.as_ref()
-    }
-
-    pub(crate) fn render_footer_banner(&self) -> Option<RenderedBanner> {
-        self.footer_banner.as_ref().map(Banner::render_for_stdout)
-    }
-
-    pub(crate) fn render_footer(&self, outcome: RunPresentationOutcome) -> String {
-        match &self.footer {
-            Some(custom) => custom(outcome).finish(),
-            None => outcome.into_footer().finish(),
-        }
-    }
 }
 
-/// `ArchiveOffers` tells which plain commands the footer offers for the run that
-/// it wrote and the flow that it built. The footer offers the verification of a
-/// replay only when verification admits the source of the replay as a baseline.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ArchiveOffers {
+pub(crate) struct ArchiveOffers {
     pub replay: bool,
     pub resume: bool,
     pub verify: bool,
 }
 
-pub enum RunPresentationOutcome {
+pub(crate) enum RunPresentationOutcome {
     Completed {
         flow_name: String,
         location: Option<CurrentRunLocator>,
@@ -420,27 +310,10 @@ pub enum RunPresentationOutcome {
 }
 
 impl RunPresentationOutcome {
-    pub fn default_footer(&self) -> String {
-        self.to_footer().finish()
-    }
-
-    /// The run mode this outcome describes, so custom footers can branch the
-    /// same way the default copy does (FLOWIP-120i).
-    pub fn run_mode(&self) -> &RunMode {
-        match self {
-            Self::Completed { run_mode, .. }
-            | Self::Stopped { run_mode, .. }
-            | Self::Failed { run_mode, .. } => run_mode,
-        }
-    }
-
-    /// The archive verbs offered for the run just written; a failed run
-    /// offers none.
-    pub fn offers(&self) -> ArchiveOffers {
-        match self {
-            Self::Completed { offers, .. } | Self::Stopped { offers, .. } => *offers,
-            Self::Failed { .. } => ArchiveOffers::default(),
-        }
+    pub(crate) fn footer(&self) -> String {
+        let paragraph = self.paragraph();
+        let lines: Vec<&str> = paragraph.lines().collect();
+        lines.join("\n").trim_end_matches('\n').to_string()
     }
 
     fn terminal_paragraph(
@@ -506,7 +379,7 @@ impl RunPresentationOutcome {
         lines.join("\n")
     }
 
-    pub fn to_footer(&self) -> Footer {
+    fn paragraph(&self) -> String {
         match self {
             Self::Completed {
                 flow_name,
@@ -514,14 +387,10 @@ impl RunPresentationOutcome {
                 run_mode,
                 offers,
             } => match location {
-                Some(location) => Footer::new().paragraph(Self::terminal_paragraph(
-                    "completed",
-                    flow_name,
-                    location,
-                    run_mode,
-                    *offers,
-                )),
-                None => Footer::new().paragraph(format!("{flow_name} completed.")),
+                Some(location) => {
+                    Self::terminal_paragraph("completed", flow_name, location, run_mode, *offers)
+                }
+                None => format!("{flow_name} completed."),
             },
             Self::Stopped {
                 flow_name,
@@ -529,10 +398,10 @@ impl RunPresentationOutcome {
                 run_mode,
                 offers,
             } => match location {
-                Some(location) => Footer::new().paragraph(Self::terminal_paragraph(
-                    "stopped", flow_name, location, run_mode, *offers,
-                )),
-                None => Footer::new().paragraph(format!("{flow_name} stopped.")),
+                Some(location) => {
+                    Self::terminal_paragraph("stopped", flow_name, location, run_mode, *offers)
+                }
+                None => format!("{flow_name} stopped."),
             },
             Self::Failed {
                 flow_name,
@@ -554,17 +423,11 @@ impl RunPresentationOutcome {
                     _ => {}
                 }
                 match location {
-                    Some(location) => {
-                        Footer::new().paragraph(format!("{prefix}: {error}\nJournal: {location}"))
-                    }
-                    None => Footer::new().paragraph(format!("{prefix}: {error}")),
+                    Some(location) => format!("{prefix}: {error}\nJournal: {location}"),
+                    None => format!("{prefix}: {error}"),
                 }
             }
         }
-    }
-
-    pub fn into_footer(self) -> Footer {
-        self.to_footer()
     }
 }
 
@@ -595,24 +458,6 @@ fn render_banner_item(out: &mut String, item: &BannerItem) {
     }
 }
 
-fn render_footer_block(out: &mut String, block: FooterBlock) {
-    match block {
-        FooterBlock::Paragraph(text) => push_raw_lines(out, &text),
-        FooterBlock::Section { title, body } => {
-            out.push_str(title.trim());
-            out.push_str(":\n");
-            push_raw_lines(out, &body);
-        }
-        FooterBlock::Bullets { title, items } => {
-            out.push_str(title.trim());
-            out.push_str(":\n");
-            for item in items {
-                push_bullet_item(out, &item, "", "  ");
-            }
-        }
-    }
-}
-
 fn push_prefixed_lines(out: &mut String, text: &str, prefix: &str) {
     if text.is_empty() {
         out.push_str(prefix);
@@ -624,22 +469,6 @@ fn push_prefixed_lines(out: &mut String, text: &str, prefix: &str) {
         out.push_str(prefix);
         out.push_str(line);
         out.push('\n');
-    }
-}
-
-fn push_raw_lines(out: &mut String, text: &str) {
-    if text.is_empty() {
-        out.push('\n');
-        return;
-    }
-
-    for line in text.lines() {
-        out.push_str(line);
-        out.push('\n');
-    }
-
-    if out.ends_with('\n') {
-        out.pop();
     }
 }
 
@@ -898,7 +727,7 @@ mod tests {
             run_mode: RunMode::Live,
             offers: ArchiveOffers::default(),
         };
-        assert_eq!(completed.default_footer(), "flow completed.");
+        assert_eq!(completed.footer(), "flow completed.");
 
         let location = CurrentRunLocator::new(PathBuf::from("tmp/run"));
         let completed_with_journal = RunPresentationOutcome::Completed {
@@ -908,7 +737,7 @@ mod tests {
             offers: REPLAY_ONLY,
         };
         assert_eq!(
-            completed_with_journal.default_footer(),
+            completed_with_journal.footer(),
             "flow completed. Journal: tmp/run\nTo verify with a bounded replay, add: --replay-from tmp/run\n(Source settings are ignored during replay and catch-up)"
         );
 
@@ -919,10 +748,9 @@ mod tests {
             offers: BOTH,
         };
         assert_eq!(
-            stopped_with_journal.default_footer(),
+            stopped_with_journal.footer(),
             "flow stopped. Journal: tmp/run\nTo verify with a bounded replay, add: --replay-from tmp/run\nTo continue this run live from where it left off, add: --resume-from tmp/run\n(Source settings are ignored during replay and catch-up)"
         );
-        assert_eq!(stopped_with_journal.offers(), BOTH);
 
         let early_stop = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
@@ -930,14 +758,14 @@ mod tests {
             run_mode: RunMode::Live,
             offers: REPLAY_ONLY,
         };
-        assert!(!early_stop.default_footer().contains("--resume-from"));
+        assert!(!early_stop.footer().contains("--resume-from"));
         let nothing = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
             location: Some(location.clone()),
             run_mode: RunMode::Live,
             offers: ArchiveOffers::default(),
         };
-        assert_eq!(nothing.default_footer(), "flow stopped. Journal: tmp/run");
+        assert_eq!(nothing.footer(), "flow stopped. Journal: tmp/run");
 
         let stopped = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
@@ -945,7 +773,7 @@ mod tests {
             run_mode: RunMode::Live,
             offers: ArchiveOffers::default(),
         };
-        assert_eq!(stopped.default_footer(), "flow stopped.");
+        assert_eq!(stopped.footer(), "flow stopped.");
 
         let failed = RunPresentationOutcome::Failed {
             flow_name: Some("flow".to_string()),
@@ -953,7 +781,7 @@ mod tests {
             location: None,
             run_mode: RunMode::Live,
         };
-        assert_eq!(failed.default_footer(), "flow failed: err");
+        assert_eq!(failed.footer(), "flow failed: err");
 
         let failed_without_name = RunPresentationOutcome::Failed {
             flow_name: None,
@@ -962,10 +790,9 @@ mod tests {
             run_mode: RunMode::Live,
         };
         assert_eq!(
-            failed_without_name.default_footer(),
+            failed_without_name.footer(),
             "Flow failed: err\nJournal: tmp/run"
         );
-        assert_eq!(failed_without_name.offers(), ArchiveOffers::default());
     }
 
     #[test]
@@ -982,7 +809,7 @@ mod tests {
             run_mode: replay_mode.clone(),
             offers: REPLAY_AND_VERIFY,
         };
-        let footer = completed.default_footer();
+        let footer = completed.footer();
         assert!(
             footer.contains("strict replay of flow_01SOURCE at tmp/archive"),
             "replay footer must name the source archive: {footer}"
@@ -1011,7 +838,7 @@ mod tests {
             run_mode: replay_mode,
         };
         assert_eq!(
-            failed.default_footer(),
+            failed.footer(),
             "flow failed (strict replay of flow_01SOURCE at tmp/archive): err"
         );
     }
@@ -1025,7 +852,7 @@ mod tests {
             location: Some(CurrentRunLocator::new(PathBuf::from("tmp/run"))),
             run_mode: RunMode::Live,
         };
-        let footer = failed.default_footer();
+        let footer = failed.footer();
         assert_eq!(
             footer,
             "flow failed: ObzenFlow cannot resume tmp/parent, because the run failed. Start a \
@@ -1046,7 +873,7 @@ mod tests {
             }),
             offers: REPLAY_ONLY,
         };
-        let footer = completed.default_footer();
+        let footer = completed.footer();
         assert!(
             !footer.contains("--verify"),
             "the comparison result follows; the footer must not suggest it: {footer}"
@@ -1071,7 +898,7 @@ mod tests {
             run_mode: resume_mode.clone(),
             offers: BOTH,
         };
-        let footer = stopped.default_footer();
+        let footer = stopped.footer();
         assert!(
             footer.contains("resumed from flow_01SOURCE at tmp/archive"),
             "resume footer must name the source archive: {footer}"
@@ -1102,7 +929,7 @@ mod tests {
             run_mode: resume_mode.clone(),
             offers: REPLAY_ONLY,
         };
-        assert!(completed.default_footer().ends_with(
+        assert!(completed.footer().ends_with(
             "Journal: tmp/resume-run\nReplay this run with: --replay-from tmp/resume-run"
         ));
 
@@ -1113,7 +940,7 @@ mod tests {
             run_mode: resume_mode,
         };
         assert_eq!(
-            failed.default_footer(),
+            failed.footer(),
             "flow failed (resumed from flow_01SOURCE at tmp/archive): err"
         );
     }
@@ -1143,29 +970,20 @@ mod tests {
     }
 
     #[test]
-    fn footer_builder_renders_paragraphs_sections_and_bullets() {
-        let footer = Footer::new()
-            .paragraph("done")
-            .section("Summary", "line1\nline2")
-            .bullets("Next", ["first", "second\ncontinued"])
-            .finish();
+    fn banner_replay_names_source_archive() {
+        let replay_mode = RunMode::Replay(super::super::run_mode::ReplayRunContext {
+            archive_path: PathBuf::from("tmp/archive"),
+            archive_flow_id: Some("flow_01SOURCE".to_string()),
+            verify: false,
+        });
 
-        assert_eq!(
-            footer,
-            "done\n\nSummary:\nline1\nline2\n\nNext:\n- first\n- second\n  continued"
+        let rendered = Presentation::new(Banner::new("Start")).render_banner(&replay_mode);
+        assert!(
+            rendered.text.ends_with(
+                "This run replays flow_01SOURCE at tmp/archive. It reads the recorded facts, executes no effects and ignores the source settings.\n"
+            ),
+            "{}",
+            rendered.text
         );
-    }
-
-    #[test]
-    fn footer_banner_uses_same_rendering_pipeline() {
-        let presentation = Presentation::new(Banner::new("Start"))
-            .with_footer_banner(Banner::new("End").art("END ART"));
-
-        let rendered = presentation
-            .render_footer_banner()
-            .expect("footer banner should be present");
-
-        assert_eq!(rendered.text, "END ART\n\n");
-        assert!(rendered.warnings.is_empty());
     }
 }

@@ -23,22 +23,17 @@ mod flow;
 mod gateway;
 mod validation;
 
-use obzenflow::application::{
-    Banner, FlowApplication, Footer, LogLevel, Presentation, RunMode, RunPresentationOutcome,
-};
+use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation, RunMode};
 
 fn banner_for(mode: &RunMode) -> Banner {
     match mode {
-        RunMode::Replay(ctx) => Banner::new("Payment Gateway Resilience Demo (strict replay)")
+        RunMode::Replay(_) => Banner::new("Payment Gateway Resilience Demo (strict replay)")
             .description("Reconstructing recorded outcomes with gateway calls suppressed.")
             .bullets(
                 "What this replay does",
                 [
-                    format!("Source archive: {}", ctx.source_label()),
-                    "Source config and env vars are ignored; recorded order events are re-admitted".to_string(),
-                    "Gateway calls are suppressed; recorded effect outcomes are reused as facts".to_string(),
-                    "Retry, circuit breaker, and rate limiter are configured for topology validation only; no live state moves".to_string(),
-                    "Replay prints no sink lines, since it makes no sink calls".to_string(),
+                    "Retry, circuit breaker, and rate limiter are configured for topology validation only; no live state moves",
+                    "Replay prints no sink lines, since it makes no sink calls",
                 ],
             )
             .config("journal_dir", "target/payment-gateway-logs"),
@@ -58,17 +53,8 @@ fn banner_for(mode: &RunMode) -> Banner {
     }
 }
 
-fn footer_for(outcome: RunPresentationOutcome) -> Footer {
-    match outcome.run_mode() {
-        RunMode::Replay(_) => outcome.into_footer(),
-        _ => outcome
-            .into_footer()
-            .paragraph("Next: scrape /metrics for obzenflow_circuit_breaker_*."),
-    }
-}
-
 fn main() -> std::process::ExitCode {
-    let presentation = Presentation::for_mode(banner_for).with_footer(footer_for);
+    let presentation = Presentation::for_mode(banner_for);
 
     let config_file = concat!(
         env!("CARGO_MANIFEST_DIR"),

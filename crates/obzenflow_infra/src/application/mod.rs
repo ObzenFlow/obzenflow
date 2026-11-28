@@ -27,8 +27,7 @@ pub use error::{ApplicationError, ResumeAdvice};
 pub use flow_application::{FlowApplication, FlowApplicationBuilder, LogLevel};
 pub use hosted_ingress::HostedIngress;
 pub use obzenflow_core::journal::factory::{CurrentRunLocator, RunSubstrateState};
-pub use presentation::{
-    shell_path, ArchiveOffers, Banner, Footer, Presentation, RunPresentationOutcome,
-};
+pub use presentation::{shell_path, Banner, Presentation};
+pub(crate) use presentation::{ArchiveOffers, RunPresentationOutcome};
 pub use run_mode::{ReplayRunContext, RunMode};
 pub use web_surface::{WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext};

@@ -87,28 +87,7 @@ fn main() -> Result<()> {
                 "Highlights",
                 "Using TopNBy and TypedPayload.\nProcessing order stream...",
             ),
-    )
-    .with_footer(|outcome| {
-        outcome
-            .into_footer()
-            .bullets(
-                "TypedPayload",
-                [
-                    "OrderEvent::EVENT_TYPE instead of \"order.placed\"",
-                    "SCHEMA_VERSION for evolution tracking",
-                    "Strongly-typed event structs",
-                ],
-            )
-            .bullets(
-                "First-class TopN and TopNBy",
-                [
-                    "Type-safe key and score extraction",
-                    "TopN replaces a key's current score",
-                    "TopNBy accumulates a key's score and count",
-                    "No ChainEvent manipulation, work with OrderEvent directly",
-                ],
-            )
-    });
+    );
 
     // Simulate a day of orders (some products appear multiple times)
     let orders: Vec<(String, String, f64, u32, String)> = vec![

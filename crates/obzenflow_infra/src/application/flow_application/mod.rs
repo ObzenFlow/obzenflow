@@ -1161,7 +1161,7 @@ impl FlowApplication {
                 let verify_candidate_dir = location
                     .as_ref()
                     .map(|locator| locator.path().to_path_buf());
-                if let Some(presentation) = &presentation {
+                if presentation.is_some() {
                     let flow_name = flow_name.unwrap_or_else(|| "Flow".to_string());
                     let (status, mut offers) = match (&built_flow, &location) {
                         (Some(flow), Some(locator)) => {
@@ -1171,22 +1171,11 @@ impl FlowApplication {
                         (None, _) => (None, ArchiveOffers::default()),
                     };
                     offers.verify = replay_verify_offered(&run_mode);
-                    let outcome =
-                        footer_outcome(status, flow_name, location, run_mode.clone(), offers);
-                    let rendered_footer_banner = presentation.render_footer_banner();
-                    let footer = presentation.render_footer(outcome);
-                    if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
-                        println!();
-                        if let Some(rendered_banner) = rendered_footer_banner {
-                            for warning in rendered_banner.warnings {
-                                tracing::warn!("{warning}");
-                            }
-                            print!("{}", rendered_banner.text);
-                        }
-                        if !footer.trim().is_empty() {
-                            println!("{footer}");
-                        }
-                    }
+                    let footer =
+                        footer_outcome(status, flow_name, location, run_mode.clone(), offers)
+                            .footer();
+                    println!();
+                    println!("{footer}");
                 }
 
                 // FLOWIP-095j: verify the replay output against the source
@@ -1225,26 +1214,16 @@ impl FlowApplication {
                     err,
                     ApplicationError::ResumeRefused(_) | ApplicationError::ReplayRefused(_)
                 );
-                if let Some(presentation) = presentation.as_ref().filter(|_| !refused) {
-                    let rendered_footer_banner = presentation.render_footer_banner();
-                    let footer = presentation.render_footer(RunPresentationOutcome::Failed {
+                if presentation.is_some() && !refused {
+                    let footer = RunPresentationOutcome::Failed {
                         flow_name,
                         error: err.to_string(),
                         location: run_state.as_ref().and_then(|s| s.locator()).cloned(),
                         run_mode: run_mode.clone(),
-                    });
-                    if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
-                        println!();
-                        if let Some(rendered_banner) = rendered_footer_banner {
-                            for warning in rendered_banner.warnings {
-                                tracing::warn!("{warning}");
-                            }
-                            print!("{}", rendered_banner.text);
-                        }
-                        if !footer.trim().is_empty() {
-                            println!("{footer}");
-                        }
                     }
+                    .footer();
+                    println!();
+                    println!("{footer}");
                 }
                 for line in refusal_footer {
                     println!("{line}");

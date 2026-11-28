@@ -2,9 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow::application::{Banner, Footer, RunMode, RunPresentationOutcome};
-
-const BAD_PAYMENT_CONFIG: &str = "examples/product_catalog_enrichment/obzenflow.bad_payment.toml";
+use obzenflow::application::{Banner, RunMode};
 
 fn live_banner() -> Banner {
     Banner::new("Product Catalog Enrichment")
@@ -27,40 +25,22 @@ fn live_banner() -> Banner {
         )
         .section(
             "Fault injection",
-            "With [app] inject_bad_payment = true, one order names an unknown payment method.\nStrictJoin triggers the Jonestown Protocol on it: it preserves the valid committed prefix, then emits a sealed Poison EOF.",
+            "Run with --config examples/product_catalog_enrichment/obzenflow.bad_payment.toml to set [app] inject_bad_payment = true. One order then names an unknown payment method.\nStrictJoin triggers the Jonestown Protocol on it: it preserves the valid committed prefix, then emits a sealed Poison EOF.",
         )
 }
 
 pub fn banner_for(mode: &RunMode) -> Banner {
     match mode {
-        RunMode::Replay(ctx) => Banner::new("Product Catalog Enrichment (strict replay)")
+        RunMode::Replay(_) => Banner::new("Product Catalog Enrichment (strict replay)")
             .description("Reconstructing archived catalog inputs and deterministic join outputs.")
             .bullets(
                 "What this replay does",
                 [
-                    format!("Source archive: {}", ctx.source_label()),
-                    "Source settings are ignored; recorded catalog and order facts are re-admitted"
-                        .to_string(),
-                    "Inner, left, and strict joins are recomputed from the recorded inputs"
-                        .to_string(),
+                    "Inner, left, and strict joins are recomputed from the recorded inputs",
                     "The replay rebuilds the analytics summary and does not call the console sinks \
-                     again"
-                        .to_string(),
+                     again",
                 ],
             ),
         _ => live_banner(),
     }
-}
-
-pub fn footer_for(outcome: RunPresentationOutcome) -> Footer {
-    let next_step = match outcome.run_mode() {
-        RunMode::Replay(_) => {
-            "Next: inspect the replay journal or replay this replay; use a separate live run to exercise the strict-join poison path.".to_string()
-        }
-        _ => format!(
-            "Try --config {BAD_PAYMENT_CONFIG} to see StrictJoin trigger the Jonestown Protocol!"
-        ),
-    };
-
-    outcome.into_footer().paragraph(next_step)
 }
