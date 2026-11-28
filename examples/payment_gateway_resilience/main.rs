@@ -59,27 +59,11 @@ fn banner_for(mode: &RunMode) -> Banner {
 }
 
 fn footer_for(outcome: RunPresentationOutcome) -> Footer {
-    let offers = outcome.offers();
-    let next_step = match outcome.run_mode() {
-        RunMode::Replay(_) => match (offers.verify, offers.replay) {
-            (true, true) => Some(
-                "Next: run the --verify command above to make the runtime prove the reconstruction (\"output matched the original run, 0 differences\"), or replay the replay.",
-            ),
-            (true, false) => Some(
-                "Next: run the --verify command above to make the runtime prove the reconstruction (\"output matched the original run, 0 differences\").",
-            ),
-            (false, true) => Some("Next: replay the replay."),
-            (false, false) => None,
-        },
-        _ if offers.replay => Some(
-            "Next: replay this run with --replay-from, or scrape /metrics for obzenflow_circuit_breaker_*.",
-        ),
-        _ => Some("Next: scrape /metrics for obzenflow_circuit_breaker_*."),
-    };
-    let footer = outcome.into_footer();
-    match next_step {
-        Some(next_step) => footer.paragraph(next_step),
-        None => footer,
+    match outcome.run_mode() {
+        RunMode::Replay(_) => outcome.into_footer(),
+        _ => outcome
+            .into_footer()
+            .paragraph("Next: scrape /metrics for obzenflow_circuit_breaker_*."),
     }
 }
 

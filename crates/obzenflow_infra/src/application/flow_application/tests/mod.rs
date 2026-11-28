@@ -251,11 +251,11 @@ fn completed(
     )
 }
 
-fn replay_of(source: &std::path::Path, verify: bool) -> crate::application::RunMode {
+fn replay_of(source: &std::path::Path) -> crate::application::RunMode {
     crate::application::RunMode::Replay(crate::application::ReplayRunContext {
         archive_path: source.to_path_buf(),
         archive_flow_id: None,
-        verify,
+        verify: false,
     })
 }
 
@@ -266,14 +266,14 @@ async fn replay_footer_sealed_source_offers_verify() {
         vec![factory.pipeline_starting(), completed(factory)]
     })
     .await;
-    assert!(replay_verify_offered(&replay_of(dir.path(), false)));
+    assert!(replay_verify_offered(&replay_of(dir.path())));
     let footer = footer_outcome(
         Some(obzenflow_core::journal::ArchiveStatus::Completed),
         "flow".into(),
         Some(CurrentRunLocator::new(std::path::PathBuf::from(
             "tmp/replay",
         ))),
-        replay_of(dir.path(), false),
+        replay_of(dir.path()),
         ArchiveOffers {
             replay: true,
             resume: false,
@@ -298,12 +298,11 @@ async fn replay_footer_unsealed_source_omits_verify() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         recorded_source(dir.path(), lifecycle).await;
-        assert!(!replay_verify_offered(&replay_of(dir.path(), false)));
+        assert!(!replay_verify_offered(&replay_of(dir.path())));
     }
     let missing = tempfile::tempdir().unwrap();
     assert!(!replay_verify_offered(&replay_of(
-        &missing.path().join("gone"),
-        false
+        &missing.path().join("gone")
     )));
 }
 
@@ -314,7 +313,12 @@ async fn replay_footer_comparison_pending_omits_verify() {
         vec![factory.pipeline_starting(), completed(factory)]
     })
     .await;
-    assert!(!replay_verify_offered(&replay_of(dir.path(), true)));
+    let verifying = crate::application::RunMode::Replay(crate::application::ReplayRunContext {
+        archive_path: dir.path().to_path_buf(),
+        archive_flow_id: None,
+        verify: true,
+    });
+    assert!(!replay_verify_offered(&verifying));
 }
 
 #[test]
