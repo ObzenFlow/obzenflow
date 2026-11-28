@@ -163,20 +163,37 @@ fn resolve_startup_config(
     result.map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
 }
 
-async fn interrupted_resume_advice(
-    requested: &std::path::Path,
-    opened: &std::path::Path,
-    flow: &obzenflow_core::journal::archive_actions::FlowEvidence,
-) -> Result<super::ResumeAdvice, obzenflow_core::journal::archive::ReplayError> {
-    let mut target =
-        crate::journal::disk::replay_archive::DiskReplayArchive::resume_evidence(opened).await?;
-    if target.run == opened {
-        target.run = requested.to_path_buf();
+fn replay_verify_offered(run_mode: &super::run_mode::RunMode) -> bool {
+    match run_mode {
+        super::run_mode::RunMode::Replay(ctx) => {
+            !ctx.verify && crate::verify::validate::admits_baseline(&ctx.archive_path)
+        }
+        _ => false,
     }
-    if target.continued_from.as_deref() == Some(opened) {
-        target.continued_from = Some(requested.to_path_buf());
+}
+
+fn footer_outcome(
+    status: Option<obzenflow_core::journal::ArchiveStatus>,
+    flow_name: String,
+    location: Option<CurrentRunLocator>,
+    run_mode: super::run_mode::RunMode,
+    offers: ArchiveOffers,
+) -> RunPresentationOutcome {
+    if status == Some(obzenflow_core::journal::ArchiveStatus::Completed) {
+        RunPresentationOutcome::Completed {
+            flow_name,
+            location,
+            run_mode,
+            offers,
+        }
+    } else {
+        RunPresentationOutcome::Stopped {
+            flow_name,
+            location,
+            run_mode,
+            offers,
+        }
     }
-    Ok(super::ResumeAdvice::judge(&target, flow))
 }
 
 /// Configuration for log level filtering
@@ -720,6 +737,7 @@ impl FlowApplication {
             // factory opening anything. A bad archive fails here, before any
             // journal is created.
             let mut opened_archive = None;
+            let mut archive_admission = None;
             let bootstrap_config = {
                 let mut bootstrap_config = config.bootstrap_config();
                 if config.server.enabled || config.replay.is_some() {
@@ -728,7 +746,7 @@ impl FlowApplication {
                 }
                 if let Some(replay) = bootstrap_config.replay.clone() {
                     use crate::journal::disk::replay_archive::{admission_run, DiskReplayArchive};
-                    use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
+                    use obzenflow_core::journal::archive::ReplayArchive;
                     // A resume continues the head of a history, merging a torn
                     // run with its ancestors (FLOWIP-134i B6, B7, B13); a
                     // replay reproduces exactly one run.
@@ -748,24 +766,7 @@ impl FlowApplication {
                             .await
                         }
                     }
-                    .map_err(|e| match e {
-                        ReplayError::AncestorMissing { .. }
-                        | ReplayError::AncestorUnreadable { .. }
-                        | ReplayError::AncestorMissingSystemLog { .. }
-                        | ReplayError::AncestorDisagrees { .. }
-                        | ReplayError::NamespaceDisagrees { .. }
-                        | ReplayError::AlreadyContinued { .. }
-                        | ReplayError::StoppedBeforeTakeover { .. }
-                        | ReplayError::ContinuedByAnother { .. }
-                        | ReplayError::LocationNotWritable { .. }
-                        | ReplayError::ReplayedRunMissing { .. } => {
-                            ApplicationError::ResumeRefused(replay_error_text(&e))
-                        }
-                        other => ApplicationError::InvalidConfiguration(format!(
-                            "Failed to open replay archive: {}",
-                            replay_error_text(&other)
-                        )),
-                    })?;
+                    .map_err(super::archive_open_error)?;
                     if std::fs::canonicalize(&replay.archive_path)
                         .is_ok_and(|requested| requested != archive.archive_path())
                     {
@@ -784,6 +785,10 @@ impl FlowApplication {
                         archive.archive_path().to_path_buf(),
                     ));
                     bootstrap_config.archive_evidence = Some(archive.evidence());
+                    archive_admission = bootstrap_config
+                        .replay
+                        .clone()
+                        .zip(bootstrap_config.archive_evidence.clone());
                     bootstrap_config.replay_archive = Some(Arc::new(archive));
                 }
                 bootstrap_config
@@ -836,9 +841,17 @@ impl FlowApplication {
                         obzenflow_dsl::FlowBuildError::ArchiveVerbRefused { refusal, flow } => {
                             use obzenflow_core::journal::archive_actions::ArchiveRefusal;
                             let resume = match (refusal, &opened_archive) {
-                                (ArchiveRefusal::Interrupted { .. }, Some((requested, opened))) => {
-                                    Some(interrupted_resume_advice(requested, opened, flow).await)
-                                }
+                                (
+                                    ArchiveRefusal::Failed { .. }
+                                    | ArchiveRefusal::Interrupted { .. }
+                                    | ArchiveRefusal::NotStarted { .. },
+                                    Some((requested, opened)),
+                                ) => Some(
+                                    super::ResumeAdvice::for_replay_refusal(
+                                        requested, opened, flow,
+                                    )
+                                    .await,
+                                ),
                                 _ => None,
                             };
                             ApplicationError::archive_refusal(refusal, resume.as_ref())
@@ -879,6 +892,19 @@ impl FlowApplication {
             }
 
             print_banner(&resumed_replayed_run);
+            if let Some((replay, evidence)) = &archive_admission {
+                if let Ok(Some(warning)) = obzenflow_core::journal::archive_actions::decide(
+                    replay.verb,
+                    &replay.archive_path,
+                    evidence,
+                    flow_handle.archive_flow_evidence(),
+                    obzenflow_core::journal::archive_actions::ArchiveOverrides {
+                        allow_incomplete_archive: replay.allow_incomplete_archive,
+                    },
+                ) {
+                    println!("{warning}");
+                }
+            }
             application.protect_flow(&flow_handle);
 
             for line in super::config_report::settings_lines(
@@ -1135,45 +1161,21 @@ impl FlowApplication {
                 let verify_candidate_dir = location
                     .as_ref()
                     .map(|locator| locator.path().to_path_buf());
-                if let Some(presentation) = &presentation {
+                if presentation.is_some() {
                     let flow_name = flow_name.unwrap_or_else(|| "Flow".to_string());
-                    let (status, offers) = match (&built_flow, &location) {
+                    let (status, mut offers) = match (&built_flow, &location) {
                         (Some(flow), Some(locator)) => {
                             Self::written_run_footer(flow, locator).await
                         }
                         (Some(flow), None) => (flow.terminal_status(), ArchiveOffers::default()),
                         (None, _) => (None, ArchiveOffers::default()),
                     };
-                    let outcome =
-                        if status == Some(obzenflow_core::journal::ArchiveStatus::Cancelled) {
-                            RunPresentationOutcome::Stopped {
-                                flow_name,
-                                location,
-                                run_mode: run_mode.clone(),
-                                offers,
-                            }
-                        } else {
-                            RunPresentationOutcome::Completed {
-                                flow_name,
-                                location,
-                                run_mode: run_mode.clone(),
-                                offers,
-                            }
-                        };
-                    let rendered_footer_banner = presentation.render_footer_banner();
-                    let footer = presentation.render_footer(outcome);
-                    if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
-                        println!();
-                        if let Some(rendered_banner) = rendered_footer_banner {
-                            for warning in rendered_banner.warnings {
-                                tracing::warn!("{warning}");
-                            }
-                            print!("{}", rendered_banner.text);
-                        }
-                        if !footer.trim().is_empty() {
-                            println!("{footer}");
-                        }
-                    }
+                    offers.verify = replay_verify_offered(&run_mode);
+                    let footer =
+                        footer_outcome(status, flow_name, location, run_mode.clone(), offers)
+                            .footer();
+                    println!();
+                    println!("{footer}");
                 }
 
                 // FLOWIP-095j: verify the replay output against the source
@@ -1212,26 +1214,16 @@ impl FlowApplication {
                     err,
                     ApplicationError::ResumeRefused(_) | ApplicationError::ReplayRefused(_)
                 );
-                if let Some(presentation) = presentation.as_ref().filter(|_| !refused) {
-                    let rendered_footer_banner = presentation.render_footer_banner();
-                    let footer = presentation.render_footer(RunPresentationOutcome::Failed {
+                if presentation.is_some() && !refused {
+                    let footer = RunPresentationOutcome::Failed {
                         flow_name,
                         error: err.to_string(),
                         location: run_state.as_ref().and_then(|s| s.locator()).cloned(),
                         run_mode: run_mode.clone(),
-                    });
-                    if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
-                        println!();
-                        if let Some(rendered_banner) = rendered_footer_banner {
-                            for warning in rendered_banner.warnings {
-                                tracing::warn!("{warning}");
-                            }
-                            print!("{}", rendered_banner.text);
-                        }
-                        if !footer.trim().is_empty() {
-                            println!("{footer}");
-                        }
                     }
+                    .footer();
+                    println!();
+                    println!("{footer}");
                 }
                 for line in refusal_footer {
                     println!("{line}");

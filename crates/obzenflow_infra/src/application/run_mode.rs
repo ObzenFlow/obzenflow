@@ -2,42 +2,24 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Run-scoped provenance for startup banners and completion prompts.
-
 use obzenflow_core::journal::archive::manifest::RUN_MANIFEST_FILENAME;
 use std::path::{Path, PathBuf};
 
-/// How this process is executing the flow, resolved once at startup.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum RunMode {
-    /// Ordinary live execution.
+pub(crate) enum RunMode {
     Live,
-    /// Strict replay of a recorded run (`--replay-from`).
     Replay(ReplayRunContext),
-    /// `Resume` resumes a recorded run (`--resume-from`) from the last fact that
-    /// it committed. The new run catches up on the archive and then continues
-    /// with live work.
     Resume(ReplayRunContext),
 }
 
-/// The replay run's source archive, for user-facing copy.
 #[derive(Debug, Clone)]
-pub struct ReplayRunContext {
-    /// The archive directory `--replay-from` named.
+pub(crate) struct ReplayRunContext {
     pub archive_path: PathBuf,
-    /// The recorded run's flow id, when the archive manifest is readable.
     pub archive_flow_id: Option<String>,
-    /// Whether `--verify` compares this replay with the archive once it ends,
-    /// so the footer does not suggest it again. Always false for a resume.
     pub verify: bool,
 }
 
 impl RunMode {
-    pub fn is_replay(&self) -> bool {
-        matches!(self, RunMode::Replay(_))
-    }
-
     pub(crate) fn replay_from_archive(archive_path: PathBuf, verify: bool) -> Self {
         let archive_flow_id = peek_archive_flow_id(&archive_path);
         RunMode::Replay(ReplayRunContext {
@@ -58,9 +40,7 @@ impl RunMode {
 }
 
 impl ReplayRunContext {
-    /// The source archive named for humans: the recorded flow id when the
-    /// manifest is readable, always the archive path.
-    pub fn source_label(&self) -> String {
+    pub(crate) fn source_label(&self) -> String {
         match &self.archive_flow_id {
             Some(flow_id) => format!("{flow_id} at {}", self.archive_path.display()),
             None => self.archive_path.display().to_string(),

@@ -68,12 +68,12 @@ completed, every source finite and ended naturally
                  | admitted      | refused, no work left
 completed with a source stopped, or cancelled
                  | admitted      | admitted
-interrupted (no terminal record)
+interrupted (no terminal record), or stopped before it started
                  | with the flag | admitted
 failed resume whose only cause was archive departures
                  | with the flag | admitted
 all other failures
-                 | with the flag | with the flag
+                 | with the flag | admitted, with a warning
 ObzenFlow refuses both verbs for a run that still has a live writer.
 ObzenFlow refuses both verbs for a flow with a cycle.
 ObzenFlow refuses a resume when the connector of a source cannot continue its recorded input.";
@@ -201,10 +201,8 @@ pub struct FlowConfig {
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Admit an interrupted or failed run to --replay-from, and a failed run to \
-            --resume-from",
-        long_help = "Admit an interrupted or failed run to --replay-from, and a failed run to \
-            --resume-from.\n\n\
+        help = "Admit an interrupted or failed run to --replay-from",
+        long_help = "Admit an interrupted or failed run to --replay-from.\n\n\
             Verify refuses such a run. Use its output only for inspection. With the flag, \
             ObzenFlow opens a run whose system.log is missing as an interrupted run. A torn \
             final append leaves the committed prefix readable. ObzenFlow refuses damage that a \
@@ -2717,14 +2715,15 @@ resume_from = "/tmp/recorded"
         };
         let (as_recorded, prefix) = admission_groups(ReplayVerb::Replay);
         let (_, resume_with_flag) = admission_groups(ReplayVerb::Resume);
+        assert_eq!(
+            resume_with_flag, "",
+            "decide admits every resume without the flag"
+        );
         let replay_detail = format!(
             "A {as_recorded} run replays as recorded. With --allow-incomplete-archive, an \
             {prefix} run replays its recorded prefix."
         );
-        let flag_summary = format!(
-            "Admit an {prefix} run to --replay-from, and a {resume_with_flag} \
-            run to --resume-from"
-        );
+        let flag_summary = format!("Admit an {prefix} run to --replay-from");
         let mut command = FlowConfig::command();
         let long = command.render_long_help().to_string();
         let short = command.render_help().to_string();
@@ -3169,8 +3168,8 @@ port = "abc"
         use crate::application::config::ADMISSION_TABLE;
         use obzenflow_core::event::payloads::flow_control_payload::EofKind;
         use obzenflow_core::journal::archive_actions::{
-            decide, ArchiveEvidence, ArchiveOverrides, ArchiveRefusal, FailureEvidence,
-            FlowEvidence, ReplayVerb, SourceEvidence,
+            decide, ArchiveEvidence, ArchiveOverrides, ArchiveRefusal, ArchiveWarning,
+            FailureEvidence, FlowEvidence, ReplayVerb, SourceEvidence,
         };
         use obzenflow_core::journal::ArchiveStatus;
         use obzenflow_core::source::SourceContinuation;
@@ -3181,7 +3180,7 @@ port = "abc"
         const ROWS: [&str; 5] = [
             "completed, every source finite and ended naturally",
             "completed with a source stopped, or cancelled",
-            "interrupted (no terminal record)",
+            "interrupted (no terminal record), or stopped before it started",
             "failed resume whose only cause was archive departures",
             "all other failures",
         ];
@@ -3232,7 +3231,7 @@ port = "abc"
             evidence: &ArchiveEvidence,
             flow: &FlowEvidence,
             allow_incomplete_archive: bool,
-        ) -> Result<(), ArchiveRefusal> {
+        ) -> Result<Option<ArchiveWarning>, ArchiveRefusal> {
             decide(
                 verb,
                 Path::new(RUN),
@@ -3254,7 +3253,7 @@ port = "abc"
                     ROWS[0]
                 }
                 ArchiveStatus::Completed | ArchiveStatus::Cancelled => ROWS[1],
-                ArchiveStatus::Unknown => ROWS[2],
+                ArchiveStatus::Unknown | ArchiveStatus::NotStarted => ROWS[2],
                 ArchiveStatus::Failed
                     if evidence.failure == FailureEvidence::DepartedFromArchive =>
                 {
@@ -3269,10 +3268,18 @@ port = "abc"
                 decided(verb, evidence, flow, false),
                 decided(verb, evidence, flow, true),
             ) {
-                (Ok(()), Ok(())) => "admitted".to_string(),
+                (Ok(None), Ok(None)) => "admitted".to_string(),
                 (
-                    Err(ArchiveRefusal::Failed { .. } | ArchiveRefusal::Interrupted { .. }),
-                    Ok(()),
+                    Ok(Some(ArchiveWarning::Failed { .. })),
+                    Ok(Some(ArchiveWarning::Failed { .. })),
+                ) => "admitted, with a warning".to_string(),
+                (
+                    Err(
+                        ArchiveRefusal::Failed { .. }
+                        | ArchiveRefusal::Interrupted { .. }
+                        | ArchiveRefusal::NotStarted { .. },
+                    ),
+                    Ok(None),
                 ) => "with the flag".to_string(),
                 (
                     Err(ArchiveRefusal::NoWorkLeft { .. }),
@@ -3316,7 +3323,7 @@ port = "abc"
                     flow,
                     allow_incomplete_archive,
                 ) {
-                    Ok(()) => false,
+                    Ok(_) => false,
                     Err(refusal) if triggered(&refusal) => true,
                     Err(other) => panic!(
                         "unexpected refusal for {subject}, {verb:?}, flag \
@@ -3349,6 +3356,7 @@ port = "abc"
             for status in [
                 ArchiveStatus::Completed,
                 ArchiveStatus::Cancelled,
+                ArchiveStatus::NotStarted,
                 ArchiveStatus::Unknown,
                 ArchiveStatus::Failed,
             ] {

@@ -226,12 +226,14 @@ async fn run(command: Command) -> Result<u8, Error> {
         Command::Start(args) => start(args).await,
         Command::Verify(args) => tokio::task::spawn_blocking(move || verify(args)).await?,
         Command::Inspect(args) => {
+            let runtime = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
-                inspect(
+                runtime.block_on(inspect(
                     &args.run_dir,
                     args.stage.as_deref(),
                     args.event_type.as_deref(),
-                )?;
+                    &mut std::io::stdout().lock(),
+                ))?;
                 Ok::<_, Error>(0)
             })
             .await?

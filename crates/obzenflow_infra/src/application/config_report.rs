@@ -10,7 +10,8 @@ use crate::journal::read::{
     LogicVersionChange, RunConfigChanges,
 };
 use obzenflow_core::journal::archive_actions::{
-    decide, ArchiveEvidence, ArchiveOverrides, FailureEvidence, FlowEvidence, ReplayVerb,
+    decide, ArchiveEvidence, ArchiveOverrides, ArchiveWarning, FailureEvidence, FlowEvidence,
+    ReplayVerb,
 };
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_runtime::pipeline::FlowHandle;
@@ -111,35 +112,51 @@ pub(super) async fn resume_remedy(
     locator: &CurrentRunLocator,
 ) -> Option<String> {
     let run = locator.path();
-    let resumed_from = load_manifest(run).ok()?.resume?.resumed_from;
+    let manifest = load_manifest(run).ok()?;
+    if crate::journal::disk::replay_archive::replayed_run(&manifest).is_some() {
+        return None;
+    }
+    let resumed_from = manifest.resume.map(|resume| resume.resumed_from);
     let evidence = DiskReplayArchive::written_run_evidence(run.to_path_buf(), ReplayVerb::Resume)
         .await
         .ok()?;
-    remedy_line(&evidence, flow.archive_flow_evidence(), &resumed_from, run)
+    remedy_line(
+        &evidence,
+        flow.archive_flow_evidence(),
+        resumed_from.as_deref(),
+        run,
+    )
 }
 
 fn remedy_line(
     evidence: &ArchiveEvidence,
     flow: &FlowEvidence,
-    resumed_from: &Path,
+    resumed_from: Option<&Path>,
     run: &Path,
 ) -> Option<String> {
-    let admitted = evidence.failure == FailureEvidence::DepartedFromArchive
-        && decide(
-            ReplayVerb::Resume,
-            run,
-            evidence,
-            flow,
-            ArchiveOverrides::default(),
-        )
-        .is_ok();
-    admitted.then(|| {
-        format!(
-            "To continue this run, restore what {} recorded. Then add --resume-from {}.",
-            resumed_from.display(),
-            shell_path(run)
-        )
-    })
+    let command = shell_path(run);
+    match decide(
+        ReplayVerb::Resume,
+        run,
+        evidence,
+        flow,
+        ArchiveOverrides::default(),
+    ) {
+        Ok(Some(ArchiveWarning::Failed { .. })) => Some(format!(
+            "To continue this run, remove the cause of the failure. Then add --resume-from \
+             {command}."
+        )),
+        Ok(None) if evidence.failure == FailureEvidence::DepartedFromArchive => {
+            resumed_from.map(|parent| {
+                format!(
+                    "To continue this run, restore what {} recorded. Then add --resume-from \
+                     {command}.",
+                    parent.display()
+                )
+            })
+        }
+        Ok(None) | Err(_) => None,
+    }
 }
 
 fn footer_lines(changes: &[RunConfigChanges], logic: &[LogicVersionChange]) -> Vec<String> {
@@ -269,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn the_remedy_names_the_plain_resume_only_after_a_departure_core_admits() {
+    fn remedy_line_admitted_resume_names_command() {
         use obzenflow_core::journal::ArchiveStatus;
         let failed = |failure| ArchiveEvidence {
             status: ArchiveStatus::Failed,
@@ -277,31 +294,46 @@ mod tests {
             sources: Vec::new(),
             failure,
         };
-        let line = |evidence: &ArchiveEvidence, flow: &FlowEvidence| {
+        let line = |evidence: &ArchiveEvidence, flow: &FlowEvidence, parent: Option<&str>| {
             remedy_line(
                 evidence,
                 flow,
-                Path::new("/runs/killed"),
+                parent.map(Path::new),
                 Path::new("runs/refused"),
             )
         };
         let flow = FlowEvidence::default();
         assert_eq!(
-            line(&failed(FailureEvidence::DepartedFromArchive), &flow).as_deref(),
+            line(
+                &failed(FailureEvidence::DepartedFromArchive),
+                &flow,
+                Some("/runs/killed")
+            )
+            .as_deref(),
             Some(
                 "To continue this run, restore what /runs/killed recorded. Then add \
                  --resume-from runs/refused."
             )
         );
-        assert_eq!(line(&failed(FailureEvidence::Other), &flow), None);
+        for parent in [Some("/runs/killed"), None] {
+            assert_eq!(
+                line(&failed(FailureEvidence::Other), &flow, parent).as_deref(),
+                Some(
+                    "To continue this run, remove the cause of the failure. Then add \
+                     --resume-from runs/refused."
+                )
+            );
+        }
         let cyclic = FlowEvidence {
             cycle_members: vec!["triage".to_string()],
             ..FlowEvidence::default()
         };
-        assert_eq!(
-            line(&failed(FailureEvidence::DepartedFromArchive), &cyclic),
-            None,
-            "a command Core refuses is never offered"
-        );
+        for failure in [FailureEvidence::DepartedFromArchive, FailureEvidence::Other] {
+            assert_eq!(
+                line(&failed(failure), &cyclic, Some("/runs/killed")),
+                None,
+                "a command Core refuses is never offered"
+            );
+        }
     }
 }

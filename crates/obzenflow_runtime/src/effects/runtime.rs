@@ -7,7 +7,7 @@ mod sink_group;
 use super::boundary::PhysicalCallOutcome;
 use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
 use super::*;
-use crate::execution::{ExecutionPosition, UnrecordedEffect};
+use crate::execution::{ExecutionPosition, StageRecording, UnrecordedEffect};
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use obzenflow_core::event::payloads::effect_payload::{
     CallKind, CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
@@ -567,15 +567,19 @@ impl EffectsCore {
         checked.map_err(|error| self.refuse(ReconstructionRefusal::HistoryShape(error)))
     }
 
-    fn missing_outcome(&self) -> UnrecordedEffect {
-        self.ctx
-            .stage
-            .runtime_execution
-            .missing_outcome(ExecutionPosition {
+    fn missing_outcome(&self, cursor: &EffectCursor) -> UnrecordedEffect {
+        let recording = match self.ctx.stage.effect_history.as_ref() {
+            Some(history) if history.actions().recorded_after(cursor) => StageRecording::Continues,
+            _ => StageRecording::Ended,
+        };
+        self.ctx.stage.runtime_execution.missing_outcome(
+            ExecutionPosition {
                 stage_id: self.ctx.stage.stage_id,
                 position: self.ctx.input_seq,
                 generation: None,
-            })
+            },
+            recording,
+        )
     }
 
     fn starts_journeys(&self) -> bool {
@@ -629,7 +633,7 @@ impl EffectsCore {
     /// The refusal for a cursor without any recorded attempt, or `None` when
     /// this position performs it live (FLOWIP-134i B13).
     fn unrecorded_effect_error(&mut self, cursor: EffectCursor) -> Option<EffectError> {
-        match self.missing_outcome() {
+        match self.missing_outcome(&cursor) {
             UnrecordedEffect::Execute => None,
             UnrecordedEffect::Corrupt => {
                 Some(self.refuse(ReconstructionRefusal::Unrecorded { cursor }))

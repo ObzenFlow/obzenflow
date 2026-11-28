@@ -382,6 +382,18 @@ impl RecordedActions {
         }
     }
 
+    pub(crate) fn recorded_after(&self, missing: &EffectCursor) -> bool {
+        let missing = (missing.input_seq, missing.effect_ordinal);
+        self.actions.iter().any(|action| match action {
+            RecordedAction::Member(cursor)
+            | RecordedAction::Effect { cursor, .. }
+            | RecordedAction::Settlement { cursor } => {
+                (cursor.input_seq, cursor.effect_ordinal) > missing
+            }
+            RecordedAction::Fact { .. } => false,
+        })
+    }
+
     pub(crate) fn take(&self, offered: &ActionKey) -> ActionCheck {
         let mut next = self
             .next
@@ -615,6 +627,26 @@ mod tests {
             }
             ActionCheck::Reproduce | ActionCheck::Live => panic!("not a departure"),
         }
+    }
+
+    #[test]
+    fn recorded_after_later_input_returns_true() {
+        let actions = RecordedActions::new(
+            vec![effect(1, false), fact(EventId::new()), effect(4, false)],
+            HashMap::new(),
+        );
+        assert!(actions.recorded_after(&cursor(2, 0)));
+        assert!(actions.recorded_after(&cursor(1, 1)));
+    }
+
+    #[test]
+    fn recorded_after_last_cursor_returns_false() {
+        let actions = RecordedActions::new(
+            vec![effect(1, false), effect(4, false), fact(EventId::new())],
+            HashMap::new(),
+        );
+        assert!(!actions.recorded_after(&cursor(4, 1)));
+        assert!(!actions.recorded_after(&cursor(5, 0)));
     }
 
     #[test]

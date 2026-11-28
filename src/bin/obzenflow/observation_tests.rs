@@ -40,6 +40,7 @@ async fn pending_tail_reaches_wait_decision_and_detaches_without_inventing_settl
         stages: Default::default(),
         capabilities: [(OBSERVABILITY_CAPTURE_CAPABILITY.into(), 1)].into(),
         bounded_direct_fact_admission: vec![],
+        cycle_members: Vec::new(),
     };
     std::fs::write(
         dir.path().join(RUN_MANIFEST_FILENAME),
@@ -140,6 +141,7 @@ async fn parent_lineage_names_own_tail() {
         stages: Default::default(),
         capabilities: [(OBSERVABILITY_CAPTURE_CAPABILITY.into(), 1)].into(),
         bounded_direct_fact_admission: vec![],
+        cycle_members: Vec::new(),
     };
     std::fs::write(
         dir.path().join(RUN_MANIFEST_FILENAME),

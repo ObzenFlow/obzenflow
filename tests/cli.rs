@@ -680,6 +680,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
     assert!(inspection.contains("[ticks]") && !inspection.contains("[out]"));
     let listing: Vec<_> = inspection
         .lines()
+        .skip_while(|line| !line.starts_with("[ticks]"))
         .filter(|line| line.starts_with("  "))
         .collect();
     assert_eq!(listing.len(), 3);

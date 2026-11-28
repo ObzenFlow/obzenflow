@@ -545,6 +545,7 @@ mod tests {
                     delivery_order: *delivery_order,
                     ai_models: Vec::new(),
                     max_open_keys: None,
+                    source_continuation: None,
                 },
             );
         }
@@ -566,6 +567,7 @@ mod tests {
             effective_config: None,
             capabilities: Default::default(),
             bounded_direct_fact_admission: Vec::new(),
+            cycle_members: Vec::new(),
         }
     }
 
@@ -878,6 +880,37 @@ mod tests {
             outcome,
             VerifyOutcome::Refused(RefusalReason::IncompleteArchiveReplayCandidate)
         ));
+    }
+
+    #[test]
+    fn validate_run_flagged_baseline_admitted() {
+        let flagged = || {
+            manifest(
+                &topology(),
+                Some(RunManifestReplayConfig {
+                    replay_from: "/archives/gen0".to_string(),
+                    allow_incomplete_archive: true,
+                }),
+                "flow_r",
+            )
+        };
+        let completed = source(flagged(), ArchiveStatus::Completed, &[], "/runs/r");
+        assert!(validate::validate_run(&completed, validate::VerifyRole::Baseline).is_ok());
+        assert!(matches!(
+            *validate::validate_run(&completed, validate::VerifyRole::Candidate).unwrap_err(),
+            RefusalReason::IncompleteArchiveReplayCandidate
+        ));
+        for status in [
+            ArchiveStatus::Failed,
+            ArchiveStatus::NotStarted,
+            ArchiveStatus::Unknown,
+        ] {
+            let unsealed = source(flagged(), status, &[], "/runs/r");
+            assert!(matches!(
+                *validate::validate_run(&unsealed, validate::VerifyRole::Baseline).unwrap_err(),
+                RefusalReason::StatusGate { .. }
+            ));
+        }
     }
 
     #[test]

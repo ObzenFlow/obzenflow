@@ -10,7 +10,7 @@ use super::flow::{
     HN_SOURCE_BREAKER_FAILURES,
 };
 use anyhow::Result;
-use obzenflow::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
+use obzenflow::application::{Banner, FlowApplication, Presentation};
 use obzenflow::flow::FlowDefinition;
 use tokio::runtime::Builder;
 
@@ -49,13 +49,4 @@ pub(crate) fn build_presentation() -> Presentation {
                 ),
             ),
     )
-    .with_footer(move |outcome| {
-        let is_success = matches!(&outcome, RunPresentationOutcome::Completed { .. });
-        let footer = outcome.into_footer();
-        if !is_success {
-            footer
-        } else {
-            footer.paragraph("Digest output uses the destination selected by [app] output.")
-        }
-    })
 }

@@ -68,6 +68,7 @@ fn write_manifest_of(
             delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
             ai_models: Vec::new(),
             max_open_keys: None,
+            source_continuation: Some(obzenflow_core::source::SourceContinuation::Refuse),
         },
     );
 
@@ -89,6 +90,7 @@ fn write_manifest_of(
         effective_config: None,
         capabilities: binding_descriptor_capabilities(),
         bounded_direct_fact_admission: Vec::new(),
+        cycle_members: Vec::new(),
     };
 
     let body = serde_json::to_string_pretty(&manifest).unwrap();
@@ -351,6 +353,53 @@ async fn damaged_system_log_with_flag_refused() {
                 if message.starts_with("system.log record corrupt at line 1 in ")),
             "{error}"
         );
+    }
+}
+
+#[tokio::test]
+async fn damaged_source_journal_open_refused() {
+    let dir = tempdir().unwrap();
+    write_run(
+        dir.path(),
+        FLOW_ID,
+        None,
+        &[source_fact(1), source_fact(2), source_eof()],
+        Some(completed()),
+    )
+    .await;
+    let journal = dir.path().join(SOURCE_LOG);
+    flip_first_record_byte(&journal);
+
+    for allow_incomplete_archive in [false, true] {
+        for (verb, opened) in [
+            (
+                "replay",
+                DiskReplayArchive::open(dir.path().to_path_buf(), allow_incomplete_archive)
+                    .await
+                    .err(),
+            ),
+            (
+                "resume",
+                DiskReplayArchive::open_for_resume(
+                    dir.path().to_path_buf(),
+                    allow_incomplete_archive,
+                )
+                .await
+                .err(),
+            ),
+        ] {
+            let error = opened.unwrap_or_else(|| {
+                panic!(
+                    "a damaged source journal opens to {verb} with \
+                     allow_incomplete_archive={allow_incomplete_archive}"
+                )
+            });
+            assert!(
+                matches!(&error, ReplayError::CorruptedArchive { path, .. }
+                    if path.file_name() == journal.file_name()),
+                "{error}"
+            );
+        }
     }
 }
 
@@ -701,7 +750,9 @@ async fn manifest_frame_mismatches_refuse_replay_inspect_export_and_verify() {
                 matches!(error, ReplayError::UnsupportedJournalSchemaVersion { .. }),
                 "{error}"
             );
-            assert!(inspect(dir.path(), None, None).is_err());
+            assert!(inspect(dir.path(), None, None, &mut Vec::new())
+                .await
+                .is_err());
             assert!(export_jsonl(dir.path(), Some(&dir.path().join("projection.jsonl"))).is_err());
             let outcome = verify_run_dirs(dir.path(), dir.path(), &VerifyOptions::default());
             assert!(outcome.is_err() || outcome.unwrap().exit_code() != 0);
@@ -960,23 +1011,18 @@ async fn admission_damage_before_frame_records_nothing() {
     bytes[40] ^= 0xff;
     std::fs::write(&source, &bytes).unwrap();
 
-    let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
-        .await
-        .expect("admission refuses nothing it accepted before");
-    assert!(archive.interrupted_appends().is_empty());
-    let mut reader = archive
-        .open_source_reader("returns", StageType::FiniteSource)
-        .await
-        .unwrap();
-    let Err(error) = reader.next().await else {
-        panic!("the read path refuses damage that a valid frame follows");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("a valid frame follows at offset"),
-        "{error}"
-    );
+    for allow_incomplete_archive in [false, true] {
+        let Err(error) =
+            DiskReplayArchive::open(dir.path().to_path_buf(), allow_incomplete_archive).await
+        else {
+            panic!("the archive open refuses damage that a valid frame follows");
+        };
+        assert!(
+            matches!(&error, ReplayError::CorruptedArchive { message, .. }
+                if message.contains("a valid frame follows at offset")),
+            "{error}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1195,7 +1241,7 @@ async fn torn_resume_evidence_merges_ancestor() {
             &flow,
             ArchiveOverrides::default()
         ),
-        Ok(())
+        Ok(None)
     );
 }
 
@@ -1432,14 +1478,7 @@ async fn archive_read_moved_carrier_names_journal() {
         .set_len(0)
         .unwrap();
 
-    let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
-        .await
-        .unwrap();
-    let mut reader = archive
-        .open_source_reader("returns", StageType::FiniteSource)
-        .await
-        .unwrap();
-    let Err(error) = reader.next().await else {
+    let Err(error) = DiskReplayArchive::open(dir.path().to_path_buf(), false).await else {
         panic!("a record whose definition was moved out of its carrier must fail");
     };
     assert!(

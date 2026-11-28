@@ -83,11 +83,15 @@ impl Run {
                     delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
                     ai_models: Vec::new(),
                     max_open_keys: None,
+                    source_continuation: Some(
+                        obzenflow_core::source::SourceContinuation::RecordedRead,
+                    ),
                 },
             )]
             .into(),
             capabilities: [(OBSERVABILITY_CAPTURE_CAPABILITY.into(), 1)].into(),
             bounded_direct_fact_admission: vec![],
+            cycle_members: Vec::new(),
         };
         let run = Self {
             dir,

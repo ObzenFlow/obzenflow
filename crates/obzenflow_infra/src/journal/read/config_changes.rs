@@ -224,6 +224,7 @@ mod tests {
                 delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
                 ai_models: Vec::new(),
                 max_open_keys: None,
+                source_continuation: None,
             },
         )
     }

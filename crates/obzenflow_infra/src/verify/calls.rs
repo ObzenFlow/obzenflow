@@ -400,6 +400,7 @@ mod tests {
             effective_config: None,
             capabilities: BTreeMap::new(),
             bounded_direct_fact_admission: Vec::new(),
+            cycle_members: Vec::new(),
         }
     }
 

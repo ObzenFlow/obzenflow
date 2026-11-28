@@ -955,12 +955,6 @@ fn resume(archive: &Path) -> Vec<String> {
     vec!["--resume-from".into(), archive.display().to_string()]
 }
 
-fn resume_failed(archive: &Path) -> Vec<String> {
-    let mut args = resume(archive);
-    args.push("--allow-incomplete-archive".into());
-    args
-}
-
 fn replay(archive: &Path) -> Vec<String> {
     vec!["--replay-from".into(), archive.display().to_string()]
 }
@@ -2433,6 +2427,7 @@ async fn durable_execution_contract() {
             .expect("mkfifo runs")
             .success());
         let child = Child::spawn(&scenario, Vec::new(), None);
+        let failed_log = child.log.clone();
         let run = child.run().await;
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -2473,12 +2468,28 @@ async fn durable_execution_contract() {
             .filter(|call| call.order_id().starts_with("W-"))
             .count();
         assert_eq!(web_calls, 0, "{name}: nothing is charged before the cut");
-        let args = if killed {
-            resume(&run)
-        } else {
-            resume_failed(&run)
-        };
-        let resumed = Child::spawn(&scenario, args, None).completed().await;
+        let remedy = format!(
+            "To continue this run, remove the cause of the failure. Then add --resume-from {}.",
+            run.display()
+        );
+        assert_eq!(
+            read_log(&failed_log).contains(&remedy),
+            !killed,
+            "{name}: only the failed run's output names its plain resume"
+        );
+        let resuming = Child::spawn(&scenario, resume(&run), None);
+        let resumed_log = resuming.log.clone();
+        let resumed = resuming.completed().await;
+        let warning = format!(
+            "ObzenFlow resumes {}, which failed. If the cause of that failure is still present, \
+             this run fails in the same way.",
+            run.display()
+        );
+        assert_eq!(
+            read_log(&resumed_log).contains(&warning),
+            !killed,
+            "{name}: only the resume of the failed run prints the warning"
+        );
         let opening = never_read
             .record(&resumed, Ended::Natural)
             .await
@@ -2769,6 +2780,31 @@ fn read_log(log: &Path) -> String {
     strip_ansi(&std::fs::read_to_string(log).expect("the child log is readable"))
 }
 
+fn inspected_verdicts(run: &Path) -> (String, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+        .arg("inspect")
+        .arg(run)
+        .output()
+        .expect("obzenflow inspect runs");
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).expect("inspect prints UTF-8");
+    let verdict = |label: &str| {
+        let mut lines = text.lines().skip_while(|line| !line.starts_with(label));
+        let first = lines
+            .next()
+            .unwrap_or_else(|| panic!("inspect prints {label}: {text}"));
+        std::iter::once(&first[12..])
+            .chain(
+                lines
+                    .take_while(|line| line.starts_with("            "))
+                    .map(|line| &line[12..]),
+            )
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    (verdict("replay:"), verdict("resume:"))
+}
+
 fn copy_run(run: &Path, into: &Scenario) -> PathBuf {
     let copy = into
         .journals()
@@ -2837,7 +2873,11 @@ async fn a_running_run_refuses_resume_and_replay() {
     let running = first_cut(&scenario, &child, "still running").await;
     let files = run_files(&running);
     let runs = scenario.runs();
-    for (args, verb) in [(resume(&running), "resume"), (replay(&running), "replay")] {
+    let (inspected_replay, inspected_resume) = inspected_verdicts(&running);
+    for (args, verb, inspected) in [
+        (resume(&running), "resume", &inspected_resume),
+        (replay(&running), "replay", &inspected_replay),
+    ] {
         let refused = Child::spawn(&scenario, args, None);
         let log = refused.log.clone();
         assert_eq!(refused.exit().await.code(), Some(2), "the {verb} refuses");
@@ -2849,6 +2889,10 @@ async fn a_running_run_refuses_resume_and_replay() {
                 running.display()
             )),
             "{refusal}"
+        );
+        assert!(
+            inspected.starts_with("ObzenFlow cannot ") && refusal.contains(inspected.as_str()),
+            "inspect's {verb} verdict {inspected:?} is the flow binary's refusal: {refusal}"
         );
         assert_eq!(scenario.runs(), runs, "the {verb} leaves no run directory");
         assert_eq!(
@@ -4231,6 +4275,25 @@ mod payment_demo {
             1,
             "{name}: the killed archive keeps the waiting call's committed wait: {waiting:?}"
         );
+        let (inspected_replay, inspected_resume) = inspected_verdicts(&killed);
+        let refused = Child::spawn(&scenario, replay(&killed), None);
+        let log = refused.log.clone();
+        assert_eq!(
+            refused.exit().await.code(),
+            Some(2),
+            "{name}: the plain replay refuses"
+        );
+        let log = read_log(&log);
+        assert!(
+            inspected_replay.starts_with("ObzenFlow cannot replay ")
+                && log.contains(&inspected_replay),
+            "{name}: inspect's replay verdict {inspected_replay:?} is the refusal: {log}"
+        );
+        assert_eq!(
+            inspected_resume,
+            format!("admitted: --resume-from {}", killed.display()),
+            "{name}: inspect admits the resume that completes below"
+        );
 
         let resumed = Child::spawn(&scenario, resume(&killed), None)
             .completed()
@@ -4262,6 +4325,79 @@ mod payment_demo {
         assert!(
             waiting.is_subset(&scheduled_cursors(&replay, true)),
             "{name}: the replay reproduces the waited call's committed wait"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replay_cancelled_payment_names_resume() {
+        let name = "payment_cancelled";
+        let scenario = Scenario::for_graph(name, Graph::PaymentDemo);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let cancelled = child.run().await;
+        let outage_begun = |archive: &Archive| {
+            let routes = routes(archive);
+            archive.eof("web_orders") == Some(EofKind::Natural)
+                && archive.eof("store_orders") == Some(EofKind::Natural)
+                && routes.len() == WARMUP_ORDERS
+                && routes
+                    .values()
+                    .all(|(phase, _)| *phase == TrafficPhase::Warmup)
+        };
+        until(&cancelled, name, outage_begun).await;
+        child.signal(Signal::Interrupt);
+        assert!(
+            child.exit().await.success(),
+            "{name}: a Ctrl-C exits cleanly"
+        );
+        let at_cancel = obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive::open(
+            cancelled.clone(),
+            false,
+        )
+        .await
+        .expect("the cancelled run opens");
+        assert_eq!(
+            at_cancel.status(),
+            obzenflow_core::journal::ArchiveStatus::Cancelled,
+            "{name}: Ctrl-C cancels the run"
+        );
+        let settled = routes(&Archive::read(&cancelled).await).len();
+        let calls = read_lines::<GatewayCall>(&gateway_calls(&scenario)).len();
+
+        let replaying = Child::spawn(&scenario, replay(&cancelled), None);
+        let log = replaying.log.clone();
+        assert!(
+            !replaying.exit().await.success(),
+            "{name}: the replay stops where the recording ends"
+        );
+        let log = read_log(&log);
+        let head = std::fs::canonicalize(&cancelled).expect("the cancelled run resolves");
+        assert!(
+            log.contains(&format!(
+                "replay of {} stopped: stage 'authorize_payment' reached the end of its \
+                 recording at input ",
+                cancelled.display()
+            )) && log.contains(&format!(
+                "Resume {} to finish this run's work.",
+                head.display()
+            )),
+            "{name}: the stop names the stage and the resume: {log}"
+        );
+        assert!(
+            !log.contains("missing recorded effect"),
+            "{name}: an intact cancelled archive is not corruption: {log}"
+        );
+        assert_eq!(
+            read_lines::<GatewayCall>(&gateway_calls(&scenario)).len(),
+            calls,
+            "{name}: the replay calls no gateway"
+        );
+
+        let resumed = Child::spawn(&scenario, resume(&cancelled), None)
+            .completed()
+            .await;
+        assert!(
+            routes(&Archive::read(&resumed).await).len() > settled,
+            "{name}: the resume settles the orders the cancel left"
         );
     }
 
@@ -4412,6 +4548,7 @@ mod payment_demo {
             "{name}: the kill lands before web_orders ends"
         );
         let runs = scenario.runs();
+        let (inspected_replay, inspected_resume) = inspected_verdicts(&killed);
         let refused = Child::spawn(&scenario, resume(&killed), Some(Hold::Processor));
         let log = refused.log.clone();
         assert_eq!(
@@ -4420,6 +4557,11 @@ mod payment_demo {
             "{name}: the resume refuses"
         );
         let log = read_log(&log);
+        assert!(
+            inspected_resume.starts_with("ObzenFlow cannot resume ")
+                && log.contains(&inspected_resume),
+            "{name}: inspect's resume verdict {inspected_resume:?} is the refusal: {log}"
+        );
         let refusal = log
             .lines()
             .find(|line| {
@@ -4459,6 +4601,11 @@ mod payment_demo {
             "{name}: the replay refuses"
         );
         let log = read_log(&log);
+        assert!(
+            inspected_replay.starts_with("ObzenFlow cannot replay ")
+                && log.contains(&inspected_replay),
+            "{name}: inspect's replay verdict {inspected_replay:?} is the refusal: {log}"
+        );
         let (_, replay_refusal) = log
             .split_once(&format!(
                 "ObzenFlow cannot replay {}, because ",

@@ -3,10 +3,10 @@
 // https://obzenflow.dev
 
 use super::presentation::shell_path;
-use crate::journal::disk::replay_archive::ResumeEvidence;
+use crate::journal::disk::replay_archive::{DiskReplayArchive, ResumeEvidence};
 use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_core::journal::archive_actions::{
-    decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+    decide, ArchiveOverrides, ArchiveRefusal, ArchiveWarning, FlowEvidence, ReplayVerb,
 };
 use std::error::Error;
 use std::fmt;
@@ -18,10 +18,25 @@ use std::path::{Path, PathBuf};
 pub struct ResumeAdvice {
     pub run: PathBuf,
     pub continued_from: Option<PathBuf>,
-    pub admission: Result<(), ArchiveRefusal>,
+    pub admission: Result<Option<ArchiveWarning>, ArchiveRefusal>,
 }
 
 impl ResumeAdvice {
+    pub(crate) async fn for_replay_refusal(
+        requested: &Path,
+        opened: &Path,
+        flow: &FlowEvidence,
+    ) -> Result<Self, ReplayError> {
+        let mut target = DiskReplayArchive::resume_evidence(opened).await?;
+        if target.run == opened {
+            target.run = requested.to_path_buf();
+        }
+        if target.continued_from.as_deref() == Some(opened) {
+            target.continued_from = Some(requested.to_path_buf());
+        }
+        Ok(Self::judge(&target, flow))
+    }
+
     pub(crate) fn judge(target: &ResumeEvidence, flow: &FlowEvidence) -> Self {
         Self {
             run: target.run.clone(),
@@ -114,7 +129,7 @@ impl fmt::Display for ApplicationError {
                 f.write_str(", and a replay never executes an effect.\n")?;
                 match resume.as_deref() {
                     Some(Ok(advice)) => match &advice.admission {
-                        Ok(()) => write!(
+                        Ok(_) => write!(
                             f,
                             "Resume {} to finish this run's work.",
                             advice.run.display()
@@ -168,15 +183,39 @@ impl From<&ArchiveRefusal> for ApplicationError {
     }
 }
 
+pub(crate) fn archive_open_error(error: ReplayError) -> ApplicationError {
+    match error {
+        ReplayError::AncestorMissing { .. }
+        | ReplayError::AncestorUnreadable { .. }
+        | ReplayError::AncestorMissingSystemLog { .. }
+        | ReplayError::AncestorDisagrees { .. }
+        | ReplayError::NamespaceDisagrees { .. }
+        | ReplayError::AlreadyContinued { .. }
+        | ReplayError::StoppedBeforeTakeover { .. }
+        | ReplayError::ContinuedByAnother { .. }
+        | ReplayError::LocationNotWritable { .. }
+        | ReplayError::ReplayedRunMissing { .. } => {
+            ApplicationError::ResumeRefused(replay_error_text(&error))
+        }
+        other => ApplicationError::InvalidConfiguration(format!(
+            "Failed to open replay archive: {}",
+            replay_error_text(&other)
+        )),
+    }
+}
+
 impl ApplicationError {
-    pub(super) fn archive_refusal(
+    pub(crate) fn archive_refusal(
         refusal: &ArchiveRefusal,
         resume: Option<&Result<ResumeAdvice, ReplayError>>,
     ) -> Self {
         let message = match (refusal, resume) {
-            (ArchiveRefusal::Interrupted { run }, Some(resume)) => {
-                interrupted_text(refusal, run, resume)
-            }
+            (
+                ArchiveRefusal::Failed { run }
+                | ArchiveRefusal::Interrupted { run }
+                | ArchiveRefusal::NotStarted { run },
+                Some(resume),
+            ) => unsealed_replay_text(refusal, run, resume),
             _ => refusal_text(refusal),
         };
         match refusal.verb() {
@@ -216,18 +255,16 @@ fn refusal_text(refusal: &ArchiveRefusal) -> String {
                 shell_path(run)
             )
         }
-        ArchiveRefusal::Failed { verb, .. } => format!(
-            "{refusal}\nTo {} it, add --allow-incomplete-archive.",
-            verb.word()
-        ),
-        ArchiveRefusal::Interrupted { .. } => {
+        ArchiveRefusal::Failed { .. }
+        | ArchiveRefusal::Interrupted { .. }
+        | ArchiveRefusal::NotStarted { .. } => {
             format!("{refusal}\nTo replay its recorded prefix, add --allow-incomplete-archive.")
         }
         ArchiveRefusal::Sources { .. } => format!("{refusal}\nStart a new run."),
     }
 }
 
-fn interrupted_text(
+fn unsealed_replay_text(
     refusal: &ArchiveRefusal,
     run: &Path,
     resume: &Result<ResumeAdvice, ReplayError>,
@@ -260,13 +297,13 @@ fn interrupted_text(
         None => "To replay its recorded prefix, add --allow-incomplete-archive.".to_string(),
     };
     let next = match &advice.admission {
-        Ok(()) => format!("Resume it with --resume-from {}.", shell_path(&advice.run)),
+        Ok(_) => format!("Resume it with --resume-from {}.", shell_path(&advice.run)),
         Err(resume_refusal) => refusal_text(resume_refusal),
     };
     format!("{refusal}\n{prefix}\n{next}")
 }
 
-pub(super) fn replay_error_text(error: &ReplayError) -> String {
+pub(crate) fn replay_error_text(error: &ReplayError) -> String {
     match error {
         ReplayError::UnsupportedJournalSchemaVersion { .. }
         | ReplayError::UnsupportedArchiveCapability { .. } => {
@@ -470,25 +507,19 @@ mod tests {
                  source is finite. No work remains.\nReplay it with --replay-from /runs/r1.",
             ),
             (
-                ArchiveRefusal::Failed {
-                    verb: ReplayVerb::Resume,
-                    run: run(),
-                },
-                "ObzenFlow cannot resume /runs/r1, because the run failed.\nTo resume it, add \
-                 --allow-incomplete-archive.",
-            ),
-            (
-                ArchiveRefusal::Failed {
-                    verb: ReplayVerb::Replay,
-                    run: run(),
-                },
-                "ObzenFlow cannot replay /runs/r1, because the run failed.\nTo replay it, add \
-                 --allow-incomplete-archive.",
+                ArchiveRefusal::Failed { run: run() },
+                "ObzenFlow cannot replay /runs/r1, because the run failed.\nTo replay its \
+                 recorded prefix, add --allow-incomplete-archive.",
             ),
             (
                 ArchiveRefusal::Interrupted { run: run() },
                 "ObzenFlow cannot replay /runs/r1, because the run is interrupted and has no \
                  terminal record.\nTo replay its recorded prefix, add --allow-incomplete-archive.",
+            ),
+            (
+                ArchiveRefusal::NotStarted { run: run() },
+                "ObzenFlow cannot replay /runs/r1, because the run did not start.\nTo replay its \
+                 recorded prefix, add --allow-incomplete-archive.",
             ),
             (
                 ArchiveRefusal::Sources {
@@ -545,6 +576,40 @@ mod tests {
             "ObzenFlow cannot replay /runs/r1, because the run is interrupted and has no \
              terminal record.\nResume it with --resume-from /runs/r1. To replay its recorded \
              prefix instead, add --allow-incomplete-archive."
+        );
+    }
+
+    #[test]
+    fn failed_replay_plain_names_resume() {
+        let refusal = ArchiveRefusal::Failed {
+            run: PathBuf::from("/runs/r1"),
+        };
+        let resume = advice(
+            "/runs/r1",
+            None,
+            evidence(ArchiveStatus::Failed, finished()),
+        );
+        assert!(matches!(
+            resume.as_ref().map(|advice| &advice.admission),
+            Ok(Ok(Some(ArchiveWarning::Failed { .. })))
+        ));
+        assert_eq!(
+            ApplicationError::archive_refusal(&refusal, Some(&resume)).to_string(),
+            "ObzenFlow cannot replay /runs/r1, because the run failed.\nResume it with \
+             --resume-from /runs/r1. To replay its recorded prefix instead, add \
+             --allow-incomplete-archive."
+        );
+        let refused = advice(
+            "/runs/r1",
+            None,
+            evidence(ArchiveStatus::Failed, unfinished()),
+        );
+        assert_eq!(
+            ApplicationError::archive_refusal(&refusal, Some(&refused)).to_string(),
+            "ObzenFlow cannot replay /runs/r1, because the run failed.\nTo replay its recorded \
+             prefix, add --allow-incomplete-archive.\nObzenFlow cannot resume /runs/r1, because \
+             sources 'store_orders' and 'web_orders' stopped before their input finished, and \
+             only the stopped process held that input.\nStart a new run."
         );
     }
 

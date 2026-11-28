@@ -17,7 +17,7 @@ pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
 /// One version for the journal records, physical frames, and run manifest.
 /// Breaking any of these contracts requires a bump here and fresh archives.
 /// Framework package versions are provenance only, never archive admission gates.
-pub const JOURNAL_SCHEMA_VERSION: &str = "27.0";
+pub const JOURNAL_SCHEMA_VERSION: &str = "28.0";
 pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 /// Every persisted effect descriptor carries an explicit portless/named binding identity.
@@ -65,6 +65,7 @@ pub struct RunManifest {
     /// exact versioned physical input event type.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bounded_direct_fact_admission: Vec<RunManifestDirectFactAdmission>,
+    pub cycle_members: Vec<String>,
 }
 
 impl RunManifest {
@@ -180,6 +181,8 @@ pub struct RunManifestStage {
     /// The open-key limit a keyed `ai!` stage applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_open_keys: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_continuation: Option<crate::source::SourceContinuation>,
 }
 
 /// How a stage's input delivery order is fixed.
@@ -230,6 +233,7 @@ mod tests {
             effective_config: None,
             capabilities: BTreeMap::new(),
             bounded_direct_fact_admission: Vec::new(),
+            cycle_members: Vec::new(),
         }
     }
 

@@ -154,6 +154,7 @@ async fn archive_observation_rewrite_preserves_both_metrics_consumers() {
         effective_config: None,
         capabilities: [(OBSERVABILITY_CAPTURE_CAPABILITY.into(), 1)].into(),
         bounded_direct_fact_admission: vec![],
+        cycle_members: Vec::new(),
     };
     std::fs::write(
         root.join(RUN_MANIFEST_FILENAME),
@@ -312,6 +313,9 @@ async fn observation_archive() -> ObservationArchive {
                     delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
                     ai_models: Vec::new(),
                     max_open_keys: None,
+                    source_continuation: stage_type
+                        .is_source()
+                        .then_some(obzenflow_core::source::SourceContinuation::RecordedRead),
                 },
             )
         })
@@ -321,6 +325,7 @@ async fn observation_archive() -> ObservationArchive {
         effective_config: None,
         capabilities: [(OBSERVABILITY_CAPTURE_CAPABILITY.into(), 1)].into(),
         bounded_direct_fact_admission: vec![],
+        cycle_members: Vec::new(),
     };
     std::fs::write(
         root.join(RUN_MANIFEST_FILENAME),
